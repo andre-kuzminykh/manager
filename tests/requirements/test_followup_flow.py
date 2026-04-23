@@ -47,10 +47,25 @@ def test_pick_next_missing_for_task_all_filled_returns_none():
         {
             "title": "x",
             "due_date": "2026-05-01",
+            "owner_user_id": "U1",
             "owner_display_name": "Ivan",
         },
     )
     assert out is None
+
+
+def test_pick_next_missing_owner_unresolved_name_still_asks():
+    """Bare display_name without a slack id means we couldn't match the
+    user against ALLOWED_OWNERS; bot must keep asking instead of moving on."""
+    out = pick_next_missing(
+        "create_task",
+        {
+            "title": "x",
+            "due_date": "2026-05-01",
+            "owner_display_name": "Семен",  # not in allowed list
+        },
+    )
+    assert out == "owner"
 
 
 def test_pick_next_missing_for_meeting_order():

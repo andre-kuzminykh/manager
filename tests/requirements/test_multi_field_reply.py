@@ -94,7 +94,9 @@ def test_llm_extract_returns_parsed_fields():
     assert out["due_date"] == "2026-04-24"
 
 
-def test_llm_extract_drops_owner_outside_allowed_list():
+def test_llm_extract_drops_unrecognised_owner_id_keeps_display_name():
+    """We strip the bogus user id but KEEP the name so the bot can re-ask
+    the user with a 'не нашёл "Evil" в списке' hint."""
     backend = _StubBackend(
         payload={"owner_user_id": "U-evil", "owner_display_name": "Evil"}
     )
@@ -105,7 +107,21 @@ def test_llm_extract_drops_owner_outside_allowed_list():
         allowed_owners=[{"slack_user_id": "U-alice", "display_name": "Alice"}],
     )
     assert "owner_user_id" not in out
-    assert "owner_display_name" not in out
+    assert out["owner_display_name"] == "Evil"
+
+
+def test_llm_extract_resolves_display_name_via_local_matcher():
+    """If LLM returned only display_name, fall back to resolve_owner_hint
+    so plain 'Alice' against the allowed list still lands a slack id."""
+    backend = _StubBackend(payload={"owner_display_name": "Alice"})
+    out = llm_extract_reply_fields(
+        backend=backend,
+        reply_text="Alice",
+        awaiting_field="owner",
+        allowed_owners=[{"slack_user_id": "U-alice", "display_name": "Alice"}],
+    )
+    assert out["owner_user_id"] == "U-alice"
+    assert out["owner_display_name"] == "Alice"
 
 
 def test_llm_extract_strips_empty_values():

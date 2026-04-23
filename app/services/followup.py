@@ -43,9 +43,12 @@ PROMPTS: dict[str, str] = {
 
 # Normalised empty check for each field (payload is a dict).
 def _is_empty(field: str, payload: dict[str, Any]) -> bool:
-    # "owner" is virtual — back it by owner_user_id / owner_display_name.
+    # "owner" is virtual — treat it as filled only when we have a real
+    # slack_user_id. A bare display_name (e.g. "Семен" mentioned in chat
+    # but not matched against ALLOWED_OWNERS) does NOT count, so the bot
+    # keeps asking until we get a resolvable owner.
     if field == "owner":
-        return not (payload.get("owner_user_id") or payload.get("owner_display_name"))
+        return not payload.get("owner_user_id")
     value = payload.get(field)
     if value is None or value == "":
         return True
@@ -64,8 +67,21 @@ def pick_next_missing(intent: str, payload: dict[str, Any]) -> str | None:
     return None
 
 
-def prompt_for(field: str) -> str:
-    return PROMPTS.get(field, f"Пожалуйста, уточни: {field}")
+def prompt_for(field: str, *, payload: dict[str, Any] | None = None,
+               allowed_owners: list[dict[str, str]] | None = None) -> str:
+    """Return the user-facing question for the given field. For 'owner', if
+    the LLM extracted a display_name we couldn't resolve, mention that name
+    explicitly and list the allowed candidates."""
+    base = PROMPTS.get(field, f"Пожалуйста, уточни: {field}")
+    if field == "owner" and payload and allowed_owners:
+        unresolved = payload.get("owner_display_name")
+        if unresolved and not payload.get("owner_user_id"):
+            names = ", ".join(o["display_name"] for o in allowed_owners) or "пусто"
+            return (
+                f"Не нашёл *{unresolved}* в списке. Кому назначаем? "
+                f"Доступные: {names}."
+            )
+    return base
 
 
 # --------------------------------------------------------------------------- #
@@ -299,11 +315,24 @@ def llm_extract_reply_fields(
             continue
         cleaned[k] = v
 
-    # Guard: only accept owner_user_id from the allowed list.
+    # Owner reconciliation:
+    # 1) If LLM returned an owner_user_id that's not in the allowed list,
+    #    drop the id but KEEP display_name so the bot can hint at the
+    #    user that we saw a name but couldn't resolve it.
+    # 2) If only display_name came back, try to resolve it locally so
+    #    "Иван", "@Ivan" etc. land owner_user_id even without the LLM.
     allowed_ids = {o["slack_user_id"] for o in allowed_owners}
-    if cleaned.get("owner_user_id") and cleaned["owner_user_id"] not in allowed_ids:
+    owner_id = cleaned.get("owner_user_id")
+    owner_name = cleaned.get("owner_display_name")
+    if owner_id and owner_id not in allowed_ids:
         cleaned.pop("owner_user_id", None)
-        cleaned.pop("owner_display_name", None)
+    if not cleaned.get("owner_user_id") and owner_name:
+        match = resolve_owner_hint(
+            hint_text=owner_name, allowed_owners=allowed_owners
+        )
+        if match is not None:
+            cleaned["owner_user_id"] = match["slack_user_id"]
+            cleaned["owner_display_name"] = match["display_name"]
 
     return cleaned
 

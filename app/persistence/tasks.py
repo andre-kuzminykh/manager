@@ -57,8 +57,12 @@ def create_task_from_draft(
         raise ValueError("Task title is required")
 
     owner_user_id = payload.get("owner_user_id")
-    if not owner_user_id:
-        # Owner resolution policy fallback: author of the source message.
+    owner_display_name = payload.get("owner_display_name")
+    if not owner_user_id and not owner_display_name:
+        # No owner mentioned at all → default to the author of the source
+        # message. If the user mentioned a name we couldn't resolve, leave
+        # owner_user_id empty so the bot will keep asking instead of
+        # silently re-assigning to the author.
         owner_user_id = fallback_author_slack_id
 
     due = _coerce_due(payload.get("due_date"))

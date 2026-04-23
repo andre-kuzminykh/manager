@@ -158,7 +158,8 @@ def _handle_followup_reply(
             thread_ts=thread_ts,
             text=(
                 f":question: Не распарсил ответ. "
-                f"{prompt_for(field)} Или нажми *Edit* на карточке."
+                f"{prompt_for(field, payload=draft.payload or {}, allowed_owners=settings.allowed_owners())} "
+                "Или нажми *Edit* на карточке."
             ),
         )
         _record_followup_ts(session, draft, resp)
@@ -192,7 +193,10 @@ def _handle_followup_reply(
         resp = sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
-            text=f":ok_hand: Записал. {prompt_for(next_field)}",
+            text=(
+                ":ok_hand: Записал. "
+                f"{prompt_for(next_field, payload=draft.payload or {}, allowed_owners=settings.allowed_owners())}"
+            ),
         )
     else:
         resp = sender.post_message(
@@ -477,7 +481,14 @@ def handle_app_mention(
 
             if next_field:
                 title_preview = (draft.payload or {}).get("title") or "задачу"
-                intro = f":memo: Записал: *{title_preview}*.\n{prompt_for(next_field)}"
+                intro = (
+                    f":memo: Записал: *{title_preview}*.\n"
+                    + prompt_for(
+                        next_field,
+                        payload=draft.payload or {},
+                        allowed_owners=get_settings().allowed_owners(),
+                    )
+                )
                 resp = sender.post_message(
                     channel=channel,
                     thread_ts=thread_ts,

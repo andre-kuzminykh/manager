@@ -36,12 +36,25 @@ def _state_value(values: dict[str, Any], block_id: str, action_id: str) -> Any:
 
 def _extract_task_payload(view: dict[str, Any]) -> dict[str, Any]:
     values = view.get("state", {}).get("values", {})
+    owner_raw = _state_value(values, bk.BLOCK_OWNER, bk.INPUT_OWNER)
+    # static_select case returns a Slack user id; plain_text_input returns a name.
+    owner_is_slack_id = isinstance(owner_raw, str) and owner_raw.startswith(("U", "W"))
+    effort_raw = _state_value(values, bk.BLOCK_EFFORT, bk.INPUT_EFFORT)
+    estimated_minutes: int | None = None
+    if effort_raw:
+        try:
+            estimated_minutes = int(str(effort_raw).strip())
+        except (TypeError, ValueError):
+            estimated_minutes = None
+
     return {
         "title": (_state_value(values, bk.BLOCK_TITLE, bk.INPUT_TITLE) or "").strip(),
         "description": _state_value(values, bk.BLOCK_DESCRIPTION, bk.INPUT_DESCRIPTION),
-        "owner_display_name": _state_value(values, bk.BLOCK_OWNER, bk.INPUT_OWNER),
+        "owner_user_id": owner_raw if owner_is_slack_id else None,
+        "owner_display_name": None if owner_is_slack_id else owner_raw,
         "priority": _state_value(values, bk.BLOCK_PRIORITY, bk.INPUT_PRIORITY) or "medium",
         "due_date": _state_value(values, bk.BLOCK_DUE, bk.INPUT_DUE),
+        "estimated_minutes": estimated_minutes,
     }
 
 

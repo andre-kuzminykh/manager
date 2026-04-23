@@ -9,7 +9,14 @@ from app.models.slack import (
     SlackMessage,
 )
 from app.models.sync import GoogleSheetsSync, GoogleTasksSync, SyncStatus
-from app.models.task import Meeting, Task, TaskPriority, TaskStatus
+from app.models.task import (
+    Meeting,
+    Task,
+    TaskPriority,
+    TaskStatus,
+    TaskStatusHistory,
+    TaskSubscription,
+)
 
 __all__ = [
     "Base",
@@ -29,4 +36,6 @@ __all__ = [
     "Task",
     "TaskPriority",
     "TaskStatus",
+    "TaskStatusHistory",
+    "TaskSubscription",
 ]

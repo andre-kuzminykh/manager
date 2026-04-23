@@ -573,7 +573,7 @@ def test_sheets_task_row_has_expected_columns(session):
         owner_display_name="@a",
         priority=TaskPriority.high,
         due_date=date(2026, 7, 1),
-        status=TaskStatus.open,
+        status=TaskStatus.todo,
         source_permalink="https://p",
     )
     session.add(t)
@@ -584,7 +584,7 @@ def test_sheets_task_row_has_expected_columns(session):
     assert row[3] == "@a"
     assert row[4] == "high"
     assert row[5] == "2026-07-01"
-    assert row[6] == "open"
+    assert row[6] == "todo"
     assert row[7] == "https://p"
 
 
@@ -595,7 +595,7 @@ def test_sheets_task_row_handles_missing_optional_fields(session):
     t = __import__("app.models", fromlist=["Task"]).Task(
         title="only title",
         priority=TaskPriority.medium,
-        status=TaskStatus.open,
+        status=TaskStatus.todo,
     )
     session.add(t)
     session.flush()
@@ -617,7 +617,7 @@ def test_google_tasks_body_includes_due(session):
     t = __import__("app.models", fromlist=["Task"]).Task(
         title="t",
         priority=TaskPriority.medium,
-        status=TaskStatus.open,
+        status=TaskStatus.todo,
         due_date=date(2026, 9, 1),
     )
     session.add(t)
@@ -650,7 +650,7 @@ def test_google_tasks_body_status_open_is_needsAction(session):
     t = __import__("app.models", fromlist=["Task"]).Task(
         title="t",
         priority=TaskPriority.medium,
-        status=TaskStatus.open,
+        status=TaskStatus.todo,
     )
     session.add(t)
     session.flush()
@@ -665,7 +665,7 @@ def test_google_tasks_body_omits_due_when_no_date(session):
     t = __import__("app.models", fromlist=["Task"]).Task(
         title="t",
         priority=TaskPriority.medium,
-        status=TaskStatus.open,
+        status=TaskStatus.todo,
     )
     session.add(t)
     session.flush()

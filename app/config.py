@@ -48,6 +48,31 @@ class Settings(BaseSettings):
     # Secrets
     secrets_encryption_key: str = Field(default="", alias="SECRETS_ENCRYPTION_KEY")
 
+    # CR-01: Allowed owners — JSON list of {slack_user_id, display_name}.
+    # Example: '[{"slack_user_id":"U123","display_name":"Ivan"},...]'
+    allowed_owners_json: str = Field(default="[]", alias="ALLOWED_OWNERS")
+
+    # CR-01: Workload heuristic (minutes per business day for a single owner).
+    workload_minutes_per_day: int = Field(default=360, alias="WORKLOAD_MINUTES_PER_DAY")
+    workload_default_task_minutes: int = Field(
+        default=120, alias="WORKLOAD_DEFAULT_TASK_MINUTES"
+    )
+
+    def allowed_owners(self) -> list[dict[str, str]]:
+        import json
+
+        try:
+            raw = json.loads(self.allowed_owners_json or "[]")
+        except json.JSONDecodeError:
+            return []
+        result = []
+        for entry in raw:
+            sid = entry.get("slack_user_id")
+            name = entry.get("display_name") or sid
+            if sid:
+                result.append({"slack_user_id": sid, "display_name": name})
+        return result
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

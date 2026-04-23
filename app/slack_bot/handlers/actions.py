@@ -121,7 +121,13 @@ def handle_edit(
     )
 
     if intent in (IntentTypeEnum.create_task, IntentTypeEnum.update_task):
-        view = bk.task_modal(private_metadata=pm, initial=payload)
+        from app.config import get_settings
+
+        view = bk.task_modal(
+            private_metadata=pm,
+            initial=payload,
+            allowed_owners=get_settings().allowed_owners(),
+        )
     else:
         view = bk.meeting_modal(private_metadata=pm, initial=payload)
 

@@ -101,7 +101,9 @@ def upgrade() -> None:
 
     task_priority = sa.Enum("low", "medium", "high", "urgent", name="task_priority")
     task_priority.create(op.get_bind(), checkfirst=True)
-    task_status = sa.Enum("open", "in_progress", "done", "cancelled", name="task_status")
+    task_status = sa.Enum(
+        "backlog", "todo", "in_progress", "review", "done", name="task_status"
+    )
     task_status.create(op.get_bind(), checkfirst=True)
     meeting_status = sa.Enum("scheduled", "cancelled", "done", name="meeting_status")
     meeting_status.create(op.get_bind(), checkfirst=True)

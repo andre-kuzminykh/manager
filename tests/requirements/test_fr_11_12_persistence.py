@@ -100,7 +100,8 @@ def test_fr11_task_defaults_are_applied(session):
         fallback_author_slack_id="U1",
     )
     assert t.priority == TaskPriority.medium
-    assert t.status == TaskStatus.open
+    # CR-01: new tasks without a due date land in Backlog
+    assert t.status == TaskStatus.backlog
 
 
 @pytest.mark.parametrize("priority", ["low", "medium", "high", "urgent"])

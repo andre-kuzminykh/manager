@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.models import ActionDraft, ActionDraftState, Task
+from app.models import ActionDraft, ActionDraftState, Task, TaskStatusHistory
 from app.models.task import TaskPriority, TaskStatus
 
 
@@ -29,6 +29,14 @@ def _coerce_priority(value: Any) -> TaskPriority:
         return TaskPriority.medium
 
 
+def _initial_status(due: date | None, today: date | None = None) -> TaskStatus:
+    """CR-01: tasks due within a week land in To Do; others sit in Backlog."""
+    if due is None:
+        return TaskStatus.backlog
+    today = today or date.today()
+    return TaskStatus.todo if due <= today + timedelta(days=7) else TaskStatus.backlog
+
+
 def create_task_from_draft(
     session: Session,
     *,
@@ -37,7 +45,11 @@ def create_task_from_draft(
     context_snapshot_id: int | None,
     fallback_author_slack_id: str | None,
 ) -> Task:
-    """Persist a Task from a confirmed draft and mark the draft as confirmed."""
+    """Persist a Task from a confirmed draft and mark the draft as confirmed.
+
+    Also writes the initial TaskStatusHistory row and auto-subscribes the
+    owner and source-message author (CR-01).
+    """
 
     payload: dict[str, Any] = draft.payload or {}
     title = (payload.get("title") or "").strip()
@@ -49,14 +61,19 @@ def create_task_from_draft(
         # Owner resolution policy fallback: author of the source message.
         owner_user_id = fallback_author_slack_id
 
+    due = _coerce_due(payload.get("due_date"))
+    status = _initial_status(due)
+
     task = Task(
         title=title,
         description=payload.get("description"),
         owner_user_id=owner_user_id,
         owner_display_name=payload.get("owner_display_name"),
         priority=_coerce_priority(payload.get("priority", "medium")),
-        due_date=_coerce_due(payload.get("due_date")),
-        status=TaskStatus.open,
+        due_date=due,
+        status=status,
+        is_current_week=(status == TaskStatus.todo),
+        estimated_minutes=payload.get("estimated_minutes"),
         source_conversation_id=source.get("conversation_id"),
         source_message_ts=source.get("message_ts"),
         source_thread_ts=source.get("thread_ts"),
@@ -66,6 +83,27 @@ def create_task_from_draft(
     )
     session.add(task)
     draft.state = ActionDraftState.confirmed
+    session.flush()
+
+    # Initial history row (from_status = None).
+    session.add(
+        TaskStatusHistory(
+            task_id=task.id,
+            from_status=None,
+            to_status=status,
+            changed_by_slack_user_id=task.created_by_slack_user_id,
+            reason="created",
+        )
+    )
+
+    # Auto-subscribe owner and source author (de-duplicated).
+    from app.services.subscriptions import SubscriptionService
+
+    subs = SubscriptionService()
+    for uid in {owner_user_id, fallback_author_slack_id} - {None, ""}:
+        if uid:
+            subs.subscribe(session, task=task, slack_user_id=uid)
+
     session.flush()
     return task
 

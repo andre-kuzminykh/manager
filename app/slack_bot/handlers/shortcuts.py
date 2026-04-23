@@ -98,7 +98,13 @@ def handle_shortcut(
             )
 
     if callback_id == SHORTCUT_CREATE_TASK:
-        view = bk.task_modal(private_metadata=metadata, initial=initial)
+        from app.config import get_settings
+
+        view = bk.task_modal(
+            private_metadata=metadata,
+            initial=initial,
+            allowed_owners=get_settings().allowed_owners(),
+        )
     elif callback_id == SHORTCUT_CREATE_MEETING:
         view = bk.meeting_modal(private_metadata=metadata, initial=initial)
     else:

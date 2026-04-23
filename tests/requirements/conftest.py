@@ -32,7 +32,14 @@ from app.schemas.intent import (
 
 @pytest.fixture()
 def engine():
-    eng = create_engine("sqlite:///:memory:", future=True)
+    from sqlalchemy.pool import StaticPool
+
+    eng = create_engine(
+        "sqlite:///:memory:",
+        future=True,
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     Base.metadata.create_all(eng)
     try:
         yield eng
@@ -78,6 +85,7 @@ def patched_session_scope(monkeypatch, SessionFactory):  # noqa: N803
         "app.slack_bot.handlers.shortcuts.session_scope",
         "app.slack_bot.handlers.views.session_scope",
         "app.slack_bot.handlers.actions.session_scope",
+        "app.slack_bot.handlers.task_actions.session_scope",
         "app.orchestrator.finalize.session_scope",
         "app.sync.factories.session_scope",
     ]

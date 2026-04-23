@@ -469,7 +469,7 @@ class _PatchedSheetsService:
 def _insert_task_row(session):
     from app.models.task import TaskPriority, TaskStatus
 
-    t = Task(title="x", priority=TaskPriority.medium, status=TaskStatus.open)
+    t = Task(title="x", priority=TaskPriority.medium, status=TaskStatus.todo)
     session.add(t)
     session.flush()
     return t

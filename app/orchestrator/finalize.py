@@ -31,10 +31,12 @@ class FinalizeService:
         settings: Settings,
         sheets_service_factory=None,
         google_tasks_service_factory=None,
+        sender=None,
     ) -> None:
         self._settings = settings
         self._sheets_factory = sheets_service_factory
         self._google_tasks_factory = google_tasks_service_factory
+        self._sender = sender  # optional: used to post the task card (CR-01)
 
     def finalize_draft(
         self,
@@ -111,8 +113,35 @@ class FinalizeService:
         # Sync tasks to Google surfaces outside the main transaction.
         if task_id is not None:
             self._sync_task(task_id)
+            self._post_task_card(task_id, source_metadata)
 
         return entity_type, entity_id, summary
+
+    def _post_task_card(self, task_id: int, source_metadata: dict[str, Any]) -> None:
+        """CR-01: post the persistent task card into the source channel/thread."""
+        if self._sender is None:
+            return
+        channel = source_metadata.get("conversation_id")
+        if not channel:
+            return
+        from app.models import Task
+        from app.slack_bot import blocks as bk
+
+        with session_scope() as session:
+            task = session.get(Task, task_id)
+            if task is None:
+                return
+            card = bk.task_card(task=task, viewer_slack_user_id=task.owner_user_id)
+
+        try:
+            self._sender.post_message(
+                channel=channel,
+                thread_ts=source_metadata.get("thread_ts") or source_metadata.get("message_ts"),
+                blocks=card,
+                text=f"Task #{task_id} created",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("task_card_post_failed", task_id=task_id, error=str(e))
 
     def _sync_task(self, task_id: int) -> None:
         sheets_service = self._sheets_factory() if self._sheets_factory else None

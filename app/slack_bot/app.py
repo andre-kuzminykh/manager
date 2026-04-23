@@ -14,6 +14,13 @@ from app.slack_bot.blocks import (
     ACTION_CONFIRM,
     ACTION_EDIT,
     ACTION_IGNORE,
+    ACTION_MARK_DONE,
+    ACTION_OPEN_SOURCE,
+    ACTION_SHOW_CONTEXT,
+    ACTION_START_WORK,
+    ACTION_SUBMIT_REVIEW,
+    ACTION_SUBSCRIBE,
+    ACTION_UNSUBSCRIBE,
     MODAL_CALLBACK_MEETING,
     MODAL_CALLBACK_TASK,
 )
@@ -24,6 +31,15 @@ from app.slack_bot.handlers.shortcuts import (
     SHORTCUT_CREATE_MEETING,
     SHORTCUT_CREATE_TASK,
     handle_shortcut,
+)
+from app.slack_bot.handlers.task_actions import (
+    handle_mark_done,
+    handle_open_source,
+    handle_show_context,
+    handle_start_work,
+    handle_submit_review,
+    handle_subscribe,
+    handle_unsubscribe,
 )
 from app.slack_bot.handlers.views import (
     handle_meeting_modal_submit,
@@ -45,6 +61,10 @@ def build_app(
         signing_secret=settings.slack_signing_secret or None,
     )
     sender = RateAwareSlackSender(app.client)
+    # Feed the sender into the finalizer so the post-confirm task card can be
+    # published (CR-01).
+    if getattr(finalizer, "_sender", None) is None:
+        finalizer._sender = sender  # type: ignore[attr-defined]
     context_retriever = ContextRetriever(
         app.client, window_before=settings.context_window_before
     )
@@ -132,6 +152,35 @@ def build_app(
             sender=sender,
             ack=ack,
         )
+
+    # ---- CR-01: Task card actions ----
+    @app.action(ACTION_START_WORK)
+    def _on_start_work(body, ack):
+        handle_start_work(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_SUBMIT_REVIEW)
+    def _on_submit_review(body, ack):
+        handle_submit_review(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_MARK_DONE)
+    def _on_mark_done(body, ack):
+        handle_mark_done(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_SUBSCRIBE)
+    def _on_subscribe(body, ack):
+        handle_subscribe(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_UNSUBSCRIBE)
+    def _on_unsubscribe(body, ack):
+        handle_unsubscribe(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_OPEN_SOURCE)
+    def _on_open_source(body, ack):
+        handle_open_source(body=body, ack=ack)
+
+    @app.action(ACTION_SHOW_CONTEXT)
+    def _on_show_context(body, client, ack):
+        handle_show_context(body=body, client=client, ack=ack)
 
     return app
 

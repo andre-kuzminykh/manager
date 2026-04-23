@@ -75,6 +75,16 @@ class LLMBackend(Protocol):
 
     def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None: ...
 
+    def call_tool(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tool_name: str,
+        tool_description: str,
+        tool_parameters: dict[str, Any],
+    ) -> dict[str, Any] | None: ...
+
 
 # ---------------------------------------------------------------------------
 # Anthropic
@@ -86,11 +96,19 @@ class AnthropicBackend:
         self._client = client
         self._model = model
 
-    def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None:
+    def call_tool(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tool_name: str,
+        tool_description: str,
+        tool_parameters: dict[str, Any],
+    ) -> dict[str, Any] | None:
         tool = {
-            "name": INTENT_TOOL_NAME,
-            "description": INTENT_TOOL_DESCRIPTION,
-            "input_schema": INTENT_TOOL_PARAMETERS,
+            "name": tool_name,
+            "description": tool_description,
+            "input_schema": tool_parameters,
         }
         response = self._client.messages.create(
             model=self._model,
@@ -98,15 +116,24 @@ class AnthropicBackend:
             system=[
                 {
                     "type": "text",
-                    "text": SYSTEM_PROMPT,
+                    "text": system_prompt,
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
             tools=[tool],
-            tool_choice={"type": "tool", "name": INTENT_TOOL_NAME},
+            tool_choice={"type": "tool", "name": tool_name},
             messages=[{"role": "user", "content": user_prompt}],
         )
         return _extract_anthropic_tool_input(response)
+
+    def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None:
+        return self.call_tool(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            tool_name=INTENT_TOOL_NAME,
+            tool_description=INTENT_TOOL_DESCRIPTION,
+            tool_parameters=INTENT_TOOL_PARAMETERS,
+        )
 
 
 def _extract_anthropic_tool_input(response: Any) -> dict[str, Any] | None:
@@ -135,39 +162,52 @@ def _extract_anthropic_tool_input(response: Any) -> dict[str, Any] | None:
 
 
 class OpenAIBackend:
-    """Structured output via OpenAI tool calls (chat.completions).
-
-    Works with gpt-4o / gpt-4o-mini / gpt-4-turbo and any other model that
-    supports the tool-calling API.
-    """
+    """Structured output via OpenAI tool calls (chat.completions)."""
 
     def __init__(self, client: Any, model: str) -> None:
         self._client = client
         self._model = model
 
-    def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None:
+    def call_tool(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        tool_name: str,
+        tool_description: str,
+        tool_parameters: dict[str, Any],
+    ) -> dict[str, Any] | None:
         tool = {
             "type": "function",
             "function": {
-                "name": INTENT_TOOL_NAME,
-                "description": INTENT_TOOL_DESCRIPTION,
-                "parameters": INTENT_TOOL_PARAMETERS,
+                "name": tool_name,
+                "description": tool_description,
+                "parameters": tool_parameters,
             },
         }
         response = self._client.chat.completions.create(
             model=self._model,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             tools=[tool],
             tool_choice={
                 "type": "function",
-                "function": {"name": INTENT_TOOL_NAME},
+                "function": {"name": tool_name},
             },
             temperature=0,
         )
         return _extract_openai_tool_input(response)
+
+    def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None:
+        return self.call_tool(
+            system_prompt=SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            tool_name=INTENT_TOOL_NAME,
+            tool_description=INTENT_TOOL_DESCRIPTION,
+            tool_parameters=INTENT_TOOL_PARAMETERS,
+        )
 
 
 def _extract_openai_tool_input(response: Any) -> dict[str, Any] | None:

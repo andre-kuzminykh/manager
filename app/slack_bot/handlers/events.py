@@ -13,6 +13,7 @@ from app.logging_setup import get_logger
 from app.models import ActionDraft, ActionDraftState
 from app.schemas.intent import IntentClassification, IntentType, InvocationType
 from app.services import parse_reply, pick_next_missing, prompt_for
+from app.services.followup import llm_extract_reply_fields
 from app.slack_bot import blocks as bk
 from app.slack_bot.dedup import claim_event
 from app.slack_bot.handlers.shared import (
@@ -105,6 +106,7 @@ def _handle_followup_reply(
     reply_text: str,
     sender: RateAwareSlackSender,
     client: WebClient,
+    services: "Services",
 ) -> bool:
     """Try to interpret a thread reply as the answer to a pending follow-up.
 
@@ -125,17 +127,37 @@ def _handle_followup_reply(
         return False
 
     field = draft.awaiting_field
-    parsed = parse_reply(
+    settings = get_settings()
+
+    # First try the LLM multi-field extractor so a single reply like
+    # "на пашу до завтра" fills both owner AND due_date.
+    backend = getattr(services.classifier, "backend", None)
+    parsed: dict[str, Any] = {}
+    if backend is not None:
+        parsed = llm_extract_reply_fields(
+            backend=backend,
+            reply_text=reply_text,
+            awaiting_field=field,
+            allowed_owners=settings.allowed_owners(),
+        )
+
+    # Fallback / augmentation: run the deterministic per-field parser for
+    # the currently-awaited field if the LLM didn't give us a value for it.
+    per_field = parse_reply(
         field=field,
         reply_text=reply_text,
-        settings=get_settings(),
+        settings=settings,
     )
-    if parsed is None:
+    if per_field:
+        for k, v in per_field.items():
+            parsed.setdefault(k, v)
+
+    if not parsed:
         sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
             text=(
-                f":question: Не распарсил ответ как *{field}*. "
+                f":question: Не распарсил ответ. "
                 f"{prompt_for(field)} Или нажми *Edit* на карточке."
             ),
         )
@@ -242,6 +264,7 @@ def handle_message(
                 reply_text=reply_text,
                 sender=sender,
                 client=client,
+                services=services,
             ):
                 return
 

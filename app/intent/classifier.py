@@ -51,6 +51,10 @@ class IntentClassifier:
         else:
             self._backend = None
 
+    @property
+    def backend(self) -> LLMBackend | None:
+        return self._backend
+
     def classify(
         self,
         *,

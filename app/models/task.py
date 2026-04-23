@@ -77,6 +77,13 @@ class Task(Base, TimestampMixin):
     google_sheets_row_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     google_tasks_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
+    # in-place Slack card coordinates: one in the source channel, one in a
+    # DM with the task's owner so status changes can chat.update both.
+    card_channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    card_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    dm_channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dm_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     sheets_sync: Mapped["GoogleSheetsSync | None"] = relationship(  # noqa: F821

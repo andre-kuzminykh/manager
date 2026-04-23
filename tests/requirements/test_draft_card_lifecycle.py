@@ -35,6 +35,10 @@ def _body(draft_id: int, *, channel="C1", message_ts="100.0"):
 def test_confirm_deletes_draft_card_on_success(
     patched_session_scope, SessionFactory, slack_client, finalizer_stub, ack
 ):
+    """On success the widget is no longer deleted — it's morphed into the
+    task card in place by FinalizeService. Draft follow-up Q&A is cleaned
+    up (but we're using a simple fake finalizer here, so just assert the
+    draft card is NOT deleted by the confirm handler anymore)."""
     from app.slack_bot.handlers.actions import handle_confirm
     from tests.test_persistence import _make_draft
 
@@ -52,7 +56,9 @@ def test_confirm_deletes_draft_card_on_success(
         sender=sender,
         ack=ack,
     )
-    assert sender.deleted == [{"channel": "C1", "ts": "100.0"}]
+    # The widget is morphed by FinalizeService (tested separately) — the
+    # Confirm handler itself no longer issues a chat.delete on it.
+    assert sender.deleted == []
 
 
 def test_confirm_keeps_draft_card_on_failure(
@@ -144,12 +150,11 @@ def test_confirm_handles_missing_channel_or_ts_gracefully(
     assert sender.deleted == []
 
 
-def test_delete_failure_does_not_abort_confirm(
+def test_followup_cleanup_failure_does_not_abort_confirm(
     patched_session_scope, SessionFactory, slack_client, finalizer_stub, ack
 ):
-    """If chat.delete fails (bot can't delete someone else's message in DM),
-    the confirm success message has already been posted, and we log and move
-    on rather than raising."""
+    """If deleting one of the follow-up Q&A messages fails, the confirm
+    flow still succeeds (finalize already committed)."""
     from app.slack_bot.handlers.actions import handle_confirm
     from tests.test_persistence import _make_draft
 
@@ -166,6 +171,7 @@ def test_delete_failure_does_not_abort_confirm(
 
     with SessionFactory() as s:
         d = _make_draft(s, intent=IE.create_task, payload={"title": "t"})
+        d.follow_up_message_ts = ["999.0"]
         s.commit()
         did = d.id
 
@@ -179,4 +185,5 @@ def test_delete_failure_does_not_abort_confirm(
         sender=sender,
         ack=ack,
     )
-    assert any("created" in m.get("text", "").lower() for m in sender.posted)
+    # finalize_stub returned ok; Confirm didn't crash even though cleanup failed.
+    assert finalizer_stub.calls

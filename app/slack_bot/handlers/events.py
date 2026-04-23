@@ -153,7 +153,7 @@ def _handle_followup_reply(
             parsed.setdefault(k, v)
 
     if not parsed:
-        sender.post_message(
+        resp = sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
             text=(
@@ -161,6 +161,7 @@ def _handle_followup_reply(
                 f"{prompt_for(field)} Или нажми *Edit* на карточке."
             ),
         )
+        _record_followup_ts(session, draft, resp)
         return True
 
     # Merge into draft payload.
@@ -188,18 +189,33 @@ def _handle_followup_reply(
 
     # Ack in thread — plus next question if there is one.
     if next_field:
-        sender.post_message(
+        resp = sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
             text=f":ok_hand: Записал. {prompt_for(next_field)}",
         )
     else:
-        sender.post_message(
+        resp = sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
             text=":white_check_mark: Все поля собрал. Жми *Confirm* на карточке.",
         )
+    _record_followup_ts(session, draft, resp)
     return True
+
+
+def _record_followup_ts(session, draft: ActionDraft, resp: Any) -> None:
+    """Append the ts of a bot-posted follow-up so we can delete it later."""
+    ts: str | None = None
+    if isinstance(resp, dict):
+        ts = resp.get("ts")
+    if not ts:
+        return
+    current = list(draft.follow_up_message_ts or [])
+    current.append(ts)
+    draft.follow_up_message_ts = current
+    flag_modified(draft, "follow_up_message_ts")
+    session.flush()
 
 
 def _missing_fields(classification: IntentClassification) -> list[str]:
@@ -462,11 +478,12 @@ def handle_app_mention(
             if next_field:
                 title_preview = (draft.payload or {}).get("title") or "задачу"
                 intro = f":memo: Записал: *{title_preview}*.\n{prompt_for(next_field)}"
-                sender.post_message(
+                resp = sender.post_message(
                     channel=channel,
                     thread_ts=thread_ts,
                     text=intro,
                 )
+                _record_followup_ts(session, draft, resp)
     except Exception as e:  # noqa: BLE001 — mention must never go silent
         log.exception("mention_handler_failed", error=str(e))
         _reply(f":warning: что-то сломалось при обработке: `{e!s}` — посмотри логи бота.")

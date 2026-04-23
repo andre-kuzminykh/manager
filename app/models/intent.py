@@ -69,5 +69,10 @@ class ActionDraft(Base, TimestampMixin):
     # When set, we are waiting for the user's thread reply to fill this field
     # (e.g. "due_date", "owner", "title"). Cleared once the reply is parsed.
     awaiting_field: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # ts values of bot-posted follow-up messages (questions / acks) — so we
+    # can delete them on confirm / ignore to keep the thread tidy.
+    follow_up_message_ts: Mapped[list[str] | None] = mapped_column(
+        JSON, nullable=True
+    )
 
     inference: Mapped[IntentInference] = relationship(back_populates="drafts")

@@ -16,20 +16,33 @@ from tests.requirements.test_fr_11_12_persistence import _prep
 class _RecordingSender:
     def __init__(self) -> None:
         self.posted: list[dict] = []
+        self.updated: list[dict] = []
 
     def post_message(self, **kw):
         self.posted.append(kw)
+        return {"ok": True, "ts": "99.0"}
+
+    def update_message(self, **kw):
+        self.updated.append(kw)
+        return {"ok": True}
+
+    def delete_message(self, **kw):
         return {"ok": True}
 
 
-def test_finalize_posts_task_card_into_source_channel(
+def test_finalize_updates_draft_widget_in_place_and_dms_owner(
     patched_session_scope, SessionFactory
 ):
+    """After confirm the widget is chat.update'd into a task card (not a
+    second message) and a DM mirror is posted to the owner."""
     sender = _RecordingSender()
     fin = FinalizeService(settings=Settings(), sender=sender)
 
     with SessionFactory() as s:
         draft, snap = _prep(s, payload={"title": "hello", "owner_user_id": "U-owner"})
+        # Pre-seed the draft's card coordinates (as handle_app_mention does).
+        draft.card_channel = "C1"
+        draft.card_ts = "100.0"
         s.commit()
         draft_id, snap_id = draft.id, snap.id
 
@@ -44,9 +57,14 @@ def test_finalize_posts_task_card_into_source_channel(
             "source_user_id": "U1",
         },
     )
+    # The widget was updated in place.
+    assert sender.updated
+    assert sender.updated[0]["channel"] == "C1"
+    assert sender.updated[0]["ts"] == "100.0"
+
+    # And a DM was posted to the owner.
     assert sender.posted
-    assert sender.posted[0]["channel"] == "C1"
-    assert "blocks" in sender.posted[0]
+    assert sender.posted[0]["channel"] == "U-owner"
 
 
 def test_finalize_task_card_contains_subscribe_button(

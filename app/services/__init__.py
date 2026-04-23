@@ -1,3 +1,4 @@
+from app.services.card_sync import refresh_task_card
 from app.services.digest import DigestKind, DigestService
 from app.services.followup import (
     parse_reply,
@@ -26,5 +27,6 @@ __all__ = [
     "parse_reply",
     "pick_next_missing",
     "prompt_for",
+    "refresh_task_card",
     "resolve_owner_hint",
 ]

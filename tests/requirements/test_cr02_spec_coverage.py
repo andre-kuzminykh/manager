@@ -273,9 +273,12 @@ def test_fr_cr02_3_unparseable_reply_re_prompts(
 # --------------------------------------------------------------------------- #
 
 
-def test_fr_cr02_4_confirm_deletes_widget(
+def test_fr_cr02_4_confirm_cleans_up_followup_questions(
     patched_session_scope, SessionFactory, slack_client, finalizer_stub, ack
 ):
+    """Widget is morphed in-place by FinalizeService (separate test).
+    Confirm handler itself must delete every follow-up Q&A the bot posted
+    under the widget — so only the live task card remains."""
     from app.slack_bot.handlers.actions import handle_confirm
     from tests.test_persistence import _make_draft
 
@@ -294,6 +297,9 @@ def test_fr_cr02_4_confirm_deletes_widget(
     sender = S()
     with SessionFactory() as s:
         d = _make_draft(s, intent=IE.create_task, payload={"title": "t"})
+        d.card_channel = "C1"
+        d.card_ts = "100.0"
+        d.follow_up_message_ts = ["101.0", "102.0"]
         s.commit()
         did = d.id
 
@@ -309,7 +315,11 @@ def test_fr_cr02_4_confirm_deletes_widget(
         sender=sender,
         ack=ack,
     )
-    assert sender.deleted == [("C1", "100.0")]
+    # Only the follow-up Q&A messages get deleted; the widget itself is
+    # morphed in place by the finalizer.
+    assert ("C1", "101.0") in sender.deleted
+    assert ("C1", "102.0") in sender.deleted
+    assert ("C1", "100.0") not in sender.deleted
 
 
 def test_fr_cr02_4_ignore_deletes_widget(

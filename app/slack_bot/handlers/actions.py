@@ -43,6 +43,30 @@ def _delete_draft_card(
         log.warning("draft_card_delete_failed", error=str(e))
 
 
+def _cleanup_follow_up_messages(
+    sender: RateAwareSlackSender, draft_id: int
+) -> None:
+    """Delete every follow-up question / ack the bot posted in the thread
+    so the history under the widget is tidy after Confirm / Ignore."""
+    with session_scope() as session:
+        draft = session.get(ActionDraft, draft_id)
+        if draft is None:
+            return
+        channel = draft.card_channel
+        tss = list(draft.follow_up_message_ts or [])
+        # Clear so retries don't double-delete.
+        draft.follow_up_message_ts = []
+
+    if not channel or not tss or not hasattr(sender, "delete_message"):
+        return
+
+    for ts in tss:
+        try:
+            sender.delete_message(channel=channel, ts=ts)
+        except Exception as e:  # noqa: BLE001
+            log.warning("follow_up_delete_failed", ts=ts, error=str(e))
+
+
 def handle_confirm(
     *,
     body: dict[str, Any],
@@ -66,20 +90,11 @@ def handle_confirm(
         entity_type, entity_id, summary = finalizer.finalize_draft(
             draft_id=draft_id, source_metadata=metadata
         )
-        if channel:
-            sender.post_message(
-                channel=channel,
-                thread_ts=thread_ts,
-                blocks=bk.success_message(
-                    entity_type,
-                    entity_id,
-                    summary,
-                    permalink=metadata.get("permalink"),
-                ),
-                text=f"{entity_type} created",
-            )
-        # Draft consumed successfully — remove the widget to declutter.
-        _delete_draft_card(sender, body)
+        # On success the widget itself was morphed into a task card
+        # via chat.update (see FinalizeService._morph_widget_into_task_card).
+        # Clean up the follow-up Q&A in the thread so only the live card
+        # remains visible.
+        _cleanup_follow_up_messages(sender, draft_id)
     except Exception as e:  # noqa: BLE001
         log.error("finalize_failed", error=str(e), draft_id=draft_id)
         if channel:
@@ -109,6 +124,7 @@ def handle_ignore(
             draft.state = ActionDraftState.ignored
     if sender is not None:
         _delete_draft_card(sender, body)
+        _cleanup_follow_up_messages(sender, draft_id)
 
 
 def handle_edit(

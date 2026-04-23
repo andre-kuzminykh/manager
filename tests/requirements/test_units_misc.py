@@ -507,9 +507,12 @@ def test_finalize_does_not_invoke_sync_for_meeting(patched_session_scope, Sessio
 # =============================================================================
 
 
-def test_confirm_posts_success_feedback(
+def test_confirm_invokes_finalizer_and_does_not_post_channel_feedback(
     patched_session_scope, SessionFactory, slack_client, sender, finalizer_stub, ack
 ):
+    """Since the widget now morphs in place, the Confirm handler no longer
+    posts a separate success message in the channel. The finalizer handles
+    the UX via chat.update + owner DM (tested elsewhere)."""
     from app.slack_bot.handlers.actions import handle_confirm
     from tests.test_persistence import _make_draft
 
@@ -530,8 +533,11 @@ def test_confirm_posts_success_feedback(
         sender=sender,
         ack=ack,
     )
-    assert len(sender.posted) == 1
-    assert "created" in sender.posted[0]["text"].lower()
+    assert finalizer_stub.calls, "finalizer must be invoked"
+    # No separate 'created' message in the channel — finalizer drives UX.
+    assert all(
+        "created" not in m.get("text", "").lower() for m in sender.posted
+    )
 
 
 def test_confirm_posts_failure_feedback_when_finalize_raises(

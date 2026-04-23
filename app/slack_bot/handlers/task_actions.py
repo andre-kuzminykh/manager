@@ -15,6 +15,7 @@ from app.services import (
     NotificationService,
     SubscriptionService,
     TransitionService,
+    refresh_task_card,
 )
 from app.slack_bot import blocks as bk
 
@@ -100,6 +101,10 @@ def _apply_transition(
             to_status=new_status,
             actor_slack_user_id=actor,
         )
+        # Refresh both the channel widget and the DM mirror so the task card
+        # visually evolves through its lifecycle.
+        if hasattr(sender, "update_message"):
+            refresh_task_card(sender, task)
 
 
 def handle_start_work(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> None:

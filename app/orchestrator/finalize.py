@@ -113,35 +113,81 @@ class FinalizeService:
         # Sync tasks to Google surfaces outside the main transaction.
         if task_id is not None:
             self._sync_task(task_id)
-            self._post_task_card(task_id, source_metadata)
+            self._morph_widget_into_task_card(
+                task_id=task_id,
+                draft_id=draft_id,
+                source_metadata=source_metadata,
+            )
 
         return entity_type, entity_id, summary
 
-    def _post_task_card(self, task_id: int, source_metadata: dict[str, Any]) -> None:
-        """CR-01: post the persistent task card into the source channel/thread."""
+    def _morph_widget_into_task_card(
+        self,
+        *,
+        task_id: int,
+        draft_id: int,
+        source_metadata: dict[str, Any],
+    ) -> None:
+        """CR-02+: turn the draft widget into the persistent task card in
+        place via chat.update, and DM a copy to the task owner as a log."""
         if self._sender is None:
             return
-        channel = source_metadata.get("conversation_id")
-        if not channel:
-            return
+
         from app.models import Task
         from app.slack_bot import blocks as bk
 
         with session_scope() as session:
             task = session.get(Task, task_id)
-            if task is None:
+            draft = session.get(ActionDraft, draft_id)
+            if task is None or draft is None:
                 return
-            card = bk.task_card(task=task, viewer_slack_user_id=task.owner_user_id)
 
-        try:
-            self._sender.post_message(
-                channel=channel,
-                thread_ts=source_metadata.get("thread_ts") or source_metadata.get("message_ts"),
-                blocks=card,
-                text=f"Task #{task_id} created",
+            channel_card = bk.task_card(
+                task=task, viewer_slack_user_id=task.owner_user_id
             )
-        except Exception as e:  # noqa: BLE001
-            log.warning("task_card_post_failed", task_id=task_id, error=str(e))
+            dm_card = bk.task_card(
+                task=task, viewer_slack_user_id=task.owner_user_id
+            )
+
+            # 1) chat.update the draft widget in the channel — viewers see the
+            #    same message evolve into a task card.
+            channel = draft.card_channel or source_metadata.get("conversation_id")
+            ts = draft.card_ts
+            if channel and ts and hasattr(self._sender, "update_message"):
+                try:
+                    self._sender.update_message(
+                        channel=channel,
+                        ts=ts,
+                        blocks=channel_card,
+                        text=f"Task #{task_id}",
+                    )
+                    task.card_channel = channel
+                    task.card_ts = ts
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "channel_card_update_failed",
+                        task_id=task_id,
+                        error=str(e),
+                    )
+
+            # 2) DM a mirror copy to the task owner, so they keep a running
+            #    log of tasks assigned to them.
+            owner_id = task.owner_user_id or draft.created_by_slack_user_id
+            if owner_id:
+                try:
+                    resp = self._sender.post_message(
+                        channel=owner_id,
+                        blocks=dm_card,
+                        text=f"Task #{task_id}",
+                    )
+                    if isinstance(resp, dict):
+                        task.dm_channel = owner_id
+                        task.dm_ts = resp.get("ts")
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "dm_mirror_failed", task_id=task_id, error=str(e)
+                    )
+            session.flush()
 
     def _sync_task(self, task_id: int) -> None:
         sheets_service = self._sheets_factory() if self._sheets_factory else None

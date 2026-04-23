@@ -416,8 +416,11 @@ def task_card(
         viewer_slack_user_id is not None
         and task.owner_user_id == viewer_slack_user_id
     )
+    # "Начать работу" shows for the owner, OR when the task has no owner
+    # assigned yet — in that case any team member can claim it.
+    may_start = is_owner or task.owner_user_id is None
     if task.status == TaskStatus.todo or task.status == TaskStatus.backlog:
-        if is_owner:
+        if may_start:
             elements.append(
                 {
                     "type": "button",

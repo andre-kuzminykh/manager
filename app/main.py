@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import sys
 
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.intent import IntentClassifier
+from app.intent.llm_backends import AnthropicBackend, LLMBackend, OpenAIBackend
 from app.logging_setup import get_logger, setup_logging
 from app.orchestrator.finalize import FinalizeService
 from app.slack_bot.app import build_app, run_socket_mode
@@ -16,15 +17,46 @@ from app.sync.factories import (
 log = get_logger(__name__)
 
 
-def _build_anthropic_client(api_key: str):
-    if not api_key:
+def _build_llm_backend(settings: Settings) -> LLMBackend | None:
+    """Pick a backend based on LLM_PROVIDER + available keys.
+
+    - "auto" (default): OpenAI if OPENAI_API_KEY set, else Anthropic if
+      ANTHROPIC_API_KEY set, else None (rule-only).
+    - "openai" / "anthropic": explicit selection.
+    - "none": force rules only.
+    """
+    provider = settings.llm_provider
+    if provider == "none":
         return None
-    try:
-        from anthropic import Anthropic
-    except ImportError:  # pragma: no cover
-        log.warning("anthropic_not_installed")
-        return None
-    return Anthropic(api_key=api_key)
+
+    if provider in ("auto", "openai") and settings.openai_api_key:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            log.warning("openai_sdk_not_installed")
+        else:
+            log.info("llm_backend_selected", provider="openai", model=settings.openai_model)
+            return OpenAIBackend(OpenAI(api_key=settings.openai_api_key), settings.openai_model)
+
+    if provider in ("auto", "anthropic") and settings.anthropic_api_key:
+        try:
+            from anthropic import Anthropic
+        except ImportError:
+            log.warning("anthropic_sdk_not_installed")
+        else:
+            log.info(
+                "llm_backend_selected", provider="anthropic", model=settings.anthropic_model
+            )
+            return AnthropicBackend(
+                Anthropic(api_key=settings.anthropic_api_key), settings.anthropic_model
+            )
+
+    if provider == "openai" and not settings.openai_api_key:
+        log.warning("llm_provider_openai_selected_but_no_key")
+    if provider == "anthropic" and not settings.anthropic_api_key:
+        log.warning("llm_provider_anthropic_selected_but_no_key")
+    log.info("llm_backend_selected", provider="none")
+    return None
 
 
 def run() -> None:
@@ -38,8 +70,8 @@ def run() -> None:
         log.error("missing_slack_app_token_for_socket_mode")
         sys.exit(2)
 
-    anthropic_client = _build_anthropic_client(settings.anthropic_api_key)
-    classifier = IntentClassifier(anthropic_client=anthropic_client)
+    backend = _build_llm_backend(settings)
+    classifier = IntentClassifier(backend=backend)
 
     sheets_factory = build_sheets_factory(settings)
     gtasks_factory = build_google_tasks_factory(settings)

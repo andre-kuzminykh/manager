@@ -1,0 +1,211 @@
+"""LLM backends for intent extraction.
+
+Defines a thin interface so either Anthropic or OpenAI can drive the
+structured-output call without the classifier caring about SDK differences.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any, Protocol
+
+from app.intent.prompts import SYSTEM_PROMPT
+from app.logging_setup import get_logger
+
+log = get_logger(__name__)
+
+
+# Shared tool schema for intent extraction.
+INTENT_TOOL_NAME = "record_intent"
+INTENT_TOOL_DESCRIPTION = (
+    "Record the extracted intent and structured draft for the Slack message."
+)
+INTENT_TOOL_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "intent": {
+            "type": "string",
+            "enum": [
+                "create_task",
+                "create_meeting",
+                "update_task",
+                "update_meeting",
+                "no_action",
+            ],
+        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "reasoning": {"type": "string"},
+        "task": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "owner_display_name": {"type": "string"},
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"],
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "ISO YYYY-MM-DD or null",
+                },
+            },
+            "required": ["title"],
+        },
+        "meeting": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "notes": {"type": "string"},
+                "participants": {"type": "array", "items": {"type": "string"}},
+                "datetime_at": {
+                    "type": "string",
+                    "description": "ISO 8601 datetime with offset or null",
+                },
+                "timezone": {"type": "string"},
+            },
+            "required": ["title"],
+        },
+    },
+    "required": ["intent", "confidence"],
+}
+
+
+class LLMBackend(Protocol):
+    """Produces the tool_use input dict or None if the model refused."""
+
+    def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None: ...
+
+
+# ---------------------------------------------------------------------------
+# Anthropic
+# ---------------------------------------------------------------------------
+
+
+class AnthropicBackend:
+    def __init__(self, client: Any, model: str) -> None:
+        self._client = client
+        self._model = model
+
+    def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None:
+        tool = {
+            "name": INTENT_TOOL_NAME,
+            "description": INTENT_TOOL_DESCRIPTION,
+            "input_schema": INTENT_TOOL_PARAMETERS,
+        }
+        response = self._client.messages.create(
+            model=self._model,
+            max_tokens=1024,
+            system=[
+                {
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            tools=[tool],
+            tool_choice={"type": "tool", "name": INTENT_TOOL_NAME},
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        return _extract_anthropic_tool_input(response)
+
+
+def _extract_anthropic_tool_input(response: Any) -> dict[str, Any] | None:
+    content = getattr(response, "content", None) or []
+    for block in content:
+        block_type = getattr(block, "type", None) or (
+            block.get("type") if isinstance(block, dict) else None
+        )
+        if block_type == "tool_use":
+            tool_input = getattr(block, "input", None)
+            if tool_input is None and isinstance(block, dict):
+                tool_input = block.get("input")
+            if isinstance(tool_input, str):
+                try:
+                    return json.loads(tool_input)
+                except json.JSONDecodeError:
+                    return None
+            if isinstance(tool_input, dict):
+                return tool_input
+    return None
+
+
+# ---------------------------------------------------------------------------
+# OpenAI
+# ---------------------------------------------------------------------------
+
+
+class OpenAIBackend:
+    """Structured output via OpenAI tool calls (chat.completions).
+
+    Works with gpt-4o / gpt-4o-mini / gpt-4-turbo and any other model that
+    supports the tool-calling API.
+    """
+
+    def __init__(self, client: Any, model: str) -> None:
+        self._client = client
+        self._model = model
+
+    def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None:
+        tool = {
+            "type": "function",
+            "function": {
+                "name": INTENT_TOOL_NAME,
+                "description": INTENT_TOOL_DESCRIPTION,
+                "parameters": INTENT_TOOL_PARAMETERS,
+            },
+        }
+        response = self._client.chat.completions.create(
+            model=self._model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            tools=[tool],
+            tool_choice={
+                "type": "function",
+                "function": {"name": INTENT_TOOL_NAME},
+            },
+            temperature=0,
+        )
+        return _extract_openai_tool_input(response)
+
+
+def _extract_openai_tool_input(response: Any) -> dict[str, Any] | None:
+    try:
+        choice = response.choices[0]
+    except (AttributeError, IndexError, TypeError):
+        return None
+
+    message = getattr(choice, "message", None)
+    if message is None and isinstance(choice, dict):
+        message = choice.get("message")
+
+    tool_calls = (
+        getattr(message, "tool_calls", None)
+        if message is not None
+        else None
+    )
+    if tool_calls is None and isinstance(message, dict):
+        tool_calls = message.get("tool_calls")
+    if not tool_calls:
+        return None
+
+    call = tool_calls[0]
+    func = getattr(call, "function", None) or (
+        call.get("function") if isinstance(call, dict) else None
+    )
+    arguments = (
+        getattr(func, "arguments", None)
+        if func is not None
+        else None
+    )
+    if arguments is None and isinstance(func, dict):
+        arguments = func.get("arguments")
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+    return None

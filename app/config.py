@@ -22,9 +22,18 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
 
-    # LLM
+    # LLM provider
+    # "auto" picks OpenAI if OPENAI_API_KEY is set, else Anthropic if
+    # ANTHROPIC_API_KEY is set, else falls back to rules only.
+    llm_provider: Literal["auto", "openai", "anthropic", "none"] = Field(
+        default="auto", alias="LLM_PROVIDER"
+    )
+
     anthropic_api_key: str = Field(default="", alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-sonnet-4-6", alias="ANTHROPIC_MODEL")
+
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
 
     # Google
     google_client_id: str = Field(default="", alias="GOOGLE_CLIENT_ID")

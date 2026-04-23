@@ -6,6 +6,14 @@ from typing import Any
 
 from app.config import get_settings
 from app.context.retriever import ContextWindow
+from app.intent.llm_backends import (
+    INTENT_TOOL_DESCRIPTION,
+    INTENT_TOOL_NAME,
+    INTENT_TOOL_PARAMETERS,
+    AnthropicBackend,
+    LLMBackend,
+    OpenAIBackend,
+)
 from app.intent.prompts import SYSTEM_PROMPT, build_user_prompt
 from app.intent.rules import prefilter_intent
 from app.logging_setup import get_logger
@@ -13,71 +21,35 @@ from app.schemas.intent import IntentClassification, IntentType, InvocationType
 
 log = get_logger(__name__)
 
-
+# Kept for back-compat with tests that import the schema directly.
 _INTENT_TOOL = {
-    "name": "record_intent",
-    "description": "Record the extracted intent and structured draft for the Slack message.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "intent": {
-                "type": "string",
-                "enum": [
-                    "create_task",
-                    "create_meeting",
-                    "update_task",
-                    "update_meeting",
-                    "no_action",
-                ],
-            },
-            "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "reasoning": {"type": "string"},
-            "task": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
-                    "owner_display_name": {"type": "string"},
-                    "priority": {
-                        "type": "string",
-                        "enum": ["low", "medium", "high", "urgent"],
-                    },
-                    "due_date": {
-                        "type": "string",
-                        "description": "ISO YYYY-MM-DD or null",
-                    },
-                },
-                "required": ["title"],
-            },
-            "meeting": {
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string"},
-                    "notes": {"type": "string"},
-                    "participants": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    "datetime_at": {
-                        "type": "string",
-                        "description": "ISO 8601 datetime with offset or null",
-                    },
-                    "timezone": {"type": "string"},
-                },
-                "required": ["title"],
-            },
-        },
-        "required": ["intent", "confidence"],
-    },
+    "name": INTENT_TOOL_NAME,
+    "description": INTENT_TOOL_DESCRIPTION,
+    "input_schema": INTENT_TOOL_PARAMETERS,
 }
 
 
 class IntentClassifier:
-    """Thin wrapper that composes rule prefilter + LLM extraction."""
+    """Composes rule prefilter + LLM extraction through a pluggable backend."""
 
-    def __init__(self, anthropic_client: Any | None = None) -> None:
-        self._client = anthropic_client
+    def __init__(
+        self,
+        anthropic_client: Any | None = None,
+        *,
+        backend: LLMBackend | None = None,
+    ) -> None:
+        # New path: pass an already-constructed backend (Anthropic or OpenAI).
+        # Old path: pass an Anthropic SDK client — we wrap it automatically so
+        # existing callers and tests keep working.
         self._settings = get_settings()
+        if backend is not None:
+            self._backend: LLMBackend | None = backend
+        elif anthropic_client is not None:
+            self._backend = AnthropicBackend(
+                anthropic_client, self._settings.anthropic_model
+            )
+        else:
+            self._backend = None
 
     def classify(
         self,
@@ -98,22 +70,58 @@ class IntentClassifier:
                 reasoning="prefilter: no task/meeting keywords",
             )
 
-        if self._client is None:
-            # Without LLM we can only return the coarse hint. Mark confidence
-            # proportional to how certain the prefilter was.
+        if self._backend is None:
+            # Without an LLM we can only return the coarse rule hint.
             return IntentClassification(
                 intent=prefilter.hint,
                 confidence=prefilter.score,
                 reasoning="prefilter only (no LLM configured)",
             )
 
-        return classify_with_llm(
-            client=self._client,
-            model=self._settings.anthropic_model,
+        return classify_with_backend(
+            backend=self._backend,
             context=context,
             invocation_type=invocation_type,
             source_text=source_text,
         )
+
+
+def classify_with_backend(
+    *,
+    backend: LLMBackend,
+    context: ContextWindow,
+    invocation_type: InvocationType,
+    source_text: str,
+) -> IntentClassification:
+    user_prompt = build_user_prompt(
+        source_text=source_text,
+        context_messages=context.flat_messages(),
+        invocation_type=invocation_type.value,
+        current_date=date.today().isoformat(),
+    )
+    try:
+        tool_input = backend.extract_intent(user_prompt=user_prompt)
+    except Exception as e:  # noqa: BLE001 — degrade gracefully
+        log.error("intent_llm_call_failed", error=str(e))
+        prefilter = prefilter_intent(source_text)
+        return IntentClassification(
+            intent=prefilter.hint,
+            confidence=prefilter.score * 0.5,
+            reasoning=f"LLM call failed, fell back to rules: {e!s}",
+        )
+
+    if tool_input is None:
+        log.warning("intent_llm_no_tool_use")
+        return IntentClassification(
+            intent=IntentType.no_action,
+            confidence=0.0,
+            reasoning="LLM did not produce a tool_use block",
+        )
+
+    return _parse_classification(tool_input)
+
+
+# -- Back-compat wrappers kept for existing tests --------------------------
 
 
 def classify_with_llm(
@@ -124,73 +132,24 @@ def classify_with_llm(
     invocation_type: InvocationType,
     source_text: str,
 ) -> IntentClassification:
-    """Call the Anthropic Messages API with a tool-use schema for structured output."""
-
-    user_prompt = build_user_prompt(
+    """Legacy entrypoint: Anthropic client → AnthropicBackend."""
+    backend = AnthropicBackend(client, model)
+    return classify_with_backend(
+        backend=backend,
+        context=context,
+        invocation_type=invocation_type,
         source_text=source_text,
-        context_messages=context.flat_messages(),
-        invocation_type=invocation_type.value,
-        current_date=date.today().isoformat(),
     )
-
-    try:
-        response = client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            tools=[_INTENT_TOOL],
-            tool_choice={"type": "tool", "name": "record_intent"},
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-    except Exception as e:  # noqa: BLE001 -- we want to degrade gracefully
-        log.error("intent_llm_call_failed", error=str(e))
-        prefilter = prefilter_intent(source_text)
-        return IntentClassification(
-            intent=prefilter.hint,
-            confidence=prefilter.score * 0.5,
-            reasoning=f"LLM call failed, fell back to rules: {e!s}",
-        )
-
-    tool_input = _extract_tool_input(response)
-    if tool_input is None:
-        log.warning("intent_llm_no_tool_use", response=str(response))
-        return IntentClassification(
-            intent=IntentType.no_action,
-            confidence=0.0,
-            reasoning="LLM did not produce a tool_use block",
-        )
-
-    return _parse_classification(tool_input)
 
 
 def _extract_tool_input(response: Any) -> dict[str, Any] | None:
-    content = getattr(response, "content", None) or []
-    for block in content:
-        block_type = getattr(block, "type", None) or (
-            block.get("type") if isinstance(block, dict) else None
-        )
-        if block_type == "tool_use":
-            tool_input = getattr(block, "input", None)
-            if tool_input is None and isinstance(block, dict):
-                tool_input = block.get("input")
-            if isinstance(tool_input, str):
-                try:
-                    return json.loads(tool_input)
-                except json.JSONDecodeError:
-                    return None
-            if isinstance(tool_input, dict):
-                return tool_input
-    return None
+    """Legacy helper used by classifier tests (Anthropic-style response)."""
+    from app.intent.llm_backends import _extract_anthropic_tool_input
+
+    return _extract_anthropic_tool_input(response)
 
 
 def _parse_classification(data: dict[str, Any]) -> IntentClassification:
-    # Pydantic will coerce strings into date/datetime where needed.
     try:
         return IntentClassification.model_validate(data)
     except Exception as e:  # noqa: BLE001
@@ -200,3 +159,13 @@ def _parse_classification(data: dict[str, Any]) -> IntentClassification:
             confidence=0.0,
             reasoning=f"parse error: {e!s}",
         )
+
+
+__all__ = [
+    "IntentClassifier",
+    "_INTENT_TOOL",
+    "_extract_tool_input",
+    "_parse_classification",
+    "classify_with_backend",
+    "classify_with_llm",
+]

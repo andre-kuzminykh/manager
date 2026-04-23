@@ -1,0 +1,47 @@
+# Paste this into Slack -> Create New App -> From an app manifest.
+# The bot uses Socket Mode, so no public request URL is required.
+
+display_information:
+  name: Task Manager Bot
+  description: Extracts tasks and meetings from Slack conversations.
+  background_color: "#1f2937"
+
+features:
+  bot_user:
+    display_name: Task Manager Bot
+    always_online: true
+
+  shortcuts:
+    - name: Create task from message
+      type: message
+      callback_id: create_task_from_message
+      description: Turn this message into a task
+    - name: Create meeting from message
+      type: message
+      callback_id: create_meeting_from_message
+      description: Turn this message into a meeting
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+      - im:history
+      - mpim:history
+      - channels:history     # remove if you don't intake from public channels
+      - groups:history       # remove if you don't intake from private channels
+      - commands
+      - users:read
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - message.mpim
+      - message.channels
+      - message.groups
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  token_rotation_enabled: false

@@ -171,7 +171,11 @@ class FinalizeService:
                     )
 
             # 2) DM a mirror copy to the task owner, so they keep a running
-            #    log of tasks assigned to them.
+            #    log of tasks assigned to them. The ts is also pinned on
+            #    the owner's TaskSubscription row so every subsequent
+            #    broadcast about this task lands as a thread reply there.
+            from app.models import TaskSubscription
+
             owner_id = task.owner_user_id or draft.created_by_slack_user_id
             if owner_id:
                 try:
@@ -183,6 +187,13 @@ class FinalizeService:
                     if isinstance(resp, dict):
                         task.dm_channel = owner_id
                         task.dm_ts = resp.get("ts")
+                        owner_sub = (
+                            session.query(TaskSubscription)
+                            .filter_by(task_id=task.id, slack_user_id=owner_id)
+                            .one_or_none()
+                        )
+                        if owner_sub is not None:
+                            owner_sub.dm_ts = resp.get("ts")
                 except Exception as e:  # noqa: BLE001
                     log.warning(
                         "dm_mirror_failed", task_id=task_id, error=str(e)

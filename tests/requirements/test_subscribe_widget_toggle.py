@@ -154,13 +154,14 @@ def test_subscribe_dms_actor_with_clickable_link(
         ack=ack,
         client=_FakeClient(permalink="https://slack.com/x/p200"),
     )
-    # DM ack went to the actor (channel == actor user id).
+    # Two DMs go to the actor: first is the anchor task card, second is
+    # the :bell: ack threaded under it.
     actor_msgs = [m for m in sender.posts if m["channel"] == "U-other"]
-    assert actor_msgs
-    txt = actor_msgs[0]["text"]
-    assert ":bell:" in txt
-    assert "subscribed" in txt
-    assert "<https://slack.com/x/p200|task #" in txt
+    assert len(actor_msgs) == 2
+    ack_msg = next(m for m in actor_msgs if ":bell:" in m.get("text", ""))
+    assert "subscribed" in ack_msg["text"]
+    assert "<https://slack.com/x/p200|task #" in ack_msg["text"]
+    assert "thread_ts" in ack_msg
 
 
 def test_subscribe_button_flips_to_unsubscribe_on_re_render(

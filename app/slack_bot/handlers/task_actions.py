@@ -139,12 +139,16 @@ def _toggle_subscription(
     subs = SubscriptionService()
 
     permalink: str | None = None
+    anchor_needed: bool = False
     with session_scope() as session:
         task = session.get(Task, task_id)
         if task is None:
             return
         if subscribe:
-            subs.subscribe(session, task=task, slack_user_id=actor)
+            sub = subs.subscribe(session, task=task, slack_user_id=actor)
+            # Remember whether we still need to post an anchor DM to this
+            # user so later broadcasts can thread under it.
+            anchor_needed = sub.dm_ts is None
         else:
             subs.unsubscribe(session, task=task, slack_user_id=actor)
 
@@ -189,14 +193,42 @@ def _toggle_subscription(
             except Exception:  # noqa: BLE001
                 permalink = None
 
+        # Post an anchor task card to the new subscriber's DM so every
+        # future broadcast about this task threads under a single
+        # message. Only do this once per (task, user).
+        if subscribe and anchor_needed:
+            try:
+                anchor_resp = sender.post_message(
+                    channel=actor,
+                    blocks=bk.task_card(
+                        task=task,
+                        viewer_slack_user_id=actor,
+                        is_subscribed=True,
+                    ),
+                    text=f"Task #{task.id}: {task.title}",
+                )
+                if isinstance(anchor_resp, dict):
+                    sub.dm_ts = anchor_resp.get("ts")
+                    session.flush()
+            except Exception as e:  # noqa: BLE001
+                log.warning("subscription_anchor_failed", error=str(e))
+
+        # Recompute the anchor ts for the ack text below.
+        anchor_ts = sub.dm_ts if subscribe else None
+
     icon = ":bell:" if subscribe else ":no_bell:"
     verb = "subscribed to" if subscribe else "unsubscribed from"
     link = f"<{permalink}|task #{task_id}>" if permalink else f"task #{task_id}"
+    ack_kwargs: dict[str, Any] = {
+        "channel": actor,
+        "text": f"{icon} {verb} {link}",
+    }
+    # Thread the ack under the anchor DM (subscribe path) so the user's
+    # notifications for this task stay grouped.
+    if anchor_ts:
+        ack_kwargs["thread_ts"] = anchor_ts
     try:
-        sender.post_message(
-            channel=actor,
-            text=f"{icon} {verb} {link}",
-        )
+        sender.post_message(**ack_kwargs)
     except Exception as e:  # noqa: BLE001
         log.warning("subscription_dm_ack_failed", error=str(e))
 

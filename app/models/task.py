@@ -163,6 +163,10 @@ class TaskSubscription(Base, TimestampMixin):
         ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False
     )
     slack_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # ts of the anchor DM the bot posted for this (task, user) pair.
+    # Later broadcasts thread under it so all updates about one task land
+    # in a single DM conversation.
+    dm_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     task: Mapped["Task"] = relationship(back_populates="subscriptions")
 

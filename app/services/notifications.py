@@ -61,10 +61,20 @@ class NotificationService:
     # ---- internals -------------------------------------------------------
 
     def _broadcast(self, session: Session, *, task: Task, text: str) -> int:
+        from app.models import TaskSubscription
+
         count = 0
-        for user_id in self._subs.list_subscribers(session, task=task):
+        rows = (
+            session.query(TaskSubscription)
+            .filter_by(task_id=task.id)
+            .all()
+        )
+        for sub in rows:
+            kwargs: dict = {"channel": sub.slack_user_id, "text": text}
+            if sub.dm_ts:
+                kwargs["thread_ts"] = sub.dm_ts
             try:
-                self._sender.post_message(channel=user_id, text=text)
+                self._sender.post_message(**kwargs)
                 count += 1
             except Exception:  # noqa: BLE001 — one bad DM must not abort the rest
                 continue

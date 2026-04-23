@@ -39,7 +39,13 @@ def _is_ignorable(event: dict[str, Any], bot_user_id: str | None) -> bool:
         return True
     if bot_user_id and event.get("user") == bot_user_id:
         return True
-    if not (event.get("text") or "").strip():
+    text = event.get("text") or ""
+    if not text.strip():
+        return True
+    # Slack fires both `app_mention` and `message.*` for messages that mention
+    # the bot. The explicit mention handler already takes care of those — skip
+    # them here to avoid duplicate drafts and races on shared rows.
+    if bot_user_id and f"<@{bot_user_id}>" in text:
         return True
     return False
 

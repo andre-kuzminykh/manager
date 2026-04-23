@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from slack_sdk import WebClient
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.context import ContextRetriever
@@ -27,11 +28,19 @@ class Services:
 
 def upsert_conversation(session: Session, *, channel_id: str, kind: str) -> SlackConversation:
     record = session.get(SlackConversation, channel_id)
-    if record is None:
+    if record is not None:
+        return record
+    sp = session.begin_nested()
+    try:
         record = SlackConversation(id=channel_id, kind=kind)
         session.add(record)
         session.flush()
-    return record
+    except IntegrityError:
+        sp.rollback()
+        record = session.get(SlackConversation, channel_id)
+    else:
+        sp.commit()
+    return record  # type: ignore[return-value]
 
 
 def upsert_message(
@@ -49,16 +58,27 @@ def upsert_message(
     )
     if existing is not None:
         return existing
-    record = SlackMessage(
-        conversation_id=conversation.id,
-        ts=ts,
-        thread_ts=message.get("thread_ts"),
-        user_id=message.get("user") or message.get("bot_id"),
-        text=message.get("text") or "",
-        raw=raw,
-    )
-    session.add(record)
-    session.flush()
+    sp = session.begin_nested()
+    try:
+        record = SlackMessage(
+            conversation_id=conversation.id,
+            ts=ts,
+            thread_ts=message.get("thread_ts"),
+            user_id=message.get("user") or message.get("bot_id"),
+            text=message.get("text") or "",
+            raw=raw,
+        )
+        session.add(record)
+        session.flush()
+    except IntegrityError:
+        sp.rollback()
+        record = (
+            session.query(SlackMessage)
+            .filter_by(conversation_id=conversation.id, ts=ts)
+            .one()
+        )
+    else:
+        sp.commit()
     return record
 
 

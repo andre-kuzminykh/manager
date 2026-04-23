@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slack-task-manager"
+version = "0.1.0"
+description = "Slack bot that extracts tasks and meetings from chat, stores them in DB, and syncs to Google Sheets + Google Tasks."
+requires-python = ">=3.11"
+dependencies = [
+    "slack-bolt>=1.18",
+    "slack-sdk>=3.27",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "python-dateutil>=2.9",
+    "dateparser>=1.2",
+    "anthropic>=0.40",
+    "google-api-python-client>=2.120",
+    "google-auth>=2.29",
+    "google-auth-oauthlib>=1.2",
+    "tenacity>=8.3",
+    "structlog>=24.1",
+    "cryptography>=42.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.1",
+    "pytest-asyncio>=0.23",
+    "mypy>=1.10",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+slack-task-bot = "app.main:run"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

@@ -70,6 +70,19 @@ This key encrypts OAuth tokens in Postgres. **Do not lose it.**
 Set `ANTHROPIC_API_KEY`. Without it the bot falls back to the rule
 prefilter only (works, but low-quality extraction).
 
+### 0.6 Allowed owners & workload (CR-01)
+
+Configure who can be assigned as a task owner and how to estimate their
+workload.
+
+- `ALLOWED_OWNERS` — JSON array of `{slack_user_id, display_name}`; see
+  `.env.example`. Example:
+  `ALLOWED_OWNERS='[{"slack_user_id":"U123","display_name":"Ivan"}]'`
+- `WORKLOAD_MINUTES_PER_DAY` (default 360) — daily budget per owner used by
+  `WorkloadEstimator` to propose deadlines.
+- `WORKLOAD_DEFAULT_TASK_MINUTES` (default 120) — fallback effort for tasks
+  without an explicit estimate.
+
 ---
 
 ## 1. Local verification with docker compose
@@ -134,6 +147,11 @@ the bot can write to your Sheet and your Google Tasks list.
 | **Confirm → persist → sync** | Click *Confirm* on a task draft | Success message in Slack, new row in the Google Sheet, new item in Google Tasks, DB row in `tasks`. |
 | **Dedup** | Post a message, then reconnect the container (`docker compose restart bot`). Slack may re-deliver. | Only one draft card is shown. |
 | **Rate limit** | Confirm several cards in quick succession | No 429s bubble up; sender throttles to 1 msg/s per channel. |
+| **CR-01 Start work** | Owner clicks **Начать работу** on a task card | Task transitions to `in_progress`; `started_at` is set; subscribers get a DM. Non-owners clicking it see a "Only <@owner> can start this task" message. |
+| **CR-01 Subscribe** | Click **Подписаться** on a task card | A row appears in `task_subscriptions` for that user; button flips to **Отписаться**. |
+| **CR-01 Show context** | Click **Show context** | A modal opens listing the source message plus the previous messages and thread replies used for extraction. |
+| **CR-01 Allowed owners** | Run `@bot create task` with `ALLOWED_OWNERS` set | The modal renders Owner as a static_select constrained to the list; NL hints like `"assign to Ivan"` preselect the matching owner. |
+| **CR-01 Digest** | `docker compose exec bot python -m ops.send_digest --type daily` | Every owner with open tasks receives a DM listing today's, approaching and overdue tasks. Repeat runs within the same day are idempotent. |
 
 ### 1.5 Inspect DB
 
@@ -190,7 +208,8 @@ the Cloud SQL Auth Proxy instead of a public IP.)
 for KEY in SLACK_BOT_TOKEN SLACK_APP_TOKEN ANTHROPIC_API_KEY \
            GOOGLE_CLIENT_ID GOOGLE_CLIENT_SECRET \
            GOOGLE_SHEETS_SPREADSHEET_ID GOOGLE_TASKS_DEFAULT_TASKLIST_ID \
-           SECRETS_ENCRYPTION_KEY DATABASE_URL; do
+           SECRETS_ENCRYPTION_KEY DATABASE_URL \
+           ALLOWED_OWNERS; do
   echo "Enter value for $KEY:"; read -r VALUE
   printf '%s' "$VALUE" | gcloud secrets create "$KEY" --data-file=- 2>/dev/null \
     || printf '%s' "$VALUE" | gcloud secrets versions add "$KEY" --data-file=-
@@ -264,6 +283,94 @@ Repeat the smoke tests from §1.4. The DB inspection queries work the same
 from Cloud SQL Auth Proxy.
 
 ---
+
+## 2.8 Schedule CR-01 digests
+
+CR-01 digests are one-shot commands; the bot container does not run cron
+internally. The recommended GCP pattern is Cloud Run Jobs + Cloud Scheduler.
+
+### 2.8.1 Cloud Run Job for digests
+
+```bash
+gcloud run jobs create slack-task-digest-daily \
+  --image="$IMAGE" \
+  --region="$REGION" \
+  --command=python --args="-m,ops.send_digest,--type,daily" \
+  --set-secrets=SLACK_BOT_TOKEN=SLACK_BOT_TOKEN:latest,DATABASE_URL=DATABASE_URL:latest,SECRETS_ENCRYPTION_KEY=SECRETS_ENCRYPTION_KEY:latest \
+  --add-cloudsql-instances="$PROJECT_ID:$REGION:slack-tasks" \
+  --max-retries=2
+
+# Repeat for weekly and deadlines (same image, different --args):
+gcloud run jobs create slack-task-digest-weekly \
+  --image="$IMAGE" --region="$REGION" \
+  --command=python --args="-m,ops.send_digest,--type,weekly" \
+  --set-secrets=SLACK_BOT_TOKEN=SLACK_BOT_TOKEN:latest,DATABASE_URL=DATABASE_URL:latest,SECRETS_ENCRYPTION_KEY=SECRETS_ENCRYPTION_KEY:latest \
+  --add-cloudsql-instances="$PROJECT_ID:$REGION:slack-tasks"
+
+gcloud run jobs create slack-task-digest-deadlines \
+  --image="$IMAGE" --region="$REGION" \
+  --command=python --args="-m,ops.send_digest,--type,deadlines" \
+  --set-secrets=SLACK_BOT_TOKEN=SLACK_BOT_TOKEN:latest,DATABASE_URL=DATABASE_URL:latest,SECRETS_ENCRYPTION_KEY=SECRETS_ENCRYPTION_KEY:latest \
+  --add-cloudsql-instances="$PROJECT_ID:$REGION:slack-tasks"
+```
+
+### 2.8.2 Cloud Scheduler triggers
+
+```bash
+# Grant Scheduler permission to invoke the job.
+PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+SA="service-${PROJECT_NUMBER}@gcp-sa-cloudscheduler.iam.gserviceaccount.com"
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$SA" \
+  --role="roles/run.invoker"
+
+# Daily 09:00 Europe/Moscow
+gcloud scheduler jobs create http slack-task-digest-daily-cron \
+  --location="$REGION" \
+  --schedule="0 9 * * *" \
+  --time-zone="Europe/Moscow" \
+  --http-method=POST \
+  --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/slack-task-digest-daily:run" \
+  --oauth-service-account-email="$SA"
+
+# Weekly Monday 09:00
+gcloud scheduler jobs create http slack-task-digest-weekly-cron \
+  --location="$REGION" \
+  --schedule="0 9 * * 1" \
+  --time-zone="Europe/Moscow" \
+  --http-method=POST \
+  --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/slack-task-digest-weekly:run" \
+  --oauth-service-account-email="$SA"
+
+# Deadlines every 30 minutes during business hours
+gcloud scheduler jobs create http slack-task-digest-deadlines-cron \
+  --location="$REGION" \
+  --schedule="*/30 9-19 * * 1-5" \
+  --time-zone="Europe/Moscow" \
+  --http-method=POST \
+  --uri="https://${REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${PROJECT_ID}/jobs/slack-task-digest-deadlines:run" \
+  --oauth-service-account-email="$SA"
+```
+
+Each job is idempotent per (user, day/week) — reruns are no-ops. To trigger a
+digest manually:
+
+```bash
+gcloud run jobs execute slack-task-digest-daily --region="$REGION" --wait
+```
+
+### 2.8.3 Alternative: cron on the GCE VM
+
+If you're running the bot on the GCE VM from §2.6, schedule the digests on
+the host via a sidecar cron rather than Cloud Scheduler:
+
+```bash
+gcloud compute ssh slack-task-bot --zone="${REGION}-b" --command "cat <<'CRON' | sudo tee /etc/cron.d/slack-digest
+0 9 * * *      root docker exec \$(docker ps -q) python -m ops.send_digest --type daily
+0 9 * * 1      root docker exec \$(docker ps -q) python -m ops.send_digest --type weekly
+*/30 9-19 * * 1-5 root docker exec \$(docker ps -q) python -m ops.send_digest --type deadlines
+CRON"
+```
 
 ## 3. Cloud Run variant (optional)
 

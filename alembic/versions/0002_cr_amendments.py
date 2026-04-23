@@ -8,6 +8,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 
 revision: str = "0002_cr_amendments"
 down_revision: Union[str, None] = "0001_initial"
@@ -40,7 +41,9 @@ def upgrade() -> None:
     # Drop the server_default after backfill so the ORM owns the value.
     op.alter_column("tasks", "is_current_week", server_default=None)
 
-    task_status = sa.Enum(
+    # task_status enum was created in 0001_initial; reference it without
+    # re-emitting CREATE TYPE.
+    task_status = PgEnum(
         "backlog",
         "todo",
         "in_progress",

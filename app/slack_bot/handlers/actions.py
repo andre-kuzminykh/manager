@@ -55,7 +55,12 @@ def handle_confirm(
             sender.post_message(
                 channel=channel,
                 thread_ts=thread_ts,
-                blocks=bk.success_message(entity_type, entity_id, summary),
+                blocks=bk.success_message(
+                    entity_type,
+                    entity_id,
+                    summary,
+                    permalink=metadata.get("permalink"),
+                ),
                 text=f"{entity_type} created",
             )
     except Exception as e:  # noqa: BLE001

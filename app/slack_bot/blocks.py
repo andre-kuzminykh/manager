@@ -63,8 +63,13 @@ def draft_card(
     classification: IntentClassification,
     draft_id: int,
     confidence_bucket: str,
+    missing_fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Confirmation card with Confirm / Edit / Ignore buttons."""
+    """Confirmation card with Confirm / Edit / Ignore buttons.
+
+    ``missing_fields`` is a list of human-readable field names to render as an
+    inline prompt ("Please fill in: …"). Pass None or empty list to skip.
+    """
     header = {
         "task": "Task draft",
         "meeting": "Meeting draft",
@@ -121,6 +126,37 @@ def draft_card(
                 {"type": "mrkdwn", "text": f"*{label}*\n{value}"} for label, value in fields
             ],
         },
+    ]
+
+    if missing_fields:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            f":pencil2: *Не хватает:* {', '.join(missing_fields)}. "
+                            "Нажми *Edit*, чтобы дозаполнить, или *Confirm* — и бот создаст как есть."
+                        ),
+                    }
+                ],
+            }
+        )
+    else:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": ":white_check_mark: Все поля заполнены. *Confirm* — и задача уедет в трекер.",
+                    }
+                ],
+            }
+        )
+
+    blocks.append(
         {
             "type": "actions",
             "block_id": f"draft_actions_{draft_id}",
@@ -146,8 +182,8 @@ def draft_card(
                     "value": str(draft_id),
                 },
             ],
-        },
-    ]
+        }
+    )
     return blocks
 
 
@@ -560,16 +596,17 @@ def meeting_modal(
     }
 
 
-def success_message(entity_type: str, entity_id: int, summary: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f":white_check_mark: {entity_type.capitalize()} #{entity_id} created: *{summary}*",
-            },
-        }
-    ]
+def success_message(
+    entity_type: str,
+    entity_id: int,
+    summary: str,
+    *,
+    permalink: str | None = None,
+) -> list[dict[str, Any]]:
+    text = f":white_check_mark: {entity_type.capitalize()} *#{entity_id}* created: *{summary}*"
+    if permalink:
+        text += f"\n<{permalink}|Открыть исходное сообщение>"
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
 def failure_message(entity_type: str, error: str) -> list[dict[str, Any]]:

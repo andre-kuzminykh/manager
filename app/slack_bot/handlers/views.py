@@ -160,7 +160,9 @@ def handle_task_modal_submit(
         _post_feedback(
             sender,
             metadata=metadata,
-            blocks=bk.success_message(entity_type, entity_id, summary),
+            blocks=bk.success_message(
+                entity_type, entity_id, summary, permalink=metadata.get("permalink")
+            ),
             text=f"{entity_type} created",
         )
     except Exception as e:  # noqa: BLE001
@@ -211,7 +213,9 @@ def handle_meeting_modal_submit(
         _post_feedback(
             sender,
             metadata=metadata,
-            blocks=bk.success_message(entity_type, entity_id, summary),
+            blocks=bk.success_message(
+                entity_type, entity_id, summary, permalink=metadata.get("permalink")
+            ),
             text=f"{entity_type} created",
         )
     except Exception as e:  # noqa: BLE001

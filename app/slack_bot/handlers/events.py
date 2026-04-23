@@ -8,7 +8,7 @@ from slack_sdk import WebClient
 
 from app.db import session_scope
 from app.logging_setup import get_logger
-from app.schemas.intent import InvocationType
+from app.schemas.intent import IntentClassification, IntentType, InvocationType
 from app.slack_bot import blocks as bk
 from app.slack_bot.dedup import claim_event
 from app.slack_bot.handlers.shared import (
@@ -32,7 +32,6 @@ def _kind_from_channel_type(channel_type: str | None, channel_id: str | None) ->
 
 
 def _is_ignorable(event: dict[str, Any], bot_user_id: str | None) -> bool:
-    # Ignore edits, deletes and bot self messages.
     subtype = event.get("subtype")
     if subtype in ("message_changed", "message_deleted", "bot_message", "channel_join"):
         return True
@@ -43,6 +42,28 @@ def _is_ignorable(event: dict[str, Any], bot_user_id: str | None) -> bool:
     if not (event.get("text") or "").strip():
         return True
     return False
+
+
+def _missing_fields(classification: IntentClassification) -> list[str]:
+    """Return required fields that are still empty — for inline prompts."""
+    missing: list[str] = []
+    if classification.intent in (IntentType.create_task, IntentType.update_task):
+        t = classification.task
+        if t is None or not t.title:
+            missing.append("title")
+        if t is None or not t.owner_display_name and not t.owner_user_id:
+            missing.append("owner")
+        if t is None or t.due_date is None:
+            missing.append("due date")
+    elif classification.intent in (IntentType.create_meeting, IntentType.update_meeting):
+        m = classification.meeting
+        if m is None or not m.title:
+            missing.append("title")
+        if m is None or not m.participants:
+            missing.append("participants")
+        if m is None or m.datetime_at is None:
+            missing.append("date/time")
+    return missing
 
 
 def handle_message(
@@ -116,6 +137,7 @@ def handle_message(
                 classification=classification,
                 draft_id=draft.id,
                 confidence_bucket=decision.confidence_bucket.value,
+                missing_fields=_missing_fields(classification),
             )
         else:
             payload = bk.soft_prompt(classification.intent, draft.id)
@@ -139,69 +161,88 @@ def handle_app_mention(
     sender: RateAwareSlackSender,
     ack: Ack,
 ) -> None:
-    """Explicit @mention flow: always return a confirmation card."""
+    """Explicit @mention flow: always return a user-visible reply.
+
+    Contract: the bot MUST post something back to the channel for every
+    mention. Either a draft card (with a "missing fields" hint when relevant)
+    or an error/fallback message — never silence.
+    """
     ack()
+
+    channel = event.get("channel")
+    thread_ts = event.get("thread_ts") or event.get("ts")
+
+    def _reply(text: str) -> None:
+        if channel:
+            try:
+                sender.post_message(channel=channel, thread_ts=thread_ts, text=text)
+            except Exception as e:  # noqa: BLE001
+                log.error("mention_fallback_reply_failed", error=str(e))
+
+    if not channel:
+        log.warning("mention_event_without_channel")
+        return
 
     event_id = body.get("event_id") or ""
     bot_user_id = context.bot_user_id
-    channel = event.get("channel")
-    if not channel:
-        return
 
-    with session_scope() as session:
-        if not claim_event(session, event_id):
-            log.info("duplicate_event_skipped", event_id=event_id)
-            return
+    try:
+        with session_scope() as session:
+            if not claim_event(session, event_id):
+                log.info("duplicate_event_skipped", event_id=event_id)
+                return
 
-        text = strip_bot_mentions(event.get("text", ""), bot_user_id)
-        source_message = {
-            "ts": event["ts"],
-            "thread_ts": event.get("thread_ts"),
-            "user": event.get("user"),
-            "text": text,
-        }
+            text = strip_bot_mentions(event.get("text", ""), bot_user_id)
+            source_message = {
+                "ts": event["ts"],
+                "thread_ts": event.get("thread_ts"),
+                "user": event.get("user"),
+                "text": text,
+            }
 
-        classification, draft, snapshot = classify_and_persist(
-            session,
-            services=services,
-            conversation_id=channel,
-            kind=_kind_from_channel_type(event.get("channel_type"), channel),
-            source_message=source_message,
-            invocation_type=InvocationType.mention,
-            slack_user_id=event.get("user"),
-        )
+            classification, draft, snapshot = classify_and_persist(
+                session,
+                services=services,
+                conversation_id=channel,
+                kind=_kind_from_channel_type(event.get("channel_type"), channel),
+                source_message=source_message,
+                invocation_type=InvocationType.mention,
+                slack_user_id=event.get("user"),
+            )
 
-        permalink = fetch_permalink(client, channel=channel, ts=event["ts"])
+            permalink = fetch_permalink(client, channel=channel, ts=event["ts"])
 
-        if draft is None:
+            if draft is None:
+                _reply(
+                    ":thinking_face: Не понял, что создать. "
+                    "Попробуй: `@bot создай задачу: <что сделать> до <когда>, ответственный <кто>` "
+                    "или: `@bot создай встречу с <кем> <когда>`."
+                )
+                return
+
+            metadata = draft_private_metadata(
+                conversation_id=channel,
+                message_ts=event["ts"],
+                thread_ts=event.get("thread_ts"),
+                draft_id=draft.id,
+                context_snapshot_id=snapshot.id,
+                source_user_id=event.get("user"),
+                permalink=permalink,
+            )
+
+            missing = _missing_fields(classification)
             sender.post_message(
                 channel=channel,
-                thread_ts=event.get("thread_ts") or event["ts"],
-                text=(
-                    "I couldn't detect a task or meeting in that message. "
-                    "Try something like: `@bot создай задачу: подготовить список фондов до пятницы`."
+                thread_ts=thread_ts,
+                blocks=bk.draft_card(
+                    classification=classification,
+                    draft_id=draft.id,
+                    confidence_bucket="high",
+                    missing_fields=missing,
                 ),
+                text="Action draft",
+                metadata={"event_type": "draft", "event_payload": {"metadata": metadata}},
             )
-            return
-
-        metadata = draft_private_metadata(
-            conversation_id=channel,
-            message_ts=event["ts"],
-            thread_ts=event.get("thread_ts"),
-            draft_id=draft.id,
-            context_snapshot_id=snapshot.id,
-            source_user_id=event.get("user"),
-            permalink=permalink,
-        )
-
-        sender.post_message(
-            channel=channel,
-            thread_ts=event.get("thread_ts") or event["ts"],
-            blocks=bk.draft_card(
-                classification=classification,
-                draft_id=draft.id,
-                confidence_bucket="high",
-            ),
-            text="Action draft",
-            metadata={"event_type": "draft", "event_payload": {"metadata": metadata}},
-        )
+    except Exception as e:  # noqa: BLE001 — mention must never go silent
+        log.exception("mention_handler_failed", error=str(e))
+        _reply(f":warning: что-то сломалось при обработке: `{e!s}` — посмотри логи бота.")

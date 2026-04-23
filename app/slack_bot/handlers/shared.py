@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from slack_sdk import WebClient
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -30,6 +31,19 @@ def upsert_conversation(session: Session, *, channel_id: str, kind: str) -> Slac
     record = session.get(SlackConversation, channel_id)
     if record is not None:
         return record
+
+    dialect = session.bind.dialect.name if session.bind is not None else ""
+    if dialect == "postgresql":
+        stmt = (
+            pg_insert(SlackConversation)
+            .values(id=channel_id, kind=kind)
+            .on_conflict_do_nothing(index_elements=["id"])
+        )
+        session.execute(stmt)
+        session.flush()
+        return session.get(SlackConversation, channel_id)  # type: ignore[return-value]
+
+    # sqlite / generic: savepoint + re-fetch on conflict.
     sp = session.begin_nested()
     try:
         record = SlackConversation(id=channel_id, kind=kind)
@@ -37,7 +51,7 @@ def upsert_conversation(session: Session, *, channel_id: str, kind: str) -> Slac
         session.flush()
     except IntegrityError:
         sp.rollback()
-        record = session.get(SlackConversation, channel_id)
+        record = session.get(SlackConversation, channel_id)  # type: ignore[assignment]
     else:
         sp.commit()
     return record  # type: ignore[return-value]
@@ -58,16 +72,33 @@ def upsert_message(
     )
     if existing is not None:
         return existing
+
+    dialect = session.bind.dialect.name if session.bind is not None else ""
+    values = {
+        "conversation_id": conversation.id,
+        "ts": ts,
+        "thread_ts": message.get("thread_ts"),
+        "user_id": message.get("user") or message.get("bot_id"),
+        "text": message.get("text") or "",
+        "raw": raw,
+    }
+    if dialect == "postgresql":
+        stmt = (
+            pg_insert(SlackMessage)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["conversation_id", "ts"])
+        )
+        session.execute(stmt)
+        session.flush()
+        return (
+            session.query(SlackMessage)
+            .filter_by(conversation_id=conversation.id, ts=ts)
+            .one()
+        )
+
     sp = session.begin_nested()
     try:
-        record = SlackMessage(
-            conversation_id=conversation.id,
-            ts=ts,
-            thread_ts=message.get("thread_ts"),
-            user_id=message.get("user") or message.get("bot_id"),
-            text=message.get("text") or "",
-            raw=raw,
-        )
+        record = SlackMessage(**values)
         session.add(record)
         session.flush()
     except IntegrityError:

@@ -56,7 +56,13 @@ def test_daily_digest_lists_today_approaching_and_overdue(session):
 
     sender = _RecordingSender()
     DigestService(sender=sender).send(session, DigestKind.daily, today=today)
-    body = sender.messages[0]["blocks"][0]["text"]["text"]
+    # Daily digest now uses a multi-block layout; concatenate every section's
+    # text to assert presence.
+    body = "\n".join(
+        b["text"]["text"]
+        for b in sender.messages[0]["blocks"]
+        if b.get("type") == "section"
+    )
     assert "do_today" in body
     assert "tomorrow" in body
     assert "after_tomorrow" in body

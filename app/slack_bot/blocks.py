@@ -22,9 +22,14 @@ ACTION_UNSUBSCRIBE = "task_unsubscribe"
 ACTION_OPEN_SOURCE = "task_open_source"
 ACTION_SHOW_CONTEXT = "task_show_context"
 
+# Daily digest + subscriptions modal
+ACTION_MANAGE_SUBSCRIPTIONS = "manage_subscriptions"
+ACTION_UNSUBSCRIBE_IN_MODAL = "subs_modal_unsubscribe"
+
 MODAL_CALLBACK_TASK = "task_modal_submit"
 MODAL_CALLBACK_MEETING = "meeting_modal_submit"
 MODAL_CALLBACK_CONTEXT = "task_context_view"
+MODAL_CALLBACK_SUBSCRIPTIONS = "subscriptions_modal"
 
 BLOCK_TITLE = "title_block"
 BLOCK_DESCRIPTION = "description_block"
@@ -611,3 +616,146 @@ def failure_message(entity_type: str, error: str) -> list[dict[str, Any]]:
             },
         }
     ]
+
+
+# ---- Daily digest + subscriptions modal -----------------------------------
+
+
+def _tasks_mrkdwn(tasks: list[Any], *, include_owner: bool = False) -> str:
+    if not tasks:
+        return "(пусто)"
+    lines = []
+    for t in tasks:
+        line = f"• *#{t.id}* {t.title} · `{t.status.value}`"
+        if t.due_date:
+            line += f" · due {t.due_date.isoformat()}"
+        if include_owner and t.owner_user_id:
+            line += f" · owner <@{t.owner_user_id}>"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def daily_digest_blocks(
+    *,
+    today,
+    today_tasks: list[Any],
+    approaching: list[Any],
+    overdue: list[Any],
+    tracked: list[Any],
+) -> list[dict[str, Any]]:
+    """Personal morning digest: mine + tracking + Manage-subscriptions CTA."""
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"Your tasks for {today.isoformat()}",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Today ({len(today_tasks)})*\n{_tasks_mrkdwn(today_tasks)}",
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Approaching ({len(approaching)})*\n{_tasks_mrkdwn(approaching)}",
+            },
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Overdue ({len(overdue)})*\n{_tasks_mrkdwn(overdue)}",
+            },
+        },
+        {"type": "divider"},
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"*Отслеживаемые ({len(tracked)})*\n"
+                    + _tasks_mrkdwn(tracked, include_owner=True)
+                ),
+            },
+        },
+        {
+            "type": "actions",
+            "block_id": "digest_actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "action_id": ACTION_MANAGE_SUBSCRIPTIONS,
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Управлять подписками",
+                    },
+                    "value": "manage",
+                }
+            ],
+        },
+    ]
+    return blocks
+
+
+def subscriptions_modal(tasks: list[Any]) -> dict[str, Any]:
+    """Modal listing every task the viewer subscribes to with per-row
+    Unsubscribe buttons."""
+    blocks: list[dict[str, Any]] = []
+    if not tasks:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "У тебя нет активных подписок.",
+                },
+            }
+        )
+    else:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Отслеживаемые задачи ({len(tasks)})*",
+                },
+            }
+        )
+        blocks.append({"type": "divider"})
+        for t in tasks:
+            meta = f"`{t.status.value}`"
+            if t.due_date:
+                meta += f" · due {t.due_date.isoformat()}"
+            if t.owner_user_id:
+                meta += f" · owner <@{t.owner_user_id}>"
+            blocks.append(
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"*#{t.id}* {t.title}\n{meta}",
+                    },
+                    "accessory": {
+                        "type": "button",
+                        "style": "danger",
+                        "action_id": ACTION_UNSUBSCRIBE_IN_MODAL,
+                        "text": {"type": "plain_text", "text": "Отписаться"},
+                        "value": str(t.id),
+                    },
+                }
+            )
+
+    return {
+        "type": "modal",
+        "callback_id": MODAL_CALLBACK_SUBSCRIPTIONS,
+        "title": {"type": "plain_text", "text": "Подписки"},
+        "close": {"type": "plain_text", "text": "Готово"},
+        "blocks": blocks,
+    }

@@ -1,5 +1,5 @@
 """CR-01 task-card action handlers: start_work, submit_review, mark_done,
-subscribe/unsubscribe, show_context."""
+subscribe/unsubscribe, show_context, manage_subscriptions."""
 from __future__ import annotations
 
 from typing import Any, Protocol
@@ -9,7 +9,7 @@ from slack_sdk import WebClient
 
 from app.db import session_scope
 from app.logging_setup import get_logger
-from app.models import ContextSnapshot, Task, TaskStatus
+from app.models import ContextSnapshot, Task, TaskStatus, TaskSubscription
 from app.services import (
     InvalidTransition,
     NotificationService,
@@ -20,6 +20,16 @@ from app.slack_bot import blocks as bk
 
 
 log = get_logger(__name__)
+
+
+def _subscribed_tasks(session, user_id: str) -> list[Task]:
+    return (
+        session.query(Task)
+        .join(TaskSubscription, TaskSubscription.task_id == Task.id)
+        .filter(TaskSubscription.slack_user_id == user_id)
+        .order_by(Task.id)
+        .all()
+    )
 
 
 class _Sender(Protocol):
@@ -169,3 +179,48 @@ def handle_show_context(
             return
         view = bk.context_view_modal(snapshot=snap)
     client.views_open(trigger_id=trigger_id, view=view)
+
+
+def handle_manage_subscriptions(
+    *, body: dict[str, Any], client: WebClient, ack: Ack
+) -> None:
+    """Open the subscriptions-management modal for the clicker."""
+    ack()
+    trigger_id = body.get("trigger_id")
+    user_id = (body.get("user") or {}).get("id")
+    if not trigger_id or not user_id:
+        return
+    with session_scope() as session:
+        tasks = _subscribed_tasks(session, user_id)
+        view = bk.subscriptions_modal(tasks)
+    client.views_open(trigger_id=trigger_id, view=view)
+
+
+def handle_unsubscribe_in_modal(
+    *, body: dict[str, Any], client: WebClient, ack: Ack
+) -> None:
+    """Unsubscribe from one task and refresh the modal in place."""
+    ack()
+    try:
+        task_id = int((body.get("actions") or [{}])[0].get("value") or 0)
+    except (TypeError, ValueError):
+        task_id = 0
+    user_id = (body.get("user") or {}).get("id")
+    view_id = (body.get("view") or {}).get("id")
+    if not task_id or not user_id:
+        return
+
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        if task is not None:
+            SubscriptionService().unsubscribe(
+                session, task=task, slack_user_id=user_id
+            )
+        tasks = _subscribed_tasks(session, user_id)
+        new_view = bk.subscriptions_modal(tasks)
+
+    if view_id:
+        try:
+            client.views_update(view_id=view_id, view=new_view)
+        except Exception as e:  # noqa: BLE001
+            log.warning("views_update_failed", error=str(e))

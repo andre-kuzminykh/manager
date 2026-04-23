@@ -14,6 +14,7 @@ from app.slack_bot.blocks import (
     ACTION_CONFIRM,
     ACTION_EDIT,
     ACTION_IGNORE,
+    ACTION_MANAGE_SUBSCRIPTIONS,
     ACTION_MARK_DONE,
     ACTION_OPEN_SOURCE,
     ACTION_SHOW_CONTEXT,
@@ -21,6 +22,7 @@ from app.slack_bot.blocks import (
     ACTION_SUBMIT_REVIEW,
     ACTION_SUBSCRIBE,
     ACTION_UNSUBSCRIBE,
+    ACTION_UNSUBSCRIBE_IN_MODAL,
     MODAL_CALLBACK_MEETING,
     MODAL_CALLBACK_TASK,
 )
@@ -33,6 +35,7 @@ from app.slack_bot.handlers.shortcuts import (
     handle_shortcut,
 )
 from app.slack_bot.handlers.task_actions import (
+    handle_manage_subscriptions,
     handle_mark_done,
     handle_open_source,
     handle_show_context,
@@ -40,6 +43,7 @@ from app.slack_bot.handlers.task_actions import (
     handle_submit_review,
     handle_subscribe,
     handle_unsubscribe,
+    handle_unsubscribe_in_modal,
 )
 from app.slack_bot.handlers.views import (
     handle_meeting_modal_submit,
@@ -181,6 +185,14 @@ def build_app(
     @app.action(ACTION_SHOW_CONTEXT)
     def _on_show_context(body, client, ack):
         handle_show_context(body=body, client=client, ack=ack)
+
+    @app.action(ACTION_MANAGE_SUBSCRIPTIONS)
+    def _on_manage_subs(body, client, ack):
+        handle_manage_subscriptions(body=body, client=client, ack=ack)
+
+    @app.action(ACTION_UNSUBSCRIBE_IN_MODAL)
+    def _on_unsubscribe_modal(body, client, ack):
+        handle_unsubscribe_in_modal(body=body, client=client, ack=ack)
 
     return app
 

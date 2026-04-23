@@ -18,7 +18,7 @@ from typing import Protocol
 
 from sqlalchemy.orm import Session
 
-from app.models import AuditLog, Task, TaskStatus
+from app.models import AuditLog, Task, TaskStatus, TaskSubscription
 
 
 class _Sender(Protocol):
@@ -50,6 +50,35 @@ def _owners(session: Session) -> list[str]:
         .all()
     )
     return [r[0] for r in rows if r[0]]
+
+
+def _daily_recipients(session: Session) -> list[str]:
+    """Everyone who either owns or subscribes to at least one open task."""
+    owner_ids = set(_owners(session))
+    sub_rows = (
+        session.query(TaskSubscription.slack_user_id)
+        .join(Task, TaskSubscription.task_id == Task.id)
+        .filter(Task.status.in_(_OPEN))
+        .distinct()
+        .all()
+    )
+    subscriber_ids = {r[0] for r in sub_rows if r[0]}
+    return sorted(owner_ids | subscriber_ids)
+
+
+def _tracked_by(session: Session, user: str) -> list[Task]:
+    """Tasks the user subscribes to but does not own — for the Tracking section."""
+    return (
+        session.query(Task)
+        .join(TaskSubscription, TaskSubscription.task_id == Task.id)
+        .filter(
+            TaskSubscription.slack_user_id == user,
+            Task.status.in_(_OPEN),
+            (Task.owner_user_id != user) | (Task.owner_user_id.is_(None)),
+        )
+        .order_by(Task.id)
+        .all()
+    )
 
 
 def _already_sent(session: Session, *, action: str) -> bool:
@@ -86,6 +115,17 @@ def _fmt(tasks: list[Task]) -> str:
     )
 
 
+def _fmt_tracked(tasks: list[Task]) -> str:
+    if not tasks:
+        return "(пусто)"
+    return "\n".join(
+        f"• *#{t.id}* {t.title} · `{t.status.value}`"
+        + (f" · due {t.due_date.isoformat()}" if t.due_date else "")
+        + (f" · owner <@{t.owner_user_id}>" if t.owner_user_id else "")
+        for t in tasks
+    )
+
+
 class DigestService:
     def __init__(self, *, sender: _Sender) -> None:
         self._sender = sender
@@ -103,8 +143,10 @@ class DigestService:
     # ---- daily -----------------------------------------------------------
 
     def _daily(self, session: Session, today: date) -> DigestReport:
+        from app.slack_bot.blocks import daily_digest_blocks
+
         report = DigestReport()
-        for user in _owners(session):
+        for user in _daily_recipients(session):
             action = f"daily:{user}:{today.isoformat()}"
             if _already_sent(session, action=action):
                 report.skipped_idempotent += 1
@@ -115,16 +157,18 @@ class DigestService:
                 session, user, today + timedelta(days=1), today + timedelta(days=2)
             )
             overdue = self._overdue(session, user, today)
+            tracked = _tracked_by(session, user)
 
-            body = (
-                f"*Your tasks for {today.isoformat()}*\n\n"
-                f"*Today ({len(today_tasks)})*\n{_fmt(today_tasks)}\n\n"
-                f"*Approaching ({len(approaching)})*\n{_fmt(approaching)}\n\n"
-                f"*Overdue ({len(overdue)})*\n{_fmt(overdue)}"
+            blocks = daily_digest_blocks(
+                today=today,
+                today_tasks=today_tasks,
+                approaching=approaching,
+                overdue=overdue,
+                tracked=tracked,
             )
-            self._sender.post_message(channel=user, text="Daily digest", blocks=[
-                {"type": "section", "text": {"type": "mrkdwn", "text": body}}
-            ])
+            self._sender.post_message(
+                channel=user, text="Daily digest", blocks=blocks
+            )
             _mark_sent(
                 session,
                 action=action,
@@ -133,10 +177,13 @@ class DigestService:
                     "today": len(today_tasks),
                     "approaching": len(approaching),
                     "overdue": len(overdue),
+                    "tracked": len(tracked),
                 },
             )
             report.recipients += 1
-            report.tasks_included += len(today_tasks) + len(approaching) + len(overdue)
+            report.tasks_included += (
+                len(today_tasks) + len(approaching) + len(overdue) + len(tracked)
+            )
         return report
 
     # ---- weekly ----------------------------------------------------------

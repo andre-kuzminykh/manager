@@ -25,9 +25,15 @@ Rules:
    priority ("low"|"medium"|"high"|"urgent"), and due_date (YYYY-MM-DD).
 4. For "create_meeting", extract title, notes, participants (list), datetime_at
    (ISO 8601 with timezone offset when known), timezone.
-5. Resolve relative dates ("tomorrow", "завтра", "до пятницы") against the
-   provided current_date. If unknown, leave the field null — do not guess.
-6. Respond with a single JSON object matching the provided schema.
+5. NEVER resolve relative or approximate dates. If the user wrote "tomorrow",
+   "завтра", "до пятницы", "на следующей неделе" and similar — leave the
+   field null. Only fill due_date / datetime_at when the user wrote an
+   unambiguous ISO-shape date (YYYY-MM-DD) or a fully specified calendar
+   date like "2026-05-01". Follow-up questions will collect the rest.
+6. If the source message contains supplementary text beyond the title
+   (context, goals, references, numbers), copy the meaningful parts into
+   description (for tasks) or notes (for meetings). Do not invent text.
+7. Respond with a single JSON object matching the provided schema.
 """
 
 

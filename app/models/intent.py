@@ -61,4 +61,13 @@ class ActionDraft(Base, TimestampMixin):
     created_by_slack_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     slack_message_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # --- follow-up / conversational enrichment -----------------------------
+    # Slack coordinates of the draft card we posted so we can chat.update()
+    # it when the user answers our thread follow-up.
+    card_channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    card_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # When set, we are waiting for the user's thread reply to fill this field
+    # (e.g. "due_date", "owner", "title"). Cleared once the reply is parsed.
+    awaiting_field: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
     inference: Mapped[IntentInference] = relationship(back_populates="drafts")

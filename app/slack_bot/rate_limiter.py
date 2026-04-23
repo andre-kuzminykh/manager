@@ -55,3 +55,23 @@ class RateAwareSlackSender:
                     attempts += 1
                     continue
                 raise
+
+    def update_message(
+        self, *, channel: str, ts: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Update an existing chat message (chat.update)."""
+        attempts = 0
+        while True:
+            self._throttle(channel)
+            try:
+                return self._client.chat_update(
+                    channel=channel, ts=ts, **kwargs
+                ).data  # type: ignore[return-value]
+            except SlackApiError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 429 and attempts < 3:
+                    retry_after = int(e.response.headers.get("Retry-After", "1"))  # type: ignore[union-attr]
+                    time.sleep(retry_after)
+                    attempts += 1
+                    continue
+                raise

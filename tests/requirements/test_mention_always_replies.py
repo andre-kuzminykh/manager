@@ -175,7 +175,9 @@ def test_mention_replies_with_draft_card_when_intent_detected(
         sender=sender,
         ack=ack,
     )
-    assert len(sender.posted) == 1
+    # Card is always the first post. A follow-up question for a missing
+    # field (e.g. due_date) may follow in the thread.
+    assert len(sender.posted) >= 1
     assert sender.posted[0].get("blocks")  # карточка
 
 

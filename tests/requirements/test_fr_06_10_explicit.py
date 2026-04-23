@@ -124,7 +124,9 @@ def test_fr6_mention_posts_draft_when_classifier_returns_payload(
         sender=sender,
         ack=ack,
     )
-    assert len(sender.posted) == 1
+    # The bot posts the draft card and may add one follow-up question when a
+    # required field is still missing (e.g. due_date). First post is the card.
+    assert len(sender.posted) >= 1
     assert sender.posted[0]["blocks"][0]["text"]["text"] == "Task draft"
 
 

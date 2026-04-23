@@ -1,5 +1,4 @@
-from unittest.mock import MagicMock
-
+from app.models import ProcessedSlackEvent
 from app.slack_bot.dedup import claim_event
 
 
@@ -17,37 +16,25 @@ def test_empty_event_id_treated_as_fresh(sqlite_session):
     assert claim_event(sqlite_session, "") is True
 
 
-# The production path uses a Postgres-specific INSERT ... ON CONFLICT DO
-# NOTHING RETURNING. Emulate both outcomes via a mocked Session so the
-# behaviour is nailed down even without a live Postgres.
+def test_duplicate_within_same_uncommitted_session(sqlite_session):
+    assert claim_event(sqlite_session, "Ev2") is True
+    assert claim_event(sqlite_session, "Ev2") is False
 
 
-def _pg_session(row_returned):
-    session = MagicMock()
-    session.bind = MagicMock()
-    session.bind.dialect.name = "postgresql"
-    execute_result = MagicMock()
-    execute_result.fetchone.return_value = (row_returned,) if row_returned else None
-    session.execute.return_value = execute_result
-    return session
+def test_many_distinct_events_all_succeed(sqlite_session):
+    for i in range(25):
+        assert claim_event(sqlite_session, f"Ev{i}") is True
+    sqlite_session.commit()
+    assert sqlite_session.query(ProcessedSlackEvent).count() == 25
 
 
-def test_postgres_branch_returns_true_when_insert_happens():
-    session = _pg_session(row_returned="EvX")
-    assert claim_event(session, "EvX") is True
-
-
-def test_postgres_branch_returns_false_when_conflict():
-    session = _pg_session(row_returned=None)
-    assert claim_event(session, "EvX") is False
-
-
-def test_postgres_branch_uses_returning_clause_not_rowcount():
-    """Regression: earlier version relied on result.rowcount > 0 which is
-    unreliable across psycopg versions for ON CONFLICT DO NOTHING."""
-    session = _pg_session(row_returned="EvX")
-    claim_event(session, "EvX")
-    # fetchone must be called; rowcount must NOT be consulted.
-    session.execute.return_value.fetchone.assert_called_once()
-    # Accessing rowcount would create a new mock attribute; verify it was not read.
-    assert "rowcount" not in session.execute.return_value._mock_children
+def test_rollback_on_conflict_does_not_leak_row(sqlite_session):
+    """Conflict path must not leave a phantom row behind."""
+    assert claim_event(sqlite_session, "Ev3") is True
+    sqlite_session.commit()
+    # Second attempt → conflict → savepoint rolls back internally.
+    assert claim_event(sqlite_session, "Ev3") is False
+    # Still exactly one row.
+    assert (
+        sqlite_session.query(ProcessedSlackEvent).filter_by(event_id="Ev3").count() == 1
+    )

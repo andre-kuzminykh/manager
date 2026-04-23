@@ -1,15 +1,20 @@
 # Slack Task Manager — Specification
 
-Version: 2 (CR-01 merged)
+Version: 3 (CR-01 + CR-02 merged)
 
 This document consolidates:
 
 - **Base SPEC** — initial product spec (passive detection, explicit mention,
   message shortcuts, DB persistence, Google Sheets + Google Tasks sync).
-- **CR-01** — Change Request adding richer task lifecycle (Backlog → To Do →
-  In Progress → Review → Done), explicit owner picker from an allowed list,
-  workload-aware deadline proposal, subscribe/unsubscribe, start-work button,
-  subscriber broadcasts, and daily / weekly / deadline digests.
+- **CR-01** — richer task lifecycle (Backlog → To Do → In Progress → Review →
+  Done), explicit owner picker from an allowed list, workload-aware deadline
+  proposal, subscribe/unsubscribe, start-work button, subscriber broadcasts,
+  and daily / weekly / deadline digests.
+- **CR-02** — conversational UX: @mention always produces a draft widget
+  (fallback when the LLM is unsure), bot asks missing fields in the thread,
+  user replies update the card in place via `chat.update`, widget disappears
+  after Confirm/Ignore, Open-source button removed from task cards, daily
+  digest gains a Tracking section and a Manage-subscriptions modal.
 
 ## 1. Operating modes
 
@@ -148,7 +153,106 @@ New: `backlog / todo / in_progress / review / done`
 Draft card (pre-confirm): **Confirm · Edit · Ignore**
 
 Task card (post-confirm): **Начать работу · Submit for review · Mark done ·
-Подписаться / Отписаться · Open source · Show context**
+Подписаться / Отписаться · Show context**
+
+(CR-02: the **Open source** URL button was removed — the card is posted in
+the source thread, so the back-link is redundant. The permalink is still
+carried in the post-confirm DM message.)
+
+## 4.1 CR-02 — Conversational mention UX
+
+### FR-CR-02-1: Mention-always-replies (fallback)
+
+An explicit @mention is always a signal to capture something. If the LLM
+returns `no_action` or otherwise fails to produce a draftable payload, the
+bot **must** synthesise a minimal `create_task` draft with the cleaned
+source text as the title (capped at 200 characters) and post the standard
+draft card. Only a bare mention with no text (`<@bot>` alone) falls back to
+an informational reply asking the user to add text.
+
+### FR-CR-02-2: Follow-up questions in thread
+
+After posting the draft card the bot asks in the same thread for the first
+missing field (ordered: title → due_date → owner for tasks; title →
+datetime_at → participants for meetings). The first question is prefixed
+with `:memo: Записал: *<title>*.` so the user sees what was recorded.
+
+### FR-CR-02-3: Reply-in-thread updates the card
+
+Any thread reply to the mention message (while
+`action_drafts.awaiting_field` is set) is parsed according to the awaited
+field:
+
+- `due_date` / `datetime_at` — ISO short-circuit first, then `dateparser`
+  (`ru` + `en`) with Russian preposition + genitive day-name normalisation
+  so *«до пятницы»* resolves to the next Friday;
+- `owner` — resolved against `ALLOWED_OWNERS` via `resolve_owner_hint`;
+- `title`, `description`, `notes` — stored as free text;
+- `participants` — split on commas.
+
+On success the card is updated in place via `chat.update`, and the bot
+either asks the next missing field or posts a
+`:white_check_mark: Все поля собрал. Жми Confirm` nudge when everything is
+known.
+
+If the reply cannot be parsed (`до чего-то`, `не знаю`), the bot re-asks
+the same field with a hint.
+
+### FR-CR-02-4: Draft card disappears on Confirm / Ignore
+
+After a successful **Confirm** the draft widget is removed via
+`chat.delete` and replaced with the short `✅ Task #N created …` summary
+plus the full task card. On finalize failure the widget stays so the user
+can retry via **Edit** / **Confirm**. **Ignore** also deletes the widget
+and marks the draft as `ignored` in DB.
+
+### FR-CR-02-5: No Open-source button on task cards
+
+The URL button `Open source` has been removed. The card is posted in the
+source thread, so the back-link is implicit. The source `permalink` is
+still rendered inside the post-confirm DM.
+
+### FR-CR-02-6: Daily digest Tracking section
+
+The daily digest is now sent to every user who either owns or subscribes to
+at least one open task (previously owners only). Layout:
+
+1. *Your tasks for YYYY-MM-DD* — Today / Approaching / Overdue — owned
+   tasks only.
+2. Divider.
+3. *Отслеживаемые (N)* — tasks the user subscribes to but does not own,
+   each showing status, due, and owner.
+4. Actions block with a **Управлять подписками** button.
+
+### FR-CR-02-7: Manage-subscriptions modal
+
+The button opens a modal listing every task the user subscribes to with a
+per-row **Отписаться** button. Clicking unsubscribe removes the row and
+refreshes the modal in place via `views.update`.
+
+### NFR-CR-02-1: Idempotent upserts for duplicate Slack events
+
+`upsert_conversation` and `upsert_message` use PostgreSQL
+`INSERT ... ON CONFLICT DO NOTHING` (and a savepoint+IntegrityError
+fallback for SQLite tests). Slack retries or double-dispatched events
+(`app_mention` + `message.channels` for the same text) never raise on the
+shared rows.
+
+### NFR-CR-02-2: Mention handler never goes silent
+
+Every code path in `handle_app_mention` either posts a draft widget, a
+synthesised widget, a `:thinking_face: add text` hint, or — on uncaught
+exceptions — a `:warning:` fallback. `ack()` is always called first.
+
+## 4.2 CR-02 — Data model delta
+
+Migration `0003_draft_followup`:
+
+- `action_drafts.card_channel: str | None`
+- `action_drafts.card_ts: str | None`
+- `action_drafts.awaiting_field: str | None`
+- Index `ix_action_drafts_thread` on `action_drafts.slack_message_ts` for
+  fast thread-reply lookup.
 
 ## 5. Acceptance criteria
 
@@ -163,6 +267,14 @@ Inherits the base SPEC criteria and adds:
 - Proposed deadline accounts for the owner's existing workload.
 - Daily, weekly, and deadline digests are delivered via the `send_digest`
   CLI.
+- (CR-02) Every @mention produces a draft widget. If the LLM cannot extract
+  structure, the widget's title is the source text and a follow-up question
+  appears below.
+- (CR-02) A user reply in the thread updates the same card via
+  `chat.update`; no extra card is posted.
+- (CR-02) Confirm / Ignore delete the draft widget.
+- (CR-02) Daily digest includes a Tracking section and a working
+  **Управлять подписками** modal with per-task unsubscribe.
 
 ## 6. Non-functional requirements
 

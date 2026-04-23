@@ -8,6 +8,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects.postgresql import ENUM as PgEnum
 
 revision: str = "0001_initial"
 down_revision: Union[str, None] = None
@@ -61,12 +62,12 @@ def upgrade() -> None:
         sa.Column("received_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
-    intent_type = sa.Enum(
+    intent_type = PgEnum(
         "create_task", "create_meeting", "update_task", "update_meeting", "no_action",
         name="intent_type",
         create_type=False,
     )
-    sa.Enum(
+    PgEnum(
         "create_task", "create_meeting", "update_task", "update_meeting", "no_action",
         name="intent_type",
     ).create(op.get_bind(), checkfirst=True)
@@ -84,12 +85,12 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
-    draft_state = sa.Enum(
+    draft_state = PgEnum(
         "proposed", "confirmed", "edited", "ignored", "expired", "failed",
         name="action_draft_state",
         create_type=False,
     )
-    sa.Enum(
+    PgEnum(
         "proposed", "confirmed", "edited", "ignored", "expired", "failed",
         name="action_draft_state",
     ).create(op.get_bind(), checkfirst=True)
@@ -107,28 +108,30 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
-    task_priority = sa.Enum("low", "medium", "high", "urgent", name="task_priority", create_type=False)
-    sa.Enum("low", "medium", "high", "urgent", name="task_priority").create(
+    task_priority = PgEnum(
+        "low", "medium", "high", "urgent", name="task_priority", create_type=False
+    )
+    PgEnum("low", "medium", "high", "urgent", name="task_priority").create(
         op.get_bind(), checkfirst=True
     )
-    task_status = sa.Enum(
+    task_status = PgEnum(
         "backlog", "todo", "in_progress", "review", "done",
         name="task_status",
         create_type=False,
     )
-    sa.Enum(
+    PgEnum(
         "backlog", "todo", "in_progress", "review", "done", name="task_status"
     ).create(op.get_bind(), checkfirst=True)
-    meeting_status = sa.Enum(
+    meeting_status = PgEnum(
         "scheduled", "cancelled", "done", name="meeting_status", create_type=False
     )
-    sa.Enum("scheduled", "cancelled", "done", name="meeting_status").create(
+    PgEnum("scheduled", "cancelled", "done", name="meeting_status").create(
         op.get_bind(), checkfirst=True
     )
-    sync_status = sa.Enum(
+    sync_status = PgEnum(
         "pending", "success", "failed", name="sync_status", create_type=False
     )
-    sa.Enum("pending", "success", "failed", name="sync_status").create(
+    PgEnum("pending", "success", "failed", name="sync_status").create(
         op.get_bind(), checkfirst=True
     )
 

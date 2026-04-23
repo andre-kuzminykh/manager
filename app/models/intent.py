@@ -28,8 +28,8 @@ class IntentInference(Base, TimestampMixin):
     __tablename__ = "intent_inferences"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    context_snapshot_id: Mapped[int] = mapped_column(
-        ForeignKey("context_snapshots.id"), nullable=False
+    context_snapshot_id: Mapped[int | None] = mapped_column(
+        ForeignKey("context_snapshots.id"), nullable=True
     )
     intent: Mapped[IntentType] = mapped_column(
         Enum(IntentType, name="intent_type"), nullable=False

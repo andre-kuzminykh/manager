@@ -70,7 +70,7 @@ def upgrade() -> None:
     op.create_table(
         "intent_inferences",
         sa.Column("id", sa.Integer, primary_key=True, autoincrement=True),
-        sa.Column("context_snapshot_id", sa.Integer, sa.ForeignKey("context_snapshots.id"), nullable=False),
+        sa.Column("context_snapshot_id", sa.Integer, sa.ForeignKey("context_snapshots.id"), nullable=True),
         sa.Column("intent", intent_type, nullable=False),
         sa.Column("confidence", sa.Float, nullable=False),
         sa.Column("invocation_type", sa.String(32), nullable=False),

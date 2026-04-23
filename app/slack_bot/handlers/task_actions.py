@@ -121,43 +121,106 @@ def handle_mark_done(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> None
     _apply_transition(body, new_status=TaskStatus.done, sender=sender, ack=ack)
 
 
-def handle_subscribe(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> None:
-    ack()
+def _toggle_subscription(
+    *,
+    body: dict[str, Any],
+    sender: _Sender,
+    client: Any | None,
+    subscribe: bool,
+) -> None:
+    """Subscribe or unsubscribe the clicker, then chat.update both task
+    cards (channel + owner DM) so the button label flips and a star
+    appears next to the title for subscribers. Posts a DM ack to the
+    clicker with a hyperlink to the channel card."""
     task_id = _draft_id_from(body)
     actor = _actor(body)
     if task_id is None or not actor:
         return
     subs = SubscriptionService()
+
+    permalink: str | None = None
     with session_scope() as session:
         task = session.get(Task, task_id)
         if task is None:
             return
-        subs.subscribe(session, task=task, slack_user_id=actor)
-    channel = _channel(body)
-    if channel:
+        if subscribe:
+            subs.subscribe(session, task=task, slack_user_id=actor)
+        else:
+            subs.unsubscribe(session, task=task, slack_user_id=actor)
+
+        # Refresh the channel card with the actor's perspective so the
+        # button label and the star reflect the latest state.
+        if hasattr(sender, "update_message"):
+            try:
+                if task.card_channel and task.card_ts:
+                    sender.update_message(
+                        channel=task.card_channel,
+                        ts=task.card_ts,
+                        blocks=bk.task_card(
+                            task=task,
+                            viewer_slack_user_id=actor,
+                            is_subscribed=subscribe,
+                        ),
+                        text=f"Task #{task.id}",
+                    )
+                if task.dm_channel and task.dm_ts:
+                    sender.update_message(
+                        channel=task.dm_channel,
+                        ts=task.dm_ts,
+                        blocks=bk.task_card(
+                            task=task,
+                            viewer_slack_user_id=task.owner_user_id,
+                            is_subscribed=subs.is_subscribed(
+                                session, task=task, slack_user_id=task.owner_user_id or ""
+                            ),
+                        ),
+                        text=f"Task #{task.id}",
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning("subscription_card_refresh_failed", error=str(e))
+
+        # Compute a permalink to the channel card for the DM ack.
+        if client is not None and task.card_channel and task.card_ts:
+            try:
+                resp = client.chat_getPermalink(
+                    channel=task.card_channel, message_ts=task.card_ts
+                )
+                permalink = resp.get("permalink")
+            except Exception:  # noqa: BLE001
+                permalink = None
+
+    icon = ":bell:" if subscribe else ":no_bell:"
+    verb = "subscribed to" if subscribe else "unsubscribed from"
+    link = f"<{permalink}|task #{task_id}>" if permalink else f"task #{task_id}"
+    try:
         sender.post_message(
-            channel=channel, text=f":bell: <@{actor}> subscribed to task #{task_id}"
+            channel=actor,
+            text=f"{icon} {verb} {link}",
         )
+    except Exception as e:  # noqa: BLE001
+        log.warning("subscription_dm_ack_failed", error=str(e))
 
 
-def handle_unsubscribe(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> None:
+def handle_subscribe(
+    *,
+    body: dict[str, Any],
+    sender: _Sender,
+    ack: Ack,
+    client: Any | None = None,
+) -> None:
     ack()
-    task_id = _draft_id_from(body)
-    actor = _actor(body)
-    if task_id is None or not actor:
-        return
-    subs = SubscriptionService()
-    with session_scope() as session:
-        task = session.get(Task, task_id)
-        if task is None:
-            return
-        subs.unsubscribe(session, task=task, slack_user_id=actor)
-    channel = _channel(body)
-    if channel:
-        sender.post_message(
-            channel=channel,
-            text=f":no_bell: <@{actor}> unsubscribed from task #{task_id}",
-        )
+    _toggle_subscription(body=body, sender=sender, client=client, subscribe=True)
+
+
+def handle_unsubscribe(
+    *,
+    body: dict[str, Any],
+    sender: _Sender,
+    ack: Ack,
+    client: Any | None = None,
+) -> None:
+    ack()
+    _toggle_subscription(body=body, sender=sender, client=client, subscribe=False)
 
 
 def handle_open_source(*, body: dict[str, Any], ack: Ack) -> None:

@@ -171,12 +171,12 @@ def build_app(
         handle_mark_done(body=body, sender=sender, ack=ack)
 
     @app.action(ACTION_SUBSCRIBE)
-    def _on_subscribe(body, ack):
-        handle_subscribe(body=body, sender=sender, ack=ack)
+    def _on_subscribe(body, client, ack):
+        handle_subscribe(body=body, sender=sender, client=client, ack=ack)
 
     @app.action(ACTION_UNSUBSCRIBE)
-    def _on_unsubscribe(body, ack):
-        handle_unsubscribe(body=body, sender=sender, ack=ack)
+    def _on_unsubscribe(body, client, ack):
+        handle_unsubscribe(body=body, sender=sender, client=client, ack=ack)
 
     @app.action(ACTION_OPEN_SOURCE)
     def _on_open_source(body, ack):

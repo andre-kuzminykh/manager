@@ -374,8 +374,11 @@ def task_card(
     """Post-confirmation task card (CR-01)."""
     from app.models import TaskStatus
 
-    title = f"*#{task.id}* {task.title}"
+    star = ":star: " if is_subscribed else ""
+    title = f"{star}*#{task.id}* {task.title}"
     meta_parts = [f"`{task.status.value}`"]
+    if is_subscribed:
+        meta_parts.append("subscribed")
     if task.owner_display_name or task.owner_user_id:
         meta_parts.append(
             f"owner: <@{task.owner_user_id}>"

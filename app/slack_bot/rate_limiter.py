@@ -75,3 +75,19 @@ class RateAwareSlackSender:
                     attempts += 1
                     continue
                 raise
+
+    def delete_message(self, *, channel: str, ts: str) -> dict[str, Any]:
+        """Delete an existing chat message (chat.delete)."""
+        attempts = 0
+        while True:
+            self._throttle(channel)
+            try:
+                return self._client.chat_delete(channel=channel, ts=ts).data  # type: ignore[return-value]
+            except SlackApiError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 429 and attempts < 3:
+                    retry_after = int(e.response.headers.get("Retry-After", "1"))  # type: ignore[union-attr]
+                    time.sleep(retry_after)
+                    attempts += 1
+                    continue
+                raise

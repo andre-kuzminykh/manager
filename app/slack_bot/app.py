@@ -128,7 +128,7 @@ def build_app(
 
     @app.action(ACTION_IGNORE)
     def _on_ignore(body, ack):
-        handle_ignore(body=body, ack=ack)
+        handle_ignore(body=body, ack=ack, sender=sender)
 
     # ---- Modal submissions ----
     @app.view(MODAL_CALLBACK_TASK)

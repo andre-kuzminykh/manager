@@ -465,17 +465,9 @@ def task_card(
             }
         )
 
-    # Open source link (URL button).
-    if task.source_permalink:
-        elements.append(
-            {
-                "type": "button",
-                "action_id": ACTION_OPEN_SOURCE,
-                "url": task.source_permalink,
-                "text": {"type": "plain_text", "text": "Open source"},
-                "value": str(task.id),
-            }
-        )
+    # "Open source" button intentionally omitted — the card lives in the
+    # source thread, so the source is already one scroll away. The
+    # permalink is still rendered inside success_message() for DMs.
 
     # Show context (opens a modal with the snapshot).
     if task.context_snapshot_id:

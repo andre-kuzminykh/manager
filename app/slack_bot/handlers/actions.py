@@ -28,6 +28,21 @@ def _extract_metadata_from_action(body: dict[str, Any]) -> dict[str, Any]:
     return load_private_metadata(payload.get("metadata"))
 
 
+def _delete_draft_card(
+    sender: RateAwareSlackSender, body: dict[str, Any]
+) -> None:
+    """Remove the draft widget from the thread so it stops cluttering UI
+    after the user made a decision."""
+    channel = (body.get("channel") or {}).get("id")
+    ts = (body.get("message") or {}).get("ts")
+    if not channel or not ts:
+        return
+    try:
+        sender.delete_message(channel=channel, ts=ts)
+    except Exception as e:  # noqa: BLE001 — best effort, not fatal
+        log.warning("draft_card_delete_failed", error=str(e))
+
+
 def handle_confirm(
     *,
     body: dict[str, Any],
@@ -63,6 +78,8 @@ def handle_confirm(
                 ),
                 text=f"{entity_type} created",
             )
+        # Draft consumed successfully — remove the widget to declutter.
+        _delete_draft_card(sender, body)
     except Exception as e:  # noqa: BLE001
         log.error("finalize_failed", error=str(e), draft_id=draft_id)
         if channel:
@@ -72,12 +89,14 @@ def handle_confirm(
                 blocks=bk.failure_message("entity", str(e)),
                 text="Failed to create entity",
             )
+        # On failure keep the widget so the user can retry via Edit / Confirm.
 
 
 def handle_ignore(
     *,
     body: dict[str, Any],
     ack: Ack,
+    sender: RateAwareSlackSender | None = None,
 ) -> None:
     ack()
     action = (body.get("actions") or [{}])[0]
@@ -88,6 +107,8 @@ def handle_ignore(
         draft = session.get(ActionDraft, draft_id)
         if draft and draft.state == ActionDraftState.proposed:
             draft.state = ActionDraftState.ignored
+    if sender is not None:
+        _delete_draft_card(sender, body)
 
 
 def handle_edit(

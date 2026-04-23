@@ -489,15 +489,19 @@ def test_task_card_toggles_subscribe_label(session):
     assert bk.ACTION_SUBSCRIBE in ids
 
 
-def test_task_card_includes_open_source_button_when_permalink_set(session):
+def test_task_card_does_not_include_open_source_button(session):
+    """The card is posted in the source thread, so the back-link would be
+    redundant. We deliberately omit it — see CR feedback 2026-04-23."""
     task = _make_task(session, status=TaskStatus.todo, owner="U-owner")
     task.source_permalink = "https://slack.com/archives/C1/p1"
     blocks = bk.task_card(task=task, viewer_slack_user_id="U-owner")
-    open_src = [
-        el for b in blocks if b["type"] == "actions" for el in b["elements"]
-        if el["action_id"] == bk.ACTION_OPEN_SOURCE
+    ids = [
+        el["action_id"]
+        for b in blocks
+        if b["type"] == "actions"
+        for el in b["elements"]
     ]
-    assert open_src and open_src[0]["url"] == "https://slack.com/archives/C1/p1"
+    assert bk.ACTION_OPEN_SOURCE not in ids
 
 
 def test_task_card_includes_show_context_when_snapshot_set(session):

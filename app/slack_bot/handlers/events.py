@@ -364,12 +364,44 @@ def handle_app_mention(
             permalink = fetch_permalink(client, channel=channel, ts=event["ts"])
 
             if draft is None:
-                _reply(
-                    ":thinking_face: Не понял, что создать. "
-                    "Попробуй: `@bot создай задачу: <что сделать> до <когда>, ответственный <кто>` "
-                    "или: `@bot создай встречу с <кем> <когда>`."
+                # Fallback: an explicit @mention is always a "do something with
+                # this text" signal. Even when the LLM couldn't tease out a
+                # clean structure, synthesise a minimal create_task draft from
+                # the cleaned source text so the user gets a widget + follow-up
+                # questions (instead of a "не понял" dead end).
+                if not text.strip():
+                    _reply(
+                        ":thinking_face: Я не вижу текста в твоём сообщении. "
+                        "Напиши рядом с @bot, что нужно сделать."
+                    )
+                    return
+
+                from app.schemas.intent import (
+                    IntentClassification,
+                    IntentType,
+                    TaskDraft,
                 )
-                return
+
+                fallback = IntentClassification(
+                    intent=IntentType.create_task,
+                    confidence=0.6,
+                    task=TaskDraft(title=text[:200]),
+                    reasoning="fallback: explicit mention without extractable structure",
+                )
+                inference = services.orchestrator.persist_inference(
+                    session,
+                    context_snapshot=snapshot,
+                    classification=fallback,
+                    invocation_type=InvocationType.mention,
+                )
+                draft = services.orchestrator.create_draft(
+                    session,
+                    inference=inference,
+                    classification=fallback,
+                    created_by_slack_user_id=event.get("user"),
+                    slack_message_ts=event["ts"],
+                )
+                classification = fallback
 
             metadata = draft_private_metadata(
                 conversation_id=channel,
@@ -405,10 +437,12 @@ def handle_app_mention(
             session.flush()
 
             if next_field:
+                title_preview = (draft.payload or {}).get("title") or "задачу"
+                intro = f":memo: Записал: *{title_preview}*.\n{prompt_for(next_field)}"
                 sender.post_message(
                     channel=channel,
                     thread_ts=thread_ts,
-                    text=f":speech_balloon: {prompt_for(next_field)}",
+                    text=intro,
                 )
     except Exception as e:  # noqa: BLE001 — mention must never go silent
         log.exception("mention_handler_failed", error=str(e))

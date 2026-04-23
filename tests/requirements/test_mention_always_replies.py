@@ -181,9 +181,11 @@ def test_mention_replies_with_draft_card_when_intent_detected(
     assert sender.posted[0].get("blocks")  # карточка
 
 
-def test_mention_replies_with_hint_when_no_intent(
+def test_mention_replies_with_widget_even_when_no_intent(
     patched_session_scope, services_silent, sender, ack, bolt_context, slack_client
 ):
+    """Explicit mention → always a draft widget. The classifier may return
+    no_action, but we still synthesise a minimal create_task from the text."""
     handle_app_mention(
         event={
             "ts": "2.0",
@@ -199,9 +201,33 @@ def test_mention_replies_with_hint_when_no_intent(
         sender=sender,
         ack=ack,
     )
+    assert len(sender.posted) >= 1
+    assert sender.posted[0].get("blocks")
+    assert sender.posted[0]["blocks"][0]["text"]["text"] == "Task draft"
+
+
+def test_mention_with_empty_text_asks_user_to_add_text(
+    patched_session_scope, services_silent, sender, ack, bolt_context, slack_client
+):
+    """Only bare <@UBOT> with no content → polite 'add some text' reply."""
+    handle_app_mention(
+        event={
+            "ts": "2.5",
+            "user": "U1",
+            "text": "<@UBOT>",
+            "channel": "C1",
+            "channel_type": "channel",
+        },
+        body={"event_id": "mra2-bare"},
+        client=slack_client,
+        context=bolt_context,
+        services=services_silent,
+        sender=sender,
+        ack=ack,
+    )
     assert len(sender.posted) == 1
     text = sender.posted[0].get("text", "").lower()
-    assert "создай" in text or "try" in text or "не понял" in text
+    assert "не вижу текста" in text
 
 
 def test_mention_replies_with_error_message_on_crash(

@@ -130,7 +130,7 @@ def test_fr6_mention_posts_draft_when_classifier_returns_payload(
     assert sender.posted[0]["blocks"][0]["text"]["text"] == "Task draft"
 
 
-def test_fr6_mention_with_no_draftable_intent_apologizes(
+def test_fr6_mention_falls_back_to_synthetic_draft_when_llm_silent(
     patched_session_scope,
     services_silent,
     sender,
@@ -138,6 +138,8 @@ def test_fr6_mention_with_no_draftable_intent_apologizes(
     bolt_context,
     slack_client,
 ):
+    """Even when the classifier returns no_action, an explicit mention
+    always produces a draft card from the cleaned source text."""
     from app.slack_bot.handlers.events import handle_app_mention
 
     handle_app_mention(
@@ -155,9 +157,11 @@ def test_fr6_mention_with_no_draftable_intent_apologizes(
         sender=sender,
         ack=ack,
     )
-    # No draftable payload → no draft card, but a user-facing hint is posted.
-    assert len(sender.posted) == 1
-    assert "create task" not in sender.posted[0].get("text", "").lower()
+    # Widget first, then the follow-up question.
+    assert len(sender.posted) >= 2
+    assert sender.posted[0]["blocks"][0]["text"]["text"] == "Task draft"
+    # And the first question is prefixed with :memo: Записал:.
+    assert "Записал" in sender.posted[1].get("text", "")
 
 
 # =============================================================================

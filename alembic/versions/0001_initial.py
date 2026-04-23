@@ -64,8 +64,12 @@ def upgrade() -> None:
     intent_type = sa.Enum(
         "create_task", "create_meeting", "update_task", "update_meeting", "no_action",
         name="intent_type",
+        create_type=False,
     )
-    intent_type.create(op.get_bind(), checkfirst=True)
+    sa.Enum(
+        "create_task", "create_meeting", "update_task", "update_meeting", "no_action",
+        name="intent_type",
+    ).create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "intent_inferences",
@@ -83,8 +87,12 @@ def upgrade() -> None:
     draft_state = sa.Enum(
         "proposed", "confirmed", "edited", "ignored", "expired", "failed",
         name="action_draft_state",
+        create_type=False,
     )
-    draft_state.create(op.get_bind(), checkfirst=True)
+    sa.Enum(
+        "proposed", "confirmed", "edited", "ignored", "expired", "failed",
+        name="action_draft_state",
+    ).create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "action_drafts",
@@ -99,16 +107,30 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
 
-    task_priority = sa.Enum("low", "medium", "high", "urgent", name="task_priority")
-    task_priority.create(op.get_bind(), checkfirst=True)
-    task_status = sa.Enum(
-        "backlog", "todo", "in_progress", "review", "done", name="task_status"
+    task_priority = sa.Enum("low", "medium", "high", "urgent", name="task_priority", create_type=False)
+    sa.Enum("low", "medium", "high", "urgent", name="task_priority").create(
+        op.get_bind(), checkfirst=True
     )
-    task_status.create(op.get_bind(), checkfirst=True)
-    meeting_status = sa.Enum("scheduled", "cancelled", "done", name="meeting_status")
-    meeting_status.create(op.get_bind(), checkfirst=True)
-    sync_status = sa.Enum("pending", "success", "failed", name="sync_status")
-    sync_status.create(op.get_bind(), checkfirst=True)
+    task_status = sa.Enum(
+        "backlog", "todo", "in_progress", "review", "done",
+        name="task_status",
+        create_type=False,
+    )
+    sa.Enum(
+        "backlog", "todo", "in_progress", "review", "done", name="task_status"
+    ).create(op.get_bind(), checkfirst=True)
+    meeting_status = sa.Enum(
+        "scheduled", "cancelled", "done", name="meeting_status", create_type=False
+    )
+    sa.Enum("scheduled", "cancelled", "done", name="meeting_status").create(
+        op.get_bind(), checkfirst=True
+    )
+    sync_status = sa.Enum(
+        "pending", "success", "failed", name="sync_status", create_type=False
+    )
+    sa.Enum("pending", "success", "failed", name="sync_status").create(
+        op.get_bind(), checkfirst=True
+    )
 
     op.create_table(
         "tasks",

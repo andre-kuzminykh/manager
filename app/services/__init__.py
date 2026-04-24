@@ -1,3 +1,8 @@
+from app.services.admin_digest import (
+    AdminDigestReport,
+    send_admin_evening_digest,
+    send_admin_morning_watch,
+)
 from app.services.admin_review import post_admin_review
 from app.services.card_sync import refresh_task_card
 from app.services.digest import DigestKind, DigestService
@@ -25,6 +30,7 @@ from app.services.workload import WorkloadEstimator
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
+    "AdminDigestReport",
     "DigestKind",
     "DigestService",
     "EmployeeDirectory",
@@ -42,6 +48,8 @@ __all__ = [
     "prompt_for",
     "refresh_task_card",
     "resolve_owner_hint",
+    "send_admin_evening_digest",
+    "send_admin_morning_watch",
     "send_weekly_plan",
     "sync_admin_flags",
 ]

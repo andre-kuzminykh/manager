@@ -18,7 +18,13 @@ from slack_sdk import WebClient
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import get_logger, setup_logging
-from app.services import DigestKind, DigestService, send_weekly_plan
+from app.services import (
+    DigestKind,
+    DigestService,
+    send_admin_evening_digest,
+    send_admin_morning_watch,
+    send_weekly_plan,
+)
 from app.slack_bot.rate_limiter import RateAwareSlackSender
 
 log = get_logger(__name__)
@@ -30,7 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--type",
         required=True,
-        choices=[k.value for k in DigestKind] + ["weekly-plan"],
+        choices=[k.value for k in DigestKind]
+        + ["weekly-plan", "admin-evening", "admin-morning"],
         help="Digest to send.",
     )
     args = parser.parse_args(argv)
@@ -48,6 +55,28 @@ def main(argv: list[str] | None = None) -> int:
             report = send_weekly_plan(session, sender=sender)
         log.info(
             "weekly_plan_sent",
+            recipients=report.recipients,
+            tasks_included=report.tasks_included,
+            skipped_idempotent=report.skipped_idempotent,
+        )
+        return 0
+
+    if args.type == "admin-evening":
+        with session_scope() as session:
+            report = send_admin_evening_digest(session, sender=sender)
+        log.info(
+            "admin_evening_sent",
+            recipients=report.recipients,
+            tasks_included=report.tasks_included,
+            skipped_idempotent=report.skipped_idempotent,
+        )
+        return 0
+
+    if args.type == "admin-morning":
+        with session_scope() as session:
+            report = send_admin_morning_watch(session, sender=sender)
+        log.info(
+            "admin_morning_sent",
             recipients=report.recipients,
             tasks_included=report.tasks_included,
             skipped_idempotent=report.skipped_idempotent,

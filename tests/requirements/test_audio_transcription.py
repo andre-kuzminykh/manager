@@ -107,6 +107,130 @@ def test_transcribe_audio_files_returns_transcripts_in_order():
 
 
 # --------------------------------------------------------------------------- #
+# download_slack_file — HTTP path
+# --------------------------------------------------------------------------- #
+
+
+def test_download_slack_file_returns_bytes_on_200():
+    from app.services.transcription import download_slack_file
+    from unittest.mock import MagicMock
+
+    resp = MagicMock()
+    resp.content = b"hello"
+    resp.raise_for_status = MagicMock()
+    with patch("app.services.transcription.httpx.get", return_value=resp) as m:
+        out = download_slack_file(url="https://slack/f", bot_token="xoxb-1")
+    assert out == b"hello"
+    # Token header passed correctly.
+    kwargs = m.call_args.kwargs
+    assert kwargs["headers"] == {"Authorization": "Bearer xoxb-1"}
+    assert kwargs["follow_redirects"] is True
+
+
+def test_download_slack_file_returns_none_on_http_error():
+    from app.services.transcription import download_slack_file
+
+    with patch(
+        "app.services.transcription.httpx.get",
+        side_effect=RuntimeError("connection reset"),
+    ):
+        assert download_slack_file(url="https://slack/f", bot_token="x") is None
+
+
+def test_download_slack_file_rejects_oversize():
+    from app.services.transcription import download_slack_file
+    from unittest.mock import MagicMock
+
+    resp = MagicMock()
+    # One byte over the 25 MB cap.
+    resp.content = b"x" * (25 * 1024 * 1024 + 1)
+    resp.raise_for_status = MagicMock()
+    with patch("app.services.transcription.httpx.get", return_value=resp):
+        assert download_slack_file(url="https://slack/f", bot_token="x") is None
+
+
+# --------------------------------------------------------------------------- #
+# transcribe_bytes — Whisper path
+# --------------------------------------------------------------------------- #
+
+
+def test_transcribe_bytes_happy_path():
+    from app.services.transcription import transcribe_bytes
+    from unittest.mock import MagicMock
+
+    whisper_resp = MagicMock()
+    whisper_resp.text = "hello world  "
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = whisper_resp
+    with patch("openai.OpenAI", return_value=client):
+        out = transcribe_bytes(
+            audio_bytes=b"x", mimetype="audio/webm", filename="a.webm",
+            openai_api_key="sk-test",
+        )
+    assert out == "hello world"
+
+
+def test_transcribe_bytes_returns_none_without_key():
+    from app.services.transcription import transcribe_bytes
+
+    assert transcribe_bytes(
+        audio_bytes=b"x", mimetype="audio/webm", filename="a.webm", openai_api_key=""
+    ) is None
+
+
+def test_transcribe_bytes_returns_none_on_empty_audio():
+    from app.services.transcription import transcribe_bytes
+
+    assert transcribe_bytes(
+        audio_bytes=b"", mimetype="audio/webm", filename="a.webm", openai_api_key="sk"
+    ) is None
+
+
+def test_transcribe_bytes_returns_none_on_whisper_error():
+    from app.services.transcription import transcribe_bytes
+
+    client = MagicMock = __import__("unittest.mock", fromlist=["MagicMock"]).MagicMock
+    client_inst = client()
+    client_inst.audio.transcriptions.create.side_effect = RuntimeError("api down")
+    with patch("openai.OpenAI", return_value=client_inst):
+        out = transcribe_bytes(
+            audio_bytes=b"x", mimetype="audio/webm", filename="a.webm",
+            openai_api_key="sk",
+        )
+    assert out is None
+
+
+def test_transcribe_bytes_returns_none_when_whisper_text_missing():
+    from app.services.transcription import transcribe_bytes
+    from unittest.mock import MagicMock
+
+    whisper_resp = MagicMock(spec=[])  # no .text attribute
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = whisper_resp
+    with patch("openai.OpenAI", return_value=client):
+        out = transcribe_bytes(
+            audio_bytes=b"x", mimetype="audio/webm", filename="a.webm",
+            openai_api_key="sk",
+        )
+    assert out is None
+
+
+def test_transcribe_bytes_accepts_dict_response_shape():
+    from app.services.transcription import transcribe_bytes
+    from unittest.mock import MagicMock
+
+    # Some client variants return dict-like responses.
+    client = MagicMock()
+    client.audio.transcriptions.create.return_value = {"text": "hey"}
+    with patch("openai.OpenAI", return_value=client):
+        out = transcribe_bytes(
+            audio_bytes=b"x", mimetype="audio/webm", filename="a.webm",
+            openai_api_key="sk",
+        )
+    assert out == "hey"
+
+
+# --------------------------------------------------------------------------- #
 # Integration: handle_message wires audio → pipeline
 # --------------------------------------------------------------------------- #
 

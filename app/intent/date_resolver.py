@@ -90,6 +90,47 @@ def _next_day_month(today: date, day: int, month: int) -> date | None:
     return None
 
 
+def _try_in_n_units(lo: str, today: date) -> date | None:
+    """Handle "через N дней / недель / месяцев" and "in N days / weeks / months".
+
+    A missing number means 1: "через неделю" → +7 days.
+    """
+    # Russian: "через [N] <unit>". N is optional.
+    m = re.search(
+        r"\bчерез\s+(?:(\d+)\s+)?(день|дн[яей]|недел\w+|месяц\w*|год\w*)",
+        lo,
+    )
+    if m:
+        n = int(m.group(1)) if m.group(1) else 1
+        unit = m.group(2)
+        if unit.startswith("дн") or unit == "день":
+            return today + timedelta(days=n)
+        if unit.startswith("недел"):
+            return today + timedelta(days=7 * n)
+        if unit.startswith("месяц"):
+            return today + timedelta(days=30 * n)
+        if unit.startswith("год"):
+            return today + timedelta(days=365 * n)
+
+    # English: "in [N] day/week/month/year(s)". "in a week" = 1 week.
+    m = re.search(
+        r"\bin\s+(?:(\d+)|a|an)\s+(day|week|month|year)s?\b",
+        lo,
+    )
+    if m:
+        n = int(m.group(1)) if m.group(1) else 1
+        unit = m.group(2)
+        if unit == "day":
+            return today + timedelta(days=n)
+        if unit == "week":
+            return today + timedelta(days=7 * n)
+        if unit == "month":
+            return today + timedelta(days=30 * n)
+        if unit == "year":
+            return today + timedelta(days=365 * n)
+    return None
+
+
 def _try_day_month(lo: str, today: date) -> date | None:
     """Detect "1 мая", "5 июня", "May 1", "by Jun 15" patterns."""
     # Russian: "<day> <month-stem>" ("1 мая", "5 июня").
@@ -136,6 +177,12 @@ def resolve_due_date(text: str, today: date) -> date | None:
         return _next_weekday(today, 4)  # Friday
     if re.search(r"на следующей неделе|next week", lo):
         return _next_weekday(today, 0)  # upcoming Monday
+
+    # "через N <unit>" / "in N <unit>" — "через неделю", "через 2 дня",
+    # "in 3 weeks", "in a month".
+    d = _try_in_n_units(lo, today)
+    if d is not None:
+        return d
 
     # "N <month>" / "<month> N" — "к 1 мая", "by May 5".
     d = _try_day_month(lo, today)
@@ -199,6 +246,14 @@ def strip_date_phrase(text: str) -> str:
     patterns.append(r"end of (?:the )?week\b")
     patterns.append(r"на\s+следующей\s+недел[еию]\b")
     patterns.append(r"next\s+week\b")
+
+    # "через N <unit>" / "in N <unit>".
+    patterns.append(
+        r"\bчерез\s+(?:\d+\s+)?(?:день|дн[яей]|недел\w+|месяц\w*|год\w*)"
+    )
+    patterns.append(
+        r"\bin\s+(?:\d+|a|an)\s+(?:day|week|month|year)s?\b"
+    )
 
     # Weekday names with optional preposition.
     ru_wd_group = "|".join(_RU_WEEKDAYS.keys())

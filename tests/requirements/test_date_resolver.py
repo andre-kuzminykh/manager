@@ -45,6 +45,15 @@ FRIDAY = date(2026, 4, 24)
         ("by Jun 15th", date(2026, 6, 15)),
         # Day + month that already passed this year → next year.
         ("к 1 января", date(2027, 1, 1)),
+        # "через N <unit>" and English "in N <unit>".
+        ("мне надо статью написать через неделю", date(2026, 5, 1)),
+        ("через 2 недели", date(2026, 5, 8)),
+        ("через 3 дня", date(2026, 4, 27)),
+        ("через день", date(2026, 4, 25)),
+        ("через месяц", date(2026, 5, 24)),
+        ("in a week we ship", date(2026, 5, 1)),
+        ("in 2 days", date(2026, 4, 26)),
+        ("in 3 weeks", date(2026, 5, 15)),
     ],
 )
 def test_resolve_due_date_hits(text, expected):
@@ -113,6 +122,10 @@ def test_classifier_fills_missing_due_date_locally(monkeypatch):
         ("сделать 2026-05-12", "сделать"),
         ("сделать завтра", "сделать"),
         ("prepare deck for May 1st", "prepare deck for"),
+        ("написать статью через неделю", "написать статью"),
+        ("отгрузить через 3 дня", "отгрузить"),
+        ("ship this in 3 days", "ship this"),
+        ("publish in a week", "publish"),
     ],
 )
 def test_strip_date_phrase(title, expected):

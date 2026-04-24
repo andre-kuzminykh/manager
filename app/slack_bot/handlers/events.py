@@ -561,16 +561,23 @@ def handle_app_mention(
                     )
                     return
 
+                from app.intent.date_resolver import resolve_due_date
                 from app.schemas.intent import (
                     IntentClassification,
                     IntentType,
                     TaskDraft,
                 )
 
+                # The resolver still owns dates in the fallback path: an
+                # LLM that couldn't classify the message shouldn't cost us
+                # the obvious "к пятнице"/"ко вторнику" information.
+                from datetime import date as _date
+
+                fallback_due = resolve_due_date(text, _date.today())
                 fallback = IntentClassification(
                     intent=IntentType.create_task,
                     confidence=0.6,
-                    task=TaskDraft(title=text[:200]),
+                    task=TaskDraft(title=text[:200], due_date=fallback_due),
                     reasoning="fallback: explicit mention without extractable structure",
                 )
                 inference = services.orchestrator.persist_inference(

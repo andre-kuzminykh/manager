@@ -1,3 +1,4 @@
+from app.services.admin_review import post_admin_review
 from app.services.card_sync import refresh_task_card
 from app.services.digest import DigestKind, DigestService
 from app.services.employees import (
@@ -35,6 +36,7 @@ __all__ = [
     "is_admin",
     "parse_reply",
     "pick_next_missing",
+    "post_admin_review",
     "prompt_for",
     "refresh_task_card",
     "resolve_owner_hint",

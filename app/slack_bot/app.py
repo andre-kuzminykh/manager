@@ -23,10 +23,20 @@ from app.slack_bot.blocks import (
     ACTION_SUBSCRIBE,
     ACTION_UNSUBSCRIBE,
     ACTION_UNSUBSCRIBE_IN_MODAL,
+    ACTION_ADMIN_CONFIRM_TASK,
+    ACTION_ADMIN_EDIT_TASK,
+    ACTION_ADMIN_REJECT_TASK,
+    MODAL_CALLBACK_ADMIN_EDIT,
     MODAL_CALLBACK_MEETING,
     MODAL_CALLBACK_TASK,
 )
 from app.slack_bot.handlers.actions import handle_confirm, handle_edit, handle_ignore
+from app.slack_bot.handlers.admin_review import (
+    handle_admin_confirm,
+    handle_admin_edit_open,
+    handle_admin_edit_submit,
+    handle_admin_reject,
+)
 from app.slack_bot.handlers.events import handle_app_mention, handle_message
 from app.slack_bot.handlers.shared import Services
 from app.slack_bot.handlers.shortcuts import (
@@ -197,6 +207,23 @@ def build_app(
     @app.action(ACTION_UNSUBSCRIBE_IN_MODAL)
     def _on_unsubscribe_modal(body, client, ack):
         handle_unsubscribe_in_modal(body=body, client=client, ack=ack)
+
+    # CR-03 admin review
+    @app.action(ACTION_ADMIN_CONFIRM_TASK)
+    def _on_admin_confirm(body, ack):
+        handle_admin_confirm(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_ADMIN_REJECT_TASK)
+    def _on_admin_reject(body, ack):
+        handle_admin_reject(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_ADMIN_EDIT_TASK)
+    def _on_admin_edit_open(body, client, ack):
+        handle_admin_edit_open(body=body, client=client, sender=sender, ack=ack)
+
+    @app.view(MODAL_CALLBACK_ADMIN_EDIT)
+    def _on_admin_edit_submit(body, ack, view):
+        handle_admin_edit_submit(body=body, view=view, sender=sender, ack=ack)
 
     return app
 

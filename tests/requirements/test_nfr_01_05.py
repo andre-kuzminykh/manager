@@ -479,7 +479,7 @@ def test_nfr3_draft_payload_is_persisted_structured(
 # =============================================================================
 
 
-def test_nfr4_passive_high_confidence_produces_draft_only_no_task(
+def test_nfr4_passive_high_confidence_auto_creates_task_per_cr03(
     patched_session_scope,
     services_task,
     sender,
@@ -488,6 +488,9 @@ def test_nfr4_passive_high_confidence_produces_draft_only_no_task(
     slack_client,
     SessionFactory,
 ):
+    """CR-03 FR-CR-03-3 superseded the original NFR-4 'never auto-create'
+    rule: on high confidence the bot creates the task immediately so the
+    admin can review/reject it rather than losing the signal."""
     from app.slack_bot.handlers.events import handle_message
 
     handle_message(
@@ -507,7 +510,7 @@ def test_nfr4_passive_high_confidence_produces_draft_only_no_task(
     )
     with SessionFactory() as s:
         assert s.query(ActionDraft).count() == 1
-        assert s.query(Task).count() == 0
+        assert s.query(Task).count() == 1  # CR-03: auto-created
         assert s.query(Meeting).count() == 0
 
 
@@ -564,9 +567,11 @@ def test_nfr4_passive_low_confidence_is_silent(
     assert sender.posted == []
 
 
-def test_nfr4_draft_remains_proposed_without_confirm(
-    patched_session_scope, services_task, sender, ack, bolt_context, slack_client, SessionFactory
+def test_nfr4_soft_prompt_draft_still_awaits_user_confirmation(
+    patched_session_scope, services_medium, sender, ack, bolt_context, slack_client, SessionFactory
 ):
+    """Medium confidence still falls into the old draft flow — the user
+    decides via soft prompt, and the draft stays 'proposed' until they do."""
     from app.slack_bot.handlers.events import handle_message
 
     handle_message(
@@ -580,7 +585,7 @@ def test_nfr4_draft_remains_proposed_without_confirm(
         body={"event_id": "Passive-4"},
         client=slack_client,
         context=bolt_context,
-        services=services_task,
+        services=services_medium,
         sender=sender,
         ack=ack,
     )

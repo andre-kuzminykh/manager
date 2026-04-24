@@ -316,6 +316,25 @@ def handle_message(
             return
 
         permalink = fetch_permalink(client, channel=channel, ts=event["ts"])
+
+        # CR-03 FR-CR-03-3 + FR-CR-03-4: on high confidence, create the task
+        # immediately and notify admin(s) for review — no more user-facing
+        # "Confirm / Edit / Ignore" flow in the channel.
+        if decision.action == "card":
+            _always_create_and_admin_review(
+                draft_id=draft.id,
+                source_conversation_id=channel,
+                source_message_ts=event["ts"],
+                source_thread_ts=event.get("thread_ts"),
+                source_user_id=event.get("user"),
+                context_snapshot_id=snapshot.id,
+                permalink=permalink,
+                reasoning=classification.reasoning,
+                sender=sender,
+            )
+            return
+
+        # Soft-prompt path unchanged — we still ask the user politely.
         metadata = draft_private_metadata(
             conversation_id=channel,
             message_ts=event["ts"],
@@ -325,23 +344,69 @@ def handle_message(
             source_user_id=event.get("user"),
             permalink=permalink,
         )
-
-        if decision.action == "card":
-            payload = bk.draft_card(
-                classification=classification,
-                draft_id=draft.id,
-                confidence_bucket=decision.confidence_bucket.value,
-                missing_fields=_missing_fields(classification),
-            )
-        else:
-            payload = bk.soft_prompt(classification.intent, draft.id)
-
         sender.post_message(
             channel=channel,
             thread_ts=event.get("thread_ts") or event["ts"],
-            blocks=payload,
+            blocks=bk.soft_prompt(classification.intent, draft.id),
             text="Action suggestion",
             metadata={"event_type": "draft", "event_payload": {"metadata": metadata}},
+        )
+
+
+def _always_create_and_admin_review(
+    *,
+    draft_id: int,
+    source_conversation_id: str,
+    source_message_ts: str,
+    source_thread_ts: str | None,
+    source_user_id: str | None,
+    context_snapshot_id: int | None,
+    permalink: str | None,
+    reasoning: str | None,
+    sender: RateAwareSlackSender,
+) -> None:
+    """CR-03 always-create: finalize the draft into a real Task (status
+    backlog / todo) and broadcast the admin review card."""
+    from app.config import get_settings
+    from app.models import Task
+    from app.orchestrator.finalize import FinalizeService
+    from app.services import post_admin_review
+    from app.services.employees import admin_slack_user_ids
+
+    settings = get_settings()
+    fin = FinalizeService(settings=settings, sender=sender)
+    source_metadata = {
+        "conversation_id": source_conversation_id,
+        "message_ts": source_message_ts,
+        "thread_ts": source_thread_ts,
+        "permalink": permalink,
+        "context_snapshot_id": context_snapshot_id,
+        "source_user_id": source_user_id,
+    }
+    try:
+        entity_type, entity_id, _ = fin.finalize_draft(
+            draft_id=draft_id, source_metadata=source_metadata
+        )
+    except Exception as e:  # noqa: BLE001
+        log.error("always_create_finalize_failed", error=str(e), draft_id=draft_id)
+        return
+
+    if entity_type != "task":
+        return
+
+    with session_scope() as session:
+        task = session.get(Task, entity_id)
+        if task is None:
+            return
+        post_admin_review(
+            session,
+            task=task,
+            sender=sender,
+            source_channel=source_conversation_id,
+            source_thread_ts=source_thread_ts or source_message_ts,
+            source_permalink=permalink,
+            reasoning=reasoning,
+            admins=admin_slack_user_ids(settings),
         )
 
 

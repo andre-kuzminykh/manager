@@ -86,6 +86,7 @@ def patched_session_scope(monkeypatch, SessionFactory):  # noqa: N803
         "app.slack_bot.handlers.views.session_scope",
         "app.slack_bot.handlers.actions.session_scope",
         "app.slack_bot.handlers.task_actions.session_scope",
+        "app.slack_bot.handlers.admin_review.session_scope",
         "app.orchestrator.finalize.session_scope",
         "app.sync.factories.session_scope",
     ]

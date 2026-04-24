@@ -26,10 +26,16 @@ ACTION_SHOW_CONTEXT = "task_show_context"
 ACTION_MANAGE_SUBSCRIPTIONS = "manage_subscriptions"
 ACTION_UNSUBSCRIBE_IN_MODAL = "subs_modal_unsubscribe"
 
+# CR-03 admin review
+ACTION_ADMIN_CONFIRM_TASK = "admin_confirm_task"
+ACTION_ADMIN_EDIT_TASK = "admin_edit_task"
+ACTION_ADMIN_REJECT_TASK = "admin_reject_task"
+
 MODAL_CALLBACK_TASK = "task_modal_submit"
 MODAL_CALLBACK_MEETING = "meeting_modal_submit"
 MODAL_CALLBACK_CONTEXT = "task_context_view"
 MODAL_CALLBACK_SUBSCRIPTIONS = "subscriptions_modal"
+MODAL_CALLBACK_ADMIN_EDIT = "admin_edit_task_modal"
 
 BLOCK_TITLE = "title_block"
 BLOCK_DESCRIPTION = "description_block"
@@ -708,6 +714,115 @@ def daily_digest_blocks(
         },
     ]
     return blocks
+
+
+def admin_review_card(
+    *,
+    task: Any,
+    reasoning: str | None = None,
+    source_permalink: str | None = None,
+) -> list[dict[str, Any]]:
+    """CR-03 FR-CR-03-4: admin-only review widget with Confirm/Edit/Reject."""
+    fields = [
+        ("Title", task.title or "—"),
+        (
+            "Owner",
+            f"<@{task.owner_user_id}>"
+            if task.owner_user_id
+            else (task.owner_display_name or "—"),
+        ),
+        ("Due", task.due_date.isoformat() if task.due_date else "—"),
+        ("Priority", task.priority.value if task.priority else "—"),
+    ]
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"Задача #{task.id} — на согласование",
+                "emoji": True,
+            },
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*{label}*\n{value}"}
+                for label, value in fields
+            ],
+        },
+    ]
+    if reasoning:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"_why detected:_ {reasoning}"}
+                ],
+            }
+        )
+    if source_permalink:
+        blocks.append(
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": f"<{source_permalink}|Открыть исходное сообщение>",
+                    }
+                ],
+            }
+        )
+    blocks.append(
+        {
+            "type": "actions",
+            "block_id": f"admin_review_{task.id}",
+            "elements": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "action_id": ACTION_ADMIN_CONFIRM_TASK,
+                    "text": {"type": "plain_text", "text": "Confirm"},
+                    "value": str(task.id),
+                },
+                {
+                    "type": "button",
+                    "action_id": ACTION_ADMIN_EDIT_TASK,
+                    "text": {"type": "plain_text", "text": "Edit"},
+                    "value": str(task.id),
+                },
+                {
+                    "type": "button",
+                    "style": "danger",
+                    "action_id": ACTION_ADMIN_REJECT_TASK,
+                    "text": {"type": "plain_text", "text": "Reject"},
+                    "value": str(task.id),
+                },
+            ],
+        }
+    )
+    return blocks
+
+
+def admin_review_resolved_message(
+    *, task_id: int, action: str, actor: str | None
+) -> list[dict[str, Any]]:
+    """Replace the admin review card after Confirm/Reject so it's obvious
+    no further action is needed."""
+    icons = {"confirm": ":white_check_mark:", "reject": ":x:", "edit": ":pencil2:"}
+    label = {"confirm": "Подтверждено", "reject": "Отклонено", "edit": "Отредактировано"}
+    actor_s = f" <@{actor}>" if actor else ""
+    return [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    f"{icons.get(action, ':arrows_counterclockwise:')} "
+                    f"Задача *#{task_id}* — {label.get(action, action)}{actor_s}."
+                ),
+            },
+        }
+    ]
 
 
 def subscriptions_modal(tasks: list[Any]) -> dict[str, Any]:

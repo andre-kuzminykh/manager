@@ -76,6 +76,27 @@ class RateAwareSlackSender:
                     continue
                 raise
 
+    def post_ephemeral(
+        self, *, channel: str, user: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Post an ephemeral message visible only to ``user``. Used for
+        CR-03 admin-only thread notifications."""
+        attempts = 0
+        while True:
+            self._throttle(channel)
+            try:
+                return self._client.chat_postEphemeral(
+                    channel=channel, user=user, **kwargs
+                ).data  # type: ignore[return-value]
+            except SlackApiError as e:
+                status = e.response.status_code if e.response is not None else None
+                if status == 429 and attempts < 3:
+                    retry_after = int(e.response.headers.get("Retry-After", "1"))  # type: ignore[union-attr]
+                    time.sleep(retry_after)
+                    attempts += 1
+                    continue
+                raise
+
     def delete_message(self, *, channel: str, ts: str) -> dict[str, Any]:
         """Delete an existing chat message (chat.delete)."""
         attempts = 0

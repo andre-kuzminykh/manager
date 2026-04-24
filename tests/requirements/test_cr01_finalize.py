@@ -67,14 +67,16 @@ def test_finalize_updates_draft_widget_in_place_and_dms_owner(
     assert sender.posted[0]["channel"] == "U-owner"
 
 
-def test_finalize_task_card_contains_subscribe_button(
+def test_finalize_owner_dm_card_hides_subscribe(
     patched_session_scope, SessionFactory
 ):
+    # The DM copy is rendered for the owner, who is implicitly subscribed.
+    # The Subscribe / Unsubscribe toggle must NOT appear in their view.
     sender = _RecordingSender()
     fin = FinalizeService(settings=Settings(), sender=sender)
 
     with SessionFactory() as s:
-        draft, snap = _prep(s)
+        draft, snap = _prep(s, payload={"title": "hello", "owner_user_id": "U-owner"})
         s.commit()
         draft_id, snap_id = draft.id, snap.id
 
@@ -88,13 +90,15 @@ def test_finalize_task_card_contains_subscribe_button(
             "context_snapshot_id": snap_id,
         },
     )
+    owner_dm = next(m for m in sender.posted if m["channel"] == "U-owner")
     ids = [
         el["action_id"]
-        for b in sender.posted[0]["blocks"]
+        for b in owner_dm["blocks"]
         if b["type"] == "actions"
         for el in b["elements"]
     ]
-    assert bk.ACTION_SUBSCRIBE in ids or bk.ACTION_UNSUBSCRIBE in ids
+    assert bk.ACTION_SUBSCRIBE not in ids
+    assert bk.ACTION_UNSUBSCRIBE not in ids
 
 
 def test_finalize_does_not_crash_without_sender(patched_session_scope, SessionFactory):

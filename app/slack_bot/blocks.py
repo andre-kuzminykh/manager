@@ -470,14 +470,6 @@ def task_card(
         elements.append(
             {
                 "type": "button",
-                "action_id": ACTION_SUBMIT_REVIEW,
-                "text": {"type": "plain_text", "text": "Submit for review"},
-                "value": str(task.id),
-            }
-        )
-        elements.append(
-            {
-                "type": "button",
                 "style": "primary",
                 "action_id": ACTION_MARK_DONE,
                 "text": {"type": "plain_text", "text": "Mark done"},
@@ -495,8 +487,9 @@ def task_card(
             }
         )
 
-    # Subscribe toggle (always present except on Done).
-    if task.status != TaskStatus.done:
+    # Subscribe toggle. Owner never sees it — they are implicitly subscribed
+    # by virtue of being the assignee, so the button would be redundant.
+    if task.status != TaskStatus.done and not is_owner:
         elements.append(
             {
                 "type": "button",

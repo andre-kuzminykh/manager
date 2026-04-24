@@ -439,14 +439,17 @@ def test_task_card_shows_start_work_only_for_owner(session):
     assert bk.ACTION_START_WORK not in ids_other
 
 
-def test_task_card_in_progress_exposes_review_and_done(session):
+def test_task_card_in_progress_exposes_only_done(session):
+    # Product decision: the Review state is still in the model (some legacy
+    # rows may sit there) but the UI no longer offers "Submit for review".
+    # From in_progress the owner goes straight to Done.
     task = _make_task(session, status=TaskStatus.in_progress, owner="U-owner")
     blocks = bk.task_card(task=task, viewer_slack_user_id="U-owner")
     ids = [
         el["action_id"] for b in blocks if b["type"] == "actions" for el in b["elements"]
     ]
-    assert bk.ACTION_SUBMIT_REVIEW in ids
     assert bk.ACTION_MARK_DONE in ids
+    assert bk.ACTION_SUBMIT_REVIEW not in ids
 
 
 def test_task_card_review_exposes_only_done(session):
@@ -487,6 +490,17 @@ def test_task_card_toggles_subscribe_label(session):
         el["action_id"] for b in unsubs_blocks if b["type"] == "actions" for el in b["elements"]
     ]
     assert bk.ACTION_SUBSCRIBE in ids
+
+
+def test_task_card_hides_subscribe_for_owner(session):
+    # Owners are implicitly subscribed — the toggle would be redundant.
+    task = _make_task(session, status=TaskStatus.todo, owner="U-owner")
+    blocks = bk.task_card(task=task, viewer_slack_user_id="U-owner")
+    ids = [
+        el["action_id"] for b in blocks if b["type"] == "actions" for el in b["elements"]
+    ]
+    assert bk.ACTION_SUBSCRIBE not in ids
+    assert bk.ACTION_UNSUBSCRIBE not in ids
 
 
 def test_task_card_does_not_include_open_source_button(session):

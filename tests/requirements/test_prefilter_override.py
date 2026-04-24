@@ -11,14 +11,29 @@ from app.schemas.intent import InvocationType, IntentType
 
 
 class _Backend:
-    def __init__(self, payload):
-        self._payload = payload
+    """Pipeline-aware stub: dispatches a different payload per tool.
 
-    def extract_intent(self, *, user_prompt):
-        return self._payload
+    `detect` controls whether Stage 1 says the message is a task at all.
+    `title` / `owner` are the Stage-2 responses (unused if Stage 1 is
+    negative).
+    """
+
+    def __init__(self, *, detect=None, title=None, owner=None):
+        from app.intent.detect_prompt import DETECT_TOOL_NAME
+        from app.intent.owner_prompt import OWNER_TOOL_NAME
+        from app.intent.title_prompt import TITLE_TOOL_NAME
+
+        self._payloads = {
+            DETECT_TOOL_NAME: detect,
+            TITLE_TOOL_NAME: title,
+            OWNER_TOOL_NAME: owner,
+        }
+
+    def extract_intent(self, *, user_prompt):  # pragma: no cover
+        raise NotImplementedError
 
     def call_tool(self, **kw):
-        return {"reasoning": "unused", "display_name": None}
+        return self._payloads.get(kw.get("tool_name"))
 
 
 def _ctx(text):
@@ -31,7 +46,7 @@ def _ctx(text):
 
 
 def test_prefilter_overrides_no_action_for_task_keywords():
-    backend = _Backend(payload={"intent": "no_action", "confidence": 0.1})
+    backend = _Backend(detect={"is_task": False, "confidence": 0.1})
     out = classify_with_backend(
         backend=backend,
         context=_ctx("надо подготовить заметки к 1 мая"),
@@ -48,7 +63,7 @@ def test_prefilter_overrides_no_action_for_task_keywords():
 
 
 def test_prefilter_overrides_no_action_for_meeting_keywords():
-    backend = _Backend(payload={"intent": "no_action", "confidence": 0.1})
+    backend = _Backend(detect={"is_task": False, "confidence": 0.1})
     out = classify_with_backend(
         backend=backend,
         context=_ctx("давайте созвон завтра в 11"),
@@ -60,7 +75,7 @@ def test_prefilter_overrides_no_action_for_meeting_keywords():
 
 
 def test_prefilter_does_not_override_when_no_keyword():
-    backend = _Backend(payload={"intent": "no_action", "confidence": 0.1})
+    backend = _Backend(detect={"is_task": False, "confidence": 0.1})
     out = classify_with_backend(
         backend=backend,
         context=_ctx("спасибо за кофе!"),
@@ -71,14 +86,13 @@ def test_prefilter_does_not_override_when_no_keyword():
     assert out.task is None
 
 
-def test_llm_create_task_wins_over_prefilter():
-    """If the LLM did its job and returned a task, we don't override."""
+def test_pipeline_create_task_wins_over_prefilter():
+    """If the pipeline detected a task, we don't run the prefilter
+    override — the LLM's answer stands."""
     backend = _Backend(
-        payload={
-            "intent": "create_task",
-            "confidence": 0.92,
-            "task": {"title": "prepared LLM title"},
-        }
+        detect={"is_task": True, "confidence": 0.92, "reasoning": "yes"},
+        title={"title": "prepared LLM title"},
+        owner={"reasoning": "no assignee", "display_name": None},
     )
     out = classify_with_backend(
         backend=backend,

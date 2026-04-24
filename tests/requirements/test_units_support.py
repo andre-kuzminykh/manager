@@ -405,11 +405,14 @@ def test_classifier_llm_no_tool_use_returns_no_action():
         messages = StubMessages()
 
     classifier = IntentClassifier(anthropic_client=StubClient())
+    # Text with NO task keywords so the rule-based safety net doesn't
+    # rescue the classification — we want the raw "no tool_use → no_action"
+    # path.
     ctx = ContextWindow(
         conversation_id="C1",
         source_ts="1.0",
         thread_ts=None,
-        source_message={"ts": "1.0", "text": "надо задачу", "user": "U1"},
+        source_message={"ts": "1.0", "text": "hello there", "user": "U1"},
     )
     result = classifier.classify(context=ctx, invocation_type=InvocationType.mention)
     assert result.intent == IntentType.no_action
@@ -420,21 +423,28 @@ def test_classifier_llm_returns_parsed_classification():
     from app.context.retriever import ContextWindow
     from app.schemas.intent import InvocationType
 
+    # The pipeline makes three separate tool calls (detect / title /
+    # owner). The stub dispatches on the tool name so each stage gets
+    # an appropriate payload.
+    def _tool_input_for(tool_name):
+        if tool_name == "record_detection":
+            return {"is_task": True, "confidence": 0.95, "reasoning": "yes"}
+        if tool_name == "record_task_draft":
+            return {"title": "Do it", "priority": "high"}
+        if tool_name == "record_owner":
+            return {"reasoning": "no assignee", "display_name": None}
+        return {}
+
     class StubMessages:
         def create(self, **kwargs):
+            # Pull the tool name out of the call — Anthropic tools[0].name.
+            tool_name = kwargs["tools"][0]["name"]
             resp = MagicMock()
             resp.content = [
                 type(
                     "Block",
                     (),
-                    {
-                        "type": "tool_use",
-                        "input": {
-                            "intent": "create_task",
-                            "confidence": 0.95,
-                            "task": {"title": "Do it", "priority": "high"},
-                        },
-                    },
+                    {"type": "tool_use", "input": _tool_input_for(tool_name)},
                 )()
             ]
             return resp

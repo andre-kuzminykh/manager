@@ -1,4 +1,7 @@
-"""CR-03 Phase F: daily in-thread reminders for open tasks."""
+"""Requirement coverage: FR-CR-03-9 (daily reminders in source
+thread), NFR-CR-03-4 (reminder deduplication per task+day).
+
+CR-03 Phase F: daily in-thread reminders for open tasks."""
 from __future__ import annotations
 
 from datetime import date, timedelta

@@ -1,4 +1,7 @@
-"""CR-03 Phase A: Employees directory + admin registry."""
+"""Requirement coverage: FR-CR-03-1 (Employees directory),
+FR-CR-03-2 (admin registry), NFR-CR-03-1 (Slack rate limits).
+
+CR-03 Phase A: Employees directory + admin registry."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone

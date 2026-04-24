@@ -1,4 +1,7 @@
-"""CR-03 Phase C: completion artifact on Mark done."""
+"""Requirement coverage: FR-CR-03-7 (Start / Review / Complete with
+artifact).
+
+CR-03 Phase C: completion artifact on Mark done."""
 from __future__ import annotations
 
 import pytest

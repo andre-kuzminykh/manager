@@ -1,4 +1,7 @@
-"""CR-03 split between the two auto-create flows:
+"""Requirement coverage: FR-CR-04-6 (offer-first passive), FR-CR-02-1
+(mention always replies).
+
+CR-03 split between the two auto-create flows:
 
 - @mention  → task created immediately, NO admin review, the user sees a
   task-card and a thread follow-up question for missing fields. Replies
@@ -145,7 +148,7 @@ def test_mention_follow_up_reply_updates_task_and_refreshes_card(
 
     # Classifier returns a task with an explicit owner and no due_date
     # so the bot's only follow-up question is about the date. (Owner
-    # is now asked before due_date — see FR-CR-04.)
+    # is now asked before due_date — see FR-CR-04-6.)
     stub = StubClassifier(
         IntentClassification(
             intent=IntentType.create_task,

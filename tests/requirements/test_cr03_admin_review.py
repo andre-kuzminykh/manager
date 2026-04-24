@@ -1,4 +1,11 @@
-"""CR-03 Phase B: always-create + admin review (Confirm / Edit / Reject)."""
+"""Requirement coverage: FR-CR-03-5 (editable tasks + audit trail),
+NFR-CR-03-2 (every admin action writes an audit row),
+NFR-CR-03-5 (ephemeral fallback for admin confirmations).
+
+Note: the original CR-03 Phase B "always-create + admin-only
+confirmation" (FR-CR-03-3 / FR-CR-03-4) was reverted in CR-04;
+current tests assert the REPLACEMENT behaviour (passive offers a
+draft card instead of auto-creating). See FR-CR-04-6."""
 from __future__ import annotations
 
 from types import SimpleNamespace

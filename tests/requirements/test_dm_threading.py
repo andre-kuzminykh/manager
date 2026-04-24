@@ -1,4 +1,7 @@
-"""Every bot notification about a task should thread under the subscriber's
+"""Requirement coverage: FR-CR-03-10 (live admin / subscriber updates
+via chat.update), FR-CR-02-6 (daily digest Tracking section anchor).
+
+Every bot notification about a task should thread under the subscriber's
 anchor DM, so one task = one DM thread in the bot chat."""
 from __future__ import annotations
 

@@ -262,6 +262,9 @@ def test_nfr2_dedup_different_ids_independent(patched_session_scope, SessionFact
 def test_nfr2_dedup_retry_from_slack_does_not_post_new_card(
     patched_session_scope, services_task, sender, ack, bolt_context, slack_client, SessionFactory
 ):
+    """Also covers NFR-CR-04-2 — handle_message commits the draft
+    BEFORE the soft-prompt / follow-up posts, so retries with the
+    same event_id are silently deduped."""
     from app.slack_bot.handlers.events import handle_message
 
     event = {

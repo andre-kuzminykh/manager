@@ -814,7 +814,7 @@ pure unit tests for internal helpers.
 | FR-CR-03-2   | `test_cr03_employees_admin.py`                          |
 | FR-CR-03-3   | *reverted — see FR-CR-04-6 + `test_passive_draft_card.py`, `test_cr03_mention_vs_passive.py`, `test_cr03_admin_review.py`* |
 | FR-CR-03-4   | *reverted — see FR-CR-04-6 + same tests as above*       |
-| FR-CR-03-5   | `test_task_edit_button.py`, `test_cr03_admin_review.py` |
+| FR-CR-03-5   | `test_task_edit_button.py`, `test_cr03_admin_review.py`, `test_widget_morph_and_dm.py` |
 | FR-CR-03-6   | `test_cr03_weekly_plan.py`                              |
 | FR-CR-03-7   | `test_cr03_completion_artifact.py`, `test_cr01_handlers.py` |
 | FR-CR-03-8   | `test_cr03_admin_digest.py`                             |
@@ -830,15 +830,15 @@ pure unit tests for internal helpers.
 
 | ID           | Test modules                                                                                                 |
 |--------------|--------------------------------------------------------------------------------------------------------------|
-| FR-CR-04-1   | `test_intent_pipeline.py`                                                                                    |
-| FR-CR-04-2   | `test_intent_pipeline.py`                                                                                    |
-| FR-CR-04-3   | `test_date_resolver.py`, `test_mention_fallback_date.py`                                                     |
+| FR-CR-04-1   | `test_intent_pipeline.py`, `test_intent_graph.py` (detect node + routing)                                    |
+| FR-CR-04-2   | `test_intent_pipeline.py`, `test_intent_graph.py` (parallel fan-out)                                         |
+| FR-CR-04-3   | `test_date_resolver.py`, `test_mention_fallback_date.py`, `test_intent_graph.py` (LLM-first date + Python validator) |
 | FR-CR-04-4   | `test_owner_focused_prompt.py`                                                                               |
 | FR-CR-04-5   | `test_date_resolver.py` (strip_date_phrase), `test_intent_pipeline.py`                                       |
-| FR-CR-04-6   | `test_passive_draft_card.py`, `test_cr03_mention_vs_passive.py`, `test_mention_passive_symmetry.py`           |
+| FR-CR-04-6   | `test_passive_draft_card.py`, `test_cr03_mention_vs_passive.py`, `test_mention_passive_symmetry.py`, `test_cr03_admin_review.py` (negative: passive no auto-create) |
 | FR-CR-04-7   | `test_mention_follow_up_for_assumed_owner.py`, `test_mention_passive_symmetry.py`                            |
 | FR-CR-04-8   | `test_audio_transcription.py`                                                                                |
 | FR-CR-04-9   | `test_prefilter_override.py`, `test_passive_pipeline_runs_always.py`                                         |
-| FR-CR-04-10  | `test_task_edit_button.py`, `test_cr01_lifecycle.py` (English labels + owner-hidden-for-owner tests)         |
-| NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_owner_focused_prompt.py` (owner-failure test)         |
-| NFR-CR-04-2  | `test_nfr_01_05.py` (dedup test asserts 2 posts from one handle_message call — both the card and the follow-up) |
+| FR-CR-04-10  | `test_task_edit_button.py`                                                                                   |
+| NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
+| NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

@@ -1,4 +1,7 @@
-"""CR-03 Phase D: Sunday weekly plan."""
+"""Requirement coverage: FR-CR-03-6 (Sunday weekly plan),
+NFR-CR-03-3 (digests idempotent per user+week).
+
+CR-03 Phase D: Sunday weekly plan."""
 from __future__ import annotations
 
 from datetime import date, timedelta

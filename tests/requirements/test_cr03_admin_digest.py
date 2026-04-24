@@ -1,4 +1,7 @@
-"""CR-03 Phase E: admin evening digest + morning watch-list."""
+"""Requirement coverage: FR-CR-03-8 (admin watch-list digest, morning
++ evening), NFR-CR-03-3 (digests idempotent per user+date).
+
+CR-03 Phase E: admin evening digest + morning watch-list."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone

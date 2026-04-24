@@ -1,4 +1,8 @@
-"""CR-03 widget lifecycle:
+"""Requirement coverage: FR-CR-02-3 (chat.update on reply), FR-CR-02-4
+(draft widget disappears on Confirm / Ignore), FR-CR-03-10 (live
+admin updates via chat.update).
+
+CR-03 widget lifecycle:
 - draft widget morphs in place via chat.update on Confirm
 - task card is also mirrored to the owner's DM (running log)
 - Start работу shows for owner OR when no owner assigned

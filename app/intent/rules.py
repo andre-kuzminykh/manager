@@ -17,9 +17,20 @@ _TASK_KEYWORDS = [
     r"\bto[-\s]?do\b",
     r"\bсделай\b",
     r"\bнадо\b",
+    r"\bнужно\b",
+    r"\bтребуется\b",
     r"\bподготов\w+",
+    r"\bпочини\w+",
+    r"\bисправ\w+",
+    r"\bпоправ\w+",
+    r"\bсобери\w*|собрать\b",
+    r"\bотправ\w+|отошли\b",
+    r"\bнапиш\w+|написать\b",
     r"\bдедлайн",
     r"\bdue\b",
+    r"\bfix\b",
+    r"\bprepare\b",
+    r"\bneed to\b",
 ]
 
 _MEETING_KEYWORDS = [

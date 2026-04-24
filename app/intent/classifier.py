@@ -64,26 +64,20 @@ class IntentClassifier:
         invocation_type: InvocationType,
     ) -> IntentClassification:
         source_text = (context.source_message.get("text") or "").strip()
-        prefilter = prefilter_intent(source_text)
-
-        # Passive path: if rules say "no_action" with very low score AND not explicit,
-        # return quickly without calling the LLM. This protects budget and keeps
-        # passive chat quiet.
-        if invocation_type == InvocationType.passive and prefilter.hint == IntentType.no_action:
-            return IntentClassification(
-                intent=IntentType.no_action,
-                confidence=0.0,
-                reasoning="prefilter: no task/meeting keywords",
-            )
 
         if self._backend is None:
             # Without an LLM we can only return the coarse rule hint.
+            prefilter = prefilter_intent(source_text)
             return IntentClassification(
                 intent=prefilter.hint,
                 confidence=prefilter.score,
                 reasoning="prefilter only (no LLM configured)",
             )
 
+        # Always run the pipeline, including on passive messages — the
+        # prefilter is not exhaustive (it misses "нам нужно починить X"
+        # and similar), and its Stage-1 detection is cheap enough on
+        # gpt-4o-mini that we'd rather over-call than miss a real task.
         return classify_with_backend(
             backend=self._backend,
             context=context,

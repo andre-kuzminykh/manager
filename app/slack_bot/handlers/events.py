@@ -240,7 +240,7 @@ def _handle_followup_reply(
         resp = sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
-            text=":white_check_mark: Все поля собрал. Жми *Confirm* на карточке.",
+            text=":white_check_mark: Все поля собрал. Жми *Accept* на карточке.",
         )
     _record_followup_ts(session, draft, resp)
     return True
@@ -441,12 +441,40 @@ def handle_message(
     card_ts = None
     if isinstance(resp, dict):
         card_ts = resp.get("ts")
-    if card_ts:
-        with session_scope() as session:
-            draft = session.get(ActionDraft, draft_id)
-            if draft is not None:
-                draft.card_channel = channel
-                draft.card_ts = card_ts
+    with session_scope() as session:
+        draft = session.get(ActionDraft, draft_id)
+        if draft is None:
+            return
+        if card_ts:
+            draft.card_channel = channel
+            draft.card_ts = card_ts
+        # Ask for the first missing field in the thread so the user can
+        # answer in chat without opening the Edit modal. The reply will
+        # be consumed by _handle_followup_reply, which updates the
+        # draft.payload and refreshes the card in place.
+        from app.services import pick_next_missing, prompt_for
+        from app.config import get_settings
+
+        next_field = pick_next_missing(
+            draft.intent.value, draft.payload or {}
+        )
+        draft.awaiting_field = next_field
+        session.flush()
+        if next_field:
+            intro = prompt_for(
+                next_field,
+                payload=draft.payload or {},
+                allowed_owners=get_settings().allowed_owners(),
+            )
+            try:
+                fu_resp = sender.post_message(
+                    channel=channel,
+                    thread_ts=event.get("thread_ts") or event["ts"],
+                    text=intro,
+                )
+                _record_followup_ts(session, draft, fu_resp)
+            except Exception as e:  # noqa: BLE001
+                log.warning("passive_followup_post_failed", error=str(e))
 
 
 def _always_create_and_admin_review(

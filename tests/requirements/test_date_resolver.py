@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 
-from app.intent.date_resolver import resolve_due_date
+from app.intent.date_resolver import resolve_due_date, strip_date_phrase
 
 # 2026-04-24 is a Friday.
 FRIDAY = date(2026, 4, 24)
@@ -97,3 +97,20 @@ def test_classifier_fills_missing_due_date_locally(monkeypatch):
     )
     assert result.task is not None
     assert result.task.due_date == date(2026, 4, 27)
+
+
+@pytest.mark.parametrize(
+    "title,expected",
+    [
+        ("подготовить заметки к 1 мая", "подготовить заметки"),
+        ("собрать демо ко вторнику", "собрать демо"),
+        ("отчёт до пятницы", "отчёт"),
+        ("call Ivan by Friday", "call Ivan"),
+        ("подготовить питчдек", "подготовить питчдек"),
+        ("сделать 2026-05-12", "сделать"),
+        ("сделать завтра", "сделать"),
+        ("prepare deck for May 1st", "prepare deck for"),
+    ],
+)
+def test_strip_date_phrase(title, expected):
+    assert strip_date_phrase(title) == expected

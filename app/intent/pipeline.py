@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date as _date
 from typing import Any
 
-from app.intent.date_resolver import resolve_due_date
+from app.intent.date_resolver import resolve_due_date, strip_date_phrase
 from app.intent.detect_prompt import (
     DETECT_SYSTEM_PROMPT,
     DETECT_TOOL_DESCRIPTION,
@@ -166,7 +166,11 @@ def run_pipeline(
     due = resolve_due_date(source_text, today)
 
     # Stage 3: Assembly.
-    title = (title_data.get("title") or source_text[:120]).strip() or "(untitled)"
+    # Dates belong in due_date, never in the title — strip any trailing
+    # "к 1 мая" / "ко вторнику" the LLM may have left behind.
+    title = strip_date_phrase(
+        (title_data.get("title") or source_text[:120]).strip()
+    ) or "(untitled)"
     description = title_data.get("description") or None
     priority = title_data.get("priority") or "medium"
     slack_user_id = owner_data.get("slack_user_id") or None

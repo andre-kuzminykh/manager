@@ -14,7 +14,7 @@ from app.intent.llm_backends import (
     LLMBackend,
     OpenAIBackend,
 )
-from app.intent.date_resolver import resolve_due_date
+from app.intent.date_resolver import resolve_due_date, strip_date_phrase
 from app.intent.pipeline import run_pipeline
 from app.intent.prompts import SYSTEM_PROMPT, build_user_prompt
 from app.intent.rules import prefilter_intent
@@ -126,7 +126,7 @@ def classify_with_backend(
         if pf.hint != IntentType.no_action:
             from app.schemas.intent import MeetingDraft, TaskDraft
 
-            title = source_text[:200]
+            title = strip_date_phrase(source_text[:200]) or source_text[:200]
             if pf.hint in (IntentType.create_task, IntentType.update_task):
                 classification = IntentClassification(
                     intent=IntentType.create_task,

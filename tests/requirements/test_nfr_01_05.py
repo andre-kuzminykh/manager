@@ -281,10 +281,10 @@ def test_nfr2_dedup_retry_from_slack_does_not_post_new_card(
             sender=sender,
             ack=ack,
         )
-    # Passive flow posts a single soft-prompt in the source thread.
-    # Retries with the same event_id must be silently deduped — total
-    # count stays at 1.
-    assert len(sender.posted) == 1
+    # Passive flow posts a draft card + an immediate follow-up question
+    # (for the missing field). Retries with the same event_id must be
+    # silently deduped — total stays at 2.
+    assert len(sender.posted) == 2
 
 
 def test_nfr2_missing_event_id_still_processed_once_per_call(

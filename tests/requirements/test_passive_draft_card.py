@@ -57,10 +57,16 @@ def test_passive_posts_prefilled_draft_card_with_three_buttons(
         sender=sender,
         ack=ack,
     )
-    assert len(sender.posts) == 1
+    # Two posts: the draft card + a follow-up question in the thread
+    # asking for the missing field (services_task stub leaves due_date
+    # null).
+    assert len(sender.posts) == 2
     posted = sender.posts[0]
     assert posted["channel"] == "C1"
     assert posted["thread_ts"] == "100.0"
+    follow_up = sender.posts[1]
+    assert follow_up["channel"] == "C1"
+    assert follow_up["thread_ts"] == "100.0"
     # Collect every button action_id present on the card.
     ids = [
         el["action_id"]
@@ -119,6 +125,106 @@ def test_passive_draft_card_widget_ts_is_saved_for_morph(
         # the same message into a task card on Accept.
         assert draft.card_channel == "C-pass"
         assert draft.card_ts == "1.0"
+
+
+def test_passive_immediately_asks_for_missing_field_in_thread(
+    patched_session_scope,
+    services_task,
+    ack,
+    bolt_context,
+    slack_client,
+    SessionFactory,
+):
+    """Right after the draft card is posted, the bot posts a follow-up
+    question in the same thread asking for the missing field (so the
+    user can answer in chat without opening Edit)."""
+    from app.slack_bot.handlers.events import handle_message
+
+    sender = _Sender()
+    handle_message(
+        event={
+            "ts": "300.0",
+            "user": "U-author",
+            "text": "надо сделать отчёт",
+            "channel": "C1",
+            "channel_type": "channel",
+        },
+        body={"event_id": "passive-ask-1"},
+        client=slack_client,
+        context=bolt_context,
+        services=services_task,
+        sender=sender,
+        ack=ack,
+    )
+    # Second post is the follow-up question in the same thread.
+    assert len(sender.posts) == 2
+    follow = sender.posts[1]
+    assert follow["thread_ts"] == "300.0"
+    assert follow["channel"] == "C1"
+    # The draft row remembers which field it is awaiting.
+    with SessionFactory() as s:
+        draft = s.query(ActionDraft).one()
+        assert draft.awaiting_field in {"owner", "due_date", "description", "effort"}
+
+
+def test_passive_thread_reply_fills_field_and_updates_draft(
+    patched_session_scope,
+    services_task,
+    ack,
+    bolt_context,
+    slack_client,
+    SessionFactory,
+):
+    """User answers the follow-up in thread → _handle_followup_reply
+    updates draft.payload and refreshes the card in place. When all
+    user-visible fields are filled, the "push Accept" ack is posted."""
+    from app.slack_bot.handlers.events import handle_message
+
+    sender = _Sender()
+    handle_message(
+        event={
+            "ts": "400.0",
+            "user": "U-author",
+            "text": "надо сделать отчёт",
+            "channel": "C1",
+            "channel_type": "channel",
+        },
+        body={"event_id": "passive-reply-1"},
+        client=slack_client,
+        context=bolt_context,
+        services=services_task,
+        sender=sender,
+        ack=ack,
+    )
+    with SessionFactory() as s:
+        draft = s.query(ActionDraft).one()
+        awaiting = draft.awaiting_field
+
+    # The user replies in the thread with an ISO date — handled as a
+    # due_date answer by _handle_followup_reply.
+    handle_message(
+        event={
+            "ts": "401.0",
+            "thread_ts": "400.0",
+            "user": "U-author",
+            "text": "2026-05-12",
+            "channel": "C1",
+            "channel_type": "channel",
+        },
+        body={"event_id": "passive-reply-2"},
+        client=slack_client,
+        context=bolt_context,
+        services=services_task,
+        sender=sender,
+        ack=ack,
+    )
+    # Draft.payload was updated with the new field value.
+    with SessionFactory() as s:
+        draft = s.query(ActionDraft).one()
+        if awaiting == "due_date":
+            assert draft.payload.get("due_date") == "2026-05-12"
+    # The widget was refreshed via chat.update (follow-up reply path).
+    assert any(u.get("ts") for u in sender.updates)
 
 
 def test_accept_on_draft_card_creates_task_and_asks_follow_up(

@@ -153,4 +153,69 @@ def resolve_due_date(text: str, today: date) -> date | None:
     return None
 
 
-__all__ = ["resolve_due_date"]
+def strip_date_phrase(text: str) -> str:
+    """Return `text` with the first date-like phrase removed.
+
+    Used by the title pipeline to drop things like "к 1 мая" / "ко
+    вторнику" / "by Friday" from the task title so they end up only
+    in the due_date field.
+
+    Handles the same phrase shapes the resolver understands, plus the
+    leading prepositions ("к", "до", "на", "by", "to", "on") and the
+    ISO date.
+    """
+    if not text:
+        return text
+
+    # Prepositions that commonly precede a date phrase. We accept the
+    # preposition optionally so we strip it along with the date.
+    _RU_PREPS = r"(?:к(?:о)?|до|на|ко\s)"
+    _EN_PREPS = r"(?:by|to|on|before)"
+
+    # Build patterns in a priority order (most specific first).
+    patterns: list[str] = []
+
+    # ISO date with optional preposition.
+    patterns.append(rf"(?:\b{_RU_PREPS}\s+|\b{_EN_PREPS}\s+)?\d{{4}}-\d{{2}}-\d{{2}}\b")
+
+    # Ru month-name with optional day: "1 мая", "к 25 декабря".
+    ru_month_group = "|".join(_RU_MONTHS.keys())
+    patterns.append(
+        rf"(?:\b{_RU_PREPS}\s+)?\d{{1,2}}\s+(?:{ru_month_group})\w*"
+    )
+
+    # En month-name with optional day: "May 1", "by Jun 15th".
+    en_month_group = "|".join(_EN_MONTHS.keys())
+    patterns.append(
+        rf"(?:\b{_EN_PREPS}\s+)?(?:{en_month_group})\w*\s+\d{{1,2}}(?:st|nd|rd|th)?\b"
+    )
+
+    # Relative phrases.
+    patterns.append(rf"\b{_RU_PREPS}\s+(?:сегодня|завтра|послезавтра)\b")
+    patterns.append(r"\b(?:сегодня|завтра|послезавтра)\b")
+    patterns.append(rf"\b{_EN_PREPS}\s+(?:today|tomorrow)\b")
+    patterns.append(r"\b(?:today|tomorrow)\b")
+    patterns.append(r"к\s+концу\s+недели\b")
+    patterns.append(r"end of (?:the )?week\b")
+    patterns.append(r"на\s+следующей\s+недел[еию]\b")
+    patterns.append(r"next\s+week\b")
+
+    # Weekday names with optional preposition.
+    ru_wd_group = "|".join(_RU_WEEKDAYS.keys())
+    patterns.append(rf"(?:\b{_RU_PREPS}\s+)?(?:{ru_wd_group})\w*")
+    en_wd_group = "|".join(_EN_WEEKDAYS.keys())
+    patterns.append(rf"(?:\b{_EN_PREPS}\s+)?(?:{en_wd_group})\b")
+
+    out = text
+    for pat in patterns:
+        new = re.sub(pat, "", out, count=1, flags=re.IGNORECASE)
+        if new != out:
+            out = new
+            break
+
+    # Tidy up leftover whitespace and trailing punctuation.
+    out = re.sub(r"\s{2,}", " ", out).strip(" ,.;:—-")
+    return out
+
+
+__all__ = ["resolve_due_date", "strip_date_phrase"]

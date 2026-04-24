@@ -65,6 +65,12 @@ _EN_MONTHS: dict[str, int] = {
 
 _ISO_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
+# Numeric formats commonly used in Russian / European contexts:
+#   DD.MM.YYYY · DD.MM.YY · DD.MM · DD/MM/YYYY · DD/MM
+_NUMERIC_DATE_RE = re.compile(
+    r"\b(?P<d>\d{1,2})[./](?P<m>\d{1,2})(?:[./](?P<y>\d{2,4}))?\b"
+)
+
 
 def _next_weekday(today: date, target: int) -> date:
     """Smallest positive offset that lands on `target` (0..6, Mon=0).
@@ -90,11 +96,108 @@ def _next_day_month(today: date, day: int, month: int) -> date | None:
     return None
 
 
+def _last_day_of_month(year: int, month: int) -> date:
+    if month == 12:
+        return date(year, 12, 31)
+    first_of_next = date(year, month + 1, 1)
+    return first_of_next - timedelta(days=1)
+
+
+def _first_day_of_next_month(today: date) -> date:
+    if today.month == 12:
+        return date(today.year + 1, 1, 1)
+    return date(today.year, today.month + 1, 1)
+
+
+def _try_numeric_date(text: str, today: date) -> date | None:
+    """Handle DD.MM.YYYY · DD.MM.YY · DD.MM · DD/MM · DD/MM/YYYY.
+
+    Bare DD.MM (no year): choose the next future occurrence — i.e. this
+    year if the date is still ahead, next year otherwise. Matches the
+    day-month logic for named months."""
+    for m in _NUMERIC_DATE_RE.finditer(text):
+        day = int(m.group("d"))
+        month = int(m.group("m"))
+        year_raw = m.group("y")
+        if not (1 <= day <= 31 and 1 <= month <= 12):
+            continue
+        if year_raw is not None:
+            year = int(year_raw)
+            if year < 100:
+                year += 2000
+            try:
+                return date(year, month, day)
+            except ValueError:
+                continue
+        # No year given — pick the next future occurrence.
+        return _next_day_month(today, day=day, month=month)
+    return None
+
+
+def _try_month_boundary(lo: str, today: date) -> date | None:
+    if re.search(r"к концу месяца|end of (?:the )?month", lo):
+        return _last_day_of_month(today.year, today.month)
+    if re.search(r"в начале следующего месяца|beginning of next month", lo):
+        return _first_day_of_next_month(today)
+    if re.search(r"к концу года|end of (?:the )?year", lo):
+        return date(today.year, 12, 31)
+    if re.search(r"в этом месяце|this month", lo):
+        return _last_day_of_month(today.year, today.month)
+    return None
+
+
+# Bare Russian month names (no day): "к маю", "в июне", "by May".
+_RU_MONTH_ALONE = {
+    "январ": 1,
+    "феврал": 2,
+    "март": 3,
+    "апрел": 4,
+    "ма[йеяю]": 5,  # май / мая / мае / маю
+    "июн": 6,
+    "июл": 7,
+    "август": 8,
+    "сентябр": 9,
+    "октябр": 10,
+    "ноябр": 11,
+    "декабр": 12,
+}
+
+
+def _try_month_alone(lo: str, today: date) -> date | None:
+    """'к маю', 'в июне', 'by May' with no day — resolve to 1st of the
+    next future occurrence of that month."""
+    # Russian with a preposition so we don't accidentally strip a
+    # surname that happens to be the stem.
+    for stem, month in _RU_MONTH_ALONE.items():
+        if re.search(rf"\b(?:к|до|в)\s+{stem}\w*\b", lo):
+            d = _next_day_month(today, day=1, month=month)
+            if d is not None:
+                return d
+    for stem, month in _EN_MONTHS.items():
+        if re.search(rf"\bby\s+{stem}\w*\b", lo):
+            d = _next_day_month(today, day=1, month=month)
+            if d is not None:
+                return d
+    return None
+
+
 def _try_in_n_units(lo: str, today: date) -> date | None:
     """Handle "через N дней / недель / месяцев" and "in N days / weeks / months".
 
     A missing number means 1: "через неделю" → +7 days.
+    "через пару" / "a couple of" counts as N=2.
     """
+    # Russian: "через пару <unit>".
+    m = re.search(r"\bчерез\s+пар[уы]\s+(день|дн[яей]|недел\w+|месяц\w*)", lo)
+    if m:
+        unit = m.group(1)
+        if unit.startswith("дн") or unit == "день":
+            return today + timedelta(days=2)
+        if unit.startswith("недел"):
+            return today + timedelta(days=14)
+        if unit.startswith("месяц"):
+            return today + timedelta(days=60)
+
     # Russian: "через [N] <unit>". N is optional.
     m = re.search(
         r"\bчерез\s+(?:(\d+)\s+)?(день|дн[яей]|недел\w+|месяц\w*|год\w*)",
@@ -111,6 +214,14 @@ def _try_in_n_units(lo: str, today: date) -> date | None:
             return today + timedelta(days=30 * n)
         if unit.startswith("год"):
             return today + timedelta(days=365 * n)
+
+    # English "a couple of <unit>".
+    m = re.search(r"\ba couple of\s+(day|week|month|year)s?\b", lo)
+    if m:
+        unit = m.group(1)
+        return today + timedelta(
+            days={"day": 2, "week": 14, "month": 60, "year": 2 * 365}[unit]
+        )
 
     # English: "in [N] day/week/month/year(s)". "in a week" = 1 week.
     m = re.search(
@@ -166,6 +277,11 @@ def resolve_due_date(text: str, today: date) -> date | None:
         except ValueError:
             pass
 
+    # Numeric formats: DD.MM.YYYY · DD/MM · etc.
+    d = _try_numeric_date(text, today)
+    if d is not None:
+        return d
+
     # Relative phrases.
     if re.search(r"\bсегодня\b", lo) or re.search(r"\btoday\b", lo):
         return today
@@ -184,8 +300,23 @@ def resolve_due_date(text: str, today: date) -> date | None:
     if d is not None:
         return d
 
-    # "N <month>" / "<month> N" — "к 1 мая", "by May 5".
+    # Month boundaries ("к концу месяца", "end of year").
+    d = _try_month_boundary(lo, today)
+    if d is not None:
+        return d
+
+    # "на этой неделе" / "this week" → Friday of the current week.
+    if re.search(r"на этой недел[еию]|this week\b", lo):
+        return _next_weekday(today, 4)
+
+    # "N <month>" / "<month> N" — "к 1 мая", "by May 5". Must run
+    # before _try_month_alone so "by May 5" doesn't resolve to 1 May.
     d = _try_day_month(lo, today)
+    if d is not None:
+        return d
+
+    # Bare month names ("к маю", "by May"), no day.
+    d = _try_month_alone(lo, today)
     if d is not None:
         return d
 
@@ -247,13 +378,40 @@ def strip_date_phrase(text: str) -> str:
     patterns.append(r"на\s+следующей\s+недел[еию]\b")
     patterns.append(r"next\s+week\b")
 
-    # "через N <unit>" / "in N <unit>".
+    # "через N <unit>" / "in N <unit>" / "через пару <unit>" / "a couple of".
+    patterns.append(
+        r"\bчерез\s+пар[уы]\s+(?:день|дн[яей]|недел\w+|месяц\w*)"
+    )
     patterns.append(
         r"\bчерез\s+(?:\d+\s+)?(?:день|дн[яей]|недел\w+|месяц\w*|год\w*)"
     )
     patterns.append(
+        r"\b(?:in\s+)?a couple of\s+(?:day|week|month|year)s?\b"
+    )
+    patterns.append(
         r"\bin\s+(?:\d+|a|an)\s+(?:day|week|month|year)s?\b"
     )
+
+    # Numeric date formats, with optional leading preposition.
+    patterns.append(
+        rf"(?:\b{_RU_PREPS}\s+|\b{_EN_PREPS}\s+)?\d{{1,2}}[./]\d{{1,2}}(?:[./]\d{{2,4}})?\b"
+    )
+
+    # Month boundaries.
+    patterns.append(r"к концу месяца|end of (?:the )?month")
+    patterns.append(r"к концу года|end of (?:the )?year")
+    patterns.append(r"в этом месяце|this month")
+    patterns.append(r"в начале следующего месяца|beginning of next month")
+
+    # Bare month names with prepositions.
+    ru_month_alone_group = "|".join(_RU_MONTH_ALONE.keys())
+    patterns.append(rf"\b(?:к|до|в)\s+(?:{ru_month_alone_group})\w*\b")
+    en_month_alone_group = "|".join(_EN_MONTHS.keys())
+    patterns.append(rf"\bby\s+(?:{en_month_alone_group})\w*\b")
+
+    # "на этой неделе" / "this week".
+    patterns.append(r"\bна этой недел[еию]\b")
+    patterns.append(r"\bthis week\b")
 
     # Weekday names with optional preposition.
     ru_wd_group = "|".join(_RU_WEEKDAYS.keys())

@@ -523,20 +523,58 @@ per-call latency does not stack.
 
 #### FR-CR-04-3 — Deterministic date resolver
 
-`resolve_due_date(text, today)` understands:
-
-- ISO `YYYY-MM-DD`.
-- Relative phrases: `сегодня / завтра / послезавтра` + English
-  equivalents, `к концу недели`, `на следующей неделе`.
-- Russian + English weekday names with any preposition (`к пятнице`,
-  `ко вторнику`, `by Friday`). Offset rolls forward when today is the
-  same weekday.
-- Day + month name in both orders: `1 мая`, `до 5 июня`, `by May 15`,
-  `Jun 15th`. Dates that already passed this year roll into next year.
-
+`resolve_due_date(text, today)` understands the following patterns.
 The resolver is authoritative: whatever it finds wins over anything
-the LLM may have emitted. If it finds nothing, the LLM's hint (if any)
+the LLM may have emitted; if it finds nothing, the LLM's hint (if any)
 is kept.
+
+**Absolute formats:**
+- ISO `YYYY-MM-DD` — `2026-05-01`.
+- Russian / European numeric: `DD.MM.YYYY`, `DD.MM.YY`, `DD.MM`,
+  `DD/MM/YYYY`, `DD/MM`. Bare DD.MM (no year) picks the next future
+  occurrence. With optional leading preposition `до / к / на / by`.
+
+**Relative phrases:**
+- `сегодня / today`, `завтра / tomorrow`, `послезавтра / day after
+  tomorrow`.
+- `к концу недели / end of [the] week` → Friday of the current week.
+- `на этой неделе / this week` → same Friday.
+- `на следующей неделе / next week` → upcoming Monday.
+- `к концу месяца / end of [the] month` → last day of the current
+  month.
+- `к концу года / end of [the] year` → 31 December of the current
+  year.
+- `в этом месяце / this month` → last day of the current month.
+- `в начале следующего месяца / beginning of next month` → 1st of
+  next month.
+
+**Weekday names** (Russian + English) with any optional preposition
+(`к / до / на / ко / by / to / on / before`):
+- `к пятнице`, `до понедельника`, `ко вторнику`, `by Friday`,
+  `on Thursday`. Offset rolls forward when today is the same
+  weekday.
+
+**Day + month name** in both orders:
+- Russian: `1 мая`, `до 5 июня`, `к 25 декабря`.
+- English: `May 15`, `by Jun 15th`, `Apr 3rd`.
+- Dates that already passed this year roll into next year.
+
+**Bare month names** (no day) with a preposition:
+- Russian: `к маю`, `в июне`, `до мая` → 1st of the next occurrence
+  of that month.
+- English: `by May`, `by June`.
+
+**Through / in N units:**
+- Russian: `через N день/дня/дней/недель/месяцев/лет`. Missing
+  number means 1 (`через неделю` = +7 days).
+- Russian `через пару дней / недель / месяцев` → N = 2.
+- English: `in N day(s) / week(s) / month(s) / year(s)`, also
+  `in a week / in an hour / a couple of weeks`.
+
+**Not understood** (deliberately left null so the follow-up loop can
+ask):
+- `когда-нибудь`, `скоро`, `в ближайшее время`, `позже`,
+  `some day`, `asap` — too vague to assign an ISO date.
 
 #### FR-CR-04-4 — Focused owner prompt with conversation context
 

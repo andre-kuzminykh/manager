@@ -54,6 +54,29 @@ FRIDAY = date(2026, 4, 24)
         ("in a week we ship", date(2026, 5, 1)),
         ("in 2 days", date(2026, 4, 26)),
         ("in 3 weeks", date(2026, 5, 15)),
+        # Numeric formats.
+        ("отчёт до 01.05.2026", date(2026, 5, 1)),
+        ("до 1/5", date(2026, 5, 1)),
+        ("к 15.06.26", date(2026, 6, 15)),
+        ("до 31.12", date(2026, 12, 31)),
+        ("15/06/26", date(2026, 6, 15)),
+        # Month boundaries.
+        ("к концу месяца", date(2026, 4, 30)),
+        ("к концу года", date(2026, 12, 31)),
+        ("end of month", date(2026, 4, 30)),
+        # Month-alone.
+        ("к маю", date(2026, 5, 1)),
+        ("в июне отчёт", date(2026, 6, 1)),
+        ("by May", date(2026, 5, 1)),
+        # "на этой неделе" maps to this Friday (which is next Friday today
+        # since 2026-04-24 IS Friday — the offset is always strictly
+        # positive).
+        ("на этой неделе всё готово", date(2026, 5, 1)),
+        ("this week", date(2026, 5, 1)),
+        # "пара".
+        ("через пару дней", date(2026, 4, 26)),
+        ("через пару недель", date(2026, 5, 8)),
+        ("a couple of weeks", date(2026, 5, 8)),
     ],
 )
 def test_resolve_due_date_hits(text, expected):
@@ -126,6 +149,19 @@ def test_classifier_fills_missing_due_date_locally(monkeypatch):
         ("отгрузить через 3 дня", "отгрузить"),
         ("ship this in 3 days", "ship this"),
         ("publish in a week", "publish"),
+        # Numeric / formatted dates with optional preposition.
+        ("отчёт до 01.05.2026", "отчёт"),
+        ("подготовить к 15/06", "подготовить"),
+        # Month boundaries.
+        ("подготовить слайды к концу месяца", "подготовить слайды"),
+        ("собрать данные к концу года", "собрать данные"),
+        # Bare months.
+        ("всё готово к маю", "всё готово"),
+        ("finalize by June", "finalize"),
+        # "this week" / "на этой неделе".
+        ("запушить на этой неделе", "запушить"),
+        # "couple of" phrasing.
+        ("ship this in a couple of weeks", "ship this"),
     ],
 )
 def test_strip_date_phrase(title, expected):

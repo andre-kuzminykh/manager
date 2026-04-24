@@ -58,12 +58,16 @@ def create_task_from_draft(
 
     owner_user_id = payload.get("owner_user_id")
     owner_display_name = payload.get("owner_display_name")
+    owner_assumed = False
     if not owner_user_id and not owner_display_name:
         # No owner mentioned at all → default to the author of the source
-        # message. If the user mentioned a name we couldn't resolve, leave
-        # owner_user_id empty so the bot will keep asking instead of
-        # silently re-assigning to the author.
+        # message so the task always has SOMEONE responsible. Mark this as
+        # an assumption so the UI can show "(предположительно ты)" and the
+        # human can reassign. If the user mentioned a name we couldn't
+        # resolve, leave owner_user_id empty so the bot keeps asking.
         owner_user_id = fallback_author_slack_id
+        if owner_user_id:
+            owner_assumed = True
 
     due = _coerce_due(payload.get("due_date"))
     status = _initial_status(due)
@@ -84,6 +88,7 @@ def create_task_from_draft(
         source_permalink=source.get("permalink"),
         context_snapshot_id=context_snapshot_id,
         created_by_slack_user_id=draft.created_by_slack_user_id or fallback_author_slack_id,
+        extra={"owner_assumed": True} if owner_assumed else None,
     )
     session.add(task)
     draft.state = ActionDraftState.confirmed

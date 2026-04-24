@@ -396,10 +396,18 @@ def task_card(
     if is_subscribed:
         meta_parts.append("subscribed")
     if task.owner_display_name or task.owner_user_id:
+        assumed_suffix = (
+            " _(предположительно)_"
+            if (task.extra or {}).get("owner_assumed")
+            else ""
+        )
         meta_parts.append(
-            f"owner: <@{task.owner_user_id}>"
-            if task.owner_user_id
-            else f"owner: {task.owner_display_name}"
+            (
+                f"owner: <@{task.owner_user_id}>"
+                if task.owner_user_id
+                else f"owner: {task.owner_display_name}"
+            )
+            + assumed_suffix
         )
     if task.due_date:
         meta_parts.append(f"due: {task.due_date.isoformat()}")
@@ -789,14 +797,16 @@ def admin_review_card(
     source_permalink: str | None = None,
 ) -> list[dict[str, Any]]:
     """CR-03 FR-CR-03-4: admin-only review widget with Confirm/Edit/Reject."""
+    owner_label = (
+        f"<@{task.owner_user_id}>"
+        if task.owner_user_id
+        else (task.owner_display_name or "—")
+    )
+    if (task.extra or {}).get("owner_assumed"):
+        owner_label += " _(предположительно)_"
     fields = [
         ("Title", task.title or "—"),
-        (
-            "Owner",
-            f"<@{task.owner_user_id}>"
-            if task.owner_user_id
-            else (task.owner_display_name or "—"),
-        ),
+        ("Owner", owner_label),
         ("Due", task.due_date.isoformat() if task.due_date else "—"),
         ("Priority", task.priority.value if task.priority else "—"),
     ]

@@ -19,6 +19,7 @@ dependencies = [
     "dateparser>=1.2",
     "anthropic>=0.40",
     "openai>=1.40",
+    "langgraph>=1.0",
     "google-api-python-client>=2.120",
     "google-auth>=2.29",
     "google-auth-oauthlib>=1.2",

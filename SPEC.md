@@ -23,11 +23,13 @@ This document consolidates:
   message. **Reverted from original CR-03 proposal:** the always-create +
   admin-only confirmation flow for passive detection has been replaced by
   CR-04's offer-first draft card (see §10 below).
-- **CR-04** — structured extraction pipeline (detect → parallel
-  title/owner/date → assemble), offer-first passive UX with
-  Accept/Edit/Reject, mention-with-follow-up parity for assumed owners,
-  date-phrase stripping in title/description, and Whisper transcription
-  for Slack voice notes.
+- **CR-04** — structured extraction pipeline wired as a LangGraph
+  state machine (`detect → [describe | owner | date] → assemble`),
+  offer-first passive UX with Accept/Edit/Reject, mention-with-
+  follow-up parity for assumed owners, date-phrase stripping in
+  title/description, Whisper transcription for Slack voice notes, and
+  an LLM-first date node on a stronger model (gpt-4o) backed by a
+  Python validator/fallback.
 
 ## 1. Operating modes
 
@@ -480,7 +482,12 @@ Migration `0007_admin_review_audit` (later): no new tables — we reuse
 
 - **Reliable extraction on small models**. Split the monolithic intent
   prompt into focused stages so gpt-4o-mini doesn't have to juggle
-  detection + title + owner + date in one breath.
+  detection + title + owner + date in one breath. Each concern has its
+  own prompt, its own tool schema, its own graph node.
+- **Everything is an LLM prompt**. Detection, description, owner,
+  date — all four concerns are answered by focused LLM calls. The
+  Python date resolver stays as a validator and fallback: if the LLM
+  emits null or a back-dated / malformed ISO, the resolver rescues.
 - **Offer-first passive**. A passive message never auto-creates a task.
   The bot posts a pre-filled draft card with Accept / Edit / Reject and
   — in parallel — asks the missing field in the source thread. The
@@ -494,39 +501,67 @@ Migration `0007_admin_review_audit` (later): no new tables — we reuse
 
 ### 10.2 Functional requirements
 
-#### FR-CR-04-1 — Detection stage
+#### FR-CR-04-1 — Detection node
 
-A focused LLM call with its own system prompt
-(`app/intent/detect_prompt.py`) answers a single question: *is this
-message a task?* Output schema: `{is_task: bool, confidence: number in
-[0,1], reasoning: string}`. If `is_task` is false, the pipeline returns
-`no_action` immediately and no further LLM calls are made.
+A focused LLM call (`app/intent/detect_prompt.py`) answers a single
+question: *is this message a task?* Output schema:
+`{is_task: bool, confidence: number in [0,1], reasoning: string}`.
+When `is_task` is false, the LangGraph router skips every extraction
+node and the pipeline returns `no_action` directly from `assemble`.
+Model: the default backend model (gpt-4o-mini).
 
-#### FR-CR-04-2 — Parallel extraction
+#### FR-CR-04-2 — Parallel extraction via LangGraph
 
-When Stage 1 says yes, three concerns are extracted **concurrently**:
+The pipeline is compiled as a `StateGraph`:
 
-- **2a — Title / description / priority**: LLM call with
-  `title_prompt.py`. Schema is strictly these three fields — the prompt
-  does not expose owner or due_date.
-- **2b — Owner**: LLM call with `owner_prompt.py`. Receives the same
-  10-message context window so the model can distinguish "питчдек для
-  Ивана" (audience) from "Иван, сделай питчдек" (assignee). Output is
-  `{slack_user_id, display_name, reasoning}` with "no assignee" being a
-  valid answer that **overrides** any owner the main pass may have
-  guessed.
-- **2c — Due date**: deterministic Python
-  (`app/intent/date_resolver.py`), no LLM.
+```
+START → detect → is_task?
+                  │
+                  ├── false ──▶ assemble ─▶ END
+                  │
+                  └── true  ──▶ describe ┐
+                                owner    ├─▶ assemble ─▶ END
+                                date     ┘
+```
 
-Stages 2a and 2b run on a `ThreadPoolExecutor` so a small LLM's
-per-call latency does not stack.
+LangGraph's conditional-edges fan-out runs `describe`, `owner`, and
+`date` concurrently. Each extractor is pure with respect to the
+state and writes only its own keys, so parallel merges are safe.
 
-#### FR-CR-04-3 — Deterministic date resolver
+- **describe**: title / description / priority (LLM,
+  `title_prompt.py`). Both `title` and `description` are piped
+  through `strip_date_phrase` so date hints end up only in
+  `due_date`.
+- **owner**: assignee (LLM, `owner_prompt.py`). Sees the same
+  10-message context window to distinguish "питчдек для Ивана"
+  (audience) from "Иван, сделай питчдек" (assignee). A "no assignee"
+  answer overrides whatever detect/describe may have guessed.
+- **date**: see FR-CR-04-3 below.
 
-`resolve_due_date(text, today)` understands the following patterns.
-The resolver is authoritative: whatever it finds wins over anything
-the LLM may have emitted; if it finds nothing, the LLM's hint (if any)
-is kept.
+#### FR-CR-04-3 — Date node (LLM-first, Python-validated)
+
+The `date` node is a dedicated LLM call with its own focused prompt
+(`app/intent/date_prompt.py`). It runs on a **stronger model**
+(`OPENAI_DATE_MODEL`, default `gpt-4o`) because gpt-4o-mini was
+demonstrably unreliable on relative-date phrases. Output:
+`{due_date: ISO or null, reasoning: string}`.
+
+A Python resolver (`app/intent/date_resolver.py`) runs as a **safety
+net**:
+
+1. The node parses the LLM's `due_date`. Only accepted when it parses
+   to a valid ISO date AND the date is strictly after `current_date`
+   (or equal to it if the source text literally contains
+   "сегодня"/"today"). Back-dated hallucinations are rejected.
+2. If the LLM's answer was null OR rejected, the node calls
+   `resolve_due_date(source_text, today)` and uses its result.
+3. If both return null, `due_date` stays null and the follow-up loop
+   asks the user.
+
+The resolver is also used by `strip_date_phrase` (FR-CR-04-5) to
+clean titles and descriptions, so the resolver's set of recognised
+patterns still defines the "canonical" Russian / English phrasings
+the product handles without LLM:
 
 **Absolute formats:**
 - ISO `YYYY-MM-DD` — `2026-05-01`.

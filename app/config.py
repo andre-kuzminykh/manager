@@ -34,6 +34,10 @@ class Settings(BaseSettings):
 
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    # CR-04: stronger model dedicated to the date node, which gpt-4o-mini
+    # cannot handle reliably on relative phrases. Defaults to gpt-4o; set
+    # to empty string to fall back to openai_model.
+    openai_date_model: str = Field(default="gpt-4o", alias="OPENAI_DATE_MODEL")
 
     # Google
     google_client_id: str = Field(default="", alias="GOOGLE_CLIENT_ID")

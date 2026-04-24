@@ -104,6 +104,7 @@ class AnthropicBackend:
         tool_name: str,
         tool_description: str,
         tool_parameters: dict[str, Any],
+        model: str | None = None,
     ) -> dict[str, Any] | None:
         tool = {
             "name": tool_name,
@@ -111,7 +112,7 @@ class AnthropicBackend:
             "input_schema": tool_parameters,
         }
         response = self._client.messages.create(
-            model=self._model,
+            model=model or self._model,
             max_tokens=1024,
             system=[
                 {
@@ -176,6 +177,7 @@ class OpenAIBackend:
         tool_name: str,
         tool_description: str,
         tool_parameters: dict[str, Any],
+        model: str | None = None,
     ) -> dict[str, Any] | None:
         tool = {
             "type": "function",
@@ -186,7 +188,7 @@ class OpenAIBackend:
             },
         }
         response = self._client.chat.completions.create(
-            model=self._model,
+            model=model or self._model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

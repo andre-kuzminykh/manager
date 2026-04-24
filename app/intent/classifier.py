@@ -94,12 +94,14 @@ def classify_with_backend(
     source_text: str,
 ) -> IntentClassification:
     try:
+        date_model = (get_settings().openai_date_model or None)
         classification = run_pipeline(
             backend=backend,
             source_text=source_text,
             context_messages=context.flat_messages(),
             author_user_id=context.source_message.get("user"),
             today=date.today(),
+            date_model=date_model,
         )
     except Exception as e:  # noqa: BLE001 — degrade to rules
         log.error("intent_pipeline_failed", error=str(e))

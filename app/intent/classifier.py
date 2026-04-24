@@ -14,6 +14,7 @@ from app.intent.llm_backends import (
     LLMBackend,
     OpenAIBackend,
 )
+from app.intent.date_resolver import resolve_due_date
 from app.intent.prompts import SYSTEM_PROMPT, build_user_prompt
 from app.intent.rules import prefilter_intent
 from app.logging_setup import get_logger
@@ -122,7 +123,17 @@ def classify_with_backend(
             reasoning="LLM did not produce a tool_use block",
         )
 
-    return _parse_classification(tool_input)
+    classification = _parse_classification(tool_input)
+    # Safety net: small LLMs (gpt-4o-mini) routinely ignore the weekday
+    # table and leave due_date null. Resolve obvious phrases locally.
+    if (
+        classification.task is not None
+        and classification.task.due_date is None
+    ):
+        resolved = resolve_due_date(source_text, date.today())
+        if resolved is not None:
+            classification.task.due_date = resolved
+    return classification
 
 
 # -- Back-compat wrappers kept for existing tests --------------------------

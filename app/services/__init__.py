@@ -25,6 +25,7 @@ from app.services.transitions import (
     InvalidTransition,
     TransitionService,
 )
+from app.services.thread_reminders import ReminderReport, send_thread_reminders
 from app.services.weekly_plan import WeeklyPlanReport, send_weekly_plan
 from app.services.workload import WorkloadEstimator
 
@@ -48,8 +49,10 @@ __all__ = [
     "prompt_for",
     "refresh_task_card",
     "resolve_owner_hint",
+    "ReminderReport",
     "send_admin_evening_digest",
     "send_admin_morning_watch",
+    "send_thread_reminders",
     "send_weekly_plan",
     "sync_admin_flags",
 ]

@@ -23,6 +23,7 @@ from app.services import (
     DigestService,
     send_admin_evening_digest,
     send_admin_morning_watch,
+    send_thread_reminders,
     send_weekly_plan,
 )
 from app.slack_bot.rate_limiter import RateAwareSlackSender
@@ -37,7 +38,12 @@ def main(argv: list[str] | None = None) -> int:
         "--type",
         required=True,
         choices=[k.value for k in DigestKind]
-        + ["weekly-plan", "admin-evening", "admin-morning"],
+        + [
+            "weekly-plan",
+            "admin-evening",
+            "admin-morning",
+            "thread-reminders",
+        ],
         help="Digest to send.",
     )
     args = parser.parse_args(argv)
@@ -80,6 +86,18 @@ def main(argv: list[str] | None = None) -> int:
             recipients=report.recipients,
             tasks_included=report.tasks_included,
             skipped_idempotent=report.skipped_idempotent,
+        )
+        return 0
+
+    if args.type == "thread-reminders":
+        with session_scope() as session:
+            report = send_thread_reminders(session, sender=sender)
+        log.info(
+            "thread_reminders_sent",
+            reminders=report.reminders,
+            skipped_idempotent=report.skipped_idempotent,
+            skipped_no_thread=report.skipped_no_thread,
+            skipped_not_relevant=report.skipped_not_relevant,
         )
         return 0
 

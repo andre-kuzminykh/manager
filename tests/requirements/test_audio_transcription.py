@@ -1,4 +1,6 @@
-"""Slack audio attachments (voice notes, uploaded audio files) are
+"""Requirement coverage: FR-CR-04-8 (audio input via Whisper).
+
+Slack audio attachments (voice notes, uploaded audio files) are
 transcribed via OpenAI Whisper and fed into the normal intent pipeline
 as the source text. Text captions, if present, are preserved and the
 transcript is appended."""

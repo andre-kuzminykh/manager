@@ -1,4 +1,7 @@
-"""Owner (and admins) can edit a task from the task card itself via a
+"""Requirement coverage: FR-CR-04-10 (task-card Edit button for owner
+and admins), FR-CR-03-5 (editable tasks with history).
+
+Owner (and admins) can edit a task from the task card itself via a
 modal. Bystanders that click the action get an ephemeral denial and no
 modal is opened.
 """

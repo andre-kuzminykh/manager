@@ -1,4 +1,7 @@
-"""When the LLM classifies a @mention as no_action (regular behaviour on
+"""Requirement coverage: FR-CR-04-3 (date resolver runs on the
+@mention synth fallback too), FR-CR-02-1 (mention-always-replies).
+
+When the LLM classifies a @mention as no_action (regular behaviour on
 gpt-4o-mini), handle_app_mention falls back to a synthesised create_task
 draft. That fallback must still pick up explicit date phrases — otherwise
 the user types "ко вторнику" and the task lands in Backlog with due=null.

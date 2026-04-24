@@ -1,4 +1,6 @@
-"""When the LLM returns no_action but the rule-based prefilter strongly
+"""Requirement coverage: FR-CR-04-9 (prefilter safety net).
+
+When the LLM returns no_action but the rule-based prefilter strongly
 matches a task/meeting keyword, classify_with_backend overrides the
 LLM's answer with the prefilter's hint. This keeps the passive path from
 going silent on clear phrases like "надо подготовить заметки к 1 мая"

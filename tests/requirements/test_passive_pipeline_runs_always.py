@@ -1,4 +1,7 @@
-"""Passive messages used to short-circuit to no_action whenever the
+"""Requirement coverage: FR-CR-04-9 (prefilter is no longer a gate;
+pipeline always runs on passive).
+
+Passive messages used to short-circuit to no_action whenever the
 rule-based prefilter found no task/meeting keyword. That fence was too
 strict: real Russian phrasings like "нам нужно починить X к пятнице"
 never reached the LLM detection stage. Now the pipeline runs on every

@@ -1,4 +1,7 @@
-"""Passive path UX (product decision 2026-04-24):
+"""Requirement coverage: FR-CR-04-6 (offer-first passive UX with
+Accept / Edit / Reject + immediate follow-up).
+
+Passive path UX (product decision 2026-04-24):
 
 - Passive never auto-creates.
 - Instead it posts a PRE-FILLED draft card (title / owner / priority /

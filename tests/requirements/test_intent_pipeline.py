@@ -1,6 +1,8 @@
-"""Pipeline architecture tests.
+"""Requirement coverage: FR-CR-04-1 (Detection stage),
+FR-CR-04-2 (Parallel extraction), FR-CR-04-5 (date stripping from
+title/description), NFR-CR-04-1 (per-stage resilience).
 
-Spec the user asked for:
+Pipeline architecture tests:
   Stage 1 — a single LLM call decides: is this a task? (yes / no).
   Stage 2 — if yes, three concerns are extracted IN PARALLEL:
             2a. description / title / priority  (LLM)

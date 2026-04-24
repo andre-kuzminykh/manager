@@ -1,6 +1,6 @@
 # Slack Task Manager — Specification
 
-Version: 4 (CR-01 + CR-02 + CR-03 merged)
+Version: 5 (Base + CR-01 + CR-02 + CR-03 refined + CR-04)
 
 This document consolidates:
 
@@ -18,9 +18,16 @@ This document consolidates:
   same conversation.
 - **CR-03** — admin-run team operations: full ingestion of every message in
   bot-visible channels, automatic employees directory from Slack metadata,
-  admin-only task confirmation with audit trail, always-create policy for
-  detected tasks, weekly plan on Sundays, artifact on completion, and
-  daily reminder threads in the source message.
+  editable tasks with audit trail, weekly plan on Sundays, artifact on
+  completion, admin digests and daily reminder threads in the source
+  message. **Reverted from original CR-03 proposal:** the always-create +
+  admin-only confirmation flow for passive detection has been replaced by
+  CR-04's offer-first draft card (see §10 below).
+- **CR-04** — structured extraction pipeline (detect → parallel
+  title/owner/date → assemble), offer-first passive UX with
+  Accept/Edit/Reject, mention-with-follow-up parity for assumed owners,
+  date-phrase stripping in title/description, and Whisper transcription
+  for Slack voice notes.
 
 ## 1. Operating modes
 
@@ -348,34 +355,23 @@ reflected by setting `Employee.is_admin = True`. Changing the env → DB flag
 flips within a minute. A helper `is_admin(user_id) -> bool` is used across
 all admin-gated code paths.
 
-#### FR-CR-03-3 — Always-create passive task
+#### FR-CR-03-3 — Passive detection policy (REVERTED, see CR-04)
 
-When the classifier (prefilter + LLM) returns `create_task` with confidence
-≥ `INTENT_CONFIDENCE_HIGH`, the bot persists a `Task` immediately (status
-`backlog`, missing fields left empty). No more "draft → confirm → create".
-The draft row is still persisted for audit, pointing at the created task.
+> **Historical:** the original proposal was to auto-create a `Task` whenever
+> passive classification reached `INTENT_CONFIDENCE_HIGH` and hand it to
+> admins for review. Product feedback after rollout found the admin-only
+> flow too gated for a small team. CR-04 replaces this with a user-facing
+> pre-filled draft card (Accept / Edit / Reject). The requirement ID is
+> retained for traceability but the behaviour described here is no longer
+> implemented; see **FR-CR-04-6**.
 
-Lower-confidence paths keep the existing prompt / silent behaviour.
+#### FR-CR-03-4 — Admin confirmation (REVERTED, see CR-04)
 
-#### FR-CR-03-4 — Admin-only confirmation
-
-Each auto-created task is broadcast to the admin(s):
-
-1. Ephemeral message in the source thread tagging admin with **Confirm /
-   Edit / Reject** buttons (`chat.postEphemeral`, visible to admin only).
-2. DM to each admin with the full task-card + the same buttons.
-3. Entry in `audit_logs` (`category=admin_review`,
-   `action=awaiting_confirmation`).
-
-**Confirm** → task becomes `todo` (if due ≤ 7 days) / stays `backlog`;
-assignee gets their own subscription anchor DM.
-
-**Edit** → opens the modal (prefilled) for admin; on submit, updates fields
-and stays in the same lifecycle bucket.
-
-**Reject** → deletes the task and writes an audit row
-(`action=admin_rejected`). The original ephemeral message and DM are
-replaced with a `:x: Отклонено` note.
+> **Historical:** admin DM + ephemeral "Confirm / Edit / Reject" on every
+> auto-created task. Replaced by the user-facing draft card in CR-04.
+> Admins keep power over tasks via **FR-CR-03-5** (Edit button is available
+> to admin AND assignee) and the admin digests
+> (**FR-CR-03-8**).
 
 #### FR-CR-03-5 — Editable tasks with history
 
@@ -477,3 +473,294 @@ Migration `0007_admin_review_audit` (later): no new tables — we reuse
 - Marking a task `done` requires a non-empty artifact.
 - Admin's DM card always reflects the current status / artifact within one
   `chat.update` cycle of any edit.
+
+## 10. CR-04 — Structured pipeline, offer-first passive, audio input
+
+### 10.1 Product goals
+
+- **Reliable extraction on small models**. Split the monolithic intent
+  prompt into focused stages so gpt-4o-mini doesn't have to juggle
+  detection + title + owner + date in one breath.
+- **Offer-first passive**. A passive message never auto-creates a task.
+  The bot posts a pre-filled draft card with Accept / Edit / Reject and
+  — in parallel — asks the missing field in the source thread. The
+  author decides whether the task lands in the tracker.
+- **Mention parity for assumed owners**. When @mention creates a task
+  and the owner is only a fallback to the message author, the bot asks
+  "кому назначаем?" in the thread, same machinery as passive.
+- **Voice notes are first-class input**. Slack audio attachments are
+  transcribed via Whisper and fed into the pipeline alongside any
+  typed caption.
+
+### 10.2 Functional requirements
+
+#### FR-CR-04-1 — Detection stage
+
+A focused LLM call with its own system prompt
+(`app/intent/detect_prompt.py`) answers a single question: *is this
+message a task?* Output schema: `{is_task: bool, confidence: number in
+[0,1], reasoning: string}`. If `is_task` is false, the pipeline returns
+`no_action` immediately and no further LLM calls are made.
+
+#### FR-CR-04-2 — Parallel extraction
+
+When Stage 1 says yes, three concerns are extracted **concurrently**:
+
+- **2a — Title / description / priority**: LLM call with
+  `title_prompt.py`. Schema is strictly these three fields — the prompt
+  does not expose owner or due_date.
+- **2b — Owner**: LLM call with `owner_prompt.py`. Receives the same
+  10-message context window so the model can distinguish "питчдек для
+  Ивана" (audience) from "Иван, сделай питчдек" (assignee). Output is
+  `{slack_user_id, display_name, reasoning}` with "no assignee" being a
+  valid answer that **overrides** any owner the main pass may have
+  guessed.
+- **2c — Due date**: deterministic Python
+  (`app/intent/date_resolver.py`), no LLM.
+
+Stages 2a and 2b run on a `ThreadPoolExecutor` so a small LLM's
+per-call latency does not stack.
+
+#### FR-CR-04-3 — Deterministic date resolver
+
+`resolve_due_date(text, today)` understands:
+
+- ISO `YYYY-MM-DD`.
+- Relative phrases: `сегодня / завтра / послезавтра` + English
+  equivalents, `к концу недели`, `на следующей неделе`.
+- Russian + English weekday names with any preposition (`к пятнице`,
+  `ко вторнику`, `by Friday`). Offset rolls forward when today is the
+  same weekday.
+- Day + month name in both orders: `1 мая`, `до 5 июня`, `by May 15`,
+  `Jun 15th`. Dates that already passed this year roll into next year.
+
+The resolver is authoritative: whatever it finds wins over anything
+the LLM may have emitted. If it finds nothing, the LLM's hint (if any)
+is kept.
+
+#### FR-CR-04-4 — Focused owner prompt with conversation context
+
+Owner extraction runs in its own LLM call with a minimal system prompt
+that teaches only the assignee concept. The prompt explicitly lists
+the author id (from `context.source_message.user`) and the 10 previous
+messages, so the model can avoid picking the author or the audience.
+A "no assignee" answer clears whatever the title pass might have
+guessed.
+
+#### FR-CR-04-5 — Date stripping in title / description
+
+`strip_date_phrase(text)` removes the first date-like phrase from a
+string (same patterns the resolver recognises, plus leading
+prepositions). The pipeline pipes both the title and the description
+through it, so date information lives **only** in `due_date`.
+
+#### FR-CR-04-6 — Offer-first passive UX
+
+Passive messages (no `@bot` mention) never auto-create a task.
+Instead, `handle_message`:
+
+1. Persists an `ActionDraft`.
+2. Posts a pre-filled draft card in the source thread with three
+   buttons: **Accept · Edit · Reject**.
+3. Remembers `card_channel` / `card_ts` on the draft so Accept can
+   morph the widget into a task card in place.
+4. Asks the first missing field in the same thread via `prompt_for`,
+   setting `draft.awaiting_field` so subsequent replies are consumed
+   by `_handle_followup_reply`.
+
+Accept → `finalize_draft` creates the task and morphs the widget; any
+remaining gap triggers another follow-up question in the thread.
+Edit → opens the task modal prefilled. Reject → draft marked
+`ignored`, widget deleted.
+
+#### FR-CR-04-7 — Mention follow-up parity for assumed owners
+
+`@mention` still auto-creates. When the resulting Task's owner is a
+fallback to the message author (`task.extra.owner_assumed == True`),
+`_task_payload` reports the owner slot as empty and the handler posts
+the "Кому назначаем?" question in the source thread — same machinery
+as passive, same reply handler. A thread reply with a valid owner
+clears the `owner_assumed` flag so the label `(предположительно)`
+disappears from the card.
+
+#### FR-CR-04-8 — Audio input via Whisper
+
+Slack messages with `files: [{ mimetype: "audio/*" }]` are transcribed
+before the pipeline sees the text:
+
+- `extract_audio_files()` filters the audio attachments.
+- `download_slack_file()` fetches each private URL with the bot token.
+- `transcribe_bytes()` calls OpenAI `whisper-1` with a 25 MB per-file
+  cap.
+- `merge_transcripts_into_text()` preserves any typed caption and
+  appends every transcript newline-separated.
+
+Voice-only messages (empty `text`, at least one audio file) are NOT
+filtered by `_is_ignorable`. Download / transcription failures are
+best-effort: the typed caption still reaches the pipeline.
+
+Bot requires the Slack scope `files:read` to fetch attachments.
+
+#### FR-CR-04-9 — Prefilter safety net
+
+A rule-based keyword prefilter
+(`app/intent/rules.py: prefilter_intent`) complements the LLM
+pipeline as a safety net for small models that occasionally return
+`is_task=false` on unambiguous phrases. When the pipeline result is
+`no_action` but the prefilter hint is `create_task` / `create_meeting`,
+`classify_with_backend` synthesises a minimal draft from the source
+text (with the date phrase stripped) at the prefilter's confidence.
+The prefilter is no longer used as a *gate*: the LLM pipeline runs on
+every passive message when a backend is configured.
+
+#### FR-CR-04-10 — Task-card Edit button
+
+The post-confirm task card exposes an **Edit** button visible only to
+the task owner and to admins. Click opens the task modal prefilled
+with current values. Submit updates the fields, clears the
+`owner_assumed` flag if present, and refreshes the card + DM mirror
+via `refresh_task_card`. English labels throughout the task card
+(`Start`, `Edit`, `Mark done`, `Subscribe`, `Unsubscribe`) replace
+the earlier Russian strings to keep terminology consistent with the
+buttons admins see on mobile.
+
+### 10.3 Non-functional requirements
+
+#### NFR-CR-04-1 — Per-stage resilience
+
+A stage failing (exception, network, malformed output) does not abort
+the whole pipeline. Stage 1 failures return `no_action`. Stage 2a/b
+failures leave their fields null so the follow-up loop fills them
+later. Stage 2c is deterministic and cannot fail.
+
+#### NFR-CR-04-2 — Commit draft before finalize
+
+`handle_message` snapshots everything it needs from the session
+BEFORE leaving the `with session_scope()` block, then calls
+`_always_create_and_admin_review` / the soft-prompt path only after
+the transaction has committed. This prevents the
+"`Draft N not found`" race where a nested `session_scope()` couldn't
+see the uncommitted draft.
+
+### 10.4 Data model delta
+
+No schema changes. CR-04 reuses:
+
+- `action_drafts.card_channel / card_ts / awaiting_field` (from CR-02)
+  to morph widgets on Accept.
+- `tasks.extra.owner_assumed` (JSON flag, set by
+  `create_task_from_draft`) to drive the owner follow-up question.
+
+### 10.5 Acceptance criteria
+
+- Passive "надо подготовить заметки к 1 мая" → draft card with
+  `title = подготовить заметки`, `due_date = 2026-05-01`, owner empty
+  + "Кому назначаем?" asked in thread. Accept creates the task.
+- Mention "@бот надо сделать X" without an explicit assignee →
+  task created, owner = author `(предположительно)`, bot asks "Кому
+  назначаем?" in the source thread. Reply "Иван" updates the owner
+  and clears the label.
+- Voice note (no caption) → Whisper transcript is used as the source
+  text. Typed caption + voice note → both reach the pipeline.
+- Pipeline returns `no_action` on non-task chat without running the
+  Stage-2 LLM calls.
+
+## 11. Requirements → tests traceability
+
+One requirement may have several tests. Tests not listed here either
+cover multiple requirements listed in their module docstring or are
+pure unit tests for internal helpers.
+
+### Base SPEC
+
+| ID    | Test modules                                      |
+|-------|---------------------------------------------------|
+| FR-1  | `test_fr_01_05_ingestion.py`                      |
+| FR-2  | `test_fr_01_05_ingestion.py`                      |
+| FR-3  | `test_fr_01_05_ingestion.py`                      |
+| FR-4  | `test_fr_01_05_ingestion.py`                      |
+| FR-5  | `test_fr_01_05_ingestion.py`                      |
+| FR-6  | `test_fr_06_10_explicit.py`                       |
+| FR-7  | `test_fr_06_10_explicit.py`                       |
+| FR-8  | `test_fr_06_10_explicit.py`                       |
+| FR-9  | `test_fr_06_10_explicit.py`                       |
+| FR-10 | `test_fr_06_10_explicit.py`                       |
+| FR-11 | `test_fr_11_12_persistence.py`                    |
+| FR-12 | `test_fr_11_12_persistence.py`                    |
+| NFR-1  | `test_nfr_01_05.py`                              |
+| NFR-2  | `test_nfr_01_05.py`                              |
+| NFR-3  | `test_nfr_01_05.py`                              |
+| NFR-4  | `test_nfr_01_05.py` (passive-never-auto-creates) |
+| NFR-5  | `test_nfr_01_05.py`                              |
+| NFR-6  | `test_nfr_06_11.py`                              |
+| NFR-7  | `test_nfr_06_11.py`                              |
+| NFR-8  | `test_nfr_06_11.py`                              |
+| NFR-9  | `test_nfr_06_11.py`                              |
+| NFR-10 | `test_nfr_06_11.py`                              |
+| NFR-11 | `test_nfr_06_11.py`                              |
+
+### CR-01
+
+| ID        | Test modules                                    |
+|-----------|--------------------------------------------------|
+| FR-CR-1   | `test_cr01_owners_workload.py`                   |
+| FR-CR-2   | `test_cr01_owners_workload.py`                   |
+| FR-CR-3   | `test_cr01_lifecycle.py`                         |
+| FR-CR-4   | `test_cr01_handlers.py`, `test_cr01_lifecycle.py`|
+| FR-CR-5   | `test_cr01_handlers.py`, `test_subscribe_widget_toggle.py` |
+| FR-CR-6   | `test_cr01_digest.py`                            |
+| FR-CR-7   | `test_cr01_lifecycle.py`, `test_cr01_handlers.py`|
+| NFR-CR-1  | `test_cr01_nfr.py`                               |
+| NFR-CR-2  | `test_cr01_nfr.py`                               |
+| NFR-CR-3  | `test_cr01_nfr.py`                               |
+
+### CR-02
+
+| ID           | Test modules                                    |
+|--------------|--------------------------------------------------|
+| FR-CR-02-1   | `test_mention_always_replies.py`, `test_mention_fallback_always_creates.py`, `test_mention_fallback_date.py` |
+| FR-CR-02-2   | `test_followup_flow.py`, `test_cr02_spec_coverage.py`     |
+| FR-CR-02-3   | `test_followup_flow.py`, `test_multi_field_reply.py`, `test_widget_morph_and_dm.py` |
+| FR-CR-02-4   | `test_draft_card_lifecycle.py`                  |
+| FR-CR-02-5   | `test_cr01_lifecycle.py` (no-open-source test)  |
+| FR-CR-02-6   | `test_daily_digest_tracking.py`                 |
+| FR-CR-02-7   | `test_daily_digest_tracking.py`                 |
+| NFR-CR-02-1  | `test_mention_dedup_upsert.py`                  |
+| NFR-CR-02-2  | `test_mention_always_replies.py`                |
+
+### CR-03 (current scope — admin tooling kept, always-create/admin-review reverted)
+
+| ID           | Test modules                                           |
+|--------------|--------------------------------------------------------|
+| FR-CR-03-1   | `test_cr03_employees_admin.py`                          |
+| FR-CR-03-2   | `test_cr03_employees_admin.py`                          |
+| FR-CR-03-3   | *reverted — see FR-CR-04-6 + `test_passive_draft_card.py`, `test_cr03_mention_vs_passive.py`, `test_cr03_admin_review.py`* |
+| FR-CR-03-4   | *reverted — see FR-CR-04-6 + same tests as above*       |
+| FR-CR-03-5   | `test_task_edit_button.py`, `test_cr03_admin_review.py` |
+| FR-CR-03-6   | `test_cr03_weekly_plan.py`                              |
+| FR-CR-03-7   | `test_cr03_completion_artifact.py`, `test_cr01_handlers.py` |
+| FR-CR-03-8   | `test_cr03_admin_digest.py`                             |
+| FR-CR-03-9   | `test_cr03_thread_reminders.py`                         |
+| FR-CR-03-10  | `test_widget_morph_and_dm.py`, `test_dm_threading.py`   |
+| NFR-CR-03-1  | `test_cr03_employees_admin.py`                          |
+| NFR-CR-03-2  | `test_cr03_admin_review.py`                             |
+| NFR-CR-03-3  | `test_cr03_admin_digest.py`                             |
+| NFR-CR-03-4  | `test_cr03_thread_reminders.py`                         |
+| NFR-CR-03-5  | `test_cr03_admin_review.py`                             |
+
+### CR-04
+
+| ID           | Test modules                                                                                                 |
+|--------------|--------------------------------------------------------------------------------------------------------------|
+| FR-CR-04-1   | `test_intent_pipeline.py`                                                                                    |
+| FR-CR-04-2   | `test_intent_pipeline.py`                                                                                    |
+| FR-CR-04-3   | `test_date_resolver.py`, `test_mention_fallback_date.py`                                                     |
+| FR-CR-04-4   | `test_owner_focused_prompt.py`                                                                               |
+| FR-CR-04-5   | `test_date_resolver.py` (strip_date_phrase), `test_intent_pipeline.py`                                       |
+| FR-CR-04-6   | `test_passive_draft_card.py`, `test_cr03_mention_vs_passive.py`                                              |
+| FR-CR-04-7   | `test_mention_follow_up_for_assumed_owner.py`                                                                |
+| FR-CR-04-8   | `test_audio_transcription.py`                                                                                |
+| FR-CR-04-9   | `test_prefilter_override.py`, `test_passive_pipeline_runs_always.py`                                         |
+| FR-CR-04-10  | `test_task_edit_button.py`, `test_cr01_lifecycle.py` (English labels + owner-hidden-for-owner tests)         |
+| NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_owner_focused_prompt.py` (owner-failure test)         |
+| NFR-CR-04-2  | `test_nfr_01_05.py` (dedup test asserts 2 posts from one handle_message call — both the card and the follow-up) |

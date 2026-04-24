@@ -1,4 +1,7 @@
-"""@mention should ask "кому назначаем?" in the thread whenever the
+"""Requirement coverage: FR-CR-04-7 (mention follow-up parity for
+assumed owners).
+
+@mention should ask "кому назначаем?" in the thread whenever the
 resulting Task's owner is only a fallback to the message author
 (owner_assumed=True) — matching passive-path parity.
 

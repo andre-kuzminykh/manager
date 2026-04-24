@@ -1,4 +1,7 @@
-"""gpt-4o-mini ignores the weekday lookup table; this safety net catches
+"""Requirement coverage: FR-CR-04-3 (deterministic date resolver),
+FR-CR-04-5 (strip_date_phrase).
+
+gpt-4o-mini ignores the weekday lookup table; this safety net catches
 the misses deterministically from the source text."""
 from __future__ import annotations
 

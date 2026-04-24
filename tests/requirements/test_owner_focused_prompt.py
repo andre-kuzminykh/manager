@@ -1,4 +1,7 @@
-"""Owner detection runs as a SEPARATE LLM call inside the pipeline,
+"""Requirement coverage: FR-CR-04-4 (focused owner prompt with
+conversation context), NFR-CR-04-1 (owner-stage failure isolation).
+
+Owner detection runs as a SEPARATE LLM call inside the pipeline,
 using a dedicated system prompt that knows nothing about intent or
 dates. This keeps owner accuracy high on small models.
 """

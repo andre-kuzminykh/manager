@@ -62,6 +62,38 @@ def test_user_prompt_includes_weekday_label():
     assert "Thursday" in first_line
 
 
+def test_user_prompt_emits_weekday_lookup_table():
+    """Regression for LLM off-by-days errors: the prompt now carries a
+    pre-computed table mapping each weekday to the next-upcoming ISO date."""
+    text = build_user_prompt(
+        source_text="к понедельнику",
+        context_messages=[],
+        invocation_type="passive",
+        current_date="2026-04-24",  # Friday
+    )
+    assert "Weekday lookup" in text
+    # Next Monday after Friday 2026-04-24 is 2026-04-27.
+    assert "Monday     → 2026-04-27" in text
+    # And Saturday in the table is 2026-04-25.
+    assert "Saturday   → 2026-04-25" in text
+    # And the named Friday entry refers to NEXT Friday, not today.
+    assert "Friday     → 2026-05-01" in text
+
+
+def test_user_prompt_weekday_lookup_always_strictly_future():
+    """Never map a day name to today — the lookup offsets start at +1 so
+    'к пятнице' on a Friday resolves to next week, avoiding the today-vs-
+    next-week ambiguity the user hit."""
+    text = build_user_prompt(
+        source_text="x",
+        context_messages=[],
+        invocation_type="passive",
+        current_date="2026-04-24",  # Friday
+    )
+    # Table should not contain 2026-04-24 itself — everything is >= +1.
+    assert "2026-04-24" not in text.split("Weekday lookup")[1]
+
+
 def test_user_prompt_labels_context_user_as_attribution():
     text = build_user_prompt(
         source_text="x",

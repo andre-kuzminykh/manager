@@ -26,18 +26,20 @@ Rules:
    due_date (YYYY-MM-DD).
 4. For "create_meeting", extract title, notes, participants (list),
    datetime_at (ISO 8601 with timezone offset when known), timezone.
-5. DO resolve relative and weekday phrases against the provided
-   current_date. Examples (assuming current_date is a Monday):
+5. DO resolve relative and weekday phrases against current_date.
+   The user_prompt carries a pre-computed "Weekday lookup" table. If the
+   user names a day ("к пятнице", "в четверг", "by Monday", "next
+   Tuesday"), COPY the ISO date from that table — do NOT compute
+   weekdays yourself. Examples:
      - "завтра" / "tomorrow"      → current_date + 1
      - "послезавтра"               → current_date + 2
-     - "на следующей неделе"       → the coming Monday (current_date + 7)
-     - "к пятнице" / "до пятницы"  → this week's Friday (next upcoming)
-     - "в четверг" / "by Thursday" → the next upcoming Thursday
-     - "к концу недели"            → this Friday
+     - "на следующей неделе"       → Monday from the weekday table
+     - "к пятнице" / "до пятницы"  → Friday from the table
+     - "к концу недели"            → Friday from the table
    Return YYYY-MM-DD for due_date and ISO 8601 for datetime_at. If the
    phrase is genuinely vague ("когда-нибудь", "when I have time"), leave
    the field null — don't guess. Never back-date; the resolved date must
-   be ≥ current_date.
+   be strictly after current_date unless the user said "сегодня".
 6. NEVER assume the author of the message is the task owner. The "user"
    tokens in the context window are ATTRIBUTION (who said it), not
    assignments. Only fill owner_user_id / owner_display_name when the
@@ -63,20 +65,38 @@ def build_user_prompt(
     invocation_type: str,
     current_date: str,
 ) -> str:
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
 
     weekday = ""
+    resolved_table: list[str] = []
     try:
-        weekday = _date.fromisoformat(current_date).strftime("%A")
+        today = _date.fromisoformat(current_date)
+        weekday = today.strftime("%A")
+        # Precomputed weekday → next-upcoming ISO date table. Using +1..+7
+        # so the named day is ALWAYS strictly after today (avoids the
+        # "today is Friday, 'к пятнице' → next Friday" ambiguity).
+        for offset in range(1, 8):
+            d = today + _td(days=offset)
+            resolved_table.append(f"  {d.strftime('%A'):<10} → {d.isoformat()}")
     except ValueError:
         pass
 
     lines = [
         f"current_date: {current_date}" + (f" ({weekday})" if weekday else ""),
         f"invocation_type: {invocation_type}",
-        "",
-        "context (oldest first) — the 'user' id is just the author of that line, NOT an assignee:",
     ]
+    if resolved_table:
+        lines.append("")
+        lines.append(
+            "Weekday lookup — if the user names a day, COPY the ISO date from here:"
+        )
+        lines.extend(resolved_table)
+    lines.extend(
+        [
+            "",
+            "context (oldest first) — the 'user' id is just the author of that line, NOT an assignee:",
+        ]
+    )
     for m in context_messages:
         user = m.get("user") or "unknown"
         text = (m.get("text") or "").replace("\n", " ").strip()

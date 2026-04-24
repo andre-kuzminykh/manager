@@ -117,8 +117,98 @@ def handle_submit_review(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> 
     _apply_transition(body, new_status=TaskStatus.review, sender=sender, ack=ack)
 
 
-def handle_mark_done(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> None:
-    _apply_transition(body, new_status=TaskStatus.done, sender=sender, ack=ack)
+def handle_mark_done(
+    *,
+    body: dict[str, Any],
+    sender: _Sender,
+    ack: Ack,
+    client: Any | None = None,
+) -> None:
+    """CR-03 FR-CR-03-7: Mark done no longer transitions directly — it opens
+    a modal asking for a completion artifact (URL or text). The transition
+    and refresh happen inside the submit handler."""
+    ack()
+    task_id = _draft_id_from(body)
+    trigger_id = body.get("trigger_id")
+    if task_id is None or not trigger_id or client is None:
+        # Graceful fallback: if we don't have a WebClient, transition
+        # directly so the button doesn't appear dead.
+        _apply_transition(
+            body, new_status=TaskStatus.done, sender=sender, ack=(lambda *a, **k: None)
+        )
+        return
+    view = bk.complete_task_modal(task_id=task_id)
+    try:
+        client.views_open(trigger_id=trigger_id, view=view)
+    except Exception as e:  # noqa: BLE001
+        log.warning("complete_modal_open_failed", error=str(e))
+
+
+def handle_complete_task_submit(
+    *,
+    body: dict[str, Any],
+    view: dict[str, Any],
+    sender: _Sender,
+    ack: Ack,
+) -> None:
+    """CR-03 FR-CR-03-7 modal submit: save artifact, transition to done,
+    refresh in-channel and DM cards."""
+    values = view.get("state", {}).get("values", {})
+    url = _state_value(values, bk.BLOCK_ARTIFACT, bk.INPUT_ARTIFACT_URL)
+    text = _state_value(values, bk.BLOCK_ARTIFACT_TEXT, bk.INPUT_ARTIFACT_TEXT)
+    url = (url or "").strip()
+    text = (text or "").strip()
+
+    if not url and not text:
+        ack(
+            response_action="errors",
+            errors={
+                bk.BLOCK_ARTIFACT: "Укажи ссылку или описание (хотя бы одно поле).",
+            },
+        )
+        return
+    ack()
+
+    try:
+        task_id = int(view.get("private_metadata") or 0)
+    except ValueError:
+        return
+    actor = (body.get("user") or {}).get("id")
+
+    transitions = TransitionService()
+    notifier = NotificationService(sender=sender)
+
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        if task is None:
+            return
+        artifact = url if url else text
+        kind = "url" if url else "text"
+        task.completion_artifact = artifact
+        task.completion_artifact_kind = kind
+        old = task.status
+        try:
+            transitions.apply(
+                session, task=task, new_status=TaskStatus.done, actor_slack_user_id=actor
+            )
+        except InvalidTransition as e:
+            # Already done — still keep the artifact.
+            log.info("complete_on_done_task", task_id=task_id, err=str(e))
+        notifier.broadcast_status_change(
+            session,
+            task=task,
+            from_status=old,
+            to_status=TaskStatus.done,
+            actor_slack_user_id=actor,
+        )
+        if hasattr(sender, "update_message"):
+            refresh_task_card(sender, task)
+
+
+def _state_value(values: dict[str, Any], block_id: str, action_id: str) -> Any:
+    block = values.get(block_id, {})
+    element = block.get(action_id, {})
+    return element.get("value")
 
 
 def _toggle_subscription(

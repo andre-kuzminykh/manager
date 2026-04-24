@@ -45,6 +45,7 @@ from app.slack_bot.handlers.shortcuts import (
     handle_shortcut,
 )
 from app.slack_bot.handlers.task_actions import (
+    handle_complete_task_submit,
     handle_manage_subscriptions,
     handle_mark_done,
     handle_open_source,
@@ -181,8 +182,12 @@ def build_app(
         handle_submit_review(body=body, sender=sender, ack=ack)
 
     @app.action(ACTION_MARK_DONE)
-    def _on_mark_done(body, ack):
-        handle_mark_done(body=body, sender=sender, ack=ack)
+    def _on_mark_done(body, client, ack):
+        handle_mark_done(body=body, sender=sender, client=client, ack=ack)
+
+    @app.view(bk.MODAL_CALLBACK_COMPLETE_TASK)
+    def _on_complete_task_submit(body, ack, view):
+        handle_complete_task_submit(body=body, view=view, sender=sender, ack=ack)
 
     @app.action(ACTION_SUBSCRIBE)
     def _on_subscribe(body, client, ack):

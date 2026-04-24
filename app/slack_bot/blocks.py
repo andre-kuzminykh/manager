@@ -36,6 +36,12 @@ MODAL_CALLBACK_MEETING = "meeting_modal_submit"
 MODAL_CALLBACK_CONTEXT = "task_context_view"
 MODAL_CALLBACK_SUBSCRIPTIONS = "subscriptions_modal"
 MODAL_CALLBACK_ADMIN_EDIT = "admin_edit_task_modal"
+MODAL_CALLBACK_COMPLETE_TASK = "complete_task_modal"
+
+BLOCK_ARTIFACT = "artifact_block"
+INPUT_ARTIFACT_URL = "artifact_url_input"
+INPUT_ARTIFACT_TEXT = "artifact_text_input"
+BLOCK_ARTIFACT_TEXT = "artifact_text_block"
 
 BLOCK_TITLE = "title_block"
 BLOCK_DESCRIPTION = "description_block"
@@ -410,6 +416,15 @@ def task_card(
         blocks.append(
             {"type": "section", "text": {"type": "mrkdwn", "text": task.description}}
         )
+    # CR-03 FR-CR-03-7: render the completion artifact for done tasks.
+    if task.status == TaskStatus.done and task.completion_artifact:
+        if task.completion_artifact_kind == "url":
+            artifact_text = f":paperclip: <{task.completion_artifact}|Артефакт>"
+        else:
+            artifact_text = f":paperclip: *Артефакт:* {task.completion_artifact}"
+        blocks.append(
+            {"type": "section", "text": {"type": "mrkdwn", "text": artifact_text}}
+        )
     if reasoning:
         blocks.append(
             {
@@ -714,6 +729,53 @@ def daily_digest_blocks(
         },
     ]
     return blocks
+
+
+def complete_task_modal(*, task_id: int) -> dict[str, Any]:
+    """Modal shown when the assignee clicks *Завершить* — asks for an
+    artifact (URL or a text note). At least one of the two is required."""
+    return {
+        "type": "modal",
+        "callback_id": MODAL_CALLBACK_COMPLETE_TASK,
+        "private_metadata": str(task_id),
+        "title": {"type": "plain_text", "text": "Завершить задачу"},
+        "submit": {"type": "plain_text", "text": "Завершить"},
+        "close": {"type": "plain_text", "text": "Отмена"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "Прикрепи артефакт — ссылка или короткое описание результата.",
+                },
+            },
+            {
+                "type": "input",
+                "block_id": BLOCK_ARTIFACT,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Ссылка на артефакт"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": INPUT_ARTIFACT_URL,
+                    "placeholder": {
+                        "type": "plain_text",
+                        "text": "https://...",
+                    },
+                },
+            },
+            {
+                "type": "input",
+                "block_id": BLOCK_ARTIFACT_TEXT,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Или описание"},
+                "element": {
+                    "type": "plain_text_input",
+                    "action_id": INPUT_ARTIFACT_TEXT,
+                    "multiline": True,
+                },
+            },
+        ],
+    }
 
 
 def admin_review_card(

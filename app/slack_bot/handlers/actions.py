@@ -105,6 +105,69 @@ def handle_confirm(
                 text="Failed to create entity",
             )
         # On failure keep the widget so the user can retry via Edit / Confirm.
+        return
+
+    # Passive-accept parity with @mention: if the just-created task is
+    # still missing a user-visible field (owner / due_date / …), post
+    # a follow-up question in the same thread so the author can answer
+    # in place. The reply handler updates the Task and refreshes the
+    # card — see _handle_followup_reply.
+    if entity_type == "task":
+        _post_accept_follow_up(
+            task_id=entity_id,
+            draft_id=draft_id,
+            channel=channel,
+            thread_ts=thread_ts,
+            sender=sender,
+        )
+
+
+def _post_accept_follow_up(
+    *,
+    task_id: int,
+    draft_id: int,
+    channel: str | None,
+    thread_ts: str | None,
+    sender: RateAwareSlackSender,
+) -> None:
+    from app.config import get_settings
+    from app.models import Task
+    from app.services import pick_next_missing, prompt_for
+    from app.slack_bot.handlers.events import (
+        _record_followup_ts,
+        _task_payload,
+    )
+
+    if not channel:
+        return
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        draft = session.get(ActionDraft, draft_id)
+        if task is None or draft is None:
+            return
+        next_field = pick_next_missing("create_task", _task_payload(task))
+        draft.awaiting_field = next_field
+        session.flush()
+        if not next_field:
+            return
+        intro = (
+            f":memo: Записал: *{task.title}*.\n"
+            + prompt_for(
+                next_field,
+                payload=_task_payload(task),
+                allowed_owners=get_settings().allowed_owners(),
+            )
+        )
+        try:
+            resp = sender.post_message(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=intro,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("accept_followup_post_failed", error=str(e))
+            return
+        _record_followup_ts(session, draft, resp)
 
 
 def handle_ignore(

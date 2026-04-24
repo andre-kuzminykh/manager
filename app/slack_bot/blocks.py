@@ -160,7 +160,8 @@ def draft_card(
                         "type": "mrkdwn",
                         "text": (
                             f":pencil2: *Не хватает:* {', '.join(missing_fields)}. "
-                            "Нажми *Edit*, чтобы дозаполнить, или *Confirm* — и бот создаст как есть."
+                            "Нажми *Edit*, чтобы дозаполнить, или *Accept* — "
+                            "бот создаст задачу и доспросит в треде."
                         ),
                     }
                 ],
@@ -173,7 +174,7 @@ def draft_card(
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": ":white_check_mark: Все поля заполнены. *Confirm* — и задача уедет в трекер.",
+                        "text": ":white_check_mark: Всё заполнено. *Accept* — и задача уедет в трекер.",
                     }
                 ],
             }
@@ -188,7 +189,7 @@ def draft_card(
                     "type": "button",
                     "style": "primary",
                     "action_id": ACTION_CONFIRM,
-                    "text": {"type": "plain_text", "text": "Confirm"},
+                    "text": {"type": "plain_text", "text": "Accept"},
                     "value": str(draft_id),
                 },
                 {
@@ -201,7 +202,7 @@ def draft_card(
                     "type": "button",
                     "style": "danger",
                     "action_id": ACTION_IGNORE,
-                    "text": {"type": "plain_text", "text": "Ignore"},
+                    "text": {"type": "plain_text", "text": "Reject"},
                     "value": str(draft_id),
                 },
             ],

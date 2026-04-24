@@ -55,12 +55,9 @@ def _is_ignorable(event: dict[str, Any], bot_user_id: str | None) -> bool:
     return False
 
 
-def _build_card_from_payload(draft: ActionDraft) -> list[dict[str, Any]]:
-    """Rebuild the draft card from the current payload on the draft row.
-
-    After the user's follow-up fills a field, we chat.update the card so it
-    reflects the new data.
-    """
+def _classification_from_draft(draft: ActionDraft):
+    """Rebuild an IntentClassification from the persisted draft row so we
+    can feed it back into Block-Kit builders."""
     from app.schemas.intent import (
         IntentClassification,
         IntentType,
@@ -77,24 +74,36 @@ def _build_card_from_payload(draft: ActionDraft) -> list[dict[str, Any]]:
     intent = intent_map.get(draft.intent.value, IntentType.no_action)
     payload = draft.payload or {}
     if intent in (IntentType.create_task, IntentType.update_task):
-        task = TaskDraft.model_validate(payload)
-        classification = IntentClassification(
-            intent=intent, confidence=0.9, task=task
+        return IntentClassification(
+            intent=intent,
+            confidence=0.9,
+            task=TaskDraft.model_validate(payload),
         )
-    elif intent in (IntentType.create_meeting, IntentType.update_meeting):
-        meeting = MeetingDraft.model_validate(payload)
-        classification = IntentClassification(
-            intent=intent, confidence=0.9, meeting=meeting
+    if intent in (IntentType.create_meeting, IntentType.update_meeting):
+        return IntentClassification(
+            intent=intent,
+            confidence=0.9,
+            meeting=MeetingDraft.model_validate(payload),
         )
-    else:
-        classification = IntentClassification(intent=intent, confidence=0.9)
+    return IntentClassification(intent=intent, confidence=0.9)
 
-    missing = _missing_fields(classification)
+
+def _draft_missing_fields(classification) -> list[str]:
+    return _missing_fields(classification)
+
+
+def _build_card_from_payload(draft: ActionDraft) -> list[dict[str, Any]]:
+    """Rebuild the draft card from the current payload on the draft row.
+
+    After the user's follow-up fills a field, we chat.update the card so it
+    reflects the new data.
+    """
+    classification = _classification_from_draft(draft)
     return bk.draft_card(
         classification=classification,
         draft_id=draft.id,
         confidence_bucket="high",
-        missing_fields=missing,
+        missing_fields=_draft_missing_fields(classification),
     )
 
 
@@ -399,14 +408,12 @@ def handle_message(
         permalink = fetch_permalink(client, channel=channel, ts=event["ts"])
         draft_id = draft.id
         snapshot_id = snapshot.id
-        decision_action = decision.action
-        classification_intent = classification.intent
-        classification_reasoning = classification.reasoning
+        # Snapshot a fresh IntentClassification rebuild for the draft card.
+        draft_classification = _classification_from_draft(draft)
 
     # ── outside session_scope: the draft row is now committed ────────────
     # Passive path only offers — never auto-creates (product decision
     # 2026-04-24). Auto-create is reserved for @mention.
-    del decision_action, classification_reasoning
     metadata = draft_private_metadata(
         conversation_id=channel,
         message_ts=event["ts"],
@@ -416,13 +423,30 @@ def handle_message(
         source_user_id=event.get("user"),
         permalink=permalink,
     )
-    sender.post_message(
+    missing = _draft_missing_fields(draft_classification)
+    resp = sender.post_message(
         channel=channel,
         thread_ts=event.get("thread_ts") or event["ts"],
-        blocks=bk.soft_prompt(classification_intent, draft_id),
-        text="Action suggestion",
+        blocks=bk.draft_card(
+            classification=draft_classification,
+            draft_id=draft_id,
+            confidence_bucket="medium",
+            missing_fields=missing,
+        ),
+        text="Task draft — Accept / Edit / Reject",
         metadata={"event_type": "draft", "event_payload": {"metadata": metadata}},
     )
+    # Remember where the widget lives so finalize_draft can morph it into
+    # a task card in place when the user clicks Accept.
+    card_ts = None
+    if isinstance(resp, dict):
+        card_ts = resp.get("ts")
+    if card_ts:
+        with session_scope() as session:
+            draft = session.get(ActionDraft, draft_id)
+            if draft is not None:
+                draft.card_channel = channel
+                draft.card_ts = card_ts
 
 
 def _always_create_and_admin_review(

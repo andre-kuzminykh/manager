@@ -98,7 +98,7 @@ def test_draft_card_shows_ready_hint_when_all_fields_present():
         classification=c, draft_id=1, confidence_bucket="high", missing_fields=[]
     )
     ctx = "\n".join(_context_texts(blocks))
-    assert "Все поля заполнены" in ctx
+    assert "Всё заполнено" in ctx
 
 
 def test_draft_card_without_missing_fields_arg_behaves_like_empty():

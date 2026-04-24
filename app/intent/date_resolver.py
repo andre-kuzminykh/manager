@@ -378,18 +378,17 @@ def strip_date_phrase(text: str) -> str:
     patterns.append(r"на\s+следующей\s+недел[еию]\b")
     patterns.append(r"next\s+week\b")
 
-    # "через N <unit>" / "in N <unit>" / "через пару <unit>" / "a couple of".
+    # "через N <unit>" / "in N <unit>" / "через пару <unit>" / "a couple
+    # of <unit>". Permissive: optional adverb ("ровно", "примерно",
+    # "около", "exactly", "about", "around") plus up to 4 filler words
+    # between "через"/"in" and the unit, so we eat "через неделю",
+    # "через три недели", "через ровно пять недель", "in a couple of
+    # weeks", "in about two months".
     patterns.append(
-        r"\bчерез\s+пар[уы]\s+(?:день|дн[яей]|недел\w+|месяц\w*)"
+        r"\b(?:ровно\s+|примерно\s+|около\s+)?через(?:\s+\w+){0,4}?\s+(?:день|дн[яей]|недел\w+|месяц\w*|год\w*)\w*"
     )
     patterns.append(
-        r"\bчерез\s+(?:\d+\s+)?(?:день|дн[яей]|недел\w+|месяц\w*|год\w*)"
-    )
-    patterns.append(
-        r"\b(?:in\s+)?a couple of\s+(?:day|week|month|year)s?\b"
-    )
-    patterns.append(
-        r"\bin\s+(?:\d+|a|an)\s+(?:day|week|month|year)s?\b"
+        r"\b(?:exactly\s+|about\s+|around\s+|roughly\s+)?(?:in|within)(?:\s+\w+){0,4}?\s+(?:day|week|month|year)s?\b"
     )
 
     # Numeric date formats, with optional leading preposition.

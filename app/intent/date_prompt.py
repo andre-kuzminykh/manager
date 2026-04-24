@@ -24,13 +24,19 @@ Rules:
 2. Weekdays always mean the NEXT upcoming occurrence strictly after
    current_date. If today is Friday and the user says "к пятнице" or
    "by Friday", the answer is next Friday, not today.
-3. Relative phrases:
+3. Relative phrases — understand WRITTEN numbers too:
      завтра / tomorrow                  → current_date + 1
      послезавтра / day after tomorrow   → current_date + 2
-     через N дней / in N days           → current_date + N
+     через день                         → +1
+     через 2 дня / через два дня        → +2
+     через 3 дня / через три дня        → +3
      через неделю / in a week           → +7
      через две недели / in two weeks    → +14
-     через месяц / in a month           → +30 days (approx, same day next month)
+     через три недели / in three weeks  → +21
+     через пять недель / in five weeks  → +35
+     через пару дней / a couple of days → +2
+     через месяц / in a month           → +30 (same day next month)
+     через два месяца / in two months   → +60
      к концу недели / end of week       → upcoming Friday
      на этой неделе / this week         → upcoming Friday
      на следующей неделе / next week    → upcoming Monday
@@ -42,11 +48,22 @@ Rules:
      "май" / "в июне" / "by May"        → 1st of that next-future month
      "01.05.2026" / "1/5" / "15.06.26"  → literal numeric (day first)
      "2026-05-01"                       → literal ISO
-5. Written numbers count: "через две недели" = 14 days, "in three
-   days" = 3 days.
+5. Count ANY written number (один/одну/одна, два/две, три, четыре,
+   пять, шесть, семь, восемь, девять, десять, пара=2; one, two,
+   three, four, five, six, seven, eight, nine, ten, a/an=1). Filler
+   words like "ровно", "примерно", "около" between "через" and the
+   unit don't change the count.
 6. Vague phrases stay null: "когда-нибудь", "скоро", "в ближайшее
    время", "some day", "asap".
 7. Do NOT invent a date when the message contains no date cue.
+
+Worked examples:
+  current_date 2026-04-24 (Friday)
+  "мне нужно купить машину ровно через три недели" → 2026-05-15
+  "надо запустить лендинг через две недели"         → 2026-05-08
+  "отчёт через пять дней"                            → 2026-04-29
+  "ship in a couple of weeks"                        → 2026-05-08
+  "отправь завтра утром"                             → 2026-04-25
 
 Respond with a single JSON object matching the provided schema.
 """

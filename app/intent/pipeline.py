@@ -231,7 +231,9 @@ def node_date(state: IntentState) -> dict[str, Any]:
     ) or {}
 
     llm_iso = data.get("due_date")
+    llm_reasoning = data.get("reasoning")
     picked: _date | None = None
+    rejected: str | None = None
     if isinstance(llm_iso, str) and llm_iso:
         try:
             parsed = _date.fromisoformat(llm_iso)
@@ -239,11 +241,23 @@ def node_date(state: IntentState) -> dict[str, Any]:
             parsed = None
         if parsed is not None and _date_is_acceptable(parsed, source_text, today):
             picked = parsed
+        else:
+            rejected = llm_iso
 
+    source_used = "llm"
     if picked is None:
-        # Python fallback.
         picked = resolve_due_date(source_text, today)
+        source_used = "python_fallback" if picked else "none"
 
+    log.info(
+        "date_node_result",
+        llm_iso=llm_iso,
+        llm_reasoning=llm_reasoning,
+        rejected=rejected,
+        final=picked.isoformat() if picked else None,
+        source=source_used,
+        model=state.get("date_model"),
+    )
     return {"due_date": picked}
 
 

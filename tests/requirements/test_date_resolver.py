@@ -162,6 +162,13 @@ def test_classifier_fills_missing_due_date_locally(monkeypatch):
         ("запушить на этой неделе", "запушить"),
         # "couple of" phrasing.
         ("ship this in a couple of weeks", "ship this"),
+        # Written numbers — strip_date_phrase must not depend on the
+        # digit form because the LLM may return either.
+        ("Мне нужно купить машину ровно через три недели", "Мне нужно купить машину"),
+        ("запустить лендинг через две недели", "запустить лендинг"),
+        ("собери отчёт через пять дней", "собери отчёт"),
+        ("ship in about two months", "ship"),
+        ("deliver within three weeks", "deliver"),
     ],
 )
 def test_strip_date_phrase(title, expected):

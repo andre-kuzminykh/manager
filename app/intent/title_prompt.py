@@ -16,15 +16,32 @@ summary, nothing else.
 Produce three fields:
 - title:        short imperative summary of the work to do. Keep it
                 tight (<= 80 chars). Strip wrappers like "надо",
-                "please". Use the imperative form
-                ("подготовить питчдек", "prepare pitch-deck").
+                "please", "мне нужно". Strip any date / deadline
+                phrasing — dates belong in a separate field. Use the
+                imperative form ("подготовить питчдек", "prepare
+                pitch-deck").
 - description:  any supplementary detail present in the source
                 message — references, numbers, sub-items, rationale.
-                null when the title already captures everything.
+                null when the title already captures everything. Do
+                NOT copy the date phrase here either.
 - priority:     one of "low" | "medium" | "high" | "urgent".
                 Default "medium". Use "urgent" only when the author
                 says so ("срочно", "ASAP", "blocker", "сегодня же"),
                 "high" for "важно"/"important".
+
+Examples (every date-like tail is removed from the title):
+  "мне нужно купить машину ровно через три недели"
+      → title: "купить машину"
+  "надо подготовить питчдек к 1 мая"
+      → title: "подготовить питчдек"
+  "Иван, сделай отчёт до пятницы"
+      → title: "сделать отчёт"
+  "please prepare the slides by Friday"
+      → title: "prepare the slides"
+  "через две недели нужно запустить лендинг"
+      → title: "запустить лендинг"
+  "отправь письмо завтра утром"
+      → title: "отправить письмо"
 
 Do NOT try to extract the assignee or the due date — those are
 handled in separate passes. It is fine to leave hints about them in

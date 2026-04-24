@@ -225,6 +225,11 @@ def _handle_followup_reply(
         except Exception as e:  # noqa: BLE001
             log.warning("card_update_failed", error=str(e), draft_id=draft.id)
 
+    # Tidy: delete the bot's previous follow-up question(s) so the
+    # thread stays clean — just the source message, the task/draft
+    # card, the user's answer, and the new ack.
+    _delete_prior_followups(sender, draft)
+
     # Ack in thread — plus next question if there is one.
     prompt_payload = _task_payload(task) if task is not None else payload
     if next_field:
@@ -312,6 +317,24 @@ def _record_followup_ts(session, draft: ActionDraft, resp: Any) -> None:
     draft.follow_up_message_ts = current
     flag_modified(draft, "follow_up_message_ts")
     session.flush()
+
+
+def _delete_prior_followups(sender, draft: ActionDraft) -> None:
+    """Delete every bot follow-up message previously tracked on the
+    draft. Called right before we post a new ack so the thread shows
+    only the latest exchange, identical on @mention and passive paths.
+    """
+    channel = draft.card_channel
+    tss = list(draft.follow_up_message_ts or [])
+    if not channel or not tss or not hasattr(sender, "delete_message"):
+        return
+    for ts in tss:
+        try:
+            sender.delete_message(channel=channel, ts=ts)
+        except Exception as e:  # noqa: BLE001
+            log.warning("followup_cleanup_delete_failed", ts=ts, error=str(e))
+    draft.follow_up_message_ts = []
+    flag_modified(draft, "follow_up_message_ts")
 
 
 def _missing_fields(classification: IntentClassification) -> list[str]:

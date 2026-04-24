@@ -21,6 +21,7 @@ class _Sender:
     def __init__(self):
         self.posts: list[dict] = []
         self.updates: list[dict] = []
+        self.deletes: list[dict] = []
 
     def post_message(self, **kw):
         self.posts.append(kw)
@@ -28,6 +29,10 @@ class _Sender:
 
     def update_message(self, **kw):
         self.updates.append(kw)
+        return {"ok": True}
+
+    def delete_message(self, **kw):
+        self.deletes.append(kw)
         return {"ok": True}
 
     def post_ephemeral(self, **kw):  # pragma: no cover
@@ -237,6 +242,68 @@ def test_passive_thread_reply_fills_field_and_updates_draft(
         assert draft.payload.get("owner_user_id") == "UIVAN0001"
     # The widget was refreshed via chat.update (follow-up reply path).
     assert any(u.get("ts") for u in sender.updates)
+
+
+def test_thread_reply_deletes_prior_followup_question(
+    patched_session_scope,
+    services_task,
+    ack,
+    bolt_context,
+    slack_client,
+    SessionFactory,
+    monkeypatch,
+):
+    """When the user answers the bot's ':memo: Кому назначаем?…' in the
+    thread, that question is deleted before the next ack lands, so the
+    thread doesn't accumulate a chain of stale bot questions."""
+    monkeypatch.setenv(
+        "ALLOWED_OWNERS",
+        '[{"slack_user_id":"UIVAN0001","display_name":"Иван"}]',
+    )
+    from app.config import get_settings
+    from app.slack_bot.handlers.events import handle_message
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    sender = _Sender()
+    handle_message(
+        event={
+            "ts": "600.0",
+            "user": "U-author",
+            "text": "надо сделать отчёт",
+            "channel": "C1",
+            "channel_type": "channel",
+        },
+        body={"event_id": "cleanup-1"},
+        client=slack_client,
+        context=bolt_context,
+        services=services_task,
+        sender=sender,
+        ack=ack,
+    )
+    # posts[0] = draft card; posts[1] = memo (Кому назначаем?).
+    # _Sender returns sequential ts "1.0", "2.0", ... — so the memo ts is "2.0".
+    assert len(sender.posts) == 2, sender.posts
+    memo_ts = "2.0"
+
+    handle_message(
+        event={
+            "ts": "601.0",
+            "thread_ts": "600.0",
+            "user": "U-author",
+            "text": "<@UIVAN0001>",
+            "channel": "C1",
+            "channel_type": "channel",
+        },
+        body={"event_id": "cleanup-2"},
+        client=slack_client,
+        context=bolt_context,
+        services=services_task,
+        sender=sender,
+        ack=ack,
+    )
+    # The memo was deleted before the new ack was posted.
+    assert any(d.get("ts") == memo_ts for d in sender.deletes), sender.deletes
 
 
 def test_accept_on_draft_card_creates_task_and_asks_follow_up(

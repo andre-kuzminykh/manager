@@ -830,8 +830,8 @@ pure unit tests for internal helpers.
 | FR-CR-04-3   | `test_date_resolver.py`, `test_mention_fallback_date.py`                                                     |
 | FR-CR-04-4   | `test_owner_focused_prompt.py`                                                                               |
 | FR-CR-04-5   | `test_date_resolver.py` (strip_date_phrase), `test_intent_pipeline.py`                                       |
-| FR-CR-04-6   | `test_passive_draft_card.py`, `test_cr03_mention_vs_passive.py`                                              |
-| FR-CR-04-7   | `test_mention_follow_up_for_assumed_owner.py`                                                                |
+| FR-CR-04-6   | `test_passive_draft_card.py`, `test_cr03_mention_vs_passive.py`, `test_mention_passive_symmetry.py`           |
+| FR-CR-04-7   | `test_mention_follow_up_for_assumed_owner.py`, `test_mention_passive_symmetry.py`                            |
 | FR-CR-04-8   | `test_audio_transcription.py`                                                                                |
 | FR-CR-04-9   | `test_prefilter_override.py`, `test_passive_pipeline_runs_always.py`                                         |
 | FR-CR-04-10  | `test_task_edit_button.py`, `test_cr01_lifecycle.py` (English labels + owner-hidden-for-owner tests)         |

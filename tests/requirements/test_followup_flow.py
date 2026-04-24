@@ -20,16 +20,19 @@ def test_pick_next_missing_for_task_asks_title_first():
     assert pick_next_missing("create_task", {}) == "title"
 
 
-def test_pick_next_missing_for_task_asks_due_date_after_title():
-    assert pick_next_missing("create_task", {"title": "x"}) == "due_date"
+def test_pick_next_missing_for_task_asks_owner_after_title():
+    # CR-04: owner comes before due_date so the passive draft-card path
+    # and the @mention auto-create path ask the same first question.
+    assert pick_next_missing("create_task", {"title": "x"}) == "owner"
 
 
-def test_pick_next_missing_for_task_asks_owner_after_due():
+def test_pick_next_missing_for_task_asks_due_after_owner_filled():
     assert (
         pick_next_missing(
-            "create_task", {"title": "x", "due_date": "2026-05-01"}
+            "create_task",
+            {"title": "x", "owner_user_id": "U1", "owner_assumed": False},
         )
-        == "owner"
+        == "due_date"
     )
 
 

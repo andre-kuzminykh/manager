@@ -177,7 +177,15 @@ def test_passive_thread_reply_fills_field_and_updates_draft(
     bolt_context,
     slack_client,
     SessionFactory,
+    monkeypatch,
 ):
+    monkeypatch.setenv(
+        "ALLOWED_OWNERS",
+        '[{"slack_user_id":"UIVAN0001","display_name":"Иван"}]',
+    )
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
     """User answers the follow-up in thread → _handle_followup_reply
     updates draft.payload and refreshes the card in place. When all
     user-visible fields are filled, the "push Accept" ack is posted."""
@@ -202,15 +210,18 @@ def test_passive_thread_reply_fills_field_and_updates_draft(
     with SessionFactory() as s:
         draft = s.query(ActionDraft).one()
         awaiting = draft.awaiting_field
+    # First missing field under the CR-04 order is the owner.
+    assert awaiting == "owner"
 
-    # The user replies in the thread with an ISO date — handled as a
-    # due_date answer by _handle_followup_reply.
+    # The user replies in the thread with a Slack mention — the
+    # follow-up reply handler resolves it via the owner path and
+    # refreshes the widget.
     handle_message(
         event={
             "ts": "401.0",
             "thread_ts": "400.0",
             "user": "U-author",
-            "text": "2026-05-12",
+            "text": "<@UIVAN0001>",
             "channel": "C1",
             "channel_type": "channel",
         },
@@ -221,11 +232,9 @@ def test_passive_thread_reply_fills_field_and_updates_draft(
         sender=sender,
         ack=ack,
     )
-    # Draft.payload was updated with the new field value.
     with SessionFactory() as s:
         draft = s.query(ActionDraft).one()
-        if awaiting == "due_date":
-            assert draft.payload.get("due_date") == "2026-05-12"
+        assert draft.payload.get("owner_user_id") == "UIVAN0001"
     # The widget was refreshed via chat.update (follow-up reply path).
     assert any(u.get("ts") for u in sender.updates)
 

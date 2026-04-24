@@ -143,12 +143,18 @@ def test_mention_follow_up_reply_updates_task_and_refreshes_card(
     from tests.requirements.conftest import StubClassifier, _make_services
     from app.schemas.intent import IntentClassification, IntentType, TaskDraft
 
-    # Classifier returns a task with no due_date so the bot will ask.
+    # Classifier returns a task with an explicit owner and no due_date
+    # so the bot's only follow-up question is about the date. (Owner
+    # is now asked before due_date — see FR-CR-04.)
     stub = StubClassifier(
         IntentClassification(
             intent=IntentType.create_task,
             confidence=0.9,
-            task=TaskDraft(title="собрать демо"),
+            task=TaskDraft(
+                title="собрать демо",
+                owner_user_id="U-author",
+                owner_display_name="Andre",
+            ),
         )
     )
     services = _make_services(slack_client, stub)

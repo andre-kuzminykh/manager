@@ -467,10 +467,14 @@ def handle_message(
         draft.awaiting_field = next_field
         session.flush()
         if next_field:
-            intro = prompt_for(
-                next_field,
-                payload=draft.payload or {},
-                allowed_owners=get_settings().allowed_owners(),
+            title_preview = (draft.payload or {}).get("title") or "задачу"
+            intro = (
+                f":memo: Записал: *{title_preview}*.\n"
+                + prompt_for(
+                    next_field,
+                    payload=draft.payload or {},
+                    allowed_owners=get_settings().allowed_owners(),
+                )
             )
             try:
                 fu_resp = sender.post_message(

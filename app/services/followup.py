@@ -26,7 +26,11 @@ log = get_logger(__name__)
 
 
 # Ordered: fields we ask the user about, first match wins.
-TASK_FIELD_ORDER = ("title", "due_date", "owner")
+# Owner is asked before due_date so the passive path (draft card with
+# both missing) asks the same first question as the @mention path
+# (task auto-created with owner_assumed fallback). The two flows match
+# step-by-step, differing only in whether the entity is already a Task.
+TASK_FIELD_ORDER = ("title", "owner", "due_date")
 MEETING_FIELD_ORDER = ("title", "datetime_at", "participants")
 
 # Human-friendly prompt per field.

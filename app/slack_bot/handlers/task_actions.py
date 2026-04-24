@@ -414,3 +414,133 @@ def handle_unsubscribe_in_modal(
             client.views_update(view_id=view_id, view=new_view)
         except Exception as e:  # noqa: BLE001
             log.warning("views_update_failed", error=str(e))
+
+
+# --------------------------------------------------------------------------- #
+# Task-card "Edit" — owner / admin can edit title, owner, priority, due_date,
+# description, and estimated_minutes from the task card itself. This is the
+# non-admin-review counterpart to handle_admin_edit_*.
+# --------------------------------------------------------------------------- #
+
+
+def _may_edit_task(actor: str | None, task: Task) -> bool:
+    from app.services.employees import is_admin as _is_admin
+
+    if actor is None:
+        return False
+    if task.owner_user_id == actor:
+        return True
+    return _is_admin(actor)
+
+
+def handle_task_edit_open(
+    *, body: dict[str, Any], client: WebClient, sender: _Sender, ack: Ack
+) -> None:
+    ack()
+    task_id = _draft_id_from(body)
+    trigger_id = body.get("trigger_id")
+    actor = _actor(body)
+    if task_id is None or not trigger_id:
+        return
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        if task is None:
+            return
+        if not _may_edit_task(actor, task):
+            channel = _channel(body)
+            if channel and actor:
+                try:
+                    sender.post_ephemeral(
+                        channel=channel,
+                        user=actor,
+                        text=":lock: Редактировать может только владелец или админ.",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        initial = {
+            "title": task.title,
+            "description": task.description,
+            "owner_user_id": task.owner_user_id,
+            "owner_display_name": task.owner_display_name,
+            "priority": task.priority.value,
+            "due_date": task.due_date.isoformat() if task.due_date else None,
+            "estimated_minutes": task.estimated_minutes,
+        }
+
+    import json as _json
+
+    from app.config import get_settings
+
+    view = bk.task_modal(
+        private_metadata=_json.dumps({"edit_task_id": task_id}),
+        initial=initial,
+        allowed_owners=get_settings().allowed_owners(),
+    )
+    view["callback_id"] = bk.MODAL_CALLBACK_EDIT_TASK
+    try:
+        client.views_open(trigger_id=trigger_id, view=view)
+    except Exception as e:  # noqa: BLE001
+        log.warning("task_edit_views_open_failed", error=str(e))
+
+
+def handle_task_edit_submit(
+    *, body: dict[str, Any], view: dict[str, Any], sender: _Sender, ack: Ack
+) -> None:
+    from datetime import date as _date
+
+    from app.slack_bot.handlers.views import _extract_task_payload
+
+    payload = _extract_task_payload(view)
+    if not payload["title"]:
+        ack(
+            response_action="errors",
+            errors={bk.BLOCK_TITLE: "Title is required"},
+        )
+        return
+    ack()
+
+    import json as _json
+
+    pm = _json.loads(view.get("private_metadata") or "{}")
+    task_id = pm.get("edit_task_id")
+    actor = _actor(body)
+    if not task_id:
+        return
+
+    with session_scope() as session:
+        task = session.get(Task, int(task_id))
+        if task is None:
+            return
+        if not _may_edit_task(actor, task):
+            return
+        task.title = payload["title"]
+        task.description = payload.get("description")
+        if payload.get("owner_user_id"):
+            task.owner_user_id = payload["owner_user_id"]
+        if payload.get("owner_display_name"):
+            task.owner_display_name = payload["owner_display_name"]
+        new_prio = payload.get("priority")
+        if new_prio:
+            from app.models.task import TaskPriority
+
+            task.priority = TaskPriority(new_prio)
+        new_due = payload.get("due_date")
+        new_due_d: _date | None = None
+        if isinstance(new_due, str) and new_due:
+            try:
+                new_due_d = _date.fromisoformat(new_due)
+            except ValueError:
+                new_due_d = None
+        task.due_date = new_due_d
+        if payload.get("estimated_minutes") is not None:
+            task.estimated_minutes = payload.get("estimated_minutes")
+        # Once the human has edited the task, the "owner_assumed" flag should
+        # come off — the label in the card stops saying "(предположительно)".
+        if task.extra and task.extra.get("owner_assumed"):
+            extra = dict(task.extra)
+            extra.pop("owner_assumed", None)
+            task.extra = extra or None
+        session.flush()
+        if hasattr(sender, "update_message"):
+            refresh_task_card(sender, task)

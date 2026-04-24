@@ -503,6 +503,81 @@ def test_task_card_hides_subscribe_for_owner(session):
     assert bk.ACTION_UNSUBSCRIBE not in ids
 
 
+def test_task_card_shows_edit_for_owner(session):
+    task = _make_task(session, status=TaskStatus.todo, owner="U-owner")
+    blocks = bk.task_card(task=task, viewer_slack_user_id="U-owner")
+    ids = [
+        el["action_id"] for b in blocks if b["type"] == "actions" for el in b["elements"]
+    ]
+    assert bk.ACTION_EDIT_TASK in ids
+
+
+def test_task_card_hides_edit_from_bystander(session):
+    task = _make_task(session, status=TaskStatus.todo, owner="U-owner")
+    blocks = bk.task_card(task=task, viewer_slack_user_id="U-other")
+    ids = [
+        el["action_id"] for b in blocks if b["type"] == "actions" for el in b["elements"]
+    ]
+    assert bk.ACTION_EDIT_TASK not in ids
+
+
+def test_task_card_shows_edit_for_admin(session, monkeypatch):
+    monkeypatch.setenv("ADMIN_SLACK_USER_IDS", "U-admin")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        task = _make_task(session, status=TaskStatus.todo, owner="U-owner")
+        blocks = bk.task_card(task=task, viewer_slack_user_id="U-admin")
+        ids = [
+            el["action_id"]
+            for b in blocks
+            if b["type"] == "actions"
+            for el in b["elements"]
+        ]
+        assert bk.ACTION_EDIT_TASK in ids
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_task_card_hides_edit_on_done(session):
+    task = _make_task(session, status=TaskStatus.done, owner="U-owner")
+    blocks = bk.task_card(task=task, viewer_slack_user_id="U-owner")
+    ids = [
+        el["action_id"] for b in blocks if b["type"] == "actions" for el in b["elements"]
+    ]
+    assert bk.ACTION_EDIT_TASK not in ids
+
+
+def test_task_card_labels_are_english(session):
+    task = _make_task(session, status=TaskStatus.todo, owner="U-owner")
+    blocks = bk.task_card(task=task, viewer_slack_user_id="U-owner")
+    labels = [
+        el["text"]["text"]
+        for b in blocks
+        if b["type"] == "actions"
+        for el in b["elements"]
+    ]
+    # Start button instead of "Начать работу"; no Russian labels anywhere.
+    assert "Start" in labels
+    assert "Начать работу" not in labels
+
+
+def test_task_card_subscribe_label_is_english(session):
+    task = _make_task(session, status=TaskStatus.todo, owner="U-owner")
+    blocks = bk.task_card(
+        task=task, viewer_slack_user_id="U-other", is_subscribed=False
+    )
+    labels = [
+        el["text"]["text"]
+        for b in blocks
+        if b["type"] == "actions"
+        for el in b["elements"]
+    ]
+    assert "Subscribe" in labels
+    assert "Подписаться" not in labels
+
+
 def test_task_card_does_not_include_open_source_button(session):
     """The card is posted in the source thread, so the back-link would be
     redundant. We deliberately omit it — see CR feedback 2026-04-23."""

@@ -17,6 +17,7 @@ ACTION_RETRY = "draft_retry"
 ACTION_START_WORK = "task_start_work"
 ACTION_SUBMIT_REVIEW = "task_submit_review"
 ACTION_MARK_DONE = "task_mark_done"
+ACTION_EDIT_TASK = "task_edit"
 ACTION_SUBSCRIBE = "task_subscribe"
 ACTION_UNSUBSCRIBE = "task_unsubscribe"
 ACTION_OPEN_SOURCE = "task_open_source"
@@ -36,6 +37,7 @@ MODAL_CALLBACK_MEETING = "meeting_modal_submit"
 MODAL_CALLBACK_CONTEXT = "task_context_view"
 MODAL_CALLBACK_SUBSCRIPTIONS = "subscriptions_modal"
 MODAL_CALLBACK_ADMIN_EDIT = "admin_edit_task_modal"
+MODAL_CALLBACK_EDIT_TASK = "edit_task_modal"
 MODAL_CALLBACK_COMPLETE_TASK = "complete_task_modal"
 
 BLOCK_ARTIFACT = "artifact_block"
@@ -452,8 +454,11 @@ def task_card(
         viewer_slack_user_id is not None
         and task.owner_user_id == viewer_slack_user_id
     )
-    # "Начать работу" shows for the owner, OR when the task has no owner
-    # assigned yet — in that case any team member can claim it.
+    from app.services.employees import is_admin as _is_admin
+
+    viewer_is_admin = _is_admin(viewer_slack_user_id)
+    # "Start" shows for the owner, OR when the task has no owner assigned
+    # yet — in that case any team member can claim it.
     may_start = is_owner or task.owner_user_id is None
     if task.status == TaskStatus.todo or task.status == TaskStatus.backlog:
         if may_start:
@@ -462,7 +467,7 @@ def task_card(
                     "type": "button",
                     "style": "primary",
                     "action_id": ACTION_START_WORK,
-                    "text": {"type": "plain_text", "text": "Начать работу"},
+                    "text": {"type": "plain_text", "text": "Start"},
                     "value": str(task.id),
                 }
             )
@@ -487,6 +492,17 @@ def task_card(
             }
         )
 
+    # Edit is available to the owner and to admins (not to bystanders).
+    if task.status != TaskStatus.done and (is_owner or viewer_is_admin):
+        elements.append(
+            {
+                "type": "button",
+                "action_id": ACTION_EDIT_TASK,
+                "text": {"type": "plain_text", "text": "Edit"},
+                "value": str(task.id),
+            }
+        )
+
     # Subscribe toggle. Owner never sees it — they are implicitly subscribed
     # by virtue of being the assignee, so the button would be redundant.
     if task.status != TaskStatus.done and not is_owner:
@@ -496,7 +512,7 @@ def task_card(
                 "action_id": ACTION_UNSUBSCRIBE if is_subscribed else ACTION_SUBSCRIBE,
                 "text": {
                     "type": "plain_text",
-                    "text": "Отписаться" if is_subscribed else "Подписаться",
+                    "text": "Unsubscribe" if is_subscribed else "Subscribe",
                 },
                 "value": str(task.id),
             }
@@ -1017,7 +1033,7 @@ def subscriptions_modal(tasks: list[Any]) -> dict[str, Any]:
                         "type": "button",
                         "style": "danger",
                         "action_id": ACTION_UNSUBSCRIBE_IN_MODAL,
-                        "text": {"type": "plain_text", "text": "Отписаться"},
+                        "text": {"type": "plain_text", "text": "Unsubscribe"},
                         "value": str(t.id),
                     },
                 }

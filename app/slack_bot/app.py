@@ -26,10 +26,12 @@ from app.slack_bot.blocks import (
     ACTION_ADMIN_CONFIRM_TASK,
     ACTION_ADMIN_EDIT_TASK,
     ACTION_ADMIN_REJECT_TASK,
+    ACTION_EDIT_TASK,
     ACTION_WEEKLY_ACCEPT,
     ACTION_WEEKLY_DEFER,
     MODAL_CALLBACK_ADMIN_EDIT,
     MODAL_CALLBACK_COMPLETE_TASK,
+    MODAL_CALLBACK_EDIT_TASK,
     MODAL_CALLBACK_MEETING,
     MODAL_CALLBACK_TASK,
 )
@@ -56,6 +58,8 @@ from app.slack_bot.handlers.task_actions import (
     handle_start_work,
     handle_submit_review,
     handle_subscribe,
+    handle_task_edit_open,
+    handle_task_edit_submit,
     handle_unsubscribe,
     handle_unsubscribe_in_modal,
 )
@@ -195,6 +199,14 @@ def build_app(
     @app.view(MODAL_CALLBACK_COMPLETE_TASK)
     def _on_complete_task_submit(body, ack, view):
         handle_complete_task_submit(body=body, view=view, sender=sender, ack=ack)
+
+    @app.action(ACTION_EDIT_TASK)
+    def _on_task_edit_open(body, client, ack):
+        handle_task_edit_open(body=body, client=client, sender=sender, ack=ack)
+
+    @app.view(MODAL_CALLBACK_EDIT_TASK)
+    def _on_task_edit_submit(body, ack, view):
+        handle_task_edit_submit(body=body, view=view, sender=sender, ack=ack)
 
     @app.action(ACTION_SUBSCRIBE)
     def _on_subscribe(body, client, ack):

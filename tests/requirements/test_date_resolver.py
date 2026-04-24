@@ -31,6 +31,17 @@ FRIDAY = date(2026, 4, 24)
         ("do it by Friday", date(2026, 5, 1)),
         ("see tomorrow", date(2026, 4, 25)),
         ("deadline 2026-05-12", date(2026, 5, 12)),
+        # Russian day + month-name (genitive).
+        ("надо подготовить заметки к 1 мая", date(2026, 5, 1)),
+        ("до 5 июня отчёт", date(2026, 6, 5)),
+        ("к 25 декабря", date(2026, 12, 25)),
+        ("до 30 апреля", date(2026, 4, 30)),
+        # English "<month> <day>".
+        ("by May 5", date(2026, 5, 5)),
+        ("May 1st deadline", date(2026, 5, 1)),
+        ("by Jun 15th", date(2026, 6, 15)),
+        # Day + month that already passed this year → next year.
+        ("к 1 января", date(2027, 1, 1)),
     ],
 )
 def test_resolve_due_date_hits(text, expected):

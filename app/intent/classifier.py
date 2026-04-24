@@ -131,6 +131,38 @@ def classify_with_backend(
         )
 
     classification = _parse_classification(tool_input)
+
+    # Rule-based safety net: small LLMs sometimes return no_action for
+    # unambiguous task phrases ("надо подготовить заметки к 1 мая"). If
+    # the prefilter saw a strong task/meeting signal, trust it and
+    # synthesise a minimal draft from the source text. The prefilter
+    # score (0.55) keeps us in the soft-prompt bucket, not in auto-create.
+    if classification.intent == IntentType.no_action:
+        pf = prefilter_intent(source_text)
+        if pf.hint != IntentType.no_action:
+            from app.schemas.intent import TaskDraft, MeetingDraft
+
+            title = source_text[:200]
+            if pf.hint in (IntentType.create_task, IntentType.update_task):
+                classification = IntentClassification(
+                    intent=IntentType.create_task,
+                    confidence=pf.score,
+                    task=TaskDraft(title=title),
+                    reasoning=(
+                        "prefilter override: LLM said no_action but rules "
+                        "matched task keywords"
+                    ),
+                )
+            elif pf.hint in (IntentType.create_meeting, IntentType.update_meeting):
+                classification = IntentClassification(
+                    intent=IntentType.create_meeting,
+                    confidence=pf.score,
+                    meeting=MeetingDraft(title=title),
+                    reasoning=(
+                        "prefilter override: LLM said no_action but rules "
+                        "matched meeting keywords"
+                    ),
+                )
     # Date: deterministic Python resolver owns this concern. If it finds a
     # clear phrase in source_text we overwrite the LLM's answer; otherwise
     # we keep the LLM's hint.

@@ -31,6 +31,38 @@ _EN_WEEKDAYS = {
     "sunday": 6,
 }
 
+# Russian month stems (match both nominative and genitive: "май"/"мая",
+# "июнь"/"июня", …). Keyed by Python month number.
+_RU_MONTHS: dict[str, int] = {
+    "янв": 1,
+    "фев": 2,
+    "мар": 3,
+    "апр": 4,
+    "ма[йя]": 5,
+    "июн": 6,
+    "июл": 7,
+    "авг": 8,
+    "сент": 9,
+    "окт": 10,
+    "нояб": 11,
+    "дек": 12,
+}
+
+_EN_MONTHS: dict[str, int] = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
+
 _ISO_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 
 
@@ -43,6 +75,38 @@ def _next_weekday(today: date, target: int) -> date:
     if offset == 0:
         offset = 7
     return today + timedelta(days=offset)
+
+
+def _next_day_month(today: date, day: int, month: int) -> date | None:
+    """Return the next occurrence of (day, month) strictly after today
+    (i.e. same year, or next year if that date has already passed)."""
+    for year in (today.year, today.year + 1):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            return None
+        if candidate > today:
+            return candidate
+    return None
+
+
+def _try_day_month(lo: str, today: date) -> date | None:
+    """Detect "1 мая", "5 июня", "May 1", "by Jun 15" patterns."""
+    # Russian: "<day> <month-stem>" ("1 мая", "5 июня").
+    for stem, month in _RU_MONTHS.items():
+        m = re.search(rf"\b(\d{{1,2}})\s+{stem}\w*", lo)
+        if m:
+            d = _next_day_month(today, day=int(m.group(1)), month=month)
+            if d is not None:
+                return d
+    # English: "<month> <day>" ("May 1", "Jun 15th").
+    for stem, month in _EN_MONTHS.items():
+        m = re.search(rf"\b{stem}\w*\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", lo)
+        if m:
+            d = _next_day_month(today, day=int(m.group(1)), month=month)
+            if d is not None:
+                return d
+    return None
 
 
 def resolve_due_date(text: str, today: date) -> date | None:
@@ -72,6 +136,11 @@ def resolve_due_date(text: str, today: date) -> date | None:
         return _next_weekday(today, 4)  # Friday
     if re.search(r"на следующей неделе|next week", lo):
         return _next_weekday(today, 0)  # upcoming Monday
+
+    # "N <month>" / "<month> N" — "к 1 мая", "by May 5".
+    d = _try_day_month(lo, today)
+    if d is not None:
+        return d
 
     # Weekday names (Russian / English), optionally preceded by a preposition.
     for stem, idx in _RU_WEEKDAYS.items():

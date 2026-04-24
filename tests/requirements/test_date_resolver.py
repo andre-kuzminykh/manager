@@ -58,6 +58,10 @@ def test_classifier_fills_missing_due_date_locally(monkeypatch):
                 "task": {"title": "питчдек", "due_date": None},
             }
 
+        def call_tool(self, **kw):
+            # Owner follow-up call — test does not care about owner here.
+            return {"reasoning": "no assignee", "display_name": None}
+
     # Freeze today to Friday 2026-04-24.
     import app.intent.classifier as clf
 

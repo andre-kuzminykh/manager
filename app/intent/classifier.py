@@ -15,6 +15,13 @@ from app.intent.llm_backends import (
     OpenAIBackend,
 )
 from app.intent.date_resolver import resolve_due_date
+from app.intent.owner_prompt import (
+    OWNER_SYSTEM_PROMPT,
+    OWNER_TOOL_DESCRIPTION,
+    OWNER_TOOL_NAME,
+    OWNER_TOOL_PARAMETERS,
+    build_owner_user_prompt,
+)
 from app.intent.prompts import SYSTEM_PROMPT, build_user_prompt
 from app.intent.rules import prefilter_intent
 from app.logging_setup import get_logger
@@ -124,15 +131,53 @@ def classify_with_backend(
         )
 
     classification = _parse_classification(tool_input)
-    # Safety net: small LLMs (gpt-4o-mini) routinely ignore the weekday
-    # table and leave due_date null. Resolve obvious phrases locally.
-    if (
-        classification.task is not None
-        and classification.task.due_date is None
-    ):
+    # Date: deterministic Python resolver owns this concern. If it finds a
+    # clear phrase in source_text we overwrite the LLM's answer; otherwise
+    # we keep the LLM's hint.
+    if classification.task is not None:
         resolved = resolve_due_date(source_text, date.today())
         if resolved is not None:
             classification.task.due_date = resolved
+
+    # Owner: small LLMs often pick the audience or the author as the
+    # assignee when owner detection shares a prompt with intent + date.
+    # A second focused LLM call with the same conversation context
+    # produces much more reliable results on gpt-4o-mini.
+    if classification.task is not None and classification.intent == IntentType.create_task:
+        author_user_id = (context.source_message.get("user") or None)
+        try:
+            owner_data = backend.call_tool(
+                system_prompt=OWNER_SYSTEM_PROMPT,
+                user_prompt=build_owner_user_prompt(
+                    source_text=source_text,
+                    context_messages=context.flat_messages(),
+                    author_user_id=author_user_id,
+                ),
+                tool_name=OWNER_TOOL_NAME,
+                tool_description=OWNER_TOOL_DESCRIPTION,
+                tool_parameters=OWNER_TOOL_PARAMETERS,
+            )
+        except Exception as e:  # noqa: BLE001 — degrade gracefully
+            log.warning("owner_llm_call_failed", error=str(e))
+            owner_data = None
+        if isinstance(owner_data, dict):
+            slack_user_id = (owner_data.get("slack_user_id") or None)
+            display_name = (owner_data.get("display_name") or None)
+            if slack_user_id:
+                classification.task.owner_user_id = slack_user_id
+                classification.task.owner_display_name = (
+                    classification.task.owner_display_name or display_name
+                )
+            elif display_name:
+                # Only fill display_name; owner_user_id stays null so the
+                # downstream layer can try the employees directory.
+                classification.task.owner_display_name = display_name
+                classification.task.owner_user_id = None
+            else:
+                # The focused call said "no assignee" — trust it and
+                # clear whatever the main pass may have guessed.
+                classification.task.owner_display_name = None
+                classification.task.owner_user_id = None
     return classification
 
 

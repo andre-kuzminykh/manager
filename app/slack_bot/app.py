@@ -26,7 +26,10 @@ from app.slack_bot.blocks import (
     ACTION_ADMIN_CONFIRM_TASK,
     ACTION_ADMIN_EDIT_TASK,
     ACTION_ADMIN_REJECT_TASK,
+    ACTION_WEEKLY_ACCEPT,
+    ACTION_WEEKLY_DEFER,
     MODAL_CALLBACK_ADMIN_EDIT,
+    MODAL_CALLBACK_COMPLETE_TASK,
     MODAL_CALLBACK_MEETING,
     MODAL_CALLBACK_TASK,
 )
@@ -189,7 +192,7 @@ def build_app(
     def _on_mark_done(body, client, ack):
         handle_mark_done(body=body, sender=sender, client=client, ack=ack)
 
-    @app.view(bk.MODAL_CALLBACK_COMPLETE_TASK)
+    @app.view(MODAL_CALLBACK_COMPLETE_TASK)
     def _on_complete_task_submit(body, ack, view):
         handle_complete_task_submit(body=body, view=view, sender=sender, ack=ack)
 
@@ -235,11 +238,11 @@ def build_app(
         handle_admin_edit_submit(body=body, view=view, sender=sender, ack=ack)
 
     # CR-03 weekly plan
-    @app.action(bk.ACTION_WEEKLY_ACCEPT)
+    @app.action(ACTION_WEEKLY_ACCEPT)
     def _on_weekly_accept(body, ack):
         handle_weekly_accept(body=body, sender=sender, ack=ack)
 
-    @app.action(bk.ACTION_WEEKLY_DEFER)
+    @app.action(ACTION_WEEKLY_DEFER)
     def _on_weekly_defer(body, ack):
         handle_weekly_defer(body=body, sender=sender, ack=ack)
 

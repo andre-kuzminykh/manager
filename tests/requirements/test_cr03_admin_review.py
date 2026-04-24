@@ -371,9 +371,12 @@ def test_admin_edit_submit_updates_task_and_audits(
 # --------------------------------------------------------------------------- #
 
 
-def test_handle_message_high_confidence_creates_task_and_posts_admin_review(
+def test_handle_message_passive_offers_soft_prompt_does_not_auto_create(
     patched_session_scope, services_task, bolt_context, slack_client, SessionFactory, monkeypatch, ack
 ):
+    """Per product decision 2026-04-24, passive never auto-creates. It
+    offers (soft_prompt in the source thread). No admin review is
+    triggered — that was also dropped with auto-create."""
     monkeypatch.setenv("ADMIN_SLACK_USER_IDS", "U-adm")
     from app.config import get_settings
     from app.slack_bot.handlers.events import handle_message
@@ -397,13 +400,13 @@ def test_handle_message_high_confidence_creates_task_and_posts_admin_review(
         ack=ack,
     )
     with SessionFactory() as s:
-        # Task was auto-created.
-        assert s.query(Task).count() == 1
-        # Draft was marked confirmed.
-        assert s.query(ActionDraft).one().state == ActionDraftState.confirmed
-        # Admin-review audit row exists.
-        assert s.query(AuditLog).filter(AuditLog.category == "admin_review").count() == 1
-    # Admin received a DM.
-    assert any(m["channel"] == "U-adm" for m in sender.posts)
+        # No task auto-created on passive path.
+        assert s.query(Task).count() == 0
+        # Draft persists in proposed state for the soft-prompt button.
+        assert s.query(ActionDraft).one().state == ActionDraftState.proposed
+        # No admin review.
+        assert s.query(AuditLog).filter(AuditLog.category == "admin_review").count() == 0
+    # Admin got nothing.
+    assert not any(m["channel"] == "U-adm" for m in sender.posts)
 
     get_settings.cache_clear()  # type: ignore[attr-defined]

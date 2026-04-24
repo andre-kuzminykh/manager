@@ -118,7 +118,18 @@ class Orchestrator:
         classification: IntentClassification,
         draft_id: int | None,
     ) -> PassiveDecision:
-        """Decide UX for passive detection based on confidence thresholds."""
+        """Passive UX rule (per product decision 2026-04-24):
+
+        Passive NEVER auto-creates. It only OFFERS. The author explicitly
+        confirms (or ignores) in the thread. Auto-create is reserved for
+        the @mention path, which has its own handler.
+
+        Mapping:
+          no_action               → silent
+          create_*  high conf     → soft_prompt  (was: card)
+          create_*  medium conf   → soft_prompt  (unchanged)
+          create_*  low conf      → silent       (unchanged)
+        """
         if classification.intent == IntentType.no_action:
             return PassiveDecision(
                 action="silent",
@@ -127,9 +138,7 @@ class Orchestrator:
             )
 
         bucket = bucket_for(classification.confidence, self._settings)
-        if bucket == ConfidenceBucket.high:
-            return PassiveDecision(action="card", confidence_bucket=bucket, draft_id=draft_id)
-        if bucket == ConfidenceBucket.medium:
+        if bucket in (ConfidenceBucket.high, ConfidenceBucket.medium):
             return PassiveDecision(
                 action="soft_prompt", confidence_bucket=bucket, draft_id=draft_id
             )

@@ -29,7 +29,10 @@ def test_no_action_is_always_silent():
     assert d.action == "silent"
 
 
-def test_high_confidence_task_shows_card():
+def test_high_confidence_task_offers_soft_prompt():
+    """Product decision 2026-04-24: passive NEVER auto-creates — it only
+    offers. High-confidence passive still routes through soft_prompt
+    (same button the user clicks to confirm)."""
     orch = Orchestrator(_settings())
     c = IntentClassification(
         intent=IntentType.create_task,
@@ -37,7 +40,7 @@ def test_high_confidence_task_shows_card():
         task=TaskDraft(title="Do X"),
     )
     d = orch.decide_passive(classification=c, draft_id=42)
-    assert d.action == "card"
+    assert d.action == "soft_prompt"
     assert d.confidence_bucket == ConfidenceBucket.high
     assert d.draft_id == 42
 

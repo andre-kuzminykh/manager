@@ -207,7 +207,7 @@ def test_mention_follow_up_reply_updates_task_and_refreshes_card(
 # --------------------------------------------------------------------------- #
 
 
-def test_passive_high_confidence_still_posts_admin_review(
+def test_passive_never_auto_creates_only_offers(
     patched_session_scope,
     services_task,
     ack,
@@ -216,6 +216,9 @@ def test_passive_high_confidence_still_posts_admin_review(
     SessionFactory,
     monkeypatch,
 ):
+    """Per product decision 2026-04-24: passive path NEVER auto-creates a
+    task. It posts a soft-prompt in the thread inviting the user to
+    confirm. @mention is the only path that auto-creates."""
     monkeypatch.setenv("ADMIN_SLACK_USER_IDS", "U-admin-1")
     from app.config import get_settings
 
@@ -240,14 +243,20 @@ def test_passive_high_confidence_still_posts_admin_review(
         ack=ack,
     )
     with SessionFactory() as s:
-        assert s.query(Task).count() == 1
+        # No task auto-created.
+        assert s.query(Task).count() == 0
+        # No admin review.
         assert (
             s.query(AuditLog)
             .filter(AuditLog.category == "admin_review")
             .count()
-            == 1
+            == 0
         )
-    # Admin got a DM.
-    assert any(m["channel"] == "U-admin-1" for m in sender.posts)
+    # Admin got NO DM.
+    assert not any(m["channel"] == "U-admin-1" for m in sender.posts)
+    # User saw a soft-prompt posted in the source thread.
+    assert any(
+        m["channel"] == "C1" and m["thread_ts"] == "5.0" for m in sender.posts
+    )
 
     get_settings.cache_clear()  # type: ignore[attr-defined]

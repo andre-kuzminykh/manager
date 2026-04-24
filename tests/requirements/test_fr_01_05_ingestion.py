@@ -507,12 +507,15 @@ def test_fr4_strict_thresholds_forces_soft_prompt_for_midrange():
     assert Orchestrator(s).decide_passive(classification=c, draft_id=1).action == "soft_prompt"
 
 
-def test_fr4_lax_thresholds_trigger_card_for_midrange():
+def test_fr4_passive_never_auto_creates_regardless_of_bucket():
+    """Per product decision 2026-04-24, passive path never auto-creates.
+    Even when thresholds are lax enough to make a message "high"
+    confidence, the UX is soft_prompt (offer, ask user to confirm)."""
     s = Settings(INTENT_CONFIDENCE_HIGH=0.3, INTENT_CONFIDENCE_LOW=0.1)
     c = IntentClassification(
         intent=IntentType.create_task, confidence=0.35, task=TaskDraft(title="x")
     )
-    assert Orchestrator(s).decide_passive(classification=c, draft_id=1).action == "card"
+    assert Orchestrator(s).decide_passive(classification=c, draft_id=1).action == "soft_prompt"
 
 
 # =============================================================================

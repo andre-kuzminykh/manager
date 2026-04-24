@@ -281,11 +281,10 @@ def test_nfr2_dedup_retry_from_slack_does_not_post_new_card(
             sender=sender,
             ack=ack,
         )
-    # CR-03 always-create for passive: first handle posts the channel
-    # task-card + an owner DM mirror (2 posts). Retries with the same
-    # event_id must be silently deduped — so the total count is still 2.
-    first_run_count = len(sender.posted)
-    assert first_run_count == 2
+    # Passive flow posts a single soft-prompt in the source thread.
+    # Retries with the same event_id must be silently deduped — total
+    # count stays at 1.
+    assert len(sender.posted) == 1
 
 
 def test_nfr2_missing_event_id_still_processed_once_per_call(
@@ -482,7 +481,7 @@ def test_nfr3_draft_payload_is_persisted_structured(
 # =============================================================================
 
 
-def test_nfr4_passive_high_confidence_auto_creates_task_per_cr03(
+def test_nfr4_passive_high_confidence_still_never_auto_creates(
     patched_session_scope,
     services_task,
     sender,
@@ -491,9 +490,10 @@ def test_nfr4_passive_high_confidence_auto_creates_task_per_cr03(
     slack_client,
     SessionFactory,
 ):
-    """CR-03 FR-CR-03-3 superseded the original NFR-4 'never auto-create'
-    rule: on high confidence the bot creates the task immediately so the
-    admin can review/reject it rather than losing the signal."""
+    """Product decision 2026-04-24 restores the original NFR-4 rule: the
+    passive path never auto-creates a Task. Only a draft is persisted
+    (for traceability) and the bot offers a soft-prompt. Auto-create is
+    reserved for @mention."""
     from app.slack_bot.handlers.events import handle_message
 
     handle_message(
@@ -513,7 +513,7 @@ def test_nfr4_passive_high_confidence_auto_creates_task_per_cr03(
     )
     with SessionFactory() as s:
         assert s.query(ActionDraft).count() == 1
-        assert s.query(Task).count() == 1  # CR-03: auto-created
+        assert s.query(Task).count() == 0  # passive never auto-creates
         assert s.query(Meeting).count() == 0
 
 

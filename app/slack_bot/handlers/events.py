@@ -45,8 +45,14 @@ def _is_ignorable(event: dict[str, Any], bot_user_id: str | None) -> bool:
     if bot_user_id and event.get("user") == bot_user_id:
         return True
     text = event.get("text") or ""
+    # Text-less events are usually system noise (joins, channel changes),
+    # EXCEPT voice notes which arrive as a message with empty text and
+    # an audio file attached. Keep those.
     if not text.strip():
-        return True
+        from app.services.transcription import extract_audio_files
+
+        if not extract_audio_files(event):
+            return True
     # Slack fires both `app_mention` and `message.*` for messages that mention
     # the bot. The explicit mention handler already takes care of those — skip
     # them here to avoid duplicate drafts and races on shared rows.
@@ -375,7 +381,7 @@ def handle_message(
                 return
 
         kind = _kind_from_channel_type(event.get("channel_type"), channel)
-        text = reply_text  # already cleaned
+        text = _enrich_text_with_audio(event, reply_text)
 
         source_message = {
             "ts": event["ts"],
@@ -575,7 +581,9 @@ def handle_app_mention(
                 log.info("duplicate_event_skipped", event_id=event_id)
                 return
 
-            text = strip_bot_mentions(event.get("text", ""), bot_user_id)
+            text = _enrich_text_with_audio(
+                event, strip_bot_mentions(event.get("text", ""), bot_user_id)
+            )
             source_message = {
                 "ts": event["ts"],
                 "thread_ts": event.get("thread_ts"),
@@ -735,6 +743,32 @@ def _auto_finalize(
         log.error("auto_finalize_failed", error=str(e), draft_id=draft_id)
         return None
     return entity_id if entity_type == "task" else None
+
+
+def _enrich_text_with_audio(event: dict[str, Any], base_text: str) -> str:
+    """If the event carries audio attachments, transcribe them and
+    merge the transcripts into the text the pipeline will see. Returns
+    base_text unchanged when there are no audio files, Whisper is not
+    configured, or transcription fails."""
+    from app.services.transcription import (
+        extract_audio_files,
+        merge_transcripts_into_text,
+        transcribe_audio_files,
+    )
+
+    audio_files = extract_audio_files(event)
+    if not audio_files:
+        return base_text
+
+    settings = get_settings()
+    transcripts = transcribe_audio_files(
+        audio_files,
+        bot_token=settings.slack_bot_token,
+        openai_api_key=settings.openai_api_key,
+    )
+    if not transcripts:
+        return base_text
+    return merge_transcripts_into_text(base_text, transcripts)
 
 
 def _task_payload(task: Task | None) -> dict:

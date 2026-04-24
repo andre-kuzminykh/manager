@@ -4,7 +4,10 @@
 
 Input: a Slack message (source_text) plus up to 10 surrounding
 messages (context, oldest first), plus the author's Slack user id and
-today's local date.
+today's local date. Voice-note attachments on the Slack message are
+transcribed via Whisper in the handler layer
+(app/services/transcription.py); the transcript is appended to the
+caption (if any) before this pipeline sees the text.
 
 Stage 1 — Detection (one focused LLM call):
     Question: "is the source message a task?"

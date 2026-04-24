@@ -132,8 +132,12 @@ def test_resubscribe_does_not_post_duplicate_anchor(
     sender.posts.clear()
     handle_subscribe(body=body, sender=sender, ack=ack, client=None)
     second_dm_posts = [m for m in sender.posts if m["channel"] == "U-other"]
-    # No new anchor card — at most one ack message.
-    anchors = [m for m in second_dm_posts if "blocks" in m]
+    # No new anchor card. Anchor = top-level DM (no thread_ts); the
+    # ack is a thread reply under the existing anchor, so it has
+    # thread_ts set. Acks also carry the task-card preview as blocks
+    # now, so we can't distinguish by "blocks in m" anymore — check
+    # thread_ts instead.
+    anchors = [m for m in second_dm_posts if not m.get("thread_ts")]
     assert anchors == []
 
 

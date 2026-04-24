@@ -230,10 +230,13 @@ def _toggle_subscription(
 
     permalink: str | None = None
     anchor_needed: bool = False
+    card_blocks: list[dict[str, Any]] | None = None
+    task_title: str = ""
     with session_scope() as session:
         task = session.get(Task, task_id)
         if task is None:
             return
+        task_title = task.title
         if subscribe:
             sub = subs.subscribe(session, task=task, slack_user_id=actor)
             # Remember whether we still need to post an anchor DM to this
@@ -255,7 +258,7 @@ def _toggle_subscription(
                             viewer_slack_user_id=actor,
                             is_subscribed=subscribe,
                         ),
-                        text=f"Task #{task.id}",
+                        text=f":clipboard: Task #{task.id}: {task.title}",
                     )
                 if task.dm_channel and task.dm_ts:
                     sender.update_message(
@@ -268,7 +271,7 @@ def _toggle_subscription(
                                 session, task=task, slack_user_id=task.owner_user_id or ""
                             ),
                         ),
-                        text=f"Task #{task.id}",
+                        text=f":clipboard: Task #{task.id}: {task.title}",
                     )
             except Exception as e:  # noqa: BLE001
                 log.warning("subscription_card_refresh_failed", error=str(e))
@@ -295,7 +298,7 @@ def _toggle_subscription(
                         viewer_slack_user_id=actor,
                         is_subscribed=True,
                     ),
-                    text=f"Task #{task.id}: {task.title}",
+                    text=f":clipboard: Task #{task.id}: {task.title}",
                 )
                 if isinstance(anchor_resp, dict):
                     sub.dm_ts = anchor_resp.get("ts")
@@ -306,12 +309,31 @@ def _toggle_subscription(
         # Recompute the anchor ts for the ack text below.
         anchor_ts = sub.dm_ts if subscribe else None
 
+        # Render the task card from the actor's perspective so the ack
+        # DM embeds a preview of the task (title, meta, buttons).
+        card_blocks = bk.task_card(
+            task=task,
+            viewer_slack_user_id=actor,
+            is_subscribed=subscribe,
+        )
+
     icon = ":bell:" if subscribe else ":no_bell:"
     verb = "subscribed to" if subscribe else "unsubscribed from"
     link = f"<{permalink}|task #{task_id}>" if permalink else f"task #{task_id}"
+    ack_line = f"{icon} {verb} {link}"
+    # Compose: a short context block with the ack line, then the
+    # task-card preview so the DM shows status / owner / buttons at
+    # a glance.
+    ack_blocks: list[dict[str, Any]] = [
+        {"type": "context", "elements": [{"type": "mrkdwn", "text": ack_line}]}
+    ]
+    if card_blocks:
+        ack_blocks.extend(card_blocks)
     ack_kwargs: dict[str, Any] = {
         "channel": actor,
-        "text": f"{icon} {verb} {link}",
+        "text": f"{ack_line}: {task_title}",
+        "blocks": ack_blocks,
+        "unfurl_links": True,
     }
     # Thread the ack under the anchor DM (subscribe path) so the user's
     # notifications for this task stay grouped.

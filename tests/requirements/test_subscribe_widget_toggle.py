@@ -160,8 +160,14 @@ def test_subscribe_dms_actor_with_clickable_link(
     assert len(actor_msgs) == 2
     ack_msg = next(m for m in actor_msgs if ":bell:" in m.get("text", ""))
     assert "subscribed" in ack_msg["text"]
-    assert "<https://slack.com/x/p200|task #" in ack_msg["text"]
+    assert "<https://slack.com/x/p200|task #" in str(ack_msg.get("blocks"))
     assert "thread_ts" in ack_msg
+    # Ack carries the task-card preview (context line + task card blocks).
+    blocks = ack_msg.get("blocks") or []
+    assert blocks[0]["type"] == "context"
+    assert any(
+        b.get("type") == "actions" for b in blocks
+    ), "task card action buttons should be present in the ack preview"
 
 
 def test_subscribe_button_flips_to_unsubscribe_on_re_render(

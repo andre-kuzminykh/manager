@@ -57,7 +57,7 @@ def _replace_card(
             blocks=bk.admin_review_resolved_message(
                 task_id=task_id, action=action, actor=actor
             ),
-            text=f"Task #{task_id} — {action}",
+            text=f":clipboard: Task #{task_id} — {action}",
         )
     except Exception as e:  # noqa: BLE001
         log.warning("admin_review_card_update_failed", error=str(e))

@@ -20,7 +20,7 @@ def refresh_task_card(sender: _Sender, task: Task) -> None:
     (task.dm_*). Failures are swallowed — the card is UX, the DB is source
     of truth."""
     card = bk.task_card(task=task, viewer_slack_user_id=task.owner_user_id)
-    text = f"Task #{task.id}"
+    text = f":clipboard: Task #{task.id}: {task.title}"
 
     for channel, ts in (
         (task.card_channel, task.card_ts),

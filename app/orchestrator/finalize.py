@@ -166,7 +166,7 @@ class FinalizeService:
                         channel=channel,
                         ts=ts,
                         blocks=channel_card,
-                        text=f"Task #{task_id}",
+                        text=f":clipboard: Task #{task_id}: {task.title}",
                     )
                     task.card_channel = channel
                     task.card_ts = ts
@@ -182,7 +182,7 @@ class FinalizeService:
                         channel=channel,
                         thread_ts=thread_ts,
                         blocks=channel_card,
-                        text=f"Task #{task_id}",
+                        text=f":clipboard: Task #{task_id}: {task.title}",
                     )
                     if isinstance(resp, dict):
                         task.card_channel = channel
@@ -206,7 +206,7 @@ class FinalizeService:
                     resp = self._sender.post_message(
                         channel=owner_id,
                         blocks=dm_card,
-                        text=f"Task #{task_id}",
+                        text=f":clipboard: Task #{task_id}: {task.title}",
                     )
                     if isinstance(resp, dict):
                         task.dm_channel = owner_id

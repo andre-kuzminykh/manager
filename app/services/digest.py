@@ -242,7 +242,7 @@ class DigestService:
             label = ":warning: Overdue" if overdue else ":alarm_clock: Approaching"
             self._sender.post_message(
                 channel=t.owner_user_id,
-                text="Deadline reminder",
+                text=f":alarm_clock: Deadline reminder — task #{t.id}: {t.title}",
                 blocks=[
                     {
                         "type": "section",

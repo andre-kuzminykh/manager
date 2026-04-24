@@ -392,42 +392,52 @@ def handle_message(
         if decision.action == "silent" or draft is None:
             return
 
+        # Snapshot everything we need outside the session BEFORE closing —
+        # downstream calls open their own session_scope() and can't see
+        # uncommitted rows otherwise (async finalize used to blow up with
+        # "Draft N not found").
         permalink = fetch_permalink(client, channel=channel, ts=event["ts"])
+        draft_id = draft.id
+        snapshot_id = snapshot.id
+        decision_action = decision.action
+        classification_intent = classification.intent
+        classification_reasoning = classification.reasoning
 
-        # CR-03 FR-CR-03-3 + FR-CR-03-4: on high confidence, create the task
-        # immediately and notify admin(s) for review — no more user-facing
+    # ── outside session_scope: the draft row is now committed ────────────
+    if decision_action == "card":
+        # CR-03 FR-CR-03-3 + FR-CR-03-4: on high confidence, create the
+        # task immediately and notify admin(s) for review — no user-facing
         # "Confirm / Edit / Ignore" flow in the channel.
-        if decision.action == "card":
-            _always_create_and_admin_review(
-                draft_id=draft.id,
-                source_conversation_id=channel,
-                source_message_ts=event["ts"],
-                source_thread_ts=event.get("thread_ts"),
-                source_user_id=event.get("user"),
-                context_snapshot_id=snapshot.id,
-                permalink=permalink,
-                reasoning=classification.reasoning,
-                sender=sender,
-            )
-            return
-
-        # Soft-prompt path unchanged — we still ask the user politely.
-        metadata = draft_private_metadata(
-            conversation_id=channel,
-            message_ts=event["ts"],
-            thread_ts=event.get("thread_ts"),
-            draft_id=draft.id,
-            context_snapshot_id=snapshot.id,
+        _always_create_and_admin_review(
+            draft_id=draft_id,
+            source_conversation_id=channel,
+            source_message_ts=event["ts"],
+            source_thread_ts=event.get("thread_ts"),
             source_user_id=event.get("user"),
+            context_snapshot_id=snapshot_id,
             permalink=permalink,
+            reasoning=classification_reasoning,
+            sender=sender,
         )
-        sender.post_message(
-            channel=channel,
-            thread_ts=event.get("thread_ts") or event["ts"],
-            blocks=bk.soft_prompt(classification.intent, draft.id),
-            text="Action suggestion",
-            metadata={"event_type": "draft", "event_payload": {"metadata": metadata}},
-        )
+        return
+
+    # Soft-prompt path — ask the user politely in the thread.
+    metadata = draft_private_metadata(
+        conversation_id=channel,
+        message_ts=event["ts"],
+        thread_ts=event.get("thread_ts"),
+        draft_id=draft_id,
+        context_snapshot_id=snapshot_id,
+        source_user_id=event.get("user"),
+        permalink=permalink,
+    )
+    sender.post_message(
+        channel=channel,
+        thread_ts=event.get("thread_ts") or event["ts"],
+        blocks=bk.soft_prompt(classification_intent, draft_id),
+        text="Action suggestion",
+        metadata={"event_type": "draft", "event_payload": {"metadata": metadata}},
+    )
 
 
 def _always_create_and_admin_review(

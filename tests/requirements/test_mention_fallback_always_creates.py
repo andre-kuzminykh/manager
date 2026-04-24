@@ -32,16 +32,21 @@ def test_mention_with_short_text_synthesises_task_draft(
         ack=ack,
     )
 
-    # Widget + follow-up question were posted
+    # CR-03: task-card + follow-up question were posted.
     assert len(sender.posted) >= 2
-    first = sender.posted[0]
-    assert first["blocks"][0]["text"]["text"] == "Task draft"
+    first_block = sender.posted[0]["blocks"][0]
+    assert first_block["type"] == "section"
+    assert first_block["text"]["text"].startswith("*#")
 
     with SessionFactory() as s:
+        from app.models import Task
+
         drafts = s.query(ActionDraft).all()
+        tasks = s.query(Task).all()
         assert len(drafts) == 1
-        assert drafts[0].state == ActionDraftState.proposed
-        assert drafts[0].payload["title"] == "надо сделать бота для сбора задач"
+        assert drafts[0].state == ActionDraftState.confirmed
+        assert len(tasks) == 1
+        assert tasks[0].title == "надо сделать бота для сбора задач"
 
 
 def test_mention_ack_message_includes_recorded_title(
@@ -63,8 +68,11 @@ def test_mention_ack_message_includes_recorded_title(
         ack=ack,
     )
 
-    ack_msg = sender.posted[1]
-    assert ":memo: Записал:" in ack_msg["text"]
+    # The ack may not be at index 1 (finalize also DMs the owner a task
+    # card mirror). Find the message by its :memo: prefix.
+    ack_msg = next(
+        m for m in sender.posted if ":memo: Записал:" in m.get("text", "")
+    )
     assert "допилить интеграцию" in ack_msg["text"]
 
 
@@ -146,11 +154,11 @@ def test_mention_when_classifier_succeeds_still_posts_full_flow(
         sender=sender,
         ack=ack,
     )
-    # First post is the card; fields from services_task fixture.
-    card_fields = "\n".join(
-        f["text"]
+    # CR-03: first post is the real task-card — not a draft widget with
+    # fields. Scan every block's text for the title.
+    card_text = "\n".join(
+        b.get("text", {}).get("text", "")
         for b in sender.posted[0]["blocks"]
-        if b["type"] == "section" and "fields" in b
-        for f in b["fields"]
+        if b.get("type") == "section"
     )
-    assert "Prepare report" in card_fields
+    assert "Prepare report" in card_text

@@ -124,10 +124,12 @@ def test_fr6_mention_posts_draft_when_classifier_returns_payload(
         sender=sender,
         ack=ack,
     )
-    # The bot posts the draft card and may add one follow-up question when a
-    # required field is still missing (e.g. due_date). First post is the card.
+    # CR-03: @mention auto-creates the task and posts a task-card (not a
+    # draft widget) plus a follow-up question when fields are missing.
     assert len(sender.posted) >= 1
-    assert sender.posted[0]["blocks"][0]["text"]["text"] == "Task draft"
+    first_block = sender.posted[0]["blocks"][0]
+    assert first_block["type"] == "section"
+    assert first_block["text"]["text"].startswith("*#")
 
 
 def test_fr6_mention_falls_back_to_synthetic_draft_when_llm_silent(
@@ -139,7 +141,8 @@ def test_fr6_mention_falls_back_to_synthetic_draft_when_llm_silent(
     slack_client,
 ):
     """Even when the classifier returns no_action, an explicit mention
-    always produces a draft card from the cleaned source text."""
+    auto-creates a Task (CR-03) from the cleaned source text and posts
+    a task-card + follow-up question."""
     from app.slack_bot.handlers.events import handle_app_mention
 
     handle_app_mention(
@@ -157,11 +160,13 @@ def test_fr6_mention_falls_back_to_synthetic_draft_when_llm_silent(
         sender=sender,
         ack=ack,
     )
-    # Widget first, then the follow-up question.
+    # Task-card first, then the follow-up question.
     assert len(sender.posted) >= 2
-    assert sender.posted[0]["blocks"][0]["text"]["text"] == "Task draft"
+    first_block = sender.posted[0]["blocks"][0]
+    assert first_block["type"] == "section"
+    assert first_block["text"]["text"].startswith("*#")
     # And the first question is prefixed with :memo: Записал:.
-    assert "Записал" in sender.posted[1].get("text", "")
+    assert any("Записал" in m.get("text", "") for m in sender.posted)
 
 
 # =============================================================================
@@ -251,7 +256,7 @@ def test_fr7_parser_roundtrip_every_priority():
 # =============================================================================
 
 
-def test_fr8_draft_starts_in_proposed_state(
+def test_fr8_mention_confirms_draft_and_links_to_task_per_cr03(
     patched_session_scope,
     services_task,
     sender,
@@ -260,6 +265,9 @@ def test_fr8_draft_starts_in_proposed_state(
     slack_client,
     SessionFactory,
 ):
+    """CR-03 superseded FR-8 for the @mention path: the draft is auto-
+    confirmed and links to a real Task. User confirmation is only
+    required for the medium-confidence passive soft prompt flow."""
     from app.slack_bot.handlers.events import handle_app_mention
 
     handle_app_mention(
@@ -279,10 +287,11 @@ def test_fr8_draft_starts_in_proposed_state(
     )
     with SessionFactory() as s:
         d = s.query(ActionDraft).one()
-        assert d.state == ActionDraftState.proposed
+        assert d.state == ActionDraftState.confirmed
+        assert d.task_id is not None
 
 
-def test_fr8_no_task_or_meeting_in_db_before_confirm(
+def test_fr8_mention_auto_creates_task_per_cr03(
     patched_session_scope,
     services_task,
     sender,
@@ -291,6 +300,7 @@ def test_fr8_no_task_or_meeting_in_db_before_confirm(
     slack_client,
     SessionFactory,
 ):
+    """CR-03 flip: explicit @mention materialises the task immediately."""
     from app.models import Meeting, Task
     from app.slack_bot.handlers.events import handle_app_mention
 
@@ -310,7 +320,7 @@ def test_fr8_no_task_or_meeting_in_db_before_confirm(
         ack=ack,
     )
     with SessionFactory() as s:
-        assert s.query(Task).count() == 0
+        assert s.query(Task).count() == 1
         assert s.query(Meeting).count() == 0
 
 

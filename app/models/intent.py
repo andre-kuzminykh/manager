@@ -74,5 +74,10 @@ class ActionDraft(Base, TimestampMixin):
     follow_up_message_ts: Mapped[list[str] | None] = mapped_column(
         JSON, nullable=True
     )
+    # Link to the Task this draft materialised into (CR-03 always-create).
+    # Null when the draft is still pending user action.
+    task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
+    )
 
     inference: Mapped[IntentInference] = relationship(back_populates="drafts")

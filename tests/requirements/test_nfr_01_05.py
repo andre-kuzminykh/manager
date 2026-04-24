@@ -281,8 +281,11 @@ def test_nfr2_dedup_retry_from_slack_does_not_post_new_card(
             sender=sender,
             ack=ack,
         )
-    # sender.posted has exactly one entry — the card on first handle
-    assert len(sender.posted) == 1
+    # CR-03 always-create for passive: first handle posts the channel
+    # task-card + an owner DM mirror (2 posts). Retries with the same
+    # event_id must be silently deduped — so the total count is still 2.
+    first_run_count = len(sender.posted)
+    assert first_run_count == 2
 
 
 def test_nfr2_missing_event_id_still_processed_once_per_call(

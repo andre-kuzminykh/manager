@@ -10,7 +10,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import get_logger
-from app.models import ActionDraft, ActionDraftState
+from app.models import ActionDraft, ActionDraftState, Task
 from app.schemas.intent import IntentClassification, IntentType, InvocationType
 from app.services import parse_reply, pick_next_missing, prompt_for
 from app.services.followup import llm_extract_reply_fields
@@ -113,12 +113,17 @@ def _handle_followup_reply(
     Returns True if it was consumed as a follow-up (caller should stop), or
     False if it should fall through to the regular passive path.
     """
+    # Draft is awaiting a field reply — either still in the old
+    # proposed-waiting-for-Confirm state, OR already confirmed into a
+    # real Task (CR-03 always-create flow). We match either case.
     draft = (
         session.query(ActionDraft)
         .filter(
             ActionDraft.slack_message_ts == thread_ts,
             ActionDraft.awaiting_field.isnot(None),
-            ActionDraft.state == ActionDraftState.proposed,
+            ActionDraft.state.in_(
+                (ActionDraftState.proposed, ActionDraftState.confirmed)
+            ),
         )
         .order_by(ActionDraft.id.desc())
         .first()
@@ -171,13 +176,30 @@ def _handle_followup_reply(
     draft.payload = payload
     flag_modified(draft, "payload")
 
-    # Decide what to ask next.
-    next_field = pick_next_missing(draft.intent.value, payload)
+    # If the draft already materialised into a Task (CR-03 always-create
+    # path — typical for @mention and high-confidence passive), apply the
+    # same patch to the Task row and refresh both cards. Otherwise update
+    # the still-pending draft widget as before.
+    task = None
+    if draft.task_id is not None:
+        task = session.get(Task, draft.task_id)
+        if task is not None:
+            _apply_payload_to_task(task, parsed)
+
+    # Decide what to ask next based on whatever is authoritative.
+    if task is not None:
+        next_field = pick_next_missing(draft.intent.value, _task_payload(task))
+    else:
+        next_field = pick_next_missing(draft.intent.value, payload)
     draft.awaiting_field = next_field
     session.flush()
 
     # Update the card in place.
-    if draft.card_channel and draft.card_ts:
+    if task is not None:
+        from app.services.card_sync import refresh_task_card as _rtc
+
+        _rtc(sender, task)
+    elif draft.card_channel and draft.card_ts:
         try:
             sender.update_message(
                 channel=draft.card_channel,
@@ -189,14 +211,21 @@ def _handle_followup_reply(
             log.warning("card_update_failed", error=str(e), draft_id=draft.id)
 
     # Ack in thread — plus next question if there is one.
+    prompt_payload = _task_payload(task) if task is not None else payload
     if next_field:
         resp = sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
             text=(
                 ":ok_hand: Записал. "
-                f"{prompt_for(next_field, payload=draft.payload or {}, allowed_owners=settings.allowed_owners())}"
+                f"{prompt_for(next_field, payload=prompt_payload, allowed_owners=settings.allowed_owners())}"
             ),
+        )
+    elif task is not None:
+        resp = sender.post_message(
+            channel=draft.card_channel or "",
+            thread_ts=thread_ts,
+            text=":white_check_mark: Всё заполнил. Задача обновлена.",
         )
     else:
         resp = sender.post_message(
@@ -206,6 +235,54 @@ def _handle_followup_reply(
         )
     _record_followup_ts(session, draft, resp)
     return True
+
+
+def _apply_payload_to_task(task: Task, patch: dict) -> None:
+    """Apply parsed follow-up fields to an already-created Task row."""
+    from datetime import date as _date
+    from datetime import datetime as _dt
+
+    for field, value in patch.items():
+        if value in (None, "", []):
+            continue
+        if field == "title":
+            task.title = value
+        elif field == "description":
+            task.description = value
+        elif field == "owner_user_id":
+            task.owner_user_id = value
+            # An explicit assignment clears the 'assumed' label.
+            extra = dict(task.extra or {})
+            if extra.pop("owner_assumed", None) is not None:
+                task.extra = extra or None
+        elif field == "owner_display_name":
+            task.owner_display_name = value
+        elif field == "priority":
+            from app.models.task import TaskPriority
+
+            try:
+                task.priority = TaskPriority(value)
+            except (ValueError, TypeError):
+                pass
+        elif field == "due_date":
+            if isinstance(value, str):
+                try:
+                    task.due_date = _date.fromisoformat(value)
+                except ValueError:
+                    pass
+            elif isinstance(value, _date):
+                task.due_date = value
+        elif field == "datetime_at":
+            # Meetings (not typical for task follow-ups); leave a hook for
+            # future intent extensions.
+            pass
+        elif field == "participants":
+            pass
+        elif field == "estimated_minutes":
+            try:
+                task.estimated_minutes = int(value)
+            except (ValueError, TypeError):
+                pass
 
 
 def _record_followup_ts(session, draft: ActionDraft, resp: Any) -> None:
@@ -511,46 +588,52 @@ def handle_app_mention(
                 )
                 classification = fallback
 
-            metadata = draft_private_metadata(
-                conversation_id=channel,
-                message_ts=event["ts"],
-                thread_ts=event.get("thread_ts"),
-                draft_id=draft.id,
-                context_snapshot_id=snapshot.id,
-                source_user_id=event.get("user"),
-                permalink=permalink,
-            )
-
-            missing = _missing_fields(classification)
-            post_resp = sender.post_message(
-                channel=channel,
-                thread_ts=thread_ts,
-                blocks=bk.draft_card(
-                    classification=classification,
-                    draft_id=draft.id,
-                    confidence_bucket="high",
-                    missing_fields=missing,
-                ),
-                text="Action draft",
-                metadata={"event_type": "draft", "event_payload": {"metadata": metadata}},
-            )
-
-            # Remember where the card lives so a later thread reply can
-            # chat.update it. And queue a follow-up question for the first
-            # missing field.
+            # Remember where the source lives so follow-up replies can edit
+            # the task and the card in place.
             draft.card_channel = channel
-            draft.card_ts = post_resp.get("ts") if isinstance(post_resp, dict) else None
-            next_field = pick_next_missing(classification.intent.value, draft.payload)
+            session.flush()
+            draft_id = draft.id
+            snap_id = snapshot.id
+            user_id = event.get("user")
+            msg_ts = event["ts"]
+            ev_thread_ts = event.get("thread_ts")
+            classification_intent_value = classification.intent.value
+
+        # Materialise the task immediately — @mention is an explicit signal,
+        # no admin review needed (CR-03 split: admin review is reserved for
+        # the background/passive path).
+        _auto_finalize(
+            draft_id=draft_id,
+            source_conversation_id=channel,
+            source_message_ts=msg_ts,
+            source_thread_ts=ev_thread_ts,
+            source_user_id=user_id,
+            context_snapshot_id=snap_id,
+            permalink=permalink,
+            sender=sender,
+        )
+
+        # Ask for the first missing field (if any) so the user can answer
+        # in the thread. The reply handler will update the Task + refresh
+        # the task-card in place.
+        with session_scope() as session:
+            draft = session.get(ActionDraft, draft_id)
+            if draft is None:
+                return
+            task = session.get(Task, draft.task_id) if draft.task_id else None
+            next_field = _next_missing_for_task(
+                task, intent=classification_intent_value
+            )
             draft.awaiting_field = next_field
             session.flush()
 
             if next_field:
-                title_preview = (draft.payload or {}).get("title") or "задачу"
+                title_preview = (task.title if task else "задачу") or "задачу"
                 intro = (
                     f":memo: Записал: *{title_preview}*.\n"
                     + prompt_for(
                         next_field,
-                        payload=draft.payload or {},
+                        payload=_task_payload(task),
                         allowed_owners=get_settings().allowed_owners(),
                     )
                 )
@@ -563,3 +646,57 @@ def handle_app_mention(
     except Exception as e:  # noqa: BLE001 — mention must never go silent
         log.exception("mention_handler_failed", error=str(e))
         _reply(f":warning: что-то сломалось при обработке: `{e!s}` — посмотри логи бота.")
+
+
+def _auto_finalize(
+    *,
+    draft_id: int,
+    source_conversation_id: str,
+    source_message_ts: str,
+    source_thread_ts: str | None,
+    source_user_id: str | None,
+    context_snapshot_id: int | None,
+    permalink: str | None,
+    sender: RateAwareSlackSender,
+) -> int | None:
+    """Finalize a draft into a Task without posting admin review."""
+    from app.config import get_settings as _gs
+    from app.orchestrator.finalize import FinalizeService
+
+    settings = _gs()
+    fin = FinalizeService(settings=settings, sender=sender)
+    source_metadata = {
+        "conversation_id": source_conversation_id,
+        "message_ts": source_message_ts,
+        "thread_ts": source_thread_ts,
+        "permalink": permalink,
+        "context_snapshot_id": context_snapshot_id,
+        "source_user_id": source_user_id,
+    }
+    try:
+        entity_type, entity_id, _ = fin.finalize_draft(
+            draft_id=draft_id, source_metadata=source_metadata
+        )
+    except Exception as e:  # noqa: BLE001
+        log.error("auto_finalize_failed", error=str(e), draft_id=draft_id)
+        return None
+    return entity_id if entity_type == "task" else None
+
+
+def _task_payload(task: Task | None) -> dict:
+    if task is None:
+        return {}
+    return {
+        "title": task.title,
+        "description": task.description,
+        "owner_user_id": task.owner_user_id,
+        "owner_display_name": task.owner_display_name,
+        "priority": task.priority.value if task.priority else None,
+        "due_date": task.due_date.isoformat() if task.due_date else None,
+    }
+
+
+def _next_missing_for_task(task: Task | None, *, intent: str) -> str | None:
+    if task is None:
+        return None
+    return pick_next_missing(intent, _task_payload(task))

@@ -48,10 +48,16 @@ def test_fr_cr02_1_fallback_creates_draft_with_source_text_as_title(
         sender=sender,
         ack=ack,
     )
+    # CR-03 supersedes CR-02 for this flow: @mention creates a real Task
+    # immediately; the draft is marked confirmed and links to the task.
     with SessionFactory() as s:
+        from app.models import Task
+
+        task = s.query(Task).one()
+        assert task.title == "настрой CRM"
         d = s.query(ActionDraft).one()
-        assert d.payload["title"] == "настрой CRM"
-        assert d.state == ActionDraftState.proposed
+        assert d.state == ActionDraftState.confirmed
+        assert d.task_id == task.id
 
 
 def test_fr_cr02_1_bare_mention_asks_user_to_add_text(
@@ -98,13 +104,18 @@ def test_fr_cr02_2_followup_question_posted_after_card(
         sender=sender,
         ack=ack,
     )
-    # At least 2 posts: card + follow-up question.
+    # CR-03: @mention posts a task-card (not a draft widget) + a
+    # follow-up question for the missing fields.
     assert len(sender.posted) >= 2
-    assert sender.posted[0]["blocks"][0]["text"]["text"] == "Task draft"
-    # The follow-up carries the ack prefix and a question.
-    followup_text = sender.posted[1].get("text", "")
-    assert ":memo: Записал" in followup_text
-    assert "?" in followup_text
+    card_title_text = sender.posted[0]["blocks"][0]["text"]["text"]
+    # Task card titles start with *#N*.
+    assert card_title_text.startswith("*#") or ":star:" in card_title_text
+    # The follow-up carries the ack prefix and a question. It may not be
+    # at index 1 (finalize also DMs the owner a task-card mirror).
+    followup = next(
+        m for m in sender.posted if ":memo: Записал" in m.get("text", "")
+    )
+    assert "?" in followup["text"]
 
 
 # --------------------------------------------------------------------------- #

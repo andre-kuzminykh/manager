@@ -149,10 +149,17 @@ class FinalizeService:
                 task=task, viewer_slack_user_id=task.owner_user_id
             )
 
-            # 1) chat.update the draft widget in the channel — viewers see the
-            #    same message evolve into a task card.
+            # 1) Materialise the card in the channel. If the draft already
+            #    has a widget (Confirm/Edit/Ignore posted earlier) — morph
+            #    it in place via chat.update. Otherwise post a fresh
+            #    task-card as a thread reply under the source message
+            #    (always-create mention flow).
             channel = draft.card_channel or source_metadata.get("conversation_id")
             ts = draft.card_ts
+            thread_ts = (
+                source_metadata.get("thread_ts")
+                or source_metadata.get("message_ts")
+            )
             if channel and ts and hasattr(self._sender, "update_message"):
                 try:
                     self._sender.update_message(
@@ -166,6 +173,23 @@ class FinalizeService:
                 except Exception as e:  # noqa: BLE001
                     log.warning(
                         "channel_card_update_failed",
+                        task_id=task_id,
+                        error=str(e),
+                    )
+            elif channel:
+                try:
+                    resp = self._sender.post_message(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        blocks=channel_card,
+                        text=f"Task #{task_id}",
+                    )
+                    if isinstance(resp, dict):
+                        task.card_channel = channel
+                        task.card_ts = resp.get("ts")
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "channel_card_post_failed",
                         task_id=task_id,
                         error=str(e),
                     )

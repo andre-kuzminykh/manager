@@ -93,6 +93,10 @@ def create_task_from_draft(
     session.add(task)
     draft.state = ActionDraftState.confirmed
     session.flush()
+    # Remember the link so follow-up thread replies can edit the task
+    # directly (CR-03 always-create flows).
+    draft.task_id = task.id
+    session.flush()
 
     # Initial history row (from_status = None).
     session.add(

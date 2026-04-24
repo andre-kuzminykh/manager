@@ -12,9 +12,17 @@ author intended to create or update a TASK or MEETING, or whether no action is
 needed.
 
 Return ONLY one of the following intents:
-- "create_task"     — the message describes a new actionable task
+- "create_task"     — the message introduces a new actionable task
+                      (e.g. "надо подготовить X", "подготовь Y", "сделай
+                      отчёт до пятницы"). Prefer this over update_task
+                      whenever the message isn't explicitly about an
+                      already-existing task.
 - "create_meeting"  — the message proposes a new meeting / call / sync
-- "update_task"     — the message modifies an existing task (reschedule, reassign, close)
+- "update_task"     — the message modifies an EXISTING task by reference
+                      (e.g. "перенеси ту задачу на среду", "закрой
+                      #42", "передай задачу о презентации Ивану"). If
+                      no such pre-existing task is named, emit
+                      create_task instead.
 - "update_meeting"  — the message modifies an existing meeting
 - "no_action"       — chat, question, observation, nothing to create
 
@@ -26,20 +34,28 @@ Rules:
    due_date (YYYY-MM-DD).
 4. For "create_meeting", extract title, notes, participants (list),
    datetime_at (ISO 8601 with timezone offset when known), timezone.
-5. DO resolve relative and weekday phrases against current_date.
-   The user_prompt carries a pre-computed "Weekday lookup" table. If the
-   user names a day ("к пятнице", "в четверг", "by Monday", "next
-   Tuesday"), COPY the ISO date from that table — do NOT compute
-   weekdays yourself. Examples:
+5. DO resolve relative and weekday phrases against current_date (this
+   rule is mandatory, not optional). The user_prompt carries a
+   pre-computed "Weekday lookup" table; you MUST copy the ISO date
+   from there for day names. Don't leave due_date null just because
+   the phrase isn't an ISO date.
+   Worked example:
+     current_date: 2026-04-24 (Friday)
+     weekday lookup says Monday → 2026-04-27, Friday → 2026-05-01
+     user text "надо собрать демо к понедельнику"
+     → due_date = "2026-04-27" (literally copied from the table)
+   Quick mappings:
      - "завтра" / "tomorrow"      → current_date + 1
      - "послезавтра"               → current_date + 2
      - "на следующей неделе"       → Monday from the weekday table
      - "к пятнице" / "до пятницы"  → Friday from the table
+     - "в четверг" / "by Thursday" → Thursday from the table
      - "к концу недели"            → Friday from the table
-   Return YYYY-MM-DD for due_date and ISO 8601 for datetime_at. If the
-   phrase is genuinely vague ("когда-нибудь", "when I have time"), leave
-   the field null — don't guess. Never back-date; the resolved date must
-   be strictly after current_date unless the user said "сегодня".
+   Return YYYY-MM-DD for due_date and ISO 8601 for datetime_at. Only
+   leave the field null if the phrase is genuinely vague, e.g.
+   "когда-нибудь", "when I have time". Never back-date; the resolved
+   date must be strictly after current_date unless the user said
+   "сегодня".
 6. NEVER assume the author of the message is the task owner. The "user"
    tokens in the context window are ATTRIBUTION (who said it), not
    assignments. Only fill owner_user_id / owner_display_name when the

@@ -18,7 +18,7 @@ from slack_sdk import WebClient
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import get_logger, setup_logging
-from app.services import DigestKind, DigestService
+from app.services import DigestKind, DigestService, send_weekly_plan
 from app.slack_bot.rate_limiter import RateAwareSlackSender
 
 log = get_logger(__name__)
@@ -30,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--type",
         required=True,
-        choices=[k.value for k in DigestKind],
+        choices=[k.value for k in DigestKind] + ["weekly-plan"],
         help="Digest to send.",
     )
     args = parser.parse_args(argv)
@@ -42,6 +42,18 @@ def main(argv: list[str] | None = None) -> int:
 
     client = WebClient(token=settings.slack_bot_token)
     sender = RateAwareSlackSender(client)
+
+    if args.type == "weekly-plan":
+        with session_scope() as session:
+            report = send_weekly_plan(session, sender=sender)
+        log.info(
+            "weekly_plan_sent",
+            recipients=report.recipients,
+            tasks_included=report.tasks_included,
+            skipped_idempotent=report.skipped_idempotent,
+        )
+        return 0
+
     service = DigestService(sender=sender)
     kind = DigestKind(args.type)
 

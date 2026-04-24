@@ -56,6 +56,10 @@ from app.slack_bot.handlers.task_actions import (
     handle_unsubscribe,
     handle_unsubscribe_in_modal,
 )
+from app.slack_bot.handlers.weekly_plan import (
+    handle_weekly_accept,
+    handle_weekly_defer,
+)
 from app.slack_bot.handlers.views import (
     handle_meeting_modal_submit,
     handle_task_modal_submit,
@@ -229,6 +233,15 @@ def build_app(
     @app.view(MODAL_CALLBACK_ADMIN_EDIT)
     def _on_admin_edit_submit(body, ack, view):
         handle_admin_edit_submit(body=body, view=view, sender=sender, ack=ack)
+
+    # CR-03 weekly plan
+    @app.action(bk.ACTION_WEEKLY_ACCEPT)
+    def _on_weekly_accept(body, ack):
+        handle_weekly_accept(body=body, sender=sender, ack=ack)
+
+    @app.action(bk.ACTION_WEEKLY_DEFER)
+    def _on_weekly_defer(body, ack):
+        handle_weekly_defer(body=body, sender=sender, ack=ack)
 
     return app
 

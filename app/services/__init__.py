@@ -20,6 +20,7 @@ from app.services.transitions import (
     InvalidTransition,
     TransitionService,
 )
+from app.services.weekly_plan import WeeklyPlanReport, send_weekly_plan
 from app.services.workload import WorkloadEstimator
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "NotificationService",
     "SubscriptionService",
     "TransitionService",
+    "WeeklyPlanReport",
     "WorkloadEstimator",
     "admin_slack_user_ids",
     "is_admin",
@@ -40,5 +42,6 @@ __all__ = [
     "prompt_for",
     "refresh_task_card",
     "resolve_owner_hint",
+    "send_weekly_plan",
     "sync_admin_flags",
 ]

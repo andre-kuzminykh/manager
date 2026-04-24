@@ -43,6 +43,10 @@ INPUT_ARTIFACT_URL = "artifact_url_input"
 INPUT_ARTIFACT_TEXT = "artifact_text_input"
 BLOCK_ARTIFACT_TEXT = "artifact_text_block"
 
+# CR-03 weekly plan
+ACTION_WEEKLY_ACCEPT = "weekly_plan_accept"
+ACTION_WEEKLY_DEFER = "weekly_plan_defer"
+
 BLOCK_TITLE = "title_block"
 BLOCK_DESCRIPTION = "description_block"
 BLOCK_OWNER = "owner_block"
@@ -885,6 +889,87 @@ def admin_review_resolved_message(
             },
         }
     ]
+
+
+def weekly_plan_blocks(
+    *,
+    week_start,
+    week_end,
+    tasks: list[Any],
+) -> list[dict[str, Any]]:
+    """Sunday-night DM showing each assignee their backlog tasks for the
+    upcoming week with Принять / Позже buttons per row."""
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"План на неделю {week_start.isoformat()} – {week_end.isoformat()}",
+                "emoji": True,
+            },
+        },
+    ]
+    if not tasks:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ":sparkles: На следующей неделе задач нет — отдыхай.",
+                },
+            }
+        )
+        return blocks
+    blocks.append(
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": (
+                    "Подтверди, какие задачи берёшь. *Принять* → To Do. "
+                    "*Позже* → остаётся в Backlog."
+                ),
+            },
+        }
+    )
+    blocks.append({"type": "divider"})
+    for t in tasks:
+        meta = f"`{t.status.value}`"
+        if t.due_date:
+            meta += f" · due {t.due_date.isoformat()}"
+        if t.priority:
+            meta += f" · priority {t.priority.value}"
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*#{t.id}* {t.title}\n{meta}",
+                },
+            }
+        )
+        blocks.append(
+            {
+                "type": "actions",
+                "block_id": f"weekly_plan_{t.id}",
+                "elements": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "action_id": ACTION_WEEKLY_ACCEPT,
+                        "text": {"type": "plain_text", "text": "Принять"},
+                        "value": str(t.id),
+                    },
+                    {
+                        "type": "button",
+                        "action_id": ACTION_WEEKLY_DEFER,
+                        "text": {"type": "plain_text", "text": "Позже"},
+                        "value": str(t.id),
+                    },
+                ],
+            }
+        )
+    return blocks
 
 
 def subscriptions_modal(tasks: list[Any]) -> dict[str, Any]:

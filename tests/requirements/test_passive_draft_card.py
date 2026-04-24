@@ -215,18 +215,18 @@ def test_passive_thread_reply_fills_field_and_updates_draft(
     with SessionFactory() as s:
         draft = s.query(ActionDraft).one()
         awaiting = draft.awaiting_field
-    # First missing field under the CR-04 order is the owner.
-    assert awaiting == "owner"
+    # Author-fallback fills the owner slot, so the first missing is
+    # due_date.
+    assert awaiting == "due_date"
+    assert draft.payload.get("owner_user_id") == "U-author"
 
-    # The user replies in the thread with a Slack mention — the
-    # follow-up reply handler resolves it via the owner path and
-    # refreshes the widget.
+    # The user replies in the thread with an ISO date.
     handle_message(
         event={
             "ts": "401.0",
             "thread_ts": "400.0",
             "user": "U-author",
-            "text": "<@UIVAN0001>",
+            "text": "2026-05-12",
             "channel": "C1",
             "channel_type": "channel",
         },
@@ -239,7 +239,7 @@ def test_passive_thread_reply_fills_field_and_updates_draft(
     )
     with SessionFactory() as s:
         draft = s.query(ActionDraft).one()
-        assert draft.payload.get("owner_user_id") == "UIVAN0001"
+        assert draft.payload.get("due_date") == "2026-05-12"
     # The widget was refreshed via chat.update (follow-up reply path).
     assert any(u.get("ts") for u in sender.updates)
 
@@ -286,12 +286,14 @@ def test_thread_reply_deletes_prior_followup_question(
     assert len(sender.posts) == 2, sender.posts
     memo_ts = "2.0"
 
+    # Author-fallback fills the owner slot, so the memo asked about
+    # the date. Reply with an ISO date.
     handle_message(
         event={
             "ts": "601.0",
             "thread_ts": "600.0",
             "user": "U-author",
-            "text": "<@UIVAN0001>",
+            "text": "2026-05-15",
             "channel": "C1",
             "channel_type": "channel",
         },

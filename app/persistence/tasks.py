@@ -58,13 +58,14 @@ def create_task_from_draft(
 
     owner_user_id = payload.get("owner_user_id")
     owner_display_name = payload.get("owner_display_name")
-    owner_assumed = False
+    # The upstream pipeline already populates owner_user_id = author
+    # with owner_assumed=True when no explicit assignee is present
+    # (see app/slack_bot/handlers/shared.py). Respect that flag so the
+    # "(предположительно)" label survives into task.extra.
+    owner_assumed = bool(payload.get("owner_assumed"))
     if not owner_user_id and not owner_display_name:
-        # No owner mentioned at all → default to the author of the source
-        # message so the task always has SOMEONE responsible. Mark this as
-        # an assumption so the UI can show "(предположительно ты)" and the
-        # human can reassign. If the user mentioned a name we couldn't
-        # resolve, leave owner_user_id empty so the bot keeps asking.
+        # Extra safety net for code paths that bypass classify_and_persist
+        # (e.g. the raw @mention fallback when the LLM timed out).
         owner_user_id = fallback_author_slack_id
         if owner_user_id:
             owner_assumed = True

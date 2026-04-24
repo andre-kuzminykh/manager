@@ -32,6 +32,10 @@ class TaskDraft(BaseModel):
     )
     priority: Literal["low", "medium", "high", "urgent"] = "medium"
     due_date: date | None = Field(None, description="Due date in ISO format YYYY-MM-DD.")
+    owner_assumed: bool = Field(
+        False,
+        description="True when the owner slot is a fallback to the message author rather than an explicit assignment.",
+    )
 
 
 class MeetingDraft(BaseModel):

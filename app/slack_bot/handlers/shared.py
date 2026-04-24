@@ -196,6 +196,22 @@ def classify_and_persist(
         context=context, invocation_type=invocation_type
     )
 
+    # If the pipeline couldn't identify an owner, fall back to the
+    # message author on BOTH paths (mention + passive). The user who
+    # wrote the task is the sensible default; they can reassign via
+    # Edit. owner_assumed=True keeps the card label
+    # "(предположительно)".
+    if (
+        classification.task is not None
+        and not classification.task.owner_user_id
+        and slack_user_id
+    ):
+        classification.task.owner_user_id = slack_user_id
+        classification.task.owner_display_name = (
+            classification.task.owner_display_name or f"<@{slack_user_id}>"
+        )
+        classification.task.owner_assumed = True
+
     snapshot = services.orchestrator.persist_context_snapshot(
         session, context.to_snapshot_dict()
     )

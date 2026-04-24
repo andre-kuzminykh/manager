@@ -1,13 +1,11 @@
-"""Requirement coverage: FR-CR-04-7 (mention follow-up parity for
-assumed owners).
+"""Requirement coverage: FR-CR-04-7 (quiet owner_assumed).
 
-@mention should ask "кому назначаем?" in the thread whenever the
-resulting Task's owner is only a fallback to the message author
-(owner_assumed=True) — matching passive-path parity.
-
-Previously pick_next_missing saw owner_user_id set to the author and
-skipped the question, leaving the user stuck with a "(предположительно
-ты)" label they had no obvious way to correct via chat.
+Product decision 2026-04-24 (v3): when the owner slot falls back to the
+message author (owner_assumed=True), the bot does NOT pester the user
+with a follow-up "кому назначаем?". The task-card label
+"(предположительно)" communicates the implicit assignment, and the
+Edit button lets the user reassign. Same rule in both the @mention
+and passive paths.
 """
 from __future__ import annotations
 
@@ -42,27 +40,22 @@ class _Sender:
 # --------------------------------------------------------------------------- #
 
 
-def test_pick_next_missing_treats_assumed_owner_as_missing():
-    payload_with_real_owner = {
-        "title": "t",
-        "due_date": "2026-05-01",
-        "owner_user_id": "U-ivan",
-        "owner_display_name": "Ivan",
-        "owner_assumed": False,
-    }
-    assert pick_next_missing("create_task", payload_with_real_owner) is None
-
+def test_pick_next_missing_accepts_assumed_owner_as_filled():
+    """owner_assumed no longer forces a follow-up question — a filled
+    owner_user_id (even a fallback to the author) is enough."""
     payload_with_assumed_owner = {
         "title": "t",
         "due_date": "2026-05-01",
-        "owner_user_id": "U-author",  # fallback to author
+        "owner_user_id": "U-author",
         "owner_display_name": None,
         "owner_assumed": True,
     }
-    assert pick_next_missing("create_task", payload_with_assumed_owner) == "owner"
+    assert pick_next_missing("create_task", payload_with_assumed_owner) is None
 
 
 def test_task_payload_exposes_owner_assumed_flag():
+    """The flag still propagates to the payload so the card can render
+    '(предположительно)' — we just don't re-ask about it."""
     class _StubTask:
         title = "t"
         description = None
@@ -81,18 +74,21 @@ def test_task_payload_exposes_owner_assumed_flag():
 # --------------------------------------------------------------------------- #
 
 
-def test_mention_asks_about_owner_when_owner_is_assumed(
+def test_mention_does_not_ask_about_owner_when_owner_assumed(
     patched_session_scope,
     ack,
     bolt_context,
     slack_client,
     SessionFactory,
 ):
-    """LLM returns a task with no explicit owner. Persistence falls back
-    to the message author + owner_assumed=True. The @mention handler
-    must ask the author who to actually assign in the thread."""
+    """The pipeline returns no owner → classify_and_persist falls back
+    to the message author (owner_assumed=True) → the @mention handler
+    should NOT post a follow-up question about the owner. Only a
+    missing date would trigger one."""
     from app.slack_bot.handlers.events import handle_app_mention
 
+    # Both owner and date are filled (owner via fallback in
+    # classify_and_persist), so no follow-up is needed.
     stub = StubClassifier(
         IntentClassification(
             intent=IntentType.create_task,
@@ -124,12 +120,12 @@ def test_mention_asks_about_owner_when_owner_is_assumed(
         assert task.owner_user_id == "U-author"
         assert (task.extra or {}).get("owner_assumed") is True
         draft = s.query(ActionDraft).one()
-        assert draft.awaiting_field == "owner"
+        # No field is awaiting an answer — date is set, owner is the
+        # author fallback and we don't re-ask.
+        assert draft.awaiting_field is None
 
-    # The follow-up question text went into the source thread.
+    # No follow-up question about the owner.
     thread_posts = [p for p in sender.posts if p.get("thread_ts") == "500.0"]
-    # At least one post should be the owner question (starts with
-    # ":memo:" intro or mentions "Кому назначаем").
-    assert any(
+    assert not any(
         "назначаем" in (p.get("text") or "") for p in thread_posts
     ), [p.get("text") for p in thread_posts]

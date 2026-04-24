@@ -646,15 +646,20 @@ remaining gap triggers another follow-up question in the thread.
 Edit → opens the task modal prefilled. Reject → draft marked
 `ignored`, widget deleted.
 
-#### FR-CR-04-7 — Mention follow-up parity for assumed owners
+#### FR-CR-04-7 — Quiet author fallback for the owner slot
 
-`@mention` still auto-creates. When the resulting Task's owner is a
-fallback to the message author (`task.extra.owner_assumed == True`),
-`_task_payload` reports the owner slot as empty and the handler posts
-the "Кому назначаем?" question in the source thread — same machinery
-as passive, same reply handler. A thread reply with a valid owner
-clears the `owner_assumed` flag so the label `(предположительно)`
-disappears from the card.
+When the LLM pipeline returns no explicit assignee,
+`classify_and_persist` pre-fills the owner with the message author
+and sets `TaskDraft.owner_assumed = True` on BOTH paths (mention +
+passive). The card renders the owner as `<@author>
+_(предположительно)_` so the user sees the implicit assignment; the
+follow-up loop does NOT re-ask about the owner — pestering an author
+who just wrote a task for themselves is noise. A user who needs to
+reassign clicks **Edit** and picks a different owner in the modal;
+that clears the `owner_assumed` flag.
+
+This supersedes an earlier version of FR-CR-04-7 that asked about
+the owner in chat whenever `owner_assumed` was true.
 
 #### FR-CR-04-8 — Audio input via Whisper
 

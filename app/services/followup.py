@@ -47,14 +47,13 @@ PROMPTS: dict[str, str] = {
 
 # Normalised empty check for each field (payload is a dict).
 def _is_empty(field: str, payload: dict[str, Any]) -> bool:
-    # "owner" is virtual — treat it as filled only when we have a real
-    # slack_user_id AND the owner wasn't just a fallback to the message
-    # author. An owner_assumed flag (set by create_task_from_draft when
-    # nobody was explicitly assigned) means the human still owes us an
-    # answer, so keep asking.
+    # "owner" is virtual — treat it as filled when we have a real
+    # slack_user_id. We used to re-ask when owner_assumed=True (i.e.
+    # fallback to the message author), but that ended up pestering
+    # users who wrote tasks for themselves. The "(предположительно)"
+    # label on the card still communicates the implicit assignment,
+    # and the Edit button lets the user reassign explicitly.
     if field == "owner":
-        if payload.get("owner_assumed"):
-            return True
         return not payload.get("owner_user_id")
     value = payload.get(field)
     if value is None or value == "":

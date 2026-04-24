@@ -111,15 +111,16 @@ def test_passive_and_mention_ask_the_same_first_question(
     assert passive_memo == mention_memo
 
 
-def test_passive_asks_owner_before_due_date(
+def test_both_paths_skip_owner_question_when_assumed(
     patched_session_scope,
     ack,
     bolt_context,
     slack_client,
     SessionFactory,
 ):
-    """CR-04: owner comes before due_date in TASK_FIELD_ORDER so the
-    first passive question matches the @mention one."""
+    """Author fallback fills the owner on BOTH mention and passive
+    paths, so the first follow-up question is about the date, not the
+    owner."""
     from app.slack_bot.handlers.events import handle_message
 
     services = _make_services(slack_client, _make_stub())
@@ -141,7 +142,10 @@ def test_passive_asks_owner_before_due_date(
     )
     with SessionFactory() as s:
         draft = s.query(ActionDraft).one()
-        assert draft.awaiting_field == "owner"
+        # Owner filled via author fallback → next missing is due_date.
+        assert draft.payload.get("owner_user_id") == "U-author"
+        assert draft.payload.get("owner_assumed") is True
+        assert draft.awaiting_field == "due_date"
     memo = _first_memo(sender) or ""
-    assert "назначаем" in memo  # owner prompt
-    assert "дедлайн" not in memo.lower()
+    assert "назначаем" not in memo  # no owner prompt
+    assert "дедлайн" in memo.lower()

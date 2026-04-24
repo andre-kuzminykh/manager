@@ -101,9 +101,19 @@ def draft_card(
     if classification.intent in (IntentType.create_task, IntentType.update_task):
         kind = "task"
         d = classification.task
+        if d is None:
+            owner_text = "—"
+        elif d.owner_user_id:
+            owner_text = f"<@{d.owner_user_id}>"
+            if d.owner_assumed:
+                owner_text += " _(предположительно)_"
+        elif d.owner_display_name:
+            owner_text = d.owner_display_name
+        else:
+            owner_text = "—"
         fields = [
             ("Title", _fmt(d.title if d else None)),
-            ("Owner", _fmt(d.owner_display_name if d else None)),
+            ("Owner", owner_text),
             ("Priority", _fmt(d.priority if d else None)),
             ("Due", _fmt(d.due_date.isoformat() if d and d.due_date else None)),
         ]

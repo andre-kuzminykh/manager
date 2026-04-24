@@ -44,10 +44,13 @@ PROMPTS: dict[str, str] = {
 # Normalised empty check for each field (payload is a dict).
 def _is_empty(field: str, payload: dict[str, Any]) -> bool:
     # "owner" is virtual — treat it as filled only when we have a real
-    # slack_user_id. A bare display_name (e.g. "Семен" mentioned in chat
-    # but not matched against ALLOWED_OWNERS) does NOT count, so the bot
-    # keeps asking until we get a resolvable owner.
+    # slack_user_id AND the owner wasn't just a fallback to the message
+    # author. An owner_assumed flag (set by create_task_from_draft when
+    # nobody was explicitly assigned) means the human still owes us an
+    # answer, so keep asking.
     if field == "owner":
+        if payload.get("owner_assumed"):
+            return True
         return not payload.get("owner_user_id")
     value = payload.get(field)
     if value is None or value == "":

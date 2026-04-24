@@ -1,43 +1,52 @@
 """Structured intent-extraction pipeline.
 
---- Spec ---
+--- Spec (updated 2026-04-24) ---
 
-Input: a Slack message (source_text) plus up to 10 surrounding messages
-(context, oldest first), plus the author's Slack user id and today's
-local date.
+Input: a Slack message (source_text) plus up to 10 surrounding
+messages (context, oldest first), plus the author's Slack user id and
+today's local date.
 
-Stage 1 — Detection (one LLM call, focused prompt):
-    Question: is the source message a task?
+Stage 1 — Detection (one focused LLM call):
+    Question: "is the source message a task?"
     Output: {is_task, confidence, reasoning}.
-    If is_task is false → pipeline returns no_action immediately.
+    If is_task is false → the pipeline returns no_action immediately.
     No further LLM calls are made.
 
-Stage 2 — Parallel extraction (runs ONLY when Stage 1 said yes):
+Stage 2 — Parallel extraction (runs only when Stage 1 said yes):
     2a. Title / description / priority — LLM call with title_prompt.
+        After the call both title and description are piped through
+        strip_date_phrase() so the date ends up ONLY in due_date.
     2b. Owner — LLM call with owner_prompt. Sees the same 10-message
         context so it can distinguish "питчдек для Ивана" (audience)
         from "Иван, сделай питчдек" (assignee).
     2c. Due date — deterministic Python (date_resolver). No LLM.
-    2a and 2b execute concurrently on a ThreadPoolExecutor so a small
+    2a and 2b run concurrently on a ThreadPoolExecutor so a small
     LLM's per-call latency doesn't stack.
 
-Stage 3 — Assembly:
-    Build IntentClassification(intent=create_task, confidence=<from
-    Stage 1>, task=TaskDraft(<merged>)) and return.
+Stage 3 — Assembly: build IntentClassification(intent=create_task, …).
 
-Downstream UX routing (not part of this module, for reference):
-    invocation_type=mention → auto-finalize regardless of confidence.
-    invocation_type=passive + high confidence (>=0.75) → create task +
-        admin review DM/ephemeral.
-    invocation_type=passive + medium (>=0.40) → soft prompt in thread.
-    invocation_type=passive + low → silent (unless the rules-based
-        prefilter salvages it — see classify_with_backend).
+Downstream UX contract (implemented in the Slack handlers):
+    @mention → task is created immediately (no Accept button). If the
+              resulting Task is missing a user-visible field (owner,
+              due_date, description, effort) OR the owner is only a
+              fallback to the message author (owner_assumed), the bot
+              posts a follow-up question in the source thread. The
+              thread reply updates the Task and refreshes the card in
+              place. (handled in handle_app_mention +
+              _handle_followup_reply)
+    passive → bot posts a PRE-FILLED draft card with three buttons:
+              Accept / Edit / Reject. At the same time it posts the
+              missing-field question in the thread (same machinery as
+              @mention, but for draft.payload). The user can answer in
+              chat OR open Edit; either way the card refreshes. On
+              Accept the draft becomes a Task; any remaining gap
+              triggers another follow-up round.
 
 Resilience:
     - A stage failing (exception, network, malformed output) does not
-      abort the whole pipeline. Stage 1 failures return no_action.
-      Stage 2a/b failures leave their respective fields null so the
-      bot can ask the user later.
+      abort the whole pipeline. Stage 1 failures → no_action. Stage 2a
+      / 2b failures leave their fields null; the follow-up loop
+      fills them later.
     - Stage 2c is deterministic and cannot fail.
 """
 from __future__ import annotations
@@ -166,12 +175,18 @@ def run_pipeline(
     due = resolve_due_date(source_text, today)
 
     # Stage 3: Assembly.
-    # Dates belong in due_date, never in the title — strip any trailing
-    # "к 1 мая" / "ко вторнику" the LLM may have left behind.
+    # Dates belong in due_date, never in the title or the description —
+    # strip any trailing "к 1 мая" / "ко вторнику" the LLM may have
+    # smuggled into either field.
     title = strip_date_phrase(
         (title_data.get("title") or source_text[:120]).strip()
     ) or "(untitled)"
-    description = title_data.get("description") or None
+    raw_description = title_data.get("description") or None
+    if isinstance(raw_description, str):
+        cleaned = strip_date_phrase(raw_description.strip())
+        description = cleaned or None
+    else:
+        description = raw_description
     priority = title_data.get("priority") or "medium"
     slack_user_id = owner_data.get("slack_user_id") or None
     display_name = owner_data.get("display_name") or None

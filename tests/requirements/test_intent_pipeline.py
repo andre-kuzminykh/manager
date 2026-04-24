@@ -185,6 +185,30 @@ def test_pipeline_assembles_all_four_fields():
     assert out.task.due_date == date(2026, 4, 27)
 
 
+def test_pipeline_strips_date_from_title_and_description():
+    backend = _RecordingBackend(
+        detect={"is_task": True, "confidence": 0.88},
+        title={
+            "title": "подготовить заметки к 1 мая",
+            "description": "к 1 мая",
+            "priority": "high",
+        },
+        owner={"reasoning": "no assignee", "display_name": None},
+    )
+    out = run_pipeline(
+        backend=backend,
+        source_text="надо подготовить заметки к 1 мая",
+        context_messages=[],
+        author_user_id="U-author",
+        today=date(2026, 4, 24),
+    )
+    assert out.task.title == "подготовить заметки"
+    # Description was just "к 1 мая" → becomes None after stripping.
+    assert out.task.description is None
+    # Date still ends up in due_date.
+    assert out.task.due_date == date(2026, 5, 1)
+
+
 def test_pipeline_leaves_owner_null_when_owner_stage_says_no_one():
     backend = _RecordingBackend(
         detect={"is_task": True, "confidence": 0.9},

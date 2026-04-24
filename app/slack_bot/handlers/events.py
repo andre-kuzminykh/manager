@@ -740,11 +740,16 @@ def _auto_finalize(
 def _task_payload(task: Task | None) -> dict:
     if task is None:
         return {}
+    # The owner_assumed flag signals that owner_user_id was a fallback to
+    # the source-message author — not a real assignment. Expose it so the
+    # follow-up machinery keeps asking "кому назначаем?" until the human
+    # answers. pick_next_missing treats assumed owners as empty.
     return {
         "title": task.title,
         "description": task.description,
         "owner_user_id": task.owner_user_id,
         "owner_display_name": task.owner_display_name,
+        "owner_assumed": bool((task.extra or {}).get("owner_assumed")),
         "priority": task.priority.value if task.priority else None,
         "due_date": task.due_date.isoformat() if task.due_date else None,
     }

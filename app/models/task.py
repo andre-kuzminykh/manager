@@ -84,6 +84,12 @@ class Task(Base, TimestampMixin):
     dm_channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dm_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
+    # CR-03: evidence attached on completion.
+    completion_artifact: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completion_artifact_kind: Mapped[str | None] = mapped_column(
+        String(16), nullable=True
+    )
+
     extra: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     sheets_sync: Mapped["GoogleSheetsSync | None"] = relationship(  # noqa: F821

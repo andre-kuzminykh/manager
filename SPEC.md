@@ -1,6 +1,6 @@
 # Slack Task Manager — Specification
 
-Version: 3 (CR-01 + CR-02 merged)
+Version: 4 (CR-01 + CR-02 + CR-03 merged)
 
 This document consolidates:
 
@@ -10,11 +10,17 @@ This document consolidates:
   Done), explicit owner picker from an allowed list, workload-aware deadline
   proposal, subscribe/unsubscribe, start-work button, subscriber broadcasts,
   and daily / weekly / deadline digests.
-- **CR-02** — conversational UX: @mention always produces a draft widget
-  (fallback when the LLM is unsure), bot asks missing fields in the thread,
-  user replies update the card in place via `chat.update`, widget disappears
-  after Confirm/Ignore, Open-source button removed from task cards, daily
-  digest gains a Tracking section and a Manage-subscriptions modal.
+- **CR-02** — conversational UX: @mention always produces a draft widget,
+  bot asks missing fields in the thread, user replies update the card in
+  place via `chat.update`, widget morphs on Confirm and is deleted on Ignore,
+  daily digest gains a Tracking section with a Manage-subscriptions modal,
+  one-task / one-DM-thread anchoring so all notifications stack under the
+  same conversation.
+- **CR-03** — admin-run team operations: full ingestion of every message in
+  bot-visible channels, automatic employees directory from Slack metadata,
+  admin-only task confirmation with audit trail, always-create policy for
+  detected tasks, weekly plan on Sundays, artifact on completion, and
+  daily reminder threads in the source message.
 
 ## 1. Operating modes
 
@@ -300,3 +306,174 @@ Alembic revision `0002_cr_amendments`:
 - Calendar sync for meetings.
 - External tracker sync (Jira / Linear) — tasks live in our DB as source of
   truth.
+
+## 9. CR-03 — Admin-run team operations
+
+### 9.1 Product goals
+
+- **Admin as source-of-truth**. One (or more) designated admin(s) see every
+  detected task, approve / edit / reject in bulk, and watch progress.
+- **Automatic employees directory**. Drop the static `ALLOWED_OWNERS` JSON
+  blob — the bot learns every team member from Slack metadata and keeps it
+  fresh.
+- **Always capture**. Any detected task is persisted the moment confidence
+  is high enough, even with missing fields. Admin can edit or reject; the
+  audit log keeps a full trail.
+- **Assignee loop**. Assignees get pinged in the source thread daily until
+  a task reaches `done`. Completion requires an artifact attachment.
+- **Planning rhythm**. Sunday evening: weekly plan for every assignee.
+  Weekday evening: admin's next-day approval digest. Weekday morning:
+  per-assignee reminders + admin's live watch-list.
+
+### 9.2 Functional requirements
+
+#### FR-CR-03-1 — Message ingestion & Employees directory
+
+All messages from channels / DMs the bot is a member of are persisted to
+`slack_messages` regardless of whether they produced a task. For every
+unique author we upsert an `Employee` row populated via Slack `users.info`:
+
+- `slack_user_id` (PK), `team_id`
+- `display_name`, `real_name`, `email`, `title`
+- `timezone`, `is_bot`, `is_admin`
+- `last_seen_at`, `profile_raw` (full payload, JSON)
+
+Updates are at-most once per `EMPLOYEE_REFRESH_TTL_SECONDS` (default 24 h)
+to respect Slack rate limits.
+
+#### FR-CR-03-2 — Admin registry
+
+Admins are configured via `ADMIN_SLACK_USER_IDS` (comma-separated list) and
+reflected by setting `Employee.is_admin = True`. Changing the env → DB flag
+flips within a minute. A helper `is_admin(user_id) -> bool` is used across
+all admin-gated code paths.
+
+#### FR-CR-03-3 — Always-create passive task
+
+When the classifier (prefilter + LLM) returns `create_task` with confidence
+≥ `INTENT_CONFIDENCE_HIGH`, the bot persists a `Task` immediately (status
+`backlog`, missing fields left empty). No more "draft → confirm → create".
+The draft row is still persisted for audit, pointing at the created task.
+
+Lower-confidence paths keep the existing prompt / silent behaviour.
+
+#### FR-CR-03-4 — Admin-only confirmation
+
+Each auto-created task is broadcast to the admin(s):
+
+1. Ephemeral message in the source thread tagging admin with **Confirm /
+   Edit / Reject** buttons (`chat.postEphemeral`, visible to admin only).
+2. DM to each admin with the full task-card + the same buttons.
+3. Entry in `audit_logs` (`category=admin_review`,
+   `action=awaiting_confirmation`).
+
+**Confirm** → task becomes `todo` (if due ≤ 7 days) / stays `backlog`;
+assignee gets their own subscription anchor DM.
+
+**Edit** → opens the modal (prefilled) for admin; on submit, updates fields
+and stays in the same lifecycle bucket.
+
+**Reject** → deletes the task and writes an audit row
+(`action=admin_rejected`). The original ephemeral message and DM are
+replaced with a `:x: Отклонено` note.
+
+#### FR-CR-03-5 — Editable tasks with history
+
+`Edit` button on the task-card is available to admin AND to the assignee.
+Opens the modal with current values. Submit updates fields and emits an
+audit row `action=task_edited` with a diff of changed fields. Thread
+reminders refresh to the new deadline/owner.
+
+#### FR-CR-03-6 — Assignee weekly plan (Sundays)
+
+Sunday 20:00 local tz: per-assignee DM listing every `backlog` task with
+`due_date` in the upcoming Mon–Sun week. Each row has **Принять** /
+**Позже** buttons.
+
+- **Принять** → task moves to `todo`.
+- **Позже** → task stays in `backlog`; admin gets a ping if more than 2
+  tasks deferred.
+
+#### FR-CR-03-7 — Start / Review / Complete flow
+
+- **Начать** → status `todo` / `backlog` → `in_progress` and records
+  `started_at` (existing).
+- **Завершить** → opens a modal asking for an **artifact** (URL or text,
+  at least one required). On submit → status `done`, `completed_at`,
+  `completion_artifact`. Thread reminder is stopped, admin DM is
+  updated with the artifact.
+- **Вернуть в бэклог** → `in_progress` → `backlog`, history row; thread
+  reminder re-engaged.
+
+#### FR-CR-03-8 — Admin watch-list digest
+
+Morning (9:00 admin tz) DM to each admin:
+
+- tasks they own (same as regular digest),
+- plus *Admin watch*: every `in_progress` / `review` task across the team,
+  with assignee tag, due, latest status.
+
+Evening (20:00 admin tz) DM to each admin:
+
+- *Tomorrow*: tasks due tomorrow by assignee,
+- *Stale*: `in_progress` tasks with no status reply in 2 + days.
+
+#### FR-CR-03-9 — Daily reminders in source thread
+
+Every weekday 10:00 local tz the bot posts a message in the source thread
+for each open task, tagging the assignee:
+
+- `in_progress`: `:raised_hand: <@assignee> задача #N — как прогресс?`
+- `todo` (due this week): `:calendar: <@assignee> на этой неделе ожидаем:
+  *<title>* — до <due>`
+- `review`: `:eyes: <@reviewer> нужен ревью задачи #N`
+
+Replies in the thread are ingested as `status_pings` audit rows. Bot
+stops nudging once status hits `done`.
+
+#### FR-CR-03-10 — Live admin updates
+
+Every edit / status change / artifact attachment:
+
+- `chat.update` the admin's DM card (already wired for `dm_channel/ts`).
+- Thread-broadcast to subscribers under the anchor DM (already wired).
+- Append audit row.
+
+### 9.3 Non-functional requirements
+
+- **NFR-CR-03-1** — Slack `users.info` respects rate limits: at-most-once per
+  `EMPLOYEE_REFRESH_TTL_SECONDS`; on 429 backoff via the rate-aware sender.
+- **NFR-CR-03-2** — Every admin action writes an audit row
+  (`admin_review` / `task_edited` / `admin_rejected`).
+- **NFR-CR-03-3** — Weekly / daily / evening digests are idempotent per
+  (user, date / week) via the existing `audit_logs`-backed mechanism.
+- **NFR-CR-03-4** — Thread reminders deduplicate: we never post two pings
+  for the same task-thread-day (`reminder:<task_id>:<YYYY-MM-DD>` audit).
+- **NFR-CR-03-5** — Ephemeral admin confirmations degrade to plain thread
+  reply when `chat.postEphemeral` isn't available in the context (DMs).
+
+### 9.4 Data model delta
+
+Migration `0006_employees_and_admin`:
+
+- `employees` (slack_user_id PK, team_id, display_name, real_name, email,
+  title, timezone, is_bot, is_admin, last_seen_at, profile_raw, timestamps)
+- `tasks.completion_artifact: Text | None`
+- `tasks.completion_artifact_kind: Enum("url","text","file") | None`
+- Index `ix_slack_messages_user_id` for per-employee lookups.
+
+Migration `0007_admin_review_audit` (later): no new tables — we reuse
+`audit_logs` with namespaced actions.
+
+### 9.5 Acceptance criteria (CR-03 additions)
+
+- Every channel the bot is in backs an up-to-date `employees` row per author.
+- An admin receives a confirmation DM + ephemeral thread reply for each
+  auto-created task.
+- Rejecting an admin-review task deletes it and logs the reason.
+- On Sunday at 20:00 every assignee receives a weekly-plan DM.
+- On weekday 10:00 the bot pings each open task's thread; pinging ceases
+  once the task is `done`.
+- Marking a task `done` requires a non-empty artifact.
+- Admin's DM card always reflects the current status / artifact within one
+  `chat.update` cycle of any edit.

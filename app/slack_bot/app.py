@@ -73,11 +73,15 @@ def build_app(
         app.client, window_before=settings.context_window_before
     )
     orchestrator = Orchestrator(settings)
+    from app.services import EmployeeDirectory
+
+    employees = EmployeeDirectory(client=app.client, settings=settings)
     services = Services(
         slack=app.client,
         context_retriever=context_retriever,
         classifier=classifier,
         orchestrator=orchestrator,
+        employees=employees,
     )
 
     # ---- Events ----

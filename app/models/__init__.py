@@ -1,5 +1,6 @@
 from app.models.audit import AuditLog
 from app.models.base import Base
+from app.models.employee import Employee
 from app.models.intent import ActionDraft, ActionDraftState, IntentInference
 from app.models.oauth import OAuthCredential
 from app.models.slack import (
@@ -23,6 +24,7 @@ __all__ = [
     "AuditLog",
     "ActionDraft",
     "ActionDraftState",
+    "Employee",
     "IntentInference",
     "OAuthCredential",
     "ContextSnapshot",

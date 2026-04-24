@@ -17,6 +17,7 @@ from app.intent import IntentClassifier
 from app.models import ActionDraft, ContextSnapshot, SlackConversation, SlackMessage
 from app.orchestrator import Orchestrator
 from app.schemas.intent import IntentClassification, InvocationType
+from app.services import EmployeeDirectory
 
 
 @dataclass
@@ -25,6 +26,7 @@ class Services:
     context_retriever: ContextRetriever
     classifier: IntentClassifier
     orchestrator: Orchestrator
+    employees: EmployeeDirectory | None = None
 
 
 def upsert_conversation(session: Session, *, channel_id: str, kind: str) -> SlackConversation:
@@ -178,6 +180,13 @@ def classify_and_persist(
 
     conversation = upsert_conversation(session, channel_id=conversation_id, kind=kind)
     upsert_message(session, conversation=conversation, message=source_message)
+
+    # CR-03: keep the Employees directory fresh for everyone we see.
+    if services.employees is not None and slack_user_id:
+        try:
+            services.employees.observed(session, slack_user_id=slack_user_id)
+        except Exception:  # noqa: BLE001 — directory is best-effort
+            pass
 
     context = services.context_retriever.build(
         conversation_id=conversation_id, source_message=source_message

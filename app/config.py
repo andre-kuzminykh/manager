@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     # Secrets
     secrets_encryption_key: str = Field(default="", alias="SECRETS_ENCRYPTION_KEY")
 
+    # CR-03: comma-separated Slack user ids with admin privileges.
+    admin_slack_user_ids: str = Field(default="", alias="ADMIN_SLACK_USER_IDS")
+    # How often the bot refreshes an employee profile from Slack (default 24h).
+    employee_refresh_ttl_seconds: int = Field(
+        default=86400, alias="EMPLOYEE_REFRESH_TTL_SECONDS"
+    )
+
     # CR-01: Allowed owners — JSON list of {slack_user_id, display_name}.
     # Example: '[{"slack_user_id":"U123","display_name":"Ivan"},...]'
     allowed_owners_json: str = Field(default="[]", alias="ALLOWED_OWNERS")

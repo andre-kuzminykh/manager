@@ -118,38 +118,26 @@ def classify_with_backend(
 
     # Rule-based safety net: small LLMs occasionally return no_action
     # for unambiguous task phrases ("надо подготовить заметки к 1 мая").
-    # If the prefilter saw a strong task/meeting signal, synthesise a
-    # minimal draft from the source text. The prefilter score (0.55)
-    # keeps us in the soft-prompt bucket, not in auto-create.
+    # FR-CR-04-19 — meetings are out of scope; only task hints become
+    # synthesised drafts, meeting hints stay no_action.
     if classification.intent == IntentType.no_action:
         pf = prefilter_intent(source_text)
-        if pf.hint != IntentType.no_action:
-            from app.schemas.intent import MeetingDraft, TaskDraft
+        if pf.hint in (IntentType.create_task, IntentType.update_task):
+            from app.schemas.intent import TaskDraft
 
             title = strip_date_phrase(source_text[:200]) or source_text[:200]
-            if pf.hint in (IntentType.create_task, IntentType.update_task):
-                classification = IntentClassification(
-                    intent=IntentType.create_task,
-                    confidence=pf.score,
-                    task=TaskDraft(
-                        title=title,
-                        due_date=resolve_due_date(source_text, date.today()),
-                    ),
-                    reasoning=(
-                        "prefilter override: pipeline said no_action but "
-                        "rules matched task keywords"
-                    ),
-                )
-            elif pf.hint in (IntentType.create_meeting, IntentType.update_meeting):
-                classification = IntentClassification(
-                    intent=IntentType.create_meeting,
-                    confidence=pf.score,
-                    meeting=MeetingDraft(title=title),
-                    reasoning=(
-                        "prefilter override: pipeline said no_action but "
-                        "rules matched meeting keywords"
-                    ),
-                )
+            classification = IntentClassification(
+                intent=IntentType.create_task,
+                confidence=pf.score,
+                task=TaskDraft(
+                    title=title,
+                    due_date=resolve_due_date(source_text, date.today()),
+                ),
+                reasoning=(
+                    "prefilter override: pipeline said no_action but "
+                    "rules matched task keywords"
+                ),
+            )
     return classification
 
 

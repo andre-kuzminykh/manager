@@ -238,6 +238,7 @@ class FakeSlackClient:
     replies_messages: list[dict[str, Any]] = field(default_factory=list)
     views_opened: list[dict[str, Any]] = field(default_factory=list)
     posted_messages: list[dict[str, Any]] = field(default_factory=list)
+    posted_ephemerals: list[dict[str, Any]] = field(default_factory=list)
 
     def conversations_history(self, channel, latest, limit, inclusive):
         return {"messages": list(self.history_messages[:limit])}
@@ -259,6 +260,10 @@ class FakeSlackClient:
             data = {"ok": True, "ts": "0.0"}
 
         return _R()
+
+    def chat_postEphemeral(self, **kwargs):  # noqa: N802
+        self.posted_ephemerals.append(kwargs)
+        return {"ok": True}
 
 
 @dataclass

@@ -64,7 +64,10 @@ def test_prefilter_overrides_no_action_for_task_keywords():
     assert out.task.due_date.day == 1
 
 
-def test_prefilter_overrides_no_action_for_meeting_keywords():
+def test_prefilter_does_not_override_for_meeting_keywords():
+    """FR-CR-04-19: meetings are out of scope. Even when the prefilter
+    matches a meeting keyword, the safety net must NOT synthesise a
+    meeting draft — the message stays no_action."""
     backend = _Backend(detect={"is_task": False, "confidence": 0.1})
     out = classify_with_backend(
         backend=backend,
@@ -72,8 +75,9 @@ def test_prefilter_overrides_no_action_for_meeting_keywords():
         invocation_type=InvocationType.passive,
         source_text="давайте созвон завтра в 11",
     )
-    assert out.intent == IntentType.create_meeting
-    assert out.meeting is not None
+    assert out.intent == IntentType.no_action
+    assert out.meeting is None
+    assert out.task is None
 
 
 def test_prefilter_does_not_override_when_no_keyword():

@@ -448,9 +448,12 @@ def test_fr10_task_shortcut_opens_task_modal(
     assert slack_client.views_opened[0]["view"]["callback_id"] == bk.MODAL_CALLBACK_TASK
 
 
-def test_fr10_meeting_shortcut_opens_meeting_modal(
+def test_fr10_meeting_shortcut_shows_disabled_notice(
     patched_session_scope, services_meeting, ack, slack_client, SessionFactory
 ):
+    """FR-CR-04-19: the legacy "Create meeting" shortcut is registered
+    (so old app manifests don't error) but no longer opens a meeting
+    modal — instead the user sees an ephemeral "tasks-only" notice."""
     payload = {
         "callback_id": SHORTCUT_CREATE_MEETING,
         "trigger_id": "trig-2",
@@ -459,7 +462,11 @@ def test_fr10_meeting_shortcut_opens_meeting_modal(
         "message": {"ts": "1.0", "user": "U1", "text": "let's sync"},
     }
     handle_shortcut(shortcut=payload, client=slack_client, services=services_meeting, ack=ack)
-    assert slack_client.views_opened[0]["view"]["callback_id"] == bk.MODAL_CALLBACK_MEETING
+    assert slack_client.views_opened == []
+    assert slack_client.posted_ephemerals
+    notice = slack_client.posted_ephemerals[0]
+    assert notice["user"] == "U1"
+    assert "tasks" in notice["text"].lower()
 
 
 def test_fr10_missing_trigger_id_skips_views_open(

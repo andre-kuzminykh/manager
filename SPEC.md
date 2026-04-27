@@ -720,6 +720,40 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-19 — Meetings out of scope
+
+Per product direction the bot is now task-only. Meeting capture and
+the meeting modal are disabled at runtime, but we keep the schema
+shapes (`MeetingDraft`, `IntentType.create_meeting/update_meeting`,
+`Meeting` table) so historical drafts/audit rows stay parseable and
+the rollback path is one revert away.
+
+Concretely:
+
+- **Classifier prefilter override** (`app/intent/classifier.py`) only
+  synthesises drafts for task hints. A meeting keyword in the source
+  text — even a strong one — leaves the classification at `no_action`
+  rather than promoting it to `create_meeting`.
+- **`create_meeting_from_message` shortcut**
+  (`app/slack_bot/handlers/shortcuts.py`) is still registered (legacy
+  app manifests reference it) but no longer opens a meeting modal.
+  Instead it `chat.postEphemeral`s a polite "this bot only handles
+  tasks now — try Create task" notice in the source channel,
+  addressed to the invoking user.
+- **The pipeline itself** never emits `create_meeting`: `node_detect`
+  classifies tasks vs. not-tasks; there is no separate meeting branch.
+
+Out of scope for this change (intentionally unchanged):
+
+- The `meetings` table and Alembic migrations.
+- `MeetingDraft` Pydantic schema and `IntentType` enum values.
+- `bk.meeting_modal` and `bk.draft_card`'s meeting branch (dead code
+  paths preserved for back-compat).
+
+If a stale Slack client somehow submits the meeting modal callback,
+finalize still works (it routes by intent), but the path is no
+longer reachable from any user surface we own.
+
 #### FR-CR-04-18 — Modal cleanup + coloured priority
 
 The Edit / Create modal lost two redundant blocks per user
@@ -1081,5 +1115,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-16  | English UI strings across the bot (assertions in many test modules; specifically `test_units_support.py::test_soft_prompt_*`, `test_mention_always_replies.py`, `test_passive_draft_card.py`, `test_daily_plan.py`, `test_cr03_thread_reminders.py`) |
 | FR-CR-04-17  | `test_employees_workspace_sync.py` (sync_workspace_members + sync_channel_members + bot startup hook) |
 | FR-CR-04-18  | `test_priority_emoji.py` (modal cleanup: no recurring checkbox / no effort block, weekdays-as-toggle, coloured priority emoji on options + card meta) |
+| FR-CR-04-19  | `test_meetings_disabled.py` (prefilter never synthesises a meeting draft, meeting shortcut posts ephemeral "tasks-only" notice, task shortcut still opens the task modal); also `test_prefilter_override.py::test_prefilter_does_not_override_for_meeting_keywords`, `test_fr_06_10_explicit.py::test_fr10_meeting_shortcut_shows_disabled_notice` |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

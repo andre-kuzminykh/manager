@@ -106,7 +106,19 @@ def handle_shortcut(
             allowed_owners=get_settings().allowed_owners(),
         )
     elif callback_id == SHORTCUT_CREATE_MEETING:
-        view = bk.meeting_modal(private_metadata=metadata, initial=initial)
+        # FR-CR-04-19: meetings are out of scope. The shortcut is
+        # still registered (legacy app manifests reference it) but
+        # we surface a polite "tasks-only" notice instead of opening
+        # the meeting modal.
+        try:
+            client.chat_postEphemeral(
+                channel=channel_id or user_id or "",
+                user=user_id or "",
+                text=":information_source: This bot only handles tasks now. Try the *Create task* shortcut.",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("meeting_shortcut_disabled_notice_failed", error=str(e))
+        return
     else:
         log.warning("unknown_shortcut_callback_id", callback_id=callback_id)
         return

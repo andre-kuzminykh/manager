@@ -58,6 +58,7 @@ def handle_shortcut(
 
     draft: ActionDraft | None = None
     metadata = ""
+    allowed_owners: list[dict[str, str]] = []
 
     with session_scope() as session:
         if channel_id and source_message.get("ts"):
@@ -96,14 +97,18 @@ def handle_shortcut(
                 source_user_id=user_id,
                 permalink=None,
             )
+        # Owner-picker list comes from the employees table (FR-CR-04-12/17)
+        # so it reflects who the bot has actually seen, not the static
+        # ALLOWED_OWNERS env.
+        from app.services.owners import list_known_owners
+
+        allowed_owners = list_known_owners(session)
 
     if callback_id == SHORTCUT_CREATE_TASK:
-        from app.config import get_settings
-
         view = bk.task_modal(
             private_metadata=metadata,
             initial=initial,
-            allowed_owners=get_settings().allowed_owners(),
+            allowed_owners=allowed_owners,
         )
     elif callback_id == SHORTCUT_CREATE_MEETING:
         # FR-CR-04-19: meetings are out of scope. The shortcut is

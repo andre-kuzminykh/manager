@@ -695,15 +695,19 @@ def handle_task_edit_open(
             ),
             "estimated_minutes": task.estimated_minutes,
         }
+        # Pull the owner-picker list from the employees table so the
+        # dropdown matches who the bot actually knows about — not the
+        # static ALLOWED_OWNERS env list.
+        from app.services.owners import list_known_owners
+
+        allowed_owners = list_known_owners(session)
 
     import json as _json
-
-    from app.config import get_settings
 
     view = bk.task_modal(
         private_metadata=_json.dumps({"edit_task_id": task_id}),
         initial=initial,
-        allowed_owners=get_settings().allowed_owners(),
+        allowed_owners=allowed_owners,
     )
     view["callback_id"] = bk.MODAL_CALLBACK_EDIT_TASK
     try:

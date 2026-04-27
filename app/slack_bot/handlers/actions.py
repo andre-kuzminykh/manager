@@ -214,6 +214,9 @@ def handle_edit(
             return
         intent = draft.intent
         payload = dict(draft.payload or {})
+        from app.services.owners import list_known_owners
+
+        allowed_owners = list_known_owners(session)
 
     pm = draft_private_metadata(
         conversation_id=metadata.get("conversation_id", ""),
@@ -226,12 +229,10 @@ def handle_edit(
     )
 
     if intent in (IntentTypeEnum.create_task, IntentTypeEnum.update_task):
-        from app.config import get_settings
-
         view = bk.task_modal(
             private_metadata=pm,
             initial=payload,
-            allowed_owners=get_settings().allowed_owners(),
+            allowed_owners=allowed_owners,
         )
     else:
         view = bk.meeting_modal(private_metadata=pm, initial=payload)

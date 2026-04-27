@@ -1,10 +1,44 @@
-"""Resolve a free-text owner hint against the allowed-owners registry."""
+"""Resolve a free-text owner hint against the allowed-owners registry,
+plus a helper that builds the owner-picker list from the employees table."""
 from __future__ import annotations
 
 import re
 
+from sqlalchemy.orm import Session
 
 _MENTION_RE = re.compile(r"<@([A-Z0-9]+)>")
+
+
+def list_known_owners(session: Session) -> list[dict[str, str]]:
+    """Return ``[{"slack_user_id", "display_name"}, ...]`` for the
+    Edit-modal owner picker.
+
+    Pulls from the ``employees`` table (FR-CR-04-12 / 17) so the
+    dropdown contains everyone the bot has seen (workspace sync +
+    per-channel sync), not just the static ``ALLOWED_OWNERS`` env list.
+
+    Falls back to the env-configured list when the employees table is
+    empty — handy for tests / the very first start before the bot has
+    walked ``users.list`` even once.
+    """
+    from app.config import get_settings
+    from app.models import Employee
+
+    rows = (
+        session.query(Employee)
+        .filter(Employee.is_bot.is_(False))
+        .order_by(Employee.display_name, Employee.real_name, Employee.slack_user_id)
+        .all()
+    )
+    out: list[dict[str, str]] = []
+    for e in rows:
+        if not e.slack_user_id:
+            continue
+        name = e.display_name or e.real_name or e.slack_user_id
+        out.append({"slack_user_id": e.slack_user_id, "display_name": name})
+    if out:
+        return out
+    return get_settings().allowed_owners()
 
 
 def resolve_owner_hint(

@@ -118,6 +118,47 @@ class SheetsSyncService:
         )
         self._spreadsheet_id = spreadsheet_id
         self._sheet_name = sheet_name
+        # Headers are written at most once per process; flip after the
+        # first call to `_ensure_headers()` so we don't hit Sheets on
+        # every sync.
+        self._headers_checked = False
+
+    def _ensure_headers(self) -> None:
+        """Write our header row to row 1 if it's missing or doesn't match
+        the current schema.
+
+        This costs one extra GET per process. After the first call we
+        flip a flag so subsequent syncs skip it. If the existing headers
+        already match `_HEADER_ROW`, we don't touch them; if they
+        differ, we overwrite row 1 — the bot's column order is the
+        source of truth for the sheet.
+        """
+        if getattr(self, "_headers_checked", False):
+            return
+        self._headers_checked = True
+        if getattr(self, "_service", None) is None:
+            return  # tests inject `_service=None`; nothing to call
+        end_col = chr(ord("A") + len(_HEADER_ROW) - 1)
+        rng = f"{self._sheet_name}!A1:{end_col}1"
+        try:
+            resp = (
+                self._service.spreadsheets()
+                .values()
+                .get(spreadsheetId=self._spreadsheet_id, range=rng)
+                .execute()
+            )
+            current = (resp.get("values") or [[]])[0]
+            if current == _HEADER_ROW:
+                return
+            self._service.spreadsheets().values().update(
+                spreadsheetId=self._spreadsheet_id,
+                range=rng,
+                valueInputOption="RAW",
+                body={"values": [_HEADER_ROW]},
+            ).execute()
+            log.info("sheets_headers_written", sheet=self._sheet_name)
+        except HttpError as e:
+            log.warning("sheets_headers_write_failed", error=str(e))
 
     @retry(
         reraise=True,
@@ -159,6 +200,10 @@ class SheetsSyncService:
         )
 
     def sync(self, session: Session, task: Task) -> GoogleSheetsSync:
+        # Make sure the header row exists / matches the current schema.
+        # No-op after the first call per process.
+        self._ensure_headers()
+
         record = (
             session.query(GoogleSheetsSync).filter_by(task_id=task.id).one_or_none()
         )

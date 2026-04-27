@@ -167,6 +167,18 @@ def handle_admin_edit_open(
             "start_date": task.start_date.isoformat() if task.start_date else None,
             "start_time": task.start_time.strftime("%H:%M") if task.start_time else None,
             "category": task.category,
+            "is_recurring": task.is_recurring,
+            "recurring_weekdays": task.recurring_weekdays or [],
+            "recurring_start_time": (
+                task.recurring_start_time.strftime("%H:%M")
+                if task.recurring_start_time
+                else None
+            ),
+            "recurring_end_time": (
+                task.recurring_end_time.strftime("%H:%M")
+                if task.recurring_end_time
+                else None
+            ),
             "estimated_minutes": task.estimated_minutes,
         }
 
@@ -308,6 +320,48 @@ def handle_admin_edit_submit(
         if new_cat != task.category:
             diff["category"] = [task.category, new_cat]
             task.category = new_cat
+
+        # Recurring schedule diff.
+        weekdays = payload.get("recurring_weekdays") or []
+        new_recurring = bool(payload.get("is_recurring")) and bool(weekdays)
+        new_rec_start = None
+        new_rec_end = None
+        if new_recurring:
+            for raw, target in (
+                (payload.get("recurring_start_time"), "start"),
+                (payload.get("recurring_end_time"), "end"),
+            ):
+                if isinstance(raw, str) and raw:
+                    try:
+                        hh, mm = raw.split(":")[:2]
+                        parsed = _time(int(hh), int(mm))
+                    except (ValueError, IndexError):
+                        parsed = None
+                else:
+                    parsed = None
+                if target == "start":
+                    new_rec_start = parsed
+                else:
+                    new_rec_end = parsed
+        new_weekdays = weekdays if new_recurring else None
+        if new_recurring != task.is_recurring:
+            diff["is_recurring"] = [task.is_recurring, new_recurring]
+        if (new_weekdays or None) != (task.recurring_weekdays or None):
+            diff["recurring_weekdays"] = [task.recurring_weekdays, new_weekdays]
+        if new_rec_start != task.recurring_start_time:
+            diff["recurring_start_time"] = [
+                task.recurring_start_time.strftime("%H:%M") if task.recurring_start_time else None,
+                new_rec_start.strftime("%H:%M") if new_rec_start else None,
+            ]
+        if new_rec_end != task.recurring_end_time:
+            diff["recurring_end_time"] = [
+                task.recurring_end_time.strftime("%H:%M") if task.recurring_end_time else None,
+                new_rec_end.strftime("%H:%M") if new_rec_end else None,
+            ]
+        task.is_recurring = new_recurring
+        task.recurring_weekdays = new_weekdays
+        task.recurring_start_time = new_rec_start
+        task.recurring_end_time = new_rec_end
 
         if payload.get("estimated_minutes") != task.estimated_minutes:
             diff["estimated_minutes"] = [

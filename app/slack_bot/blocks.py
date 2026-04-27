@@ -62,6 +62,10 @@ BLOCK_DUE_TIME = "due_time_block"
 BLOCK_START_DATE = "start_date_block"
 BLOCK_START_TIME = "start_time_block"
 BLOCK_CATEGORY = "category_block"
+BLOCK_RECURRING = "recurring_block"
+BLOCK_RECURRING_WEEKDAYS = "recurring_weekdays_block"
+BLOCK_RECURRING_START = "recurring_start_block"
+BLOCK_RECURRING_END = "recurring_end_block"
 BLOCK_PARTICIPANTS = "participants_block"
 BLOCK_DATETIME = "datetime_block"
 BLOCK_NOTES = "notes_block"
@@ -76,6 +80,21 @@ INPUT_DUE_TIME = "due_time_input"
 INPUT_START_DATE = "start_date_input"
 INPUT_START_TIME = "start_time_input"
 INPUT_CATEGORY = "category_input"
+INPUT_RECURRING = "recurring_input"
+INPUT_RECURRING_WEEKDAYS = "recurring_weekdays_input"
+INPUT_RECURRING_START = "recurring_start_input"
+INPUT_RECURRING_END = "recurring_end_input"
+
+# Order matters — same labels are used in the modal UI.
+RECURRING_WEEKDAY_OPTIONS = [
+    {"value": "mon", "text": "Mon"},
+    {"value": "tue", "text": "Tue"},
+    {"value": "wed", "text": "Wed"},
+    {"value": "thu", "text": "Thu"},
+    {"value": "fri", "text": "Fri"},
+    {"value": "sat", "text": "Sat"},
+    {"value": "sun", "text": "Sun"},
+]
 INPUT_PARTICIPANTS = "participants_input"
 INPUT_DATETIME = "datetime_input"
 INPUT_NOTES = "notes_input"
@@ -372,6 +391,52 @@ def task_modal(
     if initial.get("category"):
         category_element["initial_value"] = initial["category"]
 
+    # Recurring controls. Always rendered; the checkbox tells us
+    # whether to honor the rest of the values on submit.
+    recurring_option = {
+        "value": "on",
+        "text": {"type": "plain_text", "text": "Повторяющаяся задача"},
+    }
+    recurring_element: dict[str, Any] = {
+        "type": "checkboxes",
+        "action_id": INPUT_RECURRING,
+        "options": [recurring_option],
+    }
+    if initial.get("is_recurring"):
+        recurring_element["initial_options"] = [recurring_option]
+
+    weekday_options = [
+        {
+            "value": o["value"],
+            "text": {"type": "plain_text", "text": o["text"]},
+        }
+        for o in RECURRING_WEEKDAY_OPTIONS
+    ]
+    weekdays_element: dict[str, Any] = {
+        "type": "checkboxes",
+        "action_id": INPUT_RECURRING_WEEKDAYS,
+        "options": weekday_options,
+    }
+    initial_wd = initial.get("recurring_weekdays") or []
+    if initial_wd:
+        weekdays_element["initial_options"] = [
+            o for o in weekday_options if o["value"] in initial_wd
+        ]
+
+    rec_start_element: dict[str, Any] = {
+        "type": "timepicker",
+        "action_id": INPUT_RECURRING_START,
+    }
+    if initial.get("recurring_start_time"):
+        rec_start_element["initial_time"] = initial["recurring_start_time"]
+
+    rec_end_element: dict[str, Any] = {
+        "type": "timepicker",
+        "action_id": INPUT_RECURRING_END,
+    }
+    if initial.get("recurring_end_time"):
+        rec_end_element["initial_time"] = initial["recurring_end_time"]
+
     effort_element = {
         "type": "plain_text_input",
         "action_id": INPUT_EFFORT,
@@ -456,6 +521,46 @@ def task_modal(
             },
             {
                 "type": "input",
+                "block_id": BLOCK_RECURRING,
+                "optional": True,
+                "label": {
+                    "type": "plain_text",
+                    "text": "Recurring",
+                },
+                "element": recurring_element,
+            },
+            {
+                "type": "input",
+                "block_id": BLOCK_RECURRING_WEEKDAYS,
+                "optional": True,
+                "label": {
+                    "type": "plain_text",
+                    "text": "Дни недели (если повторяющаяся)",
+                },
+                "element": weekdays_element,
+            },
+            {
+                "type": "input",
+                "block_id": BLOCK_RECURRING_START,
+                "optional": True,
+                "label": {
+                    "type": "plain_text",
+                    "text": "Время начала повтора",
+                },
+                "element": rec_start_element,
+            },
+            {
+                "type": "input",
+                "block_id": BLOCK_RECURRING_END,
+                "optional": True,
+                "label": {
+                    "type": "plain_text",
+                    "text": "Время конца повтора",
+                },
+                "element": rec_end_element,
+            },
+            {
+                "type": "input",
                 "block_id": BLOCK_EFFORT,
                 "optional": True,
                 "label": {"type": "plain_text", "text": "Estimated effort (min)"},
@@ -506,6 +611,20 @@ def task_card(
         meta_parts.append(f"start: {start_str}")
     if getattr(task, "category", None):
         meta_parts.append(f"category: {task.category}")
+    if getattr(task, "is_recurring", False) and task.recurring_weekdays:
+        wd_label_by_value = {o["value"]: o["text"] for o in RECURRING_WEEKDAY_OPTIONS}
+        wd_str = "/".join(
+            wd_label_by_value.get(w, w) for w in task.recurring_weekdays
+        )
+        rec = f":repeat: {wd_str}"
+        if task.recurring_start_time and task.recurring_end_time:
+            rec += (
+                f" {task.recurring_start_time.strftime('%H:%M')}–"
+                f"{task.recurring_end_time.strftime('%H:%M')}"
+            )
+        elif task.recurring_start_time:
+            rec += f" с {task.recurring_start_time.strftime('%H:%M')}"
+        meta_parts.append(rec)
     if task.priority:
         meta_parts.append(f"priority: {task.priority.value}")
 

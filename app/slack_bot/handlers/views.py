@@ -27,6 +27,13 @@ def _state_value(values: dict[str, Any], block_id: str, action_id: str) -> Any:
     if "selected_option" in element:
         sel = element.get("selected_option") or {}
         return sel.get("value")
+    if "selected_options" in element:
+        # checkboxes / multi_static_select — return the list of values.
+        return [
+            (opt or {}).get("value")
+            for opt in (element.get("selected_options") or [])
+            if (opt or {}).get("value") is not None
+        ]
     if "selected_date" in element:
         return element.get("selected_date")
     if "selected_time" in element:
@@ -62,6 +69,18 @@ def _extract_task_payload(view: dict[str, Any]) -> dict[str, Any]:
         "category": (
             _state_value(values, bk.BLOCK_CATEGORY, bk.INPUT_CATEGORY) or ""
         ).strip() or None,
+        # Recurring schedule. The checkbox returns ["on"] when ticked.
+        "is_recurring": "on"
+        in (_state_value(values, bk.BLOCK_RECURRING, bk.INPUT_RECURRING) or []),
+        "recurring_weekdays": _state_value(
+            values, bk.BLOCK_RECURRING_WEEKDAYS, bk.INPUT_RECURRING_WEEKDAYS
+        ) or [],
+        "recurring_start_time": _state_value(
+            values, bk.BLOCK_RECURRING_START, bk.INPUT_RECURRING_START
+        ),
+        "recurring_end_time": _state_value(
+            values, bk.BLOCK_RECURRING_END, bk.INPUT_RECURRING_END
+        ),
         "estimated_minutes": estimated_minutes,
     }
 

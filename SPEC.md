@@ -720,6 +720,37 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-15 — Recurring tasks
+
+A task can repeat on selected weekdays during an optional time
+window. Four columns on `tasks`:
+
+- `is_recurring BOOLEAN` (master switch).
+- `recurring_weekdays JSON` — list of "mon" / "tue" / … / "sun".
+- `recurring_start_time Time | NULL`.
+- `recurring_end_time Time | NULL`.
+
+Edit modal: a "Recurring" checkbox plus three optional blocks
+(weekdays multi-select, start/end timepickers). They live in the
+modal at all times — UX discipline: tick the checkbox AND pick at
+least one weekday or the recurring schedule is treated as not set.
+
+Submit logic: `is_recurring = (checkbox AND weekdays non-empty)`.
+When falsy, all four columns are cleared so leftover modal values
+never persist quietly. The admin-edit handler captures the same
+fields in its diff audit row.
+
+Card render: shown as a meta segment — `:repeat: Mon/Wed
+09:00–11:30` when the time range is set, `:repeat: Mon/Wed` when
+just weekdays.
+
+Sheets sync gains four columns: `is_recurring` (yes / blank),
+`recurring_weekdays` (comma-joined), `recurring_start_time`,
+`recurring_end_time`.
+
+Migration: `0012_task_recurring`. No engine change yet — calendar
+booking will read these in a future iteration.
+
 #### FR-CR-04-14 — Daily plan workflow (evening approval + morning execution)
 
 Two cron jobs per user per day cover the daily routine:
@@ -960,5 +991,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-12  | `test_owner_employees_table.py` (employees table in owner prompt; id validation; name → id resolution)        |
 | FR-CR-04-13  | `test_task_extras.py` (start_date/start_time, category, subtasks via parent_task_id)                          |
 | FR-CR-04-14  | `test_daily_plan.py` (evening approval card with Skip/Approve, morning execution card, idempotency, tracking) |
+| FR-CR-04-15  | `test_task_recurring.py` (recurring checkbox, weekdays, optional time range, card render)                     |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

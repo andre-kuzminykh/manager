@@ -78,6 +78,17 @@ class Task(Base, TimestampMixin):
         ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
     )
 
+    # Recurring schedule. is_recurring is the master switch (UI
+    # checkbox); the three other columns describe the recurrence —
+    # which weekdays, and the time range of one occurrence. They are
+    # ignored at runtime when is_recurring is False.
+    is_recurring: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    recurring_weekdays: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    recurring_start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
+    recurring_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
+
     status: Mapped[TaskStatus] = mapped_column(
         Enum(TaskStatus, name="task_status"), nullable=False, default=TaskStatus.backlog
     )

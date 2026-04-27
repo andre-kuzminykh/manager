@@ -491,6 +491,18 @@ def handle_task_edit_open(
             "start_date": task.start_date.isoformat() if task.start_date else None,
             "start_time": task.start_time.strftime("%H:%M") if task.start_time else None,
             "category": task.category,
+            "is_recurring": task.is_recurring,
+            "recurring_weekdays": task.recurring_weekdays or [],
+            "recurring_start_time": (
+                task.recurring_start_time.strftime("%H:%M")
+                if task.recurring_start_time
+                else None
+            ),
+            "recurring_end_time": (
+                task.recurring_end_time.strftime("%H:%M")
+                if task.recurring_end_time
+                else None
+            ),
             "estimated_minutes": task.estimated_minutes,
         }
 
@@ -582,6 +594,21 @@ def handle_task_edit_submit(
         task.start_date = _parse_date(payload.get("start_date"))
         task.start_time = _parse_time(payload.get("start_time"))
         task.category = payload.get("category")
+
+        # Recurring: only honour the schedule if BOTH the checkbox is
+        # ticked AND at least one weekday is picked. Otherwise ignore
+        # leftover values that may sit in the modal state.
+        weekdays = payload.get("recurring_weekdays") or []
+        if payload.get("is_recurring") and weekdays:
+            task.is_recurring = True
+            task.recurring_weekdays = weekdays
+            task.recurring_start_time = _parse_time(payload.get("recurring_start_time"))
+            task.recurring_end_time = _parse_time(payload.get("recurring_end_time"))
+        else:
+            task.is_recurring = False
+            task.recurring_weekdays = None
+            task.recurring_start_time = None
+            task.recurring_end_time = None
 
         if payload.get("estimated_minutes") is not None:
             task.estimated_minutes = payload.get("estimated_minutes")

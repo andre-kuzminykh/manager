@@ -720,6 +720,33 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-18 — Modal cleanup + coloured priority
+
+The Edit / Create modal lost two redundant blocks per user
+feedback:
+
+- **Recurring checkbox** removed. Selecting any weekday in the
+  multi-select IS the toggle now: `is_recurring = bool(weekdays)`.
+- **"Estimated effort (min)"** removed. The `tasks.estimated_minutes`
+  column stays in the schema for back-compat / future analytics, but
+  the modal no longer surfaces it and `_extract_task_payload`
+  always emits `estimated_minutes=None`.
+
+Priority gets coloured circle emoji both in the modal's
+`static_select` options and on the task-card meta line:
+
+```
+low      :large_green_circle:  Low
+medium   :large_yellow_circle: Medium
+high     :large_orange_circle: High
+urgent   :red_circle:          Urgent
+```
+
+The mapping lives in `blocks.PRIORITY_EMOJI` so any future addition
+to `TaskPriority` requires registering a colour (covered by the
+`test_priority_emoji_dict_covers_every_priority_value` regression
+test).
+
 #### FR-CR-04-17 — Always-fresh Employees directory
 
 The owner LLM stage receives `known_employees` from the local
@@ -1053,5 +1080,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-15  | `test_task_recurring.py` (recurring checkbox, weekdays, optional time range, card render)                     |
 | FR-CR-04-16  | English UI strings across the bot (assertions in many test modules; specifically `test_units_support.py::test_soft_prompt_*`, `test_mention_always_replies.py`, `test_passive_draft_card.py`, `test_daily_plan.py`, `test_cr03_thread_reminders.py`) |
 | FR-CR-04-17  | `test_employees_workspace_sync.py` (sync_workspace_members + sync_channel_members + bot startup hook) |
+| FR-CR-04-18  | `test_priority_emoji.py` (modal cleanup: no recurring checkbox / no effort block, weekdays-as-toggle, coloured priority emoji on options + card meta) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

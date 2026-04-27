@@ -155,16 +155,15 @@ def test_edit_modal_includes_recurring_blocks(
     )
     view = client.opened[0]["view"]
     bids = [b.get("block_id") for b in view["blocks"]]
+    # No standalone "Recurring" checkbox anymore (FR-CR-04-18) —
+    # picking any weekday is the toggle.
+    assert bk.BLOCK_RECURRING not in bids
     for required in (
-        bk.BLOCK_RECURRING,
         bk.BLOCK_RECURRING_WEEKDAYS,
         bk.BLOCK_RECURRING_START,
         bk.BLOCK_RECURRING_END,
     ):
         assert required in bids
-
-    rec_block = next(b for b in view["blocks"] if b.get("block_id") == bk.BLOCK_RECURRING)
-    assert rec_block["element"]["initial_options"][0]["value"] == "on"
 
     wd_block = next(b for b in view["blocks"] if b.get("block_id") == bk.BLOCK_RECURRING_WEEKDAYS)
     initial_wds = [o["value"] for o in wd_block["element"]["initial_options"]]

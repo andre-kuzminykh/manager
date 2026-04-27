@@ -212,15 +212,20 @@ def test_shortcut_modal_receives_allowed_owners(
     get_settings.cache_clear()  # type: ignore[attr-defined]
 
 
-def test_task_modal_passes_through_effort_initial_value():
+def test_task_modal_no_longer_renders_effort_block():
+    """FR-CR-04-18: the Estimated effort field was removed from the
+    modal. The DB column stays, but the modal never surfaces it."""
     view = bk.task_modal(private_metadata="{}", initial={"estimated_minutes": 180})
-    effort_block = next(b for b in view["blocks"] if b["block_id"] == bk.BLOCK_EFFORT)
-    assert effort_block["element"]["initial_value"] == "180"
+    block_ids = [b.get("block_id") for b in view["blocks"]]
+    assert bk.BLOCK_EFFORT not in block_ids
 
 
-def test_task_modal_submit_parses_effort_integer(
+def test_task_modal_submit_does_not_set_estimated_minutes(
     patched_session_scope, SessionFactory, sender, finalizer_stub
 ):
+    """Even if a stale client sends a value in the (removed) effort
+    block, the submit handler ignores it — payload always carries
+    estimated_minutes=None."""
     from app.slack_bot.handlers.views import handle_task_modal_submit
 
     view = {
@@ -243,14 +248,14 @@ def test_task_modal_submit_parses_effort_integer(
         sender=sender,
         ack=lambda *a, **kw: None,
     )
-    # The finalizer was invoked with some draft id; the underlying draft
-    # should carry the parsed estimated_minutes.
     with SessionFactory() as s:
         from app.models import ActionDraft
 
         drafts = s.query(ActionDraft).all()
         assert drafts
-        assert any(d.payload.get("estimated_minutes") == 240 for d in drafts)
+        assert all(
+            d.payload.get("estimated_minutes") is None for d in drafts
+        )
 
 
 def test_task_modal_submit_parses_owner_slack_id(

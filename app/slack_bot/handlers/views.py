@@ -48,13 +48,6 @@ def _extract_task_payload(view: dict[str, Any]) -> dict[str, Any]:
     owner_raw = _state_value(values, bk.BLOCK_OWNER, bk.INPUT_OWNER)
     # static_select case returns a Slack user id; plain_text_input returns a name.
     owner_is_slack_id = isinstance(owner_raw, str) and owner_raw.startswith(("U", "W"))
-    effort_raw = _state_value(values, bk.BLOCK_EFFORT, bk.INPUT_EFFORT)
-    estimated_minutes: int | None = None
-    if effort_raw:
-        try:
-            estimated_minutes = int(str(effort_raw).strip())
-        except (TypeError, ValueError):
-            estimated_minutes = None
 
     return {
         "title": (_state_value(values, bk.BLOCK_TITLE, bk.INPUT_TITLE) or "").strip(),
@@ -69,9 +62,11 @@ def _extract_task_payload(view: dict[str, Any]) -> dict[str, Any]:
         "category": (
             _state_value(values, bk.BLOCK_CATEGORY, bk.INPUT_CATEGORY) or ""
         ).strip() or None,
-        # Recurring schedule. The checkbox returns ["on"] when ticked.
-        "is_recurring": "on"
-        in (_state_value(values, bk.BLOCK_RECURRING, bk.INPUT_RECURRING) or []),
+        # Recurring schedule — selecting any weekday IS the toggle.
+        # No separate checkbox in the modal anymore.
+        "is_recurring": bool(
+            _state_value(values, bk.BLOCK_RECURRING_WEEKDAYS, bk.INPUT_RECURRING_WEEKDAYS) or []
+        ),
         "recurring_weekdays": _state_value(
             values, bk.BLOCK_RECURRING_WEEKDAYS, bk.INPUT_RECURRING_WEEKDAYS
         ) or [],
@@ -81,7 +76,9 @@ def _extract_task_payload(view: dict[str, Any]) -> dict[str, Any]:
         "recurring_end_time": _state_value(
             values, bk.BLOCK_RECURRING_END, bk.INPUT_RECURRING_END
         ),
-        "estimated_minutes": estimated_minutes,
+        # estimated_minutes column stays in the DB but the modal no
+        # longer surfaces it (FR-CR-04-18). Always None on submit.
+        "estimated_minutes": None,
     }
 
 

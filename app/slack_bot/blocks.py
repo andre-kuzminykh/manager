@@ -288,8 +288,22 @@ def soft_prompt(intent: IntentType, draft_id: int) -> list[dict[str, Any]]:
 # ---- modals -----------------------------------------------------------------
 
 
+PRIORITY_EMOJI = {
+    "low": ":large_green_circle:",
+    "medium": ":large_yellow_circle:",
+    "high": ":large_orange_circle:",
+    "urgent": ":red_circle:",
+}
+
 _PRIORITY_OPTIONS = [
-    {"text": {"type": "plain_text", "text": label}, "value": value}
+    {
+        "text": {
+            "type": "plain_text",
+            "text": f"{PRIORITY_EMOJI[value]} {label}",
+            "emoji": True,
+        },
+        "value": value,
+    }
     for label, value in [
         ("Low", "low"),
         ("Medium", "medium"),
@@ -393,18 +407,6 @@ def task_modal(
 
     # Recurring controls. Always rendered; the checkbox tells us
     # whether to honor the rest of the values on submit.
-    recurring_option = {
-        "value": "on",
-        "text": {"type": "plain_text", "text": "Recurring task"},
-    }
-    recurring_element: dict[str, Any] = {
-        "type": "checkboxes",
-        "action_id": INPUT_RECURRING,
-        "options": [recurring_option],
-    }
-    if initial.get("is_recurring"):
-        recurring_element["initial_options"] = [recurring_option]
-
     weekday_options = [
         {
             "value": o["value"],
@@ -436,14 +438,6 @@ def task_modal(
     }
     if initial.get("recurring_end_time"):
         rec_end_element["initial_time"] = initial["recurring_end_time"]
-
-    effort_element = {
-        "type": "plain_text_input",
-        "action_id": INPUT_EFFORT,
-        "placeholder": {"type": "plain_text", "text": "Estimated minutes (optional)"},
-    }
-    if initial.get("estimated_minutes") is not None:
-        effort_element["initial_value"] = str(initial["estimated_minutes"])
 
     return {
         "type": "modal",
@@ -521,21 +515,11 @@ def task_modal(
             },
             {
                 "type": "input",
-                "block_id": BLOCK_RECURRING,
-                "optional": True,
-                "label": {
-                    "type": "plain_text",
-                    "text": "Recurring",
-                },
-                "element": recurring_element,
-            },
-            {
-                "type": "input",
                 "block_id": BLOCK_RECURRING_WEEKDAYS,
                 "optional": True,
                 "label": {
                     "type": "plain_text",
-                    "text": "Weekdays (if recurring)",
+                    "text": "Repeat weekdays (optional)",
                 },
                 "element": weekdays_element,
             },
@@ -558,13 +542,6 @@ def task_modal(
                     "text": "Recurring end time",
                 },
                 "element": rec_end_element,
-            },
-            {
-                "type": "input",
-                "block_id": BLOCK_EFFORT,
-                "optional": True,
-                "label": {"type": "plain_text", "text": "Estimated effort (min)"},
-                "element": effort_element,
             },
         ],
     }
@@ -626,7 +603,8 @@ def task_card(
             rec += f" from {task.recurring_start_time.strftime('%H:%M')}"
         meta_parts.append(rec)
     if task.priority:
-        meta_parts.append(f"priority: {task.priority.value}")
+        emoji = PRIORITY_EMOJI.get(task.priority.value, "")
+        meta_parts.append(f"priority: {emoji} {task.priority.value}".strip())
 
     blocks: list[dict[str, Any]] = [
         {

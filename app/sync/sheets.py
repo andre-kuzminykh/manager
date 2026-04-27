@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,7 +11,9 @@ from sqlalchemy.orm import Session
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.logging_setup import get_logger
-from app.models import GoogleSheetsSync, SyncStatus, Task
+from app.models import Employee, GoogleSheetsSync, SyncStatus, Task
+
+_MENTION_RE = re.compile(r"^<@([UW][A-Z0-9]+)>$")
 
 log = get_logger(__name__)
 
@@ -39,7 +42,31 @@ _HEADER_ROW = [
 ]
 
 
-def _task_row(task: Task) -> list[str]:
+def _resolve_owner_name(session: Session | None, task: Task) -> str:
+    """Pick the most human-readable owner string for the spreadsheet.
+
+    Order of preference:
+    1. Employee.display_name / real_name (looked up by `owner_user_id`).
+    2. `owner_display_name`, with a leading `<@Uxxx>` Slack mention
+       stripped to a bare uid (so the cell never shows raw mention syntax).
+    3. `owner_user_id` as last resort.
+    """
+    if task.owner_user_id and session is not None:
+        emp = session.get(Employee, task.owner_user_id)
+        if emp is not None:
+            name = emp.display_name or emp.real_name
+            if name:
+                return name
+    raw = (task.owner_display_name or "").strip()
+    m = _MENTION_RE.match(raw)
+    if m:
+        return m.group(1)  # bare uid — better than "<@Uxxx>"
+    if raw:
+        return raw
+    return task.owner_user_id or ""
+
+
+def _task_row(task: Task, *, session: Session | None = None) -> list[str]:
     # Soft-deleted tasks: keep the row in the sheet but flip status to
     # "deleted" so the user sees what happened. The `deleted_at`
     # timestamp carries the audit info.
@@ -48,7 +75,7 @@ def _task_row(task: Task) -> list[str]:
         str(task.id),
         task.title,
         task.description or "",
-        task.owner_display_name or task.owner_user_id or "",
+        _resolve_owner_name(session, task),
         task.priority.value,
         task.category or "",
         task.start_date.isoformat() if task.start_date else "",
@@ -144,7 +171,7 @@ class SheetsSyncService:
             session.add(record)
             session.flush()
 
-        row = _task_row(task)
+        row = _task_row(task, session=session)
         record.attempts += 1
         try:
             if record.row_id is None:

@@ -163,6 +163,7 @@ def handle_admin_edit_open(
             "owner_display_name": task.owner_display_name,
             "priority": task.priority.value,
             "due_date": task.due_date.isoformat() if task.due_date else None,
+            "due_time": task.due_time.strftime("%H:%M") if task.due_time else None,
             "estimated_minutes": task.estimated_minutes,
         }
 
@@ -252,6 +253,24 @@ def handle_admin_edit_submit(
                 new_due_d.isoformat() if new_due_d else None,
             ]
             task.due_date = new_due_d
+
+        from datetime import time as _time
+
+        new_time = payload.get("due_time")
+        new_time_t = None
+        if isinstance(new_time, str) and new_time:
+            try:
+                hh, mm = new_time.split(":")[:2]
+                new_time_t = _time(int(hh), int(mm))
+            except (ValueError, IndexError):
+                new_time_t = None
+        if new_time_t != task.due_time:
+            diff["due_time"] = [
+                task.due_time.strftime("%H:%M") if task.due_time else None,
+                new_time_t.strftime("%H:%M") if new_time_t else None,
+            ]
+            task.due_time = new_time_t
+
         if payload.get("estimated_minutes") != task.estimated_minutes:
             diff["estimated_minutes"] = [
                 task.estimated_minutes,

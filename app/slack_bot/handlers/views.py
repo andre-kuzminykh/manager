@@ -29,6 +29,8 @@ def _state_value(values: dict[str, Any], block_id: str, action_id: str) -> Any:
         return sel.get("value")
     if "selected_date" in element:
         return element.get("selected_date")
+    if "selected_time" in element:
+        return element.get("selected_time")
     if "selected_date_time" in element:
         return element.get("selected_date_time")
     return None
@@ -54,6 +56,7 @@ def _extract_task_payload(view: dict[str, Any]) -> dict[str, Any]:
         "owner_display_name": None if owner_is_slack_id else owner_raw,
         "priority": _state_value(values, bk.BLOCK_PRIORITY, bk.INPUT_PRIORITY) or "medium",
         "due_date": _state_value(values, bk.BLOCK_DUE, bk.INPUT_DUE),
+        "due_time": _state_value(values, bk.BLOCK_DUE_TIME, bk.INPUT_DUE_TIME),
         "estimated_minutes": estimated_minutes,
     }
 

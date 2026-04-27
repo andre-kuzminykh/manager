@@ -1,5 +1,5 @@
 import enum
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any
 
 from sqlalchemy import (
@@ -12,6 +12,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Time,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -53,6 +54,11 @@ class Task(Base, TimestampMixin):
         Enum(TaskPriority, name="task_priority"), nullable=False, default=TaskPriority.medium
     )
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Optional clock time on the deadline. Filled when the user enters
+    # it in the Edit modal — pipeline never sets it. Combined with
+    # due_date it gives a full datetime; without due_date the time is
+    # ignored on display.
+    due_time: Mapped[time | None] = mapped_column(Time, nullable=True)
     status: Mapped[TaskStatus] = mapped_column(
         Enum(TaskStatus, name="task_status"), nullable=False, default=TaskStatus.backlog
     )

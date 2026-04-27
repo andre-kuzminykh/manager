@@ -594,8 +594,10 @@ def test_sheets_task_row_has_expected_columns(session):
     assert row[3] == "@a"
     assert row[4] == "high"
     assert row[5] == "2026-07-01"
-    assert row[6] == "todo"
-    assert row[7] == "https://p"
+    # row[6] is due_time — empty when not set
+    assert row[6] == ""
+    assert row[7] == "todo"
+    assert row[8] == "https://p"
 
 
 def test_sheets_task_row_handles_missing_optional_fields(session):
@@ -612,7 +614,8 @@ def test_sheets_task_row_handles_missing_optional_fields(session):
     row = _task_row(t)
     assert row[2] == ""  # description
     assert row[5] == ""  # no due date
-    assert row[7] == ""  # no permalink
+    assert row[6] == ""  # no due time
+    assert row[8] == ""  # no permalink
 
 
 # =============================================================================

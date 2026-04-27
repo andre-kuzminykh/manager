@@ -54,6 +54,7 @@ BLOCK_DESCRIPTION = "description_block"
 BLOCK_OWNER = "owner_block"
 BLOCK_PRIORITY = "priority_block"
 BLOCK_DUE = "due_block"
+BLOCK_DUE_TIME = "due_time_block"
 BLOCK_PARTICIPANTS = "participants_block"
 BLOCK_DATETIME = "datetime_block"
 BLOCK_NOTES = "notes_block"
@@ -64,6 +65,7 @@ INPUT_DESCRIPTION = "description_input"
 INPUT_OWNER = "owner_input"
 INPUT_PRIORITY = "priority_input"
 INPUT_DUE = "due_input"
+INPUT_DUE_TIME = "due_time_input"
 INPUT_PARTICIPANTS = "participants_input"
 INPUT_DATETIME = "datetime_input"
 INPUT_NOTES = "notes_input"
@@ -328,6 +330,13 @@ def task_modal(
     if initial.get("due_date"):
         due_element["initial_date"] = initial["due_date"]
 
+    due_time_element: dict[str, Any] = {
+        "type": "timepicker",
+        "action_id": INPUT_DUE_TIME,
+    }
+    if initial.get("due_time"):
+        due_time_element["initial_time"] = initial["due_time"]
+
     effort_element = {
         "type": "plain_text_input",
         "action_id": INPUT_EFFORT,
@@ -384,6 +393,13 @@ def task_modal(
             },
             {
                 "type": "input",
+                "block_id": BLOCK_DUE_TIME,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Due time (optional)"},
+                "element": due_time_element,
+            },
+            {
+                "type": "input",
                 "block_id": BLOCK_EFFORT,
                 "optional": True,
                 "label": {"type": "plain_text", "text": "Estimated effort (min)"},
@@ -423,7 +439,10 @@ def task_card(
             + assumed_suffix
         )
     if task.due_date:
-        meta_parts.append(f"due: {task.due_date.isoformat()}")
+        due_str = task.due_date.isoformat()
+        if getattr(task, "due_time", None):
+            due_str += f" {task.due_time.strftime('%H:%M')}"
+        meta_parts.append(f"due: {due_str}")
     if task.priority:
         meta_parts.append(f"priority: {task.priority.value}")
 

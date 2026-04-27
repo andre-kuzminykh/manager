@@ -487,6 +487,7 @@ def handle_task_edit_open(
             "owner_display_name": task.owner_display_name,
             "priority": task.priority.value,
             "due_date": task.due_date.isoformat() if task.due_date else None,
+            "due_time": task.due_time.strftime("%H:%M") if task.due_time else None,
             "estimated_minutes": task.estimated_minutes,
         }
 
@@ -510,6 +511,7 @@ def handle_task_edit_submit(
     *, body: dict[str, Any], view: dict[str, Any], sender: _Sender, ack: Ack
 ) -> None:
     from datetime import date as _date
+    from datetime import time as _time
 
     from app.slack_bot.handlers.views import _extract_task_payload
 
@@ -555,6 +557,17 @@ def handle_task_edit_submit(
             except ValueError:
                 new_due_d = None
         task.due_date = new_due_d
+
+        new_time = payload.get("due_time")
+        new_time_t: _time | None = None
+        if isinstance(new_time, str) and new_time:
+            try:
+                hh, mm = new_time.split(":")[:2]
+                new_time_t = _time(int(hh), int(mm))
+            except (ValueError, IndexError):
+                new_time_t = None
+        task.due_time = new_time_t
+
         if payload.get("estimated_minutes") is not None:
             task.estimated_minutes = payload.get("estimated_minutes")
         # Once the human has edited the task, the "owner_assumed" flag should

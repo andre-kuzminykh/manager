@@ -215,18 +215,20 @@ def test_passive_thread_reply_fills_field_and_updates_draft(
     with SessionFactory() as s:
         draft = s.query(ActionDraft).one()
         awaiting = draft.awaiting_field
-    # Author-fallback fills the owner slot, so the first missing is
-    # due_date.
-    assert awaiting == "due_date"
-    assert draft.payload.get("owner_user_id") == "U-author"
+    # The stub classifier returns a TaskDraft with owner_display_name
+    # "@alice" — we no longer override that with the author, so the
+    # bot asks the user about the owner first.
+    assert awaiting == "owner"
+    assert draft.payload.get("owner_user_id") is None
 
-    # The user replies in the thread with an ISO date.
+    # The user replies in the thread with the same Slack mention from
+    # the allowed list — resolve_owner_hint promotes it to a real id.
     handle_message(
         event={
             "ts": "401.0",
             "thread_ts": "400.0",
             "user": "U-author",
-            "text": "2026-05-12",
+            "text": "<@UIVAN0001>",
             "channel": "C1",
             "channel_type": "channel",
         },
@@ -239,7 +241,7 @@ def test_passive_thread_reply_fills_field_and_updates_draft(
     )
     with SessionFactory() as s:
         draft = s.query(ActionDraft).one()
-        assert draft.payload.get("due_date") == "2026-05-12"
+        assert draft.payload.get("owner_user_id") == "UIVAN0001"
     # The widget was refreshed via chat.update (follow-up reply path).
     assert any(u.get("ts") for u in sender.updates)
 
@@ -286,14 +288,15 @@ def test_thread_reply_deletes_prior_followup_question(
     assert len(sender.posts) == 2, sender.posts
     memo_ts = "2.0"
 
-    # Author-fallback fills the owner slot, so the memo asked about
-    # the date. Reply with an ISO date.
+    # The stub classifier emits "@alice" as owner_display_name without
+    # a Slack id, so the memo asked about the owner. Reply with a
+    # mention from the allowed list.
     handle_message(
         event={
             "ts": "601.0",
             "thread_ts": "600.0",
             "user": "U-author",
-            "text": "2026-05-15",
+            "text": "<@UIVAN0001>",
             "channel": "C1",
             "channel_type": "channel",
         },

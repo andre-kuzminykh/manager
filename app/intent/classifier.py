@@ -62,6 +62,7 @@ class IntentClassifier:
         *,
         context: ContextWindow,
         invocation_type: InvocationType,
+        known_employees: list[dict] | None = None,
     ) -> IntentClassification:
         source_text = (context.source_message.get("text") or "").strip()
 
@@ -83,6 +84,7 @@ class IntentClassifier:
             context=context,
             invocation_type=invocation_type,
             source_text=source_text,
+            known_employees=known_employees,
         )
 
 
@@ -92,6 +94,7 @@ def classify_with_backend(
     context: ContextWindow,
     invocation_type: InvocationType,
     source_text: str,
+    known_employees: list[dict] | None = None,
 ) -> IntentClassification:
     try:
         date_model = (get_settings().openai_date_model or None)
@@ -102,6 +105,7 @@ def classify_with_backend(
             author_user_id=context.source_message.get("user"),
             today=date.today(),
             date_model=date_model,
+            known_employees=known_employees,
         )
     except Exception as e:  # noqa: BLE001 — degrade to rules
         log.error("intent_pipeline_failed", error=str(e))

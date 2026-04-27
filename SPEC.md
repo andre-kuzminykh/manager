@@ -720,6 +720,31 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-12 — Employees table in the owner prompt
+
+The owner LLM stage receives a structured `known_employees` table —
+one row per known team member from the `employees` directory, with
+`slack_user_id`, `display_name`, `real_name`. The prompt instructs
+the model to pick a `slack_user_id` from this table whenever the
+message names someone, instead of returning a bare display_name.
+
+After the LLM returns:
+- An `slack_user_id` that's NOT in the table is dropped (anti-
+  hallucination guard); we keep only the display_name.
+- A bare `display_name` is run through `resolve_owner_hint` against
+  the table to fill in the matching `slack_user_id` deterministically.
+
+This fixes the "bot assigns to author when another teammate was
+named" bug: in a group DM with Иван + Паша + bot, "Иван, сделай X"
+now lands on Иван's `slack_user_id` instead of falling back to the
+speaker.
+
+The author-fallback in `classify_and_persist` only fires when BOTH
+`owner_user_id` AND `owner_display_name` are null after the LLM
+stage — i.e. the message didn't name anyone at all. When a name is
+present but unresolved, the bot asks the user to clarify in chat
+instead of silently picking the wrong person.
+
 #### FR-CR-04-11 — Full message archive
 
 Every Slack event the bot receives is persisted verbatim into a
@@ -867,5 +892,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-9   | `test_prefilter_override.py`, `test_passive_pipeline_runs_always.py`                                         |
 | FR-CR-04-10  | `test_task_edit_button.py`                                                                                   |
 | FR-CR-04-11  | `test_message_archive.py` (slack_events_archive + raw / transcript / has_audio on slack_messages)             |
+| FR-CR-04-12  | `test_owner_employees_table.py` (employees table in owner prompt; id validation; name → id resolution)        |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

@@ -120,7 +120,13 @@ class StubClassifier:
         self.auto = auto
         self.calls: list[tuple[Any, InvocationType]] = []
 
-    def classify(self, *, context, invocation_type: InvocationType) -> IntentClassification:
+    def classify(
+        self,
+        *,
+        context,
+        invocation_type: InvocationType,
+        known_employees=None,
+    ) -> IntentClassification:
         self.calls.append((context, invocation_type))
         if self.result is not None:
             return self.result

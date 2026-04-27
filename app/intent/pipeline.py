@@ -73,6 +73,7 @@ class IntentState(TypedDict, total=False):
     author_user_id: Optional[str]
     today: _date
     date_model: Optional[str]
+    known_employees: list[dict]
 
     # Stage 1 output.
     is_task: bool
@@ -184,6 +185,7 @@ def node_describe(state: IntentState) -> dict[str, Any]:
 
 
 def node_owner(state: IntentState) -> dict[str, Any]:
+    known_employees: list[dict] = state.get("known_employees") or []
     data = _safe_call_tool(
         state["backend"],
         system_prompt=OWNER_SYSTEM_PROMPT,
@@ -191,14 +193,39 @@ def node_owner(state: IntentState) -> dict[str, Any]:
             source_text=state["source_text"],
             context_messages=state.get("context_messages", []),
             author_user_id=state.get("author_user_id"),
+            known_employees=known_employees,
         ),
         tool_name=OWNER_TOOL_NAME,
         tool_description=OWNER_TOOL_DESCRIPTION,
         tool_parameters=OWNER_TOOL_PARAMETERS,
     ) or {}
+    slack_user_id = data.get("slack_user_id") or None
+    display_name = data.get("display_name") or None
+
+    # Validate slack_user_id against the table — drop hallucinations.
+    if known_employees and slack_user_id:
+        valid_ids = {e.get("slack_user_id") for e in known_employees}
+        if slack_user_id not in valid_ids:
+            slack_user_id = None
+
+    # If LLM returned only a name, try to resolve it locally to a real
+    # slack_user_id from the same table.
+    if not slack_user_id and display_name and known_employees:
+        from app.services.owners import resolve_owner_hint
+
+        candidates = [
+            {"slack_user_id": e["slack_user_id"], "display_name": e.get("display_name") or e["slack_user_id"]}
+            for e in known_employees
+            if e.get("slack_user_id")
+        ]
+        match = resolve_owner_hint(hint_text=display_name, allowed_owners=candidates)
+        if match is not None:
+            slack_user_id = match["slack_user_id"]
+            display_name = match["display_name"]
+
     return {
-        "owner_user_id": data.get("slack_user_id") or None,
-        "owner_display_name": data.get("display_name") or None,
+        "owner_user_id": slack_user_id,
+        "owner_display_name": display_name,
     }
 
 
@@ -336,6 +363,7 @@ def run_pipeline(
     author_user_id: str | None,
     today: _date,
     date_model: str | None = None,
+    known_employees: list[dict] | None = None,
 ) -> IntentClassification:
     initial: IntentState = {
         "backend": backend,
@@ -344,6 +372,7 @@ def run_pipeline(
         "author_user_id": author_user_id,
         "today": today,
         "date_model": date_model,
+        "known_employees": known_employees or [],
     }
     final = _GRAPH.invoke(initial)
     return final["classification"]

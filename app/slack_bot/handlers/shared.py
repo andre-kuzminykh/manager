@@ -253,24 +253,42 @@ def classify_and_persist(
         conversation_id=conversation_id, source_message=source_message
     )
 
+    # Pull the team directory so the owner LLM stage can map names
+    # like "Иван" to a real Slack user id from the same table.
+    from app.models import Employee
+
+    known_employees = [
+        {
+            "slack_user_id": e.slack_user_id,
+            "display_name": e.display_name or e.real_name or e.slack_user_id,
+            "real_name": e.real_name,
+        }
+        for e in (
+            session.query(Employee)
+            .filter(Employee.is_bot.is_(False))
+            .all()
+        )
+    ]
+
     classification = services.classifier.classify(
-        context=context, invocation_type=invocation_type
+        context=context,
+        invocation_type=invocation_type,
+        known_employees=known_employees,
     )
 
-    # If the pipeline couldn't identify an owner, fall back to the
-    # message author on BOTH paths (mention + passive). The user who
-    # wrote the task is the sensible default; they can reassign via
-    # Edit. owner_assumed=True keeps the card label
-    # "(предположительно)".
+    # If the pipeline still couldn't identify an owner — neither a real
+    # slack_user_id nor a name we could resolve — fall back to the
+    # message author. We DO NOT overwrite when the LLM emitted a
+    # display_name without a slack_user_id: that means it found a name
+    # we don't know yet, and the bot will ask the user to clarify.
     if (
         classification.task is not None
         and not classification.task.owner_user_id
+        and not classification.task.owner_display_name
         and slack_user_id
     ):
         classification.task.owner_user_id = slack_user_id
-        classification.task.owner_display_name = (
-            classification.task.owner_display_name or f"<@{slack_user_id}>"
-        )
+        classification.task.owner_display_name = f"<@{slack_user_id}>"
         classification.task.owner_assumed = True
 
     snapshot = services.orchestrator.persist_context_snapshot(

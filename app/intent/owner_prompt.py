@@ -17,15 +17,23 @@ You extract the ASSIGNEE from a Slack task message.
 The author of the source_message is NOT the assignee by default. Only
 name someone when the message explicitly delegates the work to them.
 
+You are given a `known_employees` table of Slack user ids and their
+display names. When the message names someone (e.g. "Иван, сделай X"
+or "на Пашу"), find the matching row and return THAT user's
+slack_user_id. Match on display_name or real_name; be generous with
+case and capitalisation.
+
 Return one of:
-- slack_user_id   — a Slack user id like "UXXXXXX", when the message
-                    addresses a user via <@UXXXXXX>. Copy the id verbatim.
-- display_name    — a human name mentioned as the assignee, e.g. "Иван",
-                    "Паша", "Pavel". Copy the exact wording without
-                    @-prefix.
-- null            — no-one is named. Covers: message just describes the
-                    work, no handover wording, ambiguous phrases like
-                    "надо сделать X" with no target.
+- slack_user_id   — a Slack user id that EXISTS in known_employees.
+                    Either copied verbatim from a <@UXXXXXX> mention,
+                    or looked up by name from the table.
+- display_name    — only when no row in known_employees matches the
+                    named person. Copy the name as written. The
+                    downstream layer will ask the user to clarify.
+- null            — no-one is named. Covers messages that just
+                    describe the work ("надо сделать X", "we need
+                    to ship Y") without delegating to a specific
+                    person.
 
 Assignment wording clues (Russian + English):
   "на <Имя>", "сделает <Имя>", "делать будет <Имя>",
@@ -36,13 +44,14 @@ Assignment wording clues (Russian + English):
 Do NOT pick:
 - the message author (their user id appears in context lines as
   "author" — that's attribution, not assignment);
-- a bot user (id starting with UBOT… or similar) — bots are never
-  assignees;
+- a bot user (id starting with UBOT… or marked is_bot in the
+  table) — bots are never assignees;
 - a name mentioned only as a reference, e.g. "питчдек для Ивана"
   (Ivan is the AUDIENCE, not the doer).
 
-Prefer slack_user_id when a <@U…> mention is present; fall back to
-display_name; otherwise null.
+Prefer slack_user_id from known_employees whenever you can. Fall
+back to display_name only when the named person is genuinely not
+in the table.
 
 Respond with a single JSON object matching the provided schema.
 """
@@ -75,12 +84,22 @@ def build_owner_user_prompt(
     source_text: str,
     context_messages: list[dict],
     author_user_id: str | None,
+    known_employees: list[dict] | None = None,
 ) -> str:
     lines: list[str] = []
     if author_user_id:
         lines.append(
             f"source_author: {author_user_id}  (NOT an assignee by default)"
         )
+    if known_employees:
+        lines.append("")
+        lines.append("known_employees (pick a slack_user_id from this table):")
+        lines.append("  slack_user_id          | display_name        | real_name")
+        for e in known_employees:
+            sid = (e.get("slack_user_id") or "")[:22]
+            dn = (e.get("display_name") or "")[:25]
+            rn = (e.get("real_name") or "")[:30]
+            lines.append(f"  {sid:<22} | {dn:<19} | {rn}")
     if context_messages:
         lines.append("")
         lines.append("context (oldest first):")

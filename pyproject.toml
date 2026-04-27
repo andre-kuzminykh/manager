@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "slack-task-manager"
 version = "0.1.0"
 description = "Slack bot that extracts tasks and meetings from chat, stores them in DB, and syncs to Google Sheets + Google Tasks."
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "slack-bolt>=1.18",
     "slack-sdk>=3.27",

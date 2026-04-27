@@ -188,7 +188,7 @@ def test_evening_dm_lists_tracking_subscriptions(
     flat = str(sender.posts[0]["blocks"])
     # The subscribed task shows up in the Tracking section even
     # though the user doesn't own it.
-    assert "Отслеживаемые" in flat
+    assert "Tracking" in flat
     assert f"#{other.id}" in flat
 
 
@@ -429,5 +429,5 @@ def test_morning_dm_lists_tracking_subscriptions(
         s.commit()
 
     flat = str(sender.posts[0]["blocks"])
-    assert "Отслеживаемые" in flat
+    assert "Tracking" in flat
     assert f"#{watched.id}" in flat

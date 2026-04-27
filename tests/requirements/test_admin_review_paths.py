@@ -82,7 +82,7 @@ def test_confirm_rejects_non_admin_with_ephemeral(
             assert s.query(AuditLog).filter(AuditLog.category == "admin_review").count() == 0
         assert sender.ephemerals
         assert sender.ephemerals[0]["user"] == "U-other"
-        assert "админ" in sender.ephemerals[0]["text"].lower()
+        assert "admin-only" in sender.ephemerals[0]["text"].lower()
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 

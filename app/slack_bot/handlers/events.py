@@ -178,9 +178,9 @@ def _handle_followup_reply(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
             text=(
-                f":question: Не распарсил ответ. "
+                f":question: Couldn't parse the answer. "
                 f"{prompt_for(field, payload=draft.payload or {}, allowed_owners=settings.allowed_owners())} "
-                "Или нажми *Edit* на карточке."
+                "Or click *Edit* on the card."
             ),
         )
         _record_followup_ts(session, draft, resp)
@@ -238,7 +238,7 @@ def _handle_followup_reply(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
             text=(
-                ":ok_hand: Записал. "
+                ":ok_hand: Got it. "
                 f"{prompt_for(next_field, payload=prompt_payload, allowed_owners=settings.allowed_owners())}"
             ),
         )
@@ -246,13 +246,13 @@ def _handle_followup_reply(
         resp = sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
-            text=":white_check_mark: Всё заполнил. Задача обновлена.",
+            text=":white_check_mark: All set. Task updated.",
         )
     else:
         resp = sender.post_message(
             channel=draft.card_channel or "",
             thread_ts=thread_ts,
-            text=":white_check_mark: Все поля собрал. Жми *Accept* на карточке.",
+            text=":white_check_mark: All fields collected. Click *Accept* on the card.",
         )
     _record_followup_ts(session, draft, resp)
     return True
@@ -510,9 +510,9 @@ def handle_message(
         draft.awaiting_field = next_field
         session.flush()
         if next_field:
-            title_preview = (draft.payload or {}).get("title") or "задачу"
+            title_preview = (draft.payload or {}).get("title") or "task"
             intro = (
-                f":memo: Записал: *{title_preview}*.\n"
+                f":memo: Captured: *{title_preview}*.\n"
                 + prompt_for(
                     next_field,
                     payload=draft.payload or {},
@@ -675,8 +675,8 @@ def handle_app_mention(
                 # questions (instead of a "не понял" dead end).
                 if not text.strip():
                     _reply(
-                        ":thinking_face: Я не вижу текста в твоём сообщении. "
-                        "Напиши рядом с @bot, что нужно сделать."
+                        ":thinking_face: I don't see any text in your message. "
+                        "Type what needs to be done next to @bot."
                     )
                     return
 
@@ -754,9 +754,9 @@ def handle_app_mention(
             session.flush()
 
             if next_field:
-                title_preview = (task.title if task else "задачу") or "задачу"
+                title_preview = (task.title if task else "task") or "task"
                 intro = (
-                    f":memo: Записал: *{title_preview}*.\n"
+                    f":memo: Captured: *{title_preview}*.\n"
                     + prompt_for(
                         next_field,
                         payload=_task_payload(task),
@@ -771,7 +771,7 @@ def handle_app_mention(
                 _record_followup_ts(session, draft, resp)
     except Exception as e:  # noqa: BLE001 — mention must never go silent
         log.exception("mention_handler_failed", error=str(e))
-        _reply(f":warning: что-то сломалось при обработке: `{e!s}` — посмотри логи бота.")
+        _reply(f":warning: Something broke while processing: `{e!s}` — check the bot logs.")
 
 
 def _auto_finalize(

@@ -720,6 +720,35 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-16 — Bot UI is English
+
+All user-visible bot strings are in English: button labels, modal
+titles and labels, follow-up questions, ack messages, draft-card
+hints, completion-modal copy, thread reminders, weekly / daily plan
+prompts, subscription modal, soft prompts. Examples include:
+- "Captured: *<title>*."
+- "What's the deadline?", "Who's the assignee?"
+- "All filled. *Accept* and the task ships to the tracker."
+- "Plan for YYYY-MM-DD", "Today — YYYY-MM-DD"
+- "Approve plan", "Skip", "Accept", "Later"
+- "Tracking (N)", "Manage subscriptions", "Subscriptions", "Done"
+- ":repeat: Mon/Wed 09:00–11:30"
+- "(implicit)" suffix on owner when assumed.
+
+**Russian still appears** — and intentionally — in three places:
+1. **LLM prompt examples** (detect/title/owner/date prompts in
+   `app/intent/*.py`). Russian examples teach the small models to
+   recognise Russian phrasing like "к понедельнику" / "ко
+   вторнику". Removing them would degrade extraction quality on
+   Russian-speaking teams.
+2. **Regex / lookup tables** parsing Russian user input — weekday
+   stems, prepositions, month-name genitives, "через N
+   <unit>" patterns in `date_resolver.py`, `followup.py`,
+   `rules.py`. These never reach the user; they parse text the user
+   wrote.
+3. **Source-code comments** describing pipeline behaviour. They are
+   developer-facing and not part of any user output.
+
 #### FR-CR-04-15 — Recurring tasks
 
 A task can repeat on selected weekdays during an optional time
@@ -992,5 +1021,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-13  | `test_task_extras.py` (start_date/start_time, category, subtasks via parent_task_id)                          |
 | FR-CR-04-14  | `test_daily_plan.py` (evening approval card with Skip/Approve, morning execution card, idempotency, tracking) |
 | FR-CR-04-15  | `test_task_recurring.py` (recurring checkbox, weekdays, optional time range, card render)                     |
+| FR-CR-04-16  | English UI strings across the bot (assertions in many test modules; specifically `test_units_support.py::test_soft_prompt_*`, `test_mention_always_replies.py`, `test_passive_draft_card.py`, `test_daily_plan.py`, `test_cr03_thread_reminders.py`) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

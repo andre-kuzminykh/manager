@@ -71,7 +71,7 @@ def test_mention_ack_message_includes_recorded_title(
     # The ack may not be at index 1 (finalize also DMs the owner a task
     # card mirror). Find the message by its :memo: prefix.
     ack_msg = next(
-        m for m in sender.posted if ":memo: Записал:" in m.get("text", "")
+        m for m in sender.posted if ":memo: Captured:" in m.get("text", "")
     )
     assert "допилить интеграцию" in ack_msg["text"]
 
@@ -96,7 +96,7 @@ def test_mention_without_text_still_replies(
     )
 
     assert len(sender.posted) == 1
-    assert "не вижу текста" in sender.posted[0]["text"].lower()
+    assert "don't see any text" in sender.posted[0]["text"].lower()
 
 
 def test_mention_fallback_has_awaiting_field_set(

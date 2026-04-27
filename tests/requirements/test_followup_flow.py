@@ -173,8 +173,8 @@ def test_parse_empty_text_returns_none():
 
 
 def test_prompt_for_contains_field_hint():
-    assert "дедлайн" in prompt_for("due_date").lower()
-    assert "участники" in prompt_for("participants").lower()
+    assert "deadline" in prompt_for("due_date").lower()
+    assert "participants" in prompt_for("participants").lower()
 
 
 # --------------------------------------------------------------------------- #
@@ -328,7 +328,7 @@ def test_thread_reply_unparseable_gets_re_prompt(
         assert "due_date" not in d.payload
         assert d.awaiting_field == "due_date"
     assert any(
-        "Не распарсил" in m.get("text", "") for m in sender.posted
+        "Couldn't parse" in m.get("text", "") for m in sender.posted
     )
 
 

@@ -255,7 +255,7 @@ def test_thread_reply_deletes_prior_followup_question(
     SessionFactory,
     monkeypatch,
 ):
-    """When the user answers the bot's ':memo: Кому назначаем?…' in the
+    """When the user answers the bot's ':memo: Who's the assignee?…' in the
     thread, that question is deleted before the next ack lands, so the
     thread doesn't accumulate a chain of stale bot questions."""
     monkeypatch.setenv(
@@ -283,7 +283,7 @@ def test_thread_reply_deletes_prior_followup_question(
         sender=sender,
         ack=ack,
     )
-    # posts[0] = draft card; posts[1] = memo (Кому назначаем?).
+    # posts[0] = draft card; posts[1] = memo (Who's the assignee?).
     # _Sender returns sequential ts "1.0", "2.0", ... — so the memo ts is "2.0".
     assert len(sender.posts) == 2, sender.posts
     memo_ts = "2.0"

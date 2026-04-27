@@ -249,7 +249,7 @@ def test_multi_field_reply_fills_owner_and_due_via_llm(
     ack,
     monkeypatch,
 ):
-    """'на пашу до завтра' answered to 'Какой дедлайн?' should land BOTH
+    """'на пашу до завтра' answered to 'What's the deadline?' should land BOTH
     owner and due_date and clear awaiting_field (everything is filled)."""
     from app.slack_bot.handlers.events import handle_message
     from app.slack_bot.rate_limiter import RateAwareSlackSender
@@ -321,7 +321,7 @@ def test_multi_field_reply_fills_owner_and_due_via_llm(
     assert cli.updated, "card should be chat.update'd"
     # And a summary text was posted in the thread (ready to confirm).
     assert any(
-        "Все поля собрал" in m.get("text", "") for m in cli.posted
+        "All fields collected" in m.get("text", "") for m in cli.posted
     )
 
     get_settings.cache_clear()  # type: ignore[attr-defined]

@@ -7,7 +7,7 @@ question, its intro line, its routing in the thread — must match.
 
 We verify that claim by running both paths on two messages that are
 identical except for the @mention token and asserting the first
-follow-up question posted is the same (":memo: Записал: *<title>*.\n"
+follow-up question posted is the same (":memo: Captured: *<title>*.\n"
 + prompt_for(owner)).
 """
 from __future__ import annotations
@@ -148,4 +148,4 @@ def test_both_paths_skip_owner_question_when_assumed(
         assert draft.awaiting_field == "due_date"
     memo = _first_memo(sender) or ""
     assert "назначаем" not in memo  # no owner prompt
-    assert "дедлайн" in memo.lower()
+    assert "deadline" in memo.lower()

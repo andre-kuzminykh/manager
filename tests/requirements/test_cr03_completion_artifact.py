@@ -291,7 +291,7 @@ def test_task_card_shows_url_artifact_on_done(session):
         b["text"]["text"] for b in blocks if b.get("type") == "section" and "text" in b
     ]
     joined = "\n".join(texts)
-    assert "Артефакт" in joined
+    assert "Artifact" in joined
     assert "https://docs.example.com/r" in joined
 
 
@@ -328,4 +328,4 @@ def test_task_card_no_artifact_section_when_not_done(session):
         b["text"]["text"] for b in blocks if b.get("type") == "section" and "text" in b
     ]
     joined = "\n".join(texts)
-    assert "Артефакт" not in joined
+    assert "Artifact" not in joined

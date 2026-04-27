@@ -35,13 +35,13 @@ MEETING_FIELD_ORDER = ("title", "datetime_at", "participants")
 
 # Human-friendly prompt per field.
 PROMPTS: dict[str, str] = {
-    "due_date": "Какой дедлайн? Можно написать просто: `до пятницы`, `завтра`, `2026-05-01`.",
-    "datetime_at": "На какое число и время? Например: `завтра в 15:00`, `2026-05-01 10:00`.",
-    "owner": "Кому назначаем? Укажи имя из списка или упомяни через `@`.",
-    "title": "Как сформулировать задачу в одну строку?",
-    "participants": "Кто участники? Перечисли через запятую.",
-    "description": "Добавим описание? Можешь ответить в треде.",
-    "notes": "Какие заметки приложить? Можешь ответить в треде.",
+    "due_date": "What's the deadline? You can write `by Friday`, `tomorrow`, `2026-05-01`.",
+    "datetime_at": "What date and time? For example: `tomorrow at 15:00`, `2026-05-01 10:00`.",
+    "owner": "Who's the assignee? Pick a name from the list or mention via `@`.",
+    "title": "How would you summarise the task in one line?",
+    "participants": "Who are the participants? List them comma-separated.",
+    "description": "Want to add a description? Reply in this thread.",
+    "notes": "Any notes to attach? Reply in this thread.",
 }
 
 
@@ -78,14 +78,14 @@ def prompt_for(field: str, *, payload: dict[str, Any] | None = None,
     """Return the user-facing question for the given field. For 'owner', if
     the LLM extracted a display_name we couldn't resolve, mention that name
     explicitly and list the allowed candidates."""
-    base = PROMPTS.get(field, f"Пожалуйста, уточни: {field}")
+    base = PROMPTS.get(field, f"Please clarify: {field}")
     if field == "owner" and payload and allowed_owners:
         unresolved = payload.get("owner_display_name")
         if unresolved and not payload.get("owner_user_id"):
-            names = ", ".join(o["display_name"] for o in allowed_owners) or "пусто"
+            names = ", ".join(o["display_name"] for o in allowed_owners) or "empty"
             return (
-                f"Не нашёл *{unresolved}* в списке. Кому назначаем? "
-                f"Доступные: {names}."
+                f"I couldn't find *{unresolved}* in the list. Who's the assignee? "
+                f"Available: {names}."
             )
     return base
 

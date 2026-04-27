@@ -151,7 +151,7 @@ def _post_accept_follow_up(
         if not next_field:
             return
         intro = (
-            f":memo: Записал: *{task.title}*.\n"
+            f":memo: Captured: *{task.title}*.\n"
             + prompt_for(
                 next_field,
                 payload=_task_payload(task),

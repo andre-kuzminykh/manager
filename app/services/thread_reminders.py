@@ -64,25 +64,25 @@ def _mark_sent(session: Session, *, action: str, task_id: int) -> None:
 
 
 def _reminder_text(task: Task, *, today: date) -> str | None:
-    owner = f"<@{task.owner_user_id}>" if task.owner_user_id else "команда"
+    owner = f"<@{task.owner_user_id}>" if task.owner_user_id else "team"
     week_end = today + timedelta(days=(6 - today.weekday()))
 
     if task.status == TaskStatus.in_progress:
-        return f":raised_hand: {owner} задача *#{task.id}* — как прогресс?"
+        return f":raised_hand: {owner} task *#{task.id}* — what's the progress?"
     if task.status == TaskStatus.review:
-        return f":eyes: {owner} нужен ревью задачи *#{task.id}*"
+        return f":eyes: {owner} review needed for task *#{task.id}*"
     if task.status == TaskStatus.todo:
         if task.due_date and task.due_date <= week_end:
             return (
-                f":calendar: {owner} на этой неделе ожидаем: *{task.title}*"
-                + (f" — до {task.due_date.isoformat()}" if task.due_date else "")
+                f":calendar: {owner} this week we expect: *{task.title}*"
+                + (f" — by {task.due_date.isoformat()}" if task.due_date else "")
             )
         return None
     if task.status == TaskStatus.backlog:
         if task.due_date and task.due_date <= week_end:
             return (
-                f":bookmark: {owner} *{task.title}* ждёт старта"
-                + (f" — до {task.due_date.isoformat()}" if task.due_date else "")
+                f":bookmark: {owner} *{task.title}* waiting to start"
+                + (f" — by {task.due_date.isoformat()}" if task.due_date else "")
             )
         return None
     return None  # done — stop pinging

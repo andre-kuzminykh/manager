@@ -73,7 +73,7 @@ def _fmt_task_line(t: Task) -> str:
 
 
 def _fmt_group(title: str, tasks: list[Task]) -> str:
-    body = "\n".join(_fmt_task_line(t) for t in tasks) if tasks else "(пусто)"
+    body = "\n".join(_fmt_task_line(t) for t in tasks) if tasks else "(empty)"
     return f"*{title} ({len(tasks)})*\n{body}"
 
 
@@ -122,9 +122,9 @@ def send_admin_evening_digest(
             continue
         body = "\n\n".join(
             [
-                f"*Вечерний обзор — {today.isoformat()}*",
-                _fmt_group(f"Завтра ({tomorrow.isoformat()})", tomorrow_tasks),
-                _fmt_group(f"Стоят >= {stale_threshold_days} дней", stale),
+                f"*Evening review — {today.isoformat()}*",
+                _fmt_group(f"Tomorrow ({tomorrow.isoformat()})", tomorrow_tasks),
+                _fmt_group(f"Stale >= {stale_threshold_days} days", stale),
             ]
         )
         try:

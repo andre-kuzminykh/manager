@@ -67,7 +67,7 @@ def post_admin_review(
             sender.post_message(
                 channel=admin_id,
                 blocks=card,
-                text=f"Задача #{task.id} на согласование",
+                text=f"Task #{task.id} pending review",
             )
             reachable += 1
             delivered_to.append(admin_id)
@@ -87,7 +87,7 @@ def post_admin_review(
                     user=admin_id,
                     thread_ts=source_thread_ts,
                     blocks=card,
-                    text=f"Задача #{task.id} на согласование",
+                    text=f"Task #{task.id} pending review",
                 )
             except Exception as e:  # noqa: BLE001
                 log.info(

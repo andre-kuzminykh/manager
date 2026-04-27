@@ -62,7 +62,7 @@ def handle_weekly_accept(*, body: dict[str, Any], sender, ack: Ack) -> None:
     try:
         sender.post_message(
             channel=actor,
-            text=f":white_check_mark: Принято: задача *#{task_id}* на этой неделе.",
+            text=f":white_check_mark: Accepted: task *#{task_id}* for this week.",
             thread_ts=(body.get("message") or {}).get("ts"),
         )
     except Exception as e:  # noqa: BLE001
@@ -92,7 +92,7 @@ def handle_weekly_defer(*, body: dict[str, Any], sender, ack: Ack) -> None:
     try:
         sender.post_message(
             channel=actor,
-            text=f":hourglass_flowing_sand: Отложено: задача *#{task_id}*.",
+            text=f":hourglass_flowing_sand: Deferred: task *#{task_id}*.",
             thread_ts=(body.get("message") or {}).get("ts"),
         )
     except Exception as e:  # noqa: BLE001

@@ -45,7 +45,7 @@ def test_prompt_keeps_vague_phrases_null():
 
 def test_prompt_still_forbids_guessing_owner():
     # Rule 6 forbids assuming the author is the owner, even while allowing
-    # the downstream fallback to happen with a "(предположительно)" label.
+    # the downstream fallback to happen with a "(implicit)" label.
     assert "NEVER assume the author of the message is the task owner" in SYSTEM_PROMPT
     assert "предположительно ты" in SYSTEM_PROMPT  # documents the downstream UI
 
@@ -192,7 +192,7 @@ def test_unresolved_name_does_not_flag_assumed(session):
 
 
 # --------------------------------------------------------------------------- #
-# task_card / admin_review_card render the "(предположительно)" hint
+# task_card / admin_review_card render the "(implicit)" hint
 # --------------------------------------------------------------------------- #
 
 
@@ -212,7 +212,7 @@ def test_task_card_shows_assumed_suffix_when_extra_flag_set(session):
         if b.get("type") == "context"
         for el in b["elements"]
     )
-    assert "предположительно" in meta
+    assert "implicit" in meta
 
 
 def test_task_card_no_assumed_suffix_for_explicit_owner(session):
@@ -234,7 +234,7 @@ def test_admin_review_card_shows_assumed_suffix(session):
     owner_text = next(
         f["text"] for f in fields_section["fields"] if "Owner" in f["text"]
     )
-    assert "предположительно" in owner_text
+    assert "implicit" in owner_text
 
 
 def test_admin_review_card_no_assumed_suffix_when_explicit(session):

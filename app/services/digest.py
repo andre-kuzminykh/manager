@@ -117,7 +117,7 @@ def _fmt(tasks: list[Task]) -> str:
 
 def _fmt_tracked(tasks: list[Task]) -> str:
     if not tasks:
-        return "(пусто)"
+        return "(empty)"
     return "\n".join(
         f"• *#{t.id}* {t.title} · `{t.status.value}`"
         + (f" · due {t.due_date.isoformat()}" if t.due_date else "")

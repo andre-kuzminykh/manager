@@ -75,7 +75,7 @@ def handle_plan_skip(*, body: dict[str, Any], sender, ack: Ack) -> None:
             sender.post_message(
                 channel=channel,
                 thread_ts=msg_ts,
-                text=f":heavy_minus_sign: Убрал задачу #{task_id} из плана.",
+                text=f":heavy_minus_sign: Removed task #{task_id} from the plan.",
             )
         except Exception as e:  # noqa: BLE001
             log.warning("plan_skip_ack_failed", error=str(e))
@@ -113,7 +113,7 @@ def handle_plan_approve(*, body: dict[str, Any], sender, ack: Ack) -> None:
             sender.post_message(
                 channel=channel,
                 thread_ts=msg_ts,
-                text=":white_check_mark: План принят. До утра!",
+                text=":white_check_mark: Plan accepted. See you in the morning!",
             )
         except Exception as e:  # noqa: BLE001
             log.warning("plan_approve_ack_failed", error=str(e))

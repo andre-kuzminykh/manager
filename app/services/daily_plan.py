@@ -194,7 +194,7 @@ def send_evening_plan(
             sender.post_message(
                 channel=user_id,
                 blocks=blocks,
-                text=f":calendar: План на {plan_date.isoformat()}",
+                text=f":calendar: Plan for {plan_date.isoformat()}",
             )
         except Exception as e:  # noqa: BLE001
             log.warning(
@@ -260,7 +260,7 @@ def send_morning_plan(
                     tasks=tasks,
                     tracking=tracking,
                 ),
-                text=f":sunny: Сегодня — план на {plan_date.isoformat()}",
+                text=f":sunny: Today's plan — {plan_date.isoformat()}",
             )
         except Exception as e:  # noqa: BLE001
             log.warning(
@@ -320,7 +320,7 @@ def _evening_blocks(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f":calendar: План на {plan_date.isoformat()}",
+                "text": f":calendar: Plan for {plan_date.isoformat()}",
             },
         },
         {
@@ -329,9 +329,8 @@ def _evening_blocks(
                 {
                     "type": "mrkdwn",
                     "text": (
-                        "Это твой план на завтра. Сними галочку с тех, "
-                        "что не успеешь — кнопкой *Skip*. Когда готов — "
-                        "*Принять план*."
+                        "Your plan for tomorrow. Drop tasks you won't get to "
+                        "with *Skip*. When you're ready — *Approve plan*."
                     ),
                 }
             ],
@@ -365,7 +364,7 @@ def _evening_blocks(
                     "type": "button",
                     "style": "primary",
                     "action_id": bk.ACTION_PLAN_APPROVE,
-                    "text": {"type": "plain_text", "text": "Принять план"},
+                    "text": {"type": "plain_text", "text": "Approve plan"},
                     "value": plan_date.isoformat(),
                 }
             ],
@@ -379,7 +378,7 @@ def _evening_blocks(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f":star: *Отслеживаемые ({len(tracking)})*",
+                    "text": f":star: *Tracking ({len(tracking)})*",
                 },
             }
         )
@@ -410,7 +409,7 @@ def _morning_blocks(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f":sunny: Сегодня — {plan_date.isoformat()}",
+                "text": f":sunny: Today — {plan_date.isoformat()}",
             },
         },
         {
@@ -419,8 +418,8 @@ def _morning_blocks(
                 {
                     "type": "mrkdwn",
                     "text": (
-                        "Жми *Start* по задаче, когда начинаешь её делать. "
-                        "Закрывай по факту — *Mark done* на карточке."
+                        "Click *Start* on a task when you begin it. "
+                        "Close it with *Mark done* on the card."
                     ),
                 }
             ],
@@ -439,7 +438,7 @@ def _morning_blocks(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f":star: *Отслеживаемые ({len(tracking)})*",
+                    "text": f":star: *Tracking ({len(tracking)})*",
                 },
             }
         )

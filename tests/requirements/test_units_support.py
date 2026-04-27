@@ -131,19 +131,19 @@ def test_draft_card_empty_fields_render_dashes():
 def test_soft_prompt_has_correct_copy_for_task():
     blocks = bk.soft_prompt(IntentType.create_task, draft_id=1)
     text = blocks[0]["text"]["text"]
-    assert "задача" in text.lower()
+    assert "task" in text.lower()
 
 
 def test_soft_prompt_has_correct_copy_for_meeting():
     blocks = bk.soft_prompt(IntentType.create_meeting, draft_id=1)
     text = blocks[0]["text"]["text"]
-    assert "встреча" in text.lower()
+    assert "meeting" in text.lower()
 
 
 def test_soft_prompt_has_correct_copy_for_update_task():
     blocks = bk.soft_prompt(IntentType.update_task, draft_id=1)
     text = blocks[0]["text"]["text"]
-    assert "задачи" in text.lower() or "задача" in text.lower()
+    assert "задачи" in text.lower() or "task" in text.lower()
 
 
 def test_soft_prompt_draft_id_embedded_in_actions():

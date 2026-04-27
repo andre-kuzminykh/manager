@@ -163,7 +163,7 @@ def handle_complete_task_submit(
         ack(
             response_action="errors",
             errors={
-                bk.BLOCK_ARTIFACT: "Укажи ссылку или описание (хотя бы одно поле).",
+                bk.BLOCK_ARTIFACT: "Provide a link or a description (at least one).",
             },
         )
         return
@@ -475,7 +475,7 @@ def handle_task_edit_open(
                     sender.post_ephemeral(
                         channel=channel,
                         user=actor,
-                        text=":lock: Редактировать может только владелец или админ.",
+                        text=":lock: Only the owner or an admin can edit this.",
                     )
                 except Exception:  # noqa: BLE001
                     pass

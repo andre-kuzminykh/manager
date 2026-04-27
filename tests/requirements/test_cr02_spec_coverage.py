@@ -78,7 +78,7 @@ def test_fr_cr02_1_bare_mention_asks_user_to_add_text(
         sender=sender,
         ack=ack,
     )
-    assert any("не вижу текста" in m.get("text", "").lower() for m in sender.posted)
+    assert any("don't see any text" in m.get("text", "").lower() for m in sender.posted)
 
 
 # --------------------------------------------------------------------------- #
@@ -113,7 +113,7 @@ def test_fr_cr02_2_followup_question_posted_after_card(
     # The follow-up carries the ack prefix and a question. It may not be
     # at index 1 (finalize also DMs the owner a task-card mirror).
     followup = next(
-        m for m in sender.posted if ":memo: Записал" in m.get("text", "")
+        m for m in sender.posted if ":memo: Captured" in m.get("text", "")
     )
     assert "?" in followup["text"]
 
@@ -276,7 +276,7 @@ def test_fr_cr02_3_unparseable_reply_re_prompts(
         d = s.get(ActionDraft, did)
         assert d.awaiting_field == "due_date"  # still awaiting
         assert "due_date" not in d.payload
-    assert any("Не распарсил" in m.get("text", "") for m in sender.posted)
+    assert any("Couldn't parse" in m.get("text", "") for m in sender.posted)
 
 
 # --------------------------------------------------------------------------- #
@@ -491,7 +491,7 @@ def test_fr_cr02_6_digest_has_tracking_and_manage_button(session):
         for b in watcher_msg["blocks"]
         if b.get("type") == "section"
     ]
-    assert any("Отслеживаемые" in t for t in texts)
+    assert any("Tracking" in t for t in texts)
     assert any("shared" in t for t in texts)
 
     actions_block = next(

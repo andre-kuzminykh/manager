@@ -3,7 +3,7 @@
 Product decision 2026-04-24 (v3): when the owner slot falls back to the
 message author (owner_assumed=True), the bot does NOT pester the user
 with a follow-up "кому назначаем?". The task-card label
-"(предположительно)" communicates the implicit assignment, and the
+"(implicit)" communicates the implicit assignment, and the
 Edit button lets the user reassign. Same rule in both the @mention
 and passive paths.
 """
@@ -55,7 +55,7 @@ def test_pick_next_missing_accepts_assumed_owner_as_filled():
 
 def test_task_payload_exposes_owner_assumed_flag():
     """The flag still propagates to the payload so the card can render
-    '(предположительно)' — we just don't re-ask about it."""
+    '(implicit)' — we just don't re-ask about it."""
     class _StubTask:
         title = "t"
         description = None
@@ -127,5 +127,5 @@ def test_mention_does_not_ask_about_owner_when_owner_assumed(
     # No follow-up question about the owner.
     thread_posts = [p for p in sender.posts if p.get("thread_ts") == "500.0"]
     assert not any(
-        "назначаем" in (p.get("text") or "") for p in thread_posts
+        "assignee" in (p.get("text") or "") for p in thread_posts
     ), [p.get("text") for p in thread_posts]

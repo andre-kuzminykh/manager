@@ -60,7 +60,7 @@ def test_weekly_plan_blocks_empty_state():
         tasks=[],
     )
     texts = [b["text"]["text"] for b in blocks if b.get("type") == "section"]
-    assert any("задач нет" in t for t in texts)
+    assert any("No tasks" in t for t in texts)
 
 
 def test_weekly_plan_blocks_has_accept_and_defer_per_task(session):

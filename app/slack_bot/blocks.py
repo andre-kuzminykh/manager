@@ -137,7 +137,7 @@ def draft_card(
         elif d.owner_user_id:
             owner_text = f"<@{d.owner_user_id}>"
             if d.owner_assumed:
-                owner_text += " _(предположительно)_"
+                owner_text += " _(implicit)_"
         elif d.owner_display_name:
             owner_text = d.owner_display_name
         else:
@@ -200,9 +200,9 @@ def draft_card(
                     {
                         "type": "mrkdwn",
                         "text": (
-                            f":pencil2: *Не хватает:* {', '.join(missing_fields)}. "
-                            "Нажми *Edit*, чтобы дозаполнить, или *Accept* — "
-                            "бот создаст задачу и доспросит в треде."
+                            f":pencil2: *Missing:* {', '.join(missing_fields)}. "
+                            "Click *Edit* to fill it in, or *Accept* — "
+                            "the bot will create the task and ask in the thread."
                         ),
                     }
                 ],
@@ -215,7 +215,7 @@ def draft_card(
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": ":white_check_mark: Всё заполнено. *Accept* — и задача уедет в трекер.",
+                        "text": ":white_check_mark: All filled. *Accept* and the task ships to the tracker.",
                     }
                 ],
             }
@@ -255,11 +255,11 @@ def draft_card(
 def soft_prompt(intent: IntentType, draft_id: int) -> list[dict[str, Any]]:
     """Soft prompt shown on medium-confidence detection."""
     label = {
-        IntentType.create_task: "Похоже, это задача. Создать?",
-        IntentType.create_meeting: "Похоже, это встреча. Создать?",
-        IntentType.update_task: "Похоже, это обновление задачи. Применить?",
-        IntentType.update_meeting: "Похоже, это обновление встречи. Применить?",
-    }.get(intent, "Создать действие?")
+        IntentType.create_task: "Looks like a task. Create?",
+        IntentType.create_meeting: "Looks like a meeting. Create?",
+        IntentType.update_task: "Looks like a task update. Apply?",
+        IntentType.update_meeting: "Looks like a meeting update. Apply?",
+    }.get(intent, "Create action?")
 
     return [
         {"type": "section", "text": {"type": "mrkdwn", "text": label}},
@@ -395,7 +395,7 @@ def task_modal(
     # whether to honor the rest of the values on submit.
     recurring_option = {
         "value": "on",
-        "text": {"type": "plain_text", "text": "Повторяющаяся задача"},
+        "text": {"type": "plain_text", "text": "Recurring task"},
     }
     recurring_element: dict[str, Any] = {
         "type": "checkboxes",
@@ -535,7 +535,7 @@ def task_modal(
                 "optional": True,
                 "label": {
                     "type": "plain_text",
-                    "text": "Дни недели (если повторяющаяся)",
+                    "text": "Weekdays (if recurring)",
                 },
                 "element": weekdays_element,
             },
@@ -545,7 +545,7 @@ def task_modal(
                 "optional": True,
                 "label": {
                     "type": "plain_text",
-                    "text": "Время начала повтора",
+                    "text": "Recurring start time",
                 },
                 "element": rec_start_element,
             },
@@ -555,7 +555,7 @@ def task_modal(
                 "optional": True,
                 "label": {
                     "type": "plain_text",
-                    "text": "Время конца повтора",
+                    "text": "Recurring end time",
                 },
                 "element": rec_end_element,
             },
@@ -587,7 +587,7 @@ def task_card(
         meta_parts.append("subscribed")
     if task.owner_display_name or task.owner_user_id:
         assumed_suffix = (
-            " _(предположительно)_"
+            " _(implicit)_"
             if (task.extra or {}).get("owner_assumed")
             else ""
         )
@@ -623,7 +623,7 @@ def task_card(
                 f"{task.recurring_end_time.strftime('%H:%M')}"
             )
         elif task.recurring_start_time:
-            rec += f" с {task.recurring_start_time.strftime('%H:%M')}"
+            rec += f" from {task.recurring_start_time.strftime('%H:%M')}"
         meta_parts.append(rec)
     if task.priority:
         meta_parts.append(f"priority: {task.priority.value}")
@@ -645,9 +645,9 @@ def task_card(
     # CR-03 FR-CR-03-7: render the completion artifact for done tasks.
     if task.status == TaskStatus.done and task.completion_artifact:
         if task.completion_artifact_kind == "url":
-            artifact_text = f":paperclip: <{task.completion_artifact}|Артефакт>"
+            artifact_text = f":paperclip: <{task.completion_artifact}|Artifact>"
         else:
-            artifact_text = f":paperclip: *Артефакт:* {task.completion_artifact}"
+            artifact_text = f":paperclip: *Artifact:* {task.completion_artifact}"
         blocks.append(
             {"type": "section", "text": {"type": "mrkdwn", "text": artifact_text}}
         )
@@ -862,7 +862,7 @@ def success_message(
 ) -> list[dict[str, Any]]:
     text = f":white_check_mark: {entity_type.capitalize()} *#{entity_id}* created: *{summary}*"
     if permalink:
-        text += f"\n<{permalink}|Открыть исходное сообщение>"
+        text += f"\n<{permalink}|Open source message>"
     return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
 
@@ -883,7 +883,7 @@ def failure_message(entity_type: str, error: str) -> list[dict[str, Any]]:
 
 def _tasks_mrkdwn(tasks: list[Any], *, include_owner: bool = False) -> str:
     if not tasks:
-        return "(пусто)"
+        return "(empty)"
     lines = []
     for t in tasks:
         line = f"• *#{t.id}* {t.title} · `{t.status.value}`"
@@ -940,7 +940,7 @@ def daily_digest_blocks(
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    f"*Отслеживаемые ({len(tracked)})*\n"
+                    f"*Tracking ({len(tracked)})*\n"
                     + _tasks_mrkdwn(tracked, include_owner=True)
                 ),
             },
@@ -954,7 +954,7 @@ def daily_digest_blocks(
                     "action_id": ACTION_MANAGE_SUBSCRIPTIONS,
                     "text": {
                         "type": "plain_text",
-                        "text": "Управлять подписками",
+                        "text": "Manage subscriptions",
                     },
                     "value": "manage",
                 }
@@ -965,28 +965,28 @@ def daily_digest_blocks(
 
 
 def complete_task_modal(*, task_id: int) -> dict[str, Any]:
-    """Modal shown when the assignee clicks *Завершить* — asks for an
+    """Modal shown when the assignee clicks *Complete* — asks for an
     artifact (URL or a text note). At least one of the two is required."""
     return {
         "type": "modal",
         "callback_id": MODAL_CALLBACK_COMPLETE_TASK,
         "private_metadata": str(task_id),
-        "title": {"type": "plain_text", "text": "Завершить задачу"},
-        "submit": {"type": "plain_text", "text": "Завершить"},
-        "close": {"type": "plain_text", "text": "Отмена"},
+        "title": {"type": "plain_text", "text": "Complete task"},
+        "submit": {"type": "plain_text", "text": "Complete"},
+        "close": {"type": "plain_text", "text": "Cancel"},
         "blocks": [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "Прикрепи артефакт — ссылка или короткое описание результата.",
+                    "text": "Attach an artifact — a link or a short description of the result.",
                 },
             },
             {
                 "type": "input",
                 "block_id": BLOCK_ARTIFACT,
                 "optional": True,
-                "label": {"type": "plain_text", "text": "Ссылка на артефакт"},
+                "label": {"type": "plain_text", "text": "Artifact URL"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": INPUT_ARTIFACT_URL,
@@ -1000,7 +1000,7 @@ def complete_task_modal(*, task_id: int) -> dict[str, Any]:
                 "type": "input",
                 "block_id": BLOCK_ARTIFACT_TEXT,
                 "optional": True,
-                "label": {"type": "plain_text", "text": "Или описание"},
+                "label": {"type": "plain_text", "text": "Or description"},
                 "element": {
                     "type": "plain_text_input",
                     "action_id": INPUT_ARTIFACT_TEXT,
@@ -1024,7 +1024,7 @@ def admin_review_card(
         else (task.owner_display_name or "—")
     )
     if (task.extra or {}).get("owner_assumed"):
-        owner_label += " _(предположительно)_"
+        owner_label += " _(implicit)_"
     fields = [
         ("Title", task.title or "—"),
         ("Owner", owner_label),
@@ -1036,7 +1036,7 @@ def admin_review_card(
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"Задача #{task.id} — на согласование",
+                "text": f"Task #{task.id} — pending review",
                 "emoji": True,
             },
         },
@@ -1064,7 +1064,7 @@ def admin_review_card(
                 "elements": [
                     {
                         "type": "mrkdwn",
-                        "text": f"<{source_permalink}|Открыть исходное сообщение>",
+                        "text": f"<{source_permalink}|Open source message>",
                     }
                 ],
             }
@@ -1106,7 +1106,7 @@ def admin_review_resolved_message(
     """Replace the admin review card after Confirm/Reject so it's obvious
     no further action is needed."""
     icons = {"confirm": ":white_check_mark:", "reject": ":x:", "edit": ":pencil2:"}
-    label = {"confirm": "Подтверждено", "reject": "Отклонено", "edit": "Отредактировано"}
+    label = {"confirm": "Confirmed", "reject": "Rejected", "edit": "Edited"}
     actor_s = f" <@{actor}>" if actor else ""
     return [
         {
@@ -1115,7 +1115,7 @@ def admin_review_resolved_message(
                 "type": "mrkdwn",
                 "text": (
                     f"{icons.get(action, ':arrows_counterclockwise:')} "
-                    f"Задача *#{task_id}* — {label.get(action, action)}{actor_s}."
+                    f"Task *#{task_id}* — {label.get(action, action)}{actor_s}."
                 ),
             },
         }
@@ -1129,13 +1129,13 @@ def weekly_plan_blocks(
     tasks: list[Any],
 ) -> list[dict[str, Any]]:
     """Sunday-night DM showing each assignee their backlog tasks for the
-    upcoming week with Принять / Позже buttons per row."""
+    upcoming week with Accept / Later buttons per row."""
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"План на неделю {week_start.isoformat()} – {week_end.isoformat()}",
+                "text": f"Weekly plan {week_start.isoformat()} – {week_end.isoformat()}",
                 "emoji": True,
             },
         },
@@ -1146,7 +1146,7 @@ def weekly_plan_blocks(
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": ":sparkles: На следующей неделе задач нет — отдыхай.",
+                    "text": ":sparkles: No tasks for next week — relax.",
                 },
             }
         )
@@ -1157,8 +1157,8 @@ def weekly_plan_blocks(
             "text": {
                 "type": "mrkdwn",
                 "text": (
-                    "Подтверди, какие задачи берёшь. *Принять* → To Do. "
-                    "*Позже* → остаётся в Backlog."
+                    "Pick which tasks you'll take. *Accept* → To Do. "
+                    "*Later* → stays in Backlog."
                 ),
             },
         }
@@ -1188,13 +1188,13 @@ def weekly_plan_blocks(
                         "type": "button",
                         "style": "primary",
                         "action_id": ACTION_WEEKLY_ACCEPT,
-                        "text": {"type": "plain_text", "text": "Принять"},
+                        "text": {"type": "plain_text", "text": "Accept"},
                         "value": str(t.id),
                     },
                     {
                         "type": "button",
                         "action_id": ACTION_WEEKLY_DEFER,
-                        "text": {"type": "plain_text", "text": "Позже"},
+                        "text": {"type": "plain_text", "text": "Later"},
                         "value": str(t.id),
                     },
                 ],
@@ -1213,7 +1213,7 @@ def subscriptions_modal(tasks: list[Any]) -> dict[str, Any]:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "У тебя нет активных подписок.",
+                    "text": "No active subscriptions.",
                 },
             }
         )
@@ -1223,7 +1223,7 @@ def subscriptions_modal(tasks: list[Any]) -> dict[str, Any]:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*Отслеживаемые задачи ({len(tasks)})*",
+                    "text": f"*Tracking ({len(tasks)})*",
                 },
             }
         )
@@ -1254,7 +1254,7 @@ def subscriptions_modal(tasks: list[Any]) -> dict[str, Any]:
     return {
         "type": "modal",
         "callback_id": MODAL_CALLBACK_SUBSCRIPTIONS,
-        "title": {"type": "plain_text", "text": "Подписки"},
-        "close": {"type": "plain_text", "text": "Готово"},
+        "title": {"type": "plain_text", "text": "Subscriptions"},
+        "close": {"type": "plain_text", "text": "Done"},
         "blocks": blocks,
     }

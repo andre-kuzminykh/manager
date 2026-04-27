@@ -60,7 +60,7 @@ def test_daily_digest_tracking_section_lists_subscribed_tasks(session):
         for b in watcher_msg["blocks"]
         if b.get("type") == "section"
     )
-    assert "Отслеживаемые" in body
+    assert "Tracking" in body
     assert "shared" in body
     assert "owner <@U-owner>" in body
 
@@ -82,7 +82,7 @@ def test_daily_digest_own_tasks_not_in_tracking_section(session):
         if b.get("type") == "section"
     ]
     # Tracking section mentions "theirs" but not "mine"
-    tracking_section = next(s for s in sections if "Отслеживаемые" in s)
+    tracking_section = next(s for s in sections if "Tracking" in s)
     assert "theirs" in tracking_section
     assert "mine" not in tracking_section
 
@@ -126,7 +126,7 @@ def test_subscriptions_modal_empty_state():
     body_texts = [
         b["text"]["text"] for b in view["blocks"] if b.get("type") == "section"
     ]
-    assert any("нет активных подписок" in t.lower() for t in body_texts)
+    assert any("no active subscriptions" in t.lower() for t in body_texts)
 
 
 def test_subscriptions_modal_lists_tasks_with_unsubscribe_buttons(session):

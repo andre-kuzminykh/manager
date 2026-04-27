@@ -165,8 +165,8 @@ def test_fr6_mention_falls_back_to_synthetic_draft_when_llm_silent(
     first_block = sender.posted[0]["blocks"][0]
     assert first_block["type"] == "section"
     assert first_block["text"]["text"].startswith("*#")
-    # And the first question is prefixed with :memo: Записал:.
-    assert any("Записал" in m.get("text", "") for m in sender.posted)
+    # And the first question is prefixed with :memo: Captured:.
+    assert any("Captured" in m.get("text", "") for m in sender.posted)
 
 
 # =============================================================================

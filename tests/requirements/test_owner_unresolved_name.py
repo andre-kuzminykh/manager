@@ -117,7 +117,7 @@ def test_prompt_for_owner_mentions_unresolved_name_and_lists_allowed():
 
 def test_prompt_for_owner_default_when_no_unresolved_name():
     text = prompt_for("owner")
-    assert "Кому назначаем" in text
+    assert "Who's the assignee" in text
 
 
 class _StubBackend:

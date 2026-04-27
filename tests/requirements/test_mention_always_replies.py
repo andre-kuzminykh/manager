@@ -83,7 +83,7 @@ def test_draft_card_shows_missing_hint_when_fields_empty():
         missing_fields=["owner", "due date"],
     )
     ctx = "\n".join(_context_texts(blocks))
-    assert "Не хватает" in ctx
+    assert "Missing" in ctx
     assert "owner" in ctx
     assert "due date" in ctx
 
@@ -98,7 +98,7 @@ def test_draft_card_shows_ready_hint_when_all_fields_present():
         classification=c, draft_id=1, confidence_bucket="high", missing_fields=[]
     )
     ctx = "\n".join(_context_texts(blocks))
-    assert "Всё заполнено" in ctx
+    assert "All filled" in ctx
 
 
 def test_draft_card_without_missing_fields_arg_behaves_like_empty():
@@ -109,7 +109,7 @@ def test_draft_card_without_missing_fields_arg_behaves_like_empty():
     )
     blocks = bk.draft_card(classification=c, draft_id=1, confidence_bucket="high")
     ctx = "\n".join(_context_texts(blocks))
-    assert "Не хватает" not in ctx
+    assert "Missing" not in ctx
 
 
 def test_draft_card_buttons_still_present_with_missing():
@@ -143,13 +143,13 @@ def test_success_message_renders_permalink_link():
     text = blocks[0]["text"]["text"]
     assert "#7" in text
     assert "https://slack.com/archives/C1/p1" in text
-    assert "Открыть исходное сообщение" in text
+    assert "Open source message" in text
 
 
 def test_success_message_without_permalink_omits_link():
     blocks = bk.success_message("task", 7, "demo")
     text = blocks[0]["text"]["text"]
-    assert "Открыть исходное сообщение" not in text
+    assert "Open source message" not in text
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +229,7 @@ def test_mention_with_empty_text_asks_user_to_add_text(
     )
     assert len(sender.posted) == 1
     text = sender.posted[0].get("text", "").lower()
-    assert "не вижу текста" in text
+    assert "don't see any text" in text
 
 
 def test_mention_replies_with_error_message_on_crash(

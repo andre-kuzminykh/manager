@@ -73,7 +73,7 @@ def _gate_admin(body: dict[str, Any], sender) -> str | None:
                 sender.post_ephemeral(
                     channel=channel,
                     user=actor,
-                    text=":lock: Эту кнопку видит только админ.",
+                    text=":lock: This button is admin-only.",
                 )
             except Exception:  # noqa: BLE001
                 pass

@@ -77,30 +77,6 @@ def test_task_has_required_column(column):
     assert column in Base.metadata.tables["tasks"].columns
 
 
-@pytest.mark.parametrize(
-    "column",
-    [
-        "title",
-        "notes",
-        "participants",
-        "datetime_at",
-        "timezone",
-        "status",
-        "source_conversation_id",
-        "source_message_ts",
-        "source_thread_ts",
-        "source_permalink",
-        "context_snapshot_id",
-        "created_at",
-        "updated_at",
-    ],
-)
-def test_meeting_has_required_column(column):
-    from app.models import Base
-
-    assert column in Base.metadata.tables["meetings"].columns
-
-
 def test_action_draft_state_enum_members():
     assert {m.value for m in ActionDraftState} == {
         "proposed",
@@ -459,47 +435,6 @@ def test_finalize_invokes_sheets_factory_when_configured(
     )
     assert calls["sheets"] == 1
     assert calls["tasks"] == 1
-
-
-def test_finalize_does_not_invoke_sync_for_meeting(patched_session_scope, SessionFactory):
-    from app.config import Settings
-    from app.orchestrator.finalize import FinalizeService
-    from tests.requirements.test_fr_11_12_persistence import _prep
-
-    sheets_calls = {"n": 0}
-
-    class SheetsFake:
-        def sync(self, session, task):
-            sheets_calls["n"] += 1
-
-    with SessionFactory() as s:
-        draft, snap = _prep(
-            s,
-            intent=IE.create_meeting,
-            payload={
-                "title": "Sync",
-                "participants": [],
-                "datetime_at": "2026-06-01T10:00:00+00:00",
-            },
-        )
-        s.commit()
-        did, snap_id = draft.id, snap.id
-
-    FinalizeService(
-        settings=Settings(),
-        sheets_service_factory=lambda: SheetsFake(),
-        google_tasks_service_factory=lambda: SheetsFake(),
-    ).finalize_draft(
-        draft_id=did,
-        source_metadata={
-            "conversation_id": "C1",
-            "message_ts": "1.0",
-            "thread_ts": None,
-            "permalink": "p",
-            "context_snapshot_id": snap_id,
-        },
-    )
-    assert sheets_calls["n"] == 0
 
 
 # =============================================================================

@@ -65,7 +65,9 @@ Triggered when the bot is a participant in an MPIM, DM, or channel. The bot:
 
 ## 2. Functional requirements
 
-Original FR-1..FR-12 from the base SPEC apply unchanged. CR-01 adds:
+Original FR-1..FR-12 from the base SPEC apply unchanged with one
+exception: meeting capture (FR-3 / FR-7 / FR-9 / FR-10 meeting
+branches) was retired in **FR-CR-04-19** — see §10.2. CR-01 adds:
 
 ### 2.1 Allowed owners (FR-CR-1)
 
@@ -188,9 +190,9 @@ an informational reply asking the user to add text.
 ### FR-CR-02-2: Follow-up questions in thread
 
 After posting the draft card the bot asks in the same thread for the first
-missing field (ordered: title → due_date → owner for tasks; title →
-datetime_at → participants for meetings). The first question is prefixed
-with `:memo: Записал: *<title>*.` so the user sees what was recorded.
+missing field (ordered: title → due_date → owner). The first question is
+prefixed with `:memo: Captured: *<title>*.` so the user sees what was
+recorded.
 
 ### FR-CR-02-3: Reply-in-thread updates the card
 
@@ -312,7 +314,6 @@ Alembic revision `0002_cr_amendments`:
 ## 8. Open items (explicitly deferred)
 
 - Per-user notification schedule / quiet hours.
-- Calendar sync for meetings.
 - External tracker sync (Jira / Linear) — tasks live in our DB as source of
   truth.
 
@@ -685,11 +686,13 @@ A rule-based keyword prefilter
 (`app/intent/rules.py: prefilter_intent`) complements the LLM
 pipeline as a safety net for small models that occasionally return
 `is_task=false` on unambiguous phrases. When the pipeline result is
-`no_action` but the prefilter hint is `create_task` / `create_meeting`,
+`no_action` but the prefilter hint is `create_task` / `update_task`,
 `classify_with_backend` synthesises a minimal draft from the source
 text (with the date phrase stripped) at the prefilter's confidence.
-The prefilter is no longer used as a *gate*: the LLM pipeline runs on
-every passive message when a backend is configured.
+Meeting hints (still recognised by `prefilter_intent` for back-compat)
+do **not** trigger the override per FR-CR-04-19. The prefilter is no
+longer used as a *gate*: the LLM pipeline runs on every passive message
+when a backend is configured.
 
 #### FR-CR-04-10 — Task-card Edit button
 
@@ -723,12 +726,14 @@ see the uncommitted draft.
 #### FR-CR-04-19 — Meetings out of scope
 
 Per product direction the bot is now task-only. Meeting capture and
-the meeting modal are disabled at runtime, but we keep the schema
-shapes (`MeetingDraft`, `IntentType.create_meeting/update_meeting`,
-`Meeting` table) so historical drafts/audit rows stay parseable and
-the rollback path is one revert away.
+the meeting modal are disabled at runtime; the schema layer
+(`MeetingDraft`, `IntentType.create_meeting/update_meeting`,
+`meetings` table, `app/persistence/meetings.py`,
+`bk.meeting_modal`, `bk.draft_card`'s meeting branch) is left alone
+so historical drafts / audit rows stay parseable and the rollback
+path is one revert away.
 
-Concretely:
+Behavioural guarantees (each is a test in `test_meetings_disabled.py`):
 
 - **Classifier prefilter override** (`app/intent/classifier.py`) only
   synthesises drafts for task hints. A meeting keyword in the source
@@ -738,21 +743,18 @@ Concretely:
   (`app/slack_bot/handlers/shortcuts.py`) is still registered (legacy
   app manifests reference it) but no longer opens a meeting modal.
   Instead it `chat.postEphemeral`s a polite "this bot only handles
-  tasks now — try Create task" notice in the source channel,
+  tasks now — try *Create task*" notice in the source channel,
   addressed to the invoking user.
 - **The pipeline itself** never emits `create_meeting`: `node_detect`
   classifies tasks vs. not-tasks; there is no separate meeting branch.
 
-Out of scope for this change (intentionally unchanged):
-
-- The `meetings` table and Alembic migrations.
-- `MeetingDraft` Pydantic schema and `IntentType` enum values.
-- `bk.meeting_modal` and `bk.draft_card`'s meeting branch (dead code
-  paths preserved for back-compat).
-
-If a stale Slack client somehow submits the meeting modal callback,
-finalize still works (it routes by intent), but the path is no
-longer reachable from any user surface we own.
+The `IntentType.create_meeting` / `update_meeting` enum members and the
+`MeetingDraft` Pydantic schema are kept so old `IntentInference.raw`
+rows keep parsing. Test coverage for the dead user-facing surfaces
+(meeting modal field-by-field, draft-card meeting rendering, soft-
+prompt meeting copy, follow-up question ordering for meetings,
+finalize-meeting persistence) was deleted along with this change —
+those tests were exercising paths no user can reach.
 
 #### FR-CR-04-18 — Modal cleanup + coloured priority
 

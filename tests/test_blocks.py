@@ -44,12 +44,6 @@ def test_task_modal_has_required_title_input():
     assert title_block.get("optional") in (False, None)  # required
 
 
-def test_meeting_modal_includes_datetime_picker():
-    view = bk.meeting_modal(private_metadata="{}")
-    dt_block = next(b for b in view["blocks"] if b["block_id"] == bk.BLOCK_DATETIME)
-    assert dt_block["element"]["type"] == "datetimepicker"
-
-
 def test_soft_prompt_has_only_yes_no():
     payload = bk.soft_prompt(IntentType.create_task, draft_id=1)
     actions = next(b for b in payload if b["type"] == "actions")

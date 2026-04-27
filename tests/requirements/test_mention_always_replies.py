@@ -7,12 +7,7 @@ from __future__ import annotations
 
 from datetime import date
 
-from app.schemas.intent import (
-    IntentClassification,
-    IntentType,
-    MeetingDraft,
-    TaskDraft,
-)
+from app.schemas.intent import IntentClassification, IntentType, TaskDraft
 from app.slack_bot import blocks as bk
 from app.slack_bot.handlers.events import _missing_fields, handle_app_mention
 
@@ -40,17 +35,6 @@ def test_missing_fields_empty_when_task_is_complete():
         ),
     )
     assert _missing_fields(c) == []
-
-
-def test_missing_fields_for_meeting_without_participants_or_datetime():
-    c = IntentClassification(
-        intent=IntentType.create_meeting,
-        confidence=0.9,
-        meeting=MeetingDraft(title="t"),
-    )
-    missing = _missing_fields(c)
-    assert "participants" in missing
-    assert "date/time" in missing
 
 
 def test_missing_fields_for_no_action_is_empty():

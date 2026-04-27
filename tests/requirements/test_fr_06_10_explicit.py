@@ -170,7 +170,8 @@ def test_fr6_mention_falls_back_to_synthetic_draft_when_llm_silent(
 
 
 # =============================================================================
-# FR-7: Extraction of task/meeting structure from natural language.
+# FR-7: Extraction of task structure from natural language.
+# (Meeting extraction is out of scope per FR-CR-04-19.)
 # =============================================================================
 
 
@@ -179,13 +180,6 @@ def test_fr7_task_draft_schema_has_required_fields():
 
     fields = set(TaskDraft.model_fields.keys())
     assert {"title", "description", "owner_display_name", "priority", "due_date"}.issubset(fields)
-
-
-def test_fr7_meeting_draft_schema_has_required_fields():
-    from app.schemas.intent import MeetingDraft
-
-    fields = set(MeetingDraft.model_fields.keys())
-    assert {"title", "notes", "participants", "datetime_at", "timezone"}.issubset(fields)
 
 
 def test_fr7_llm_tool_schema_declares_required_top_level_fields():
@@ -525,68 +519,12 @@ def test_fr10_task_modal_rejects_empty_title(sender):
     assert bk.BLOCK_TITLE in captured["errors"]
 
 
-def test_fr10_meeting_modal_rejects_missing_title_and_datetime(sender):
-    from app.slack_bot.handlers.views import handle_meeting_modal_submit
-
-    ack_fn, captured = _ack_recorder()
-    view = {
-        "state": {
-            "values": {
-                bk.BLOCK_TITLE: {bk.INPUT_TITLE: {"value": ""}},
-                bk.BLOCK_PARTICIPANTS: {bk.INPUT_PARTICIPANTS: {"value": ""}},
-                bk.BLOCK_DATETIME: {bk.INPUT_DATETIME: {"selected_date_time": None}},
-                bk.BLOCK_NOTES: {bk.INPUT_NOTES: {"value": ""}},
-            }
-        },
-        "private_metadata": "{}",
-    }
-    handle_meeting_modal_submit(
-        body={}, view=view, services=None, finalizer=None, sender=sender, ack=ack_fn
-    )
-    assert bk.BLOCK_TITLE in captured["errors"]
-    assert bk.BLOCK_DATETIME in captured["errors"]
-
-
-def test_fr10_meeting_modal_accepts_valid_submission(
-    patched_session_scope, SessionFactory, sender, finalizer_stub
-):
-    from app.slack_bot.handlers.views import handle_meeting_modal_submit
-
-    ack_fn, captured = _ack_recorder()
-    view = {
-        "state": {
-            "values": {
-                bk.BLOCK_TITLE: {bk.INPUT_TITLE: {"value": "Sync"}},
-                bk.BLOCK_PARTICIPANTS: {
-                    bk.INPUT_PARTICIPANTS: {"value": "@alice, @bob"}
-                },
-                bk.BLOCK_DATETIME: {
-                    bk.INPUT_DATETIME: {"selected_date_time": 1800000000}
-                },
-                bk.BLOCK_NOTES: {bk.INPUT_NOTES: {"value": "agenda"}},
-            }
-        },
-        "private_metadata": "{}",
-    }
-    handle_meeting_modal_submit(
-        body={}, view=view, services=None, finalizer=finalizer_stub, sender=sender, ack=ack_fn
-    )
-    # valid submission → ack with no errors
-    assert not captured.get("errors")
-
-
 def test_fr10_task_modal_has_correct_shape():
     view = bk.task_modal(private_metadata="{}", initial={"title": "x"})
     assert view["type"] == "modal"
     assert view["callback_id"] == bk.MODAL_CALLBACK_TASK
     title_block = next(b for b in view["blocks"] if b["block_id"] == bk.BLOCK_TITLE)
     assert "optional" not in title_block or title_block["optional"] is False
-
-
-def test_fr10_meeting_modal_uses_datetimepicker():
-    view = bk.meeting_modal(private_metadata="{}")
-    dt_block = next(b for b in view["blocks"] if b["block_id"] == bk.BLOCK_DATETIME)
-    assert dt_block["element"]["type"] == "datetimepicker"
 
 
 def test_fr10_modal_private_metadata_roundtrips():

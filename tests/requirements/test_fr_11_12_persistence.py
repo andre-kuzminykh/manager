@@ -1,7 +1,7 @@
 """Tests for FR-11..FR-12 (DB is the source of truth + source linkage)."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 
 import pytest
 
@@ -11,12 +11,11 @@ from app.models import (
     AuditLog,
     ContextSnapshot,
     IntentInference,
-    Meeting,
     Task,
 )
 from app.models.intent import IntentType as IE
 from app.models.task import TaskPriority, TaskStatus
-from app.persistence import create_meeting_from_draft, create_task_from_draft
+from app.persistence import create_task_from_draft
 
 
 def _prep(session, intent=IE.create_task, payload=None):
@@ -68,26 +67,6 @@ def test_fr11_task_row_exists_after_create(session):
     assert t.id is not None
     # Reload by id to prove durability
     assert session.get(Task, t.id) is not None
-
-
-def test_fr11_meeting_row_exists_after_create(session):
-    draft, snap = _prep(
-        session,
-        intent=IE.create_meeting,
-        payload={
-            "title": "Sync",
-            "participants": ["@a"],
-            "datetime_at": "2026-06-01T10:00:00+00:00",
-        },
-    )
-    m = create_meeting_from_draft(
-        session,
-        draft=draft,
-        source={"conversation_id": "C1", "message_ts": "1.0", "thread_ts": None, "permalink": "p"},
-        context_snapshot_id=snap.id,
-        fallback_author_slack_id="U1",
-    )
-    assert session.get(Meeting, m.id) is not None
 
 
 def test_fr11_task_defaults_are_applied(session):
@@ -327,35 +306,6 @@ def test_fr12_task_keeps_context_snapshot_reference(session):
     assert t.context_snapshot_id == snap.id
 
 
-def test_fr12_meeting_keeps_source_fields(session):
-    draft, snap = _prep(
-        session,
-        intent=IE.create_meeting,
-        payload={
-            "title": "Sync",
-            "participants": [],
-            "datetime_at": "2026-06-01T10:00:00+00:00",
-        },
-    )
-    m = create_meeting_from_draft(
-        session,
-        draft=draft,
-        source={
-            "conversation_id": "C7",
-            "message_ts": "9.0",
-            "thread_ts": "8.0",
-            "permalink": "https://p/x",
-        },
-        context_snapshot_id=snap.id,
-        fallback_author_slack_id="U1",
-    )
-    assert m.source_conversation_id == "C7"
-    assert m.source_message_ts == "9.0"
-    assert m.source_thread_ts == "8.0"
-    assert m.source_permalink == "https://p/x"
-    assert m.context_snapshot_id == snap.id
-
-
 def test_fr12_owner_fallback_to_source_author(session):
     draft, _ = _prep(session)
     draft.created_by_slack_user_id = None  # no explicit owner
@@ -382,38 +332,6 @@ def test_fr12_explicit_owner_in_payload_wins_over_fallback(session):
         fallback_author_slack_id="U-fallback",
     )
     assert t.owner_user_id == "U-explicit"
-
-
-def test_fr12_task_datetime_parses_with_Z_suffix(session):
-    draft, _ = _prep(
-        session,
-        intent=IE.create_meeting,
-        payload={
-            "title": "Sync",
-            "participants": [],
-            "datetime_at": "2026-06-01T10:00:00Z",
-        },
-    )
-    m = create_meeting_from_draft(
-        session, draft=draft, source={}, context_snapshot_id=None, fallback_author_slack_id="U1"
-    )
-    assert m.datetime_at == datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
-
-
-def test_fr12_meeting_participants_can_be_split_from_string(session):
-    draft, _ = _prep(
-        session,
-        intent=IE.create_meeting,
-        payload={
-            "title": "Sync",
-            "participants": "Ivan, Anna, Boris",
-            "datetime_at": "2026-06-01T10:00:00Z",
-        },
-    )
-    m = create_meeting_from_draft(
-        session, draft=draft, source={}, context_snapshot_id=None, fallback_author_slack_id="U1"
-    )
-    assert m.participants == ["Ivan", "Anna", "Boris"]
 
 
 def test_fr12_context_snapshot_stores_history_and_thread(session):

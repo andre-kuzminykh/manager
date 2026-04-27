@@ -71,30 +71,6 @@ def test_pick_next_missing_owner_unresolved_name_still_asks():
     assert out == "owner"
 
 
-def test_pick_next_missing_for_meeting_order():
-    assert pick_next_missing("create_meeting", {}) == "title"
-    assert (
-        pick_next_missing("create_meeting", {"title": "x"}) == "datetime_at"
-    )
-    assert (
-        pick_next_missing(
-            "create_meeting", {"title": "x", "datetime_at": "2026-06-01T10:00"}
-        )
-        == "participants"
-    )
-    assert (
-        pick_next_missing(
-            "create_meeting",
-            {
-                "title": "x",
-                "datetime_at": "2026-06-01T10:00",
-                "participants": ["@a"],
-            },
-        )
-        is None
-    )
-
-
 # --------------------------------------------------------------------------- #
 # parse_reply
 # --------------------------------------------------------------------------- #

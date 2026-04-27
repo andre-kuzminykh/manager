@@ -416,37 +416,6 @@ def test_nfr3_intent_inference_raw_contains_task_dump(
         assert inf.raw["meeting"] is None
 
 
-def test_nfr3_intent_inference_raw_contains_meeting_dump(
-    patched_session_scope,
-    services_meeting,
-    sender,
-    ack,
-    bolt_context,
-    slack_client,
-    SessionFactory,
-):
-    from app.slack_bot.handlers.events import handle_app_mention
-
-    handle_app_mention(
-        event={
-            "ts": "10.0",
-            "user": "U1",
-            "text": "<@UBOT> встреча",
-            "channel": "C1",
-            "channel_type": "channel",
-        },
-        body={"event_id": "Raw-3"},
-        client=slack_client,
-        context=bolt_context,
-        services=services_meeting,
-        sender=sender,
-        ack=ack,
-    )
-    with SessionFactory() as s:
-        inf = s.query(IntentInference).one()
-        assert inf.raw["meeting"]["title"]
-
-
 def test_nfr3_draft_payload_is_persisted_structured(
     patched_session_scope,
     services_task,

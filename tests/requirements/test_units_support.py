@@ -12,18 +12,13 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 from unittest.mock import MagicMock
 
 import pytest
 
 from app.config import Settings
-from app.schemas.intent import (
-    IntentClassification,
-    IntentType,
-    MeetingDraft,
-    TaskDraft,
-)
+from app.schemas.intent import IntentClassification, IntentType, TaskDraft
 from app.slack_bot import blocks as bk
 
 
@@ -60,21 +55,18 @@ def test_settings_ignores_unknown_env():
 
 
 @pytest.mark.parametrize(
-    "intent, has_task, has_meeting, expected_header",
+    "intent, has_task, expected_header",
     [
-        (IntentType.create_task, True, False, "Task draft"),
-        (IntentType.update_task, True, False, "Task draft"),
-        (IntentType.create_meeting, False, True, "Meeting draft"),
-        (IntentType.update_meeting, False, True, "Meeting draft"),
-        (IntentType.no_action, False, False, "Task draft"),
+        (IntentType.create_task, True, "Task draft"),
+        (IntentType.update_task, True, "Task draft"),
+        (IntentType.no_action, False, "Task draft"),
     ],
 )
-def test_draft_card_header_per_intent(intent, has_task, has_meeting, expected_header):
+def test_draft_card_header_per_intent(intent, has_task, expected_header):
     c = IntentClassification(
         intent=intent,
         confidence=0.8,
         task=TaskDraft(title="t") if has_task else None,
-        meeting=MeetingDraft(title="m") if has_meeting else None,
     )
     blocks = bk.draft_card(classification=c, draft_id=1, confidence_bucket="high")
     header = next(b for b in blocks if b["type"] == "header")
@@ -101,23 +93,6 @@ def test_draft_card_confidence_bucket_labels_do_not_crash(bucket_label):
     assert blocks
 
 
-def test_draft_card_renders_meeting_fields():
-    c = IntentClassification(
-        intent=IntentType.create_meeting,
-        confidence=0.9,
-        meeting=MeetingDraft(
-            title="Sync",
-            participants=["@ivan", "@alice"],
-            datetime_at=datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc),
-        ),
-    )
-    blocks = bk.draft_card(classification=c, draft_id=1, confidence_bucket="high")
-    section = next(b for b in blocks if b["type"] == "section" and "fields" in b)
-    text = "\n".join(f["text"] for f in section["fields"])
-    assert "Sync" in text
-    assert "@ivan" in text and "@alice" in text
-
-
 def test_draft_card_empty_fields_render_dashes():
     c = IntentClassification(
         intent=IntentType.create_task, confidence=0.9, task=TaskDraft(title="only-title")
@@ -132,12 +107,6 @@ def test_soft_prompt_has_correct_copy_for_task():
     blocks = bk.soft_prompt(IntentType.create_task, draft_id=1)
     text = blocks[0]["text"]["text"]
     assert "task" in text.lower()
-
-
-def test_soft_prompt_has_correct_copy_for_meeting():
-    blocks = bk.soft_prompt(IntentType.create_meeting, draft_id=1)
-    text = blocks[0]["text"]["text"]
-    assert "meeting" in text.lower()
 
 
 def test_soft_prompt_has_correct_copy_for_update_task():
@@ -158,7 +127,7 @@ def test_soft_prompt_draft_id_embedded_in_actions():
 # =============================================================================
 
 
-@pytest.mark.parametrize("entity_type", ["task", "meeting"])
+@pytest.mark.parametrize("entity_type", ["task"])
 def test_success_message_mentions_entity_type_and_id(entity_type):
     blocks = bk.success_message(entity_type, 101, "hello")
     text = blocks[0]["text"]["text"]
@@ -167,7 +136,7 @@ def test_success_message_mentions_entity_type_and_id(entity_type):
     assert "hello" in text
 
 
-@pytest.mark.parametrize("entity_type", ["task", "meeting", "entity"])
+@pytest.mark.parametrize("entity_type", ["task", "entity"])
 def test_failure_message_includes_error(entity_type):
     blocks = bk.failure_message(entity_type, "boom")
     text = blocks[0]["text"]["text"]
@@ -284,27 +253,6 @@ def test_classifier_parse_handles_missing_task_field():
     c = _parse_classification({"intent": "create_task", "confidence": 0.8})
     assert c.intent == IntentType.create_task
     assert c.task is None
-
-
-def test_classifier_parse_handles_full_meeting_payload():
-    from app.intent.classifier import _parse_classification
-
-    c = _parse_classification(
-        {
-            "intent": "create_meeting",
-            "confidence": 0.9,
-            "meeting": {
-                "title": "Sync",
-                "notes": "catch up",
-                "participants": ["@a", "@b"],
-                "datetime_at": "2026-06-01T10:00:00+00:00",
-                "timezone": "UTC",
-            },
-        }
-    )
-    assert c.meeting.title == "Sync"
-    assert c.meeting.participants == ["@a", "@b"]
-    assert c.meeting.datetime_at == datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
 
 
 def test_classifier_parse_invalid_data_falls_back_to_no_action():
@@ -482,15 +430,6 @@ def test_draft_payload_picks_task_for_task_intents():
     assert c.draft_payload()["title"] == "t"
 
 
-def test_draft_payload_picks_meeting_for_meeting_intents():
-    c = IntentClassification(
-        intent=IntentType.create_meeting,
-        confidence=0.8,
-        meeting=MeetingDraft(title="m"),
-    )
-    assert c.draft_payload()["title"] == "m"
-
-
 def test_classification_confidence_bounds_reject_invalid():
     with pytest.raises(ValueError):
         IntentClassification(intent=IntentType.no_action, confidence=1.5)
@@ -510,11 +449,6 @@ def test_task_draft_defaults():
 def test_task_draft_rejects_unknown_priority():
     with pytest.raises(ValueError):
         TaskDraft(title="t", priority="critical")
-
-
-def test_meeting_draft_default_participants_list():
-    m = MeetingDraft(title="x")
-    assert m.participants == []
 
 
 # =============================================================================

@@ -124,40 +124,6 @@ def test_finalize_does_not_crash_without_sender(patched_session_scope, SessionFa
         assert s.query(Task).count() == 1
 
 
-def test_finalize_meeting_does_not_post_task_card(
-    patched_session_scope, SessionFactory
-):
-    from app.models.intent import IntentType as IE
-
-    sender = _RecordingSender()
-    fin = FinalizeService(settings=Settings(), sender=sender)
-
-    with SessionFactory() as s:
-        draft, snap = _prep(
-            s,
-            intent=IE.create_meeting,
-            payload={
-                "title": "Sync",
-                "participants": [],
-                "datetime_at": "2026-06-01T10:00:00+00:00",
-            },
-        )
-        s.commit()
-        draft_id, snap_id = draft.id, snap.id
-
-    fin.finalize_draft(
-        draft_id=draft_id,
-        source_metadata={
-            "conversation_id": "C1",
-            "message_ts": "1.0",
-            "thread_ts": None,
-            "permalink": "p",
-            "context_snapshot_id": snap_id,
-        },
-    )
-    assert sender.posted == []
-
-
 def test_finalize_auto_subscribes_owner_and_author(
     patched_session_scope, SessionFactory
 ):

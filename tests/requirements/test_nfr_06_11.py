@@ -244,22 +244,6 @@ def test_nfr7_task_modal_exposes_every_field(field, block, action_id):
     assert blocks[0]["element"]["action_id"] == action_id
 
 
-@pytest.mark.parametrize(
-    "field, block, action_id",
-    [
-        ("title", bk.BLOCK_TITLE, bk.INPUT_TITLE),
-        ("participants", bk.BLOCK_PARTICIPANTS, bk.INPUT_PARTICIPANTS),
-        ("datetime", bk.BLOCK_DATETIME, bk.INPUT_DATETIME),
-        ("notes", bk.BLOCK_NOTES, bk.INPUT_NOTES),
-    ],
-)
-def test_nfr7_meeting_modal_exposes_every_field(field, block, action_id):
-    view = bk.meeting_modal(private_metadata="{}")
-    blocks = [b for b in view["blocks"] if b["block_id"] == block]
-    assert blocks, f"missing input for {field}"
-    assert blocks[0]["element"]["action_id"] == action_id
-
-
 # =============================================================================
 # NFR-8: Shortcut is acked immediately.
 # =============================================================================

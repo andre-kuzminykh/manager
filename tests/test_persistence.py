@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date
 
 from app.models import (
     ActionDraft,
@@ -7,11 +7,7 @@ from app.models import (
     IntentInference,
 )
 from app.models.intent import IntentType as IntentTypeEnum
-from app.persistence import (
-    create_meeting_from_draft,
-    create_task_from_draft,
-    summarize_task,
-)
+from app.persistence import create_task_from_draft, summarize_task
 
 
 def _make_draft(session, *, intent: IntentTypeEnum, payload: dict) -> ActionDraft:
@@ -97,32 +93,3 @@ def test_create_task_rejects_empty_title(sqlite_session):
             context_snapshot_id=None,
             fallback_author_slack_id=None,
         )
-
-
-def test_create_meeting_parses_datetime_and_participants(sqlite_session):
-    draft = _make_draft(
-        sqlite_session,
-        intent=IntentTypeEnum.create_meeting,
-        payload={
-            "title": "Product sync",
-            "participants": "Ivan, @anna",
-            "datetime_at": "2026-05-02T15:00:00+00:00",
-            "notes": "quick chat",
-        },
-    )
-    meeting = create_meeting_from_draft(
-        sqlite_session,
-        draft=draft,
-        source={
-            "conversation_id": "C1",
-            "message_ts": "1.0",
-            "thread_ts": None,
-            "permalink": None,
-        },
-        context_snapshot_id=1,
-        fallback_author_slack_id="U1",
-    )
-    assert meeting.title == "Product sync"
-    assert meeting.participants == ["Ivan", "@anna"]
-    assert meeting.datetime_at == datetime(2026, 5, 2, 15, 0, tzinfo=timezone.utc)
-    assert draft.state == ActionDraftState.confirmed

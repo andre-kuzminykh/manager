@@ -197,6 +197,40 @@ def test_evening_dm_lists_tracking_subscriptions(
 # --------------------------------------------------------------------------- #
 
 
+def test_idempotency_query_uses_indexed_columns_not_json_contains(
+    patched_session_scope, SessionFactory
+):
+    """The idempotency lookup must filter on category / action /
+    actor / entity_id only — never via .contains() on a JSON column,
+    which Postgres rejects (it generates LIKE on JSON)."""
+    from sqlalchemy import inspect
+
+    from app.services.daily_plan import _already_sent
+
+    plan_date = date(2026, 5, 1)
+    with SessionFactory() as s:
+        # Capture the SQL we emit and assert it has no LIKE / json
+        # contains in the WHERE clause.
+        emitted: list[str] = []
+        from sqlalchemy import event
+
+        def _capture(conn, cursor, statement, parameters, *args):
+            emitted.append(statement)
+
+        engine = s.get_bind()
+        event.listen(engine, "before_cursor_execute", _capture)
+        try:
+            _already_sent(
+                s, action="evening_sent", user_id="U-x", plan_date=plan_date
+            )
+        finally:
+            event.remove(engine, "before_cursor_execute", _capture)
+        joined = " ".join(emitted).lower()
+        assert " like " not in joined, joined
+        # entity_id used instead of payload.contains.
+        assert "entity_id" in joined
+
+
 def test_evening_is_idempotent_per_user_per_day(
     patched_session_scope, SessionFactory
 ):

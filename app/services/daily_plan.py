@@ -92,14 +92,21 @@ def _subscribed_tracking(session: Session, user_id: str) -> list[Task]:
 
 
 def _already_sent(session: Session, *, action: str, user_id: str, plan_date: date) -> bool:
+    """Idempotency check via audit_logs.
+
+    We store the plan_date in entity_id (and the user in actor) so the
+    lookup is a plain index-friendly equality. Querying inside JSON
+    payload via .contains() generates `LIKE` on Postgres for type
+    JSON, which fails — see commit history for the bug.
+    """
     return (
         session.query(AuditLog)
         .filter(
             AuditLog.category == "daily_plan",
             AuditLog.action == action,
             AuditLog.actor == user_id,
+            AuditLog.entity_id == plan_date.isoformat(),
         )
-        .filter(AuditLog.payload.contains({"plan_date": plan_date.isoformat()}))
         .first()
         is not None
     )
@@ -110,8 +117,8 @@ def _mark_sent(session: Session, *, action: str, user_id: str, plan_date: date) 
         AuditLog(
             category="daily_plan",
             action=action,
-            entity_type="user",
-            entity_id=user_id,
+            entity_type="daily_plan",
+            entity_id=plan_date.isoformat(),
             actor=user_id,
             payload={"plan_date": plan_date.isoformat()},
         )

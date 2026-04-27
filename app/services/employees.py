@@ -131,6 +131,150 @@ class EmployeeDirectory:
         employee.profile_refreshed_at = datetime.now(timezone.utc)
 
 
+    def sync_workspace_members(
+        self, session: Session, *, page_size: int = 200
+    ) -> int:
+        """Pull every workspace member via Slack's `users.list` and upsert
+        them into the Employees directory. Returns the number of rows
+        touched (created + updated).
+
+        Slack rate limits `users.list` at Tier-2 (~20 req/min). Pagination
+        is handled via the cursor field. Bots / deleted users are kept
+        but flagged so the LLM owner prompt can filter them out (it
+        already does — bots are excluded).
+        """
+        if self._client is None:
+            return 0
+        touched = 0
+        cursor: str | None = None
+        while True:
+            try:
+                kwargs: dict[str, Any] = {"limit": page_size}
+                if cursor:
+                    kwargs["cursor"] = cursor
+                resp = self._client.users_list(**kwargs)
+            except SlackApiError as e:
+                log.warning("users_list_failed", error=str(e))
+                break
+            for raw in resp.get("members") or []:
+                if self._upsert_from_users_list(session, raw):
+                    touched += 1
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
+            if not cursor:
+                break
+        if touched:
+            session.flush()
+        log.info("employees_workspace_synced", touched=touched)
+        return touched
+
+    def sync_channel_members(
+        self,
+        session: Session,
+        *,
+        channel_id: str,
+        page_size: int = 200,
+    ) -> int:
+        """Walk `conversations.members` for one channel and refresh the
+        Employee row for each. Use this on `member_joined_channel` when
+        the bot itself is the joiner — quick way to learn who's in the
+        room without waiting for them to post.
+        """
+        if self._client is None:
+            return 0
+        touched = 0
+        cursor: str | None = None
+        while True:
+            try:
+                kwargs: dict[str, Any] = {
+                    "channel": channel_id,
+                    "limit": page_size,
+                }
+                if cursor:
+                    kwargs["cursor"] = cursor
+                resp = self._client.conversations_members(**kwargs)
+            except SlackApiError as e:
+                log.warning(
+                    "conversations_members_failed",
+                    channel=channel_id,
+                    error=str(e),
+                )
+                break
+            for uid in resp.get("members") or []:
+                self.observed(session, slack_user_id=uid)
+                touched += 1
+            cursor = (resp.get("response_metadata") or {}).get("next_cursor") or ""
+            if not cursor:
+                break
+        log.info(
+            "employees_channel_synced", channel=channel_id, touched=touched
+        )
+        return touched
+
+    def _upsert_from_users_list(
+        self, session: Session, raw: dict[str, Any]
+    ) -> bool:
+        """Insert / update an Employee row from a `users.list` member.
+        Returns True when the row was created or modified."""
+        slack_user_id = raw.get("id")
+        if not slack_user_id:
+            return False
+        # Skip the special slackbot user — it isn't a real teammate.
+        if slack_user_id == "USLACKBOT":
+            return False
+
+        employee = session.get(Employee, slack_user_id)
+        created = False
+        if employee is None:
+            employee = Employee(
+                slack_user_id=slack_user_id,
+                is_admin=is_admin(slack_user_id, self._settings),
+            )
+            session.add(employee)
+            created = True
+
+        profile = dict(raw.get("profile") or {})
+        new_display = (
+            profile.get("display_name_normalized")
+            or profile.get("display_name")
+            or raw.get("name")
+            or employee.display_name
+        )
+        new_real = (
+            profile.get("real_name_normalized")
+            or profile.get("real_name")
+            or employee.real_name
+        )
+        new_email = profile.get("email") or employee.email
+        new_title = profile.get("title") or employee.title
+        new_tz = raw.get("tz") or employee.timezone
+        new_team = raw.get("team_id") or employee.team_id
+        new_is_bot = bool(raw.get("is_bot", employee.is_bot))
+
+        changed = (
+            created
+            or new_display != employee.display_name
+            or new_real != employee.real_name
+            or new_email != employee.email
+            or new_title != employee.title
+            or new_tz != employee.timezone
+            or new_team != employee.team_id
+            or new_is_bot != employee.is_bot
+        )
+
+        employee.display_name = new_display
+        employee.real_name = new_real
+        employee.email = new_email
+        employee.title = new_title
+        employee.timezone = new_tz
+        employee.team_id = new_team
+        employee.is_bot = new_is_bot
+        employee.profile_raw = raw
+        employee.profile_refreshed_at = datetime.now(timezone.utc)
+        # Flip admin flag based on current config.
+        employee.is_admin = is_admin(slack_user_id, self._settings)
+        return changed
+
+
 def sync_admin_flags(session: Session, settings: Settings | None = None) -> int:
     """Backfill: flip ``is_admin`` for any existing employee based on the
     current config. Returns the number of rows updated."""

@@ -273,6 +273,44 @@ def build_app(
     def _on_plan_approve(body, ack):
         handle_plan_approve(body=body, sender=sender, ack=ack)
 
+    # Keep the Employees directory fresh as workspace membership
+    # changes — these events let us learn about people without
+    # waiting for them to post.
+    employees = services.employees
+
+    @app.event("team_join")
+    def _on_team_join(event, ack):
+        ack()
+        if employees is None:
+            return
+        user = (event or {}).get("user") or {}
+        slack_user_id = user.get("id")
+        if not slack_user_id:
+            return
+        from app.db import session_scope
+
+        with session_scope() as session:
+            employees.observed(session, slack_user_id=slack_user_id)
+
+    @app.event("member_joined_channel")
+    def _on_member_joined_channel(event, ack, context):
+        ack()
+        if employees is None:
+            return
+        slack_user_id = (event or {}).get("user")
+        channel = (event or {}).get("channel")
+        if not slack_user_id or not channel:
+            return
+        from app.db import session_scope
+
+        with session_scope() as session:
+            # If the bot itself just joined, pull the entire channel
+            # roster so we know who's in the room from minute one.
+            if slack_user_id == context.bot_user_id:
+                employees.sync_channel_members(session, channel_id=channel)
+            else:
+                employees.observed(session, slack_user_id=slack_user_id)
+
     return app
 
 

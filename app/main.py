@@ -84,6 +84,19 @@ def run() -> None:
 
     app = build_app(settings=settings, classifier=classifier, finalizer=finalizer)
 
+    # One-shot workspace-wide employees sync. Best-effort: a Slack
+    # outage here must not block startup.
+    try:
+        from app.db import session_scope
+        from app.services import EmployeeDirectory
+
+        directory = EmployeeDirectory(client=app.client, settings=settings)
+        with session_scope() as session:
+            touched = directory.sync_workspace_members(session)
+        log.info("employees_startup_sync", touched=touched)
+    except Exception as e:  # noqa: BLE001
+        log.warning("employees_startup_sync_failed", error=str(e))
+
     log.info("starting_socket_mode")
     run_socket_mode(app, settings.slack_app_token)
 

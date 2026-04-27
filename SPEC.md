@@ -720,6 +720,36 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-17 — Always-fresh Employees directory
+
+The owner LLM stage receives `known_employees` from the local
+`employees` table (FR-CR-04-12). To keep that table complete the
+bot now keeps it in sync with Slack via three mechanisms:
+
+1. **Bot startup** — after `build_app` constructs the Slack client,
+   `app.main:run` calls
+   `EmployeeDirectory.sync_workspace_members(session)` which walks
+   `users.list` (paginated) and upserts every workspace member.
+   Bot accounts are stored with `is_bot=True`; `USLACKBOT` is
+   skipped. A Slack failure here is logged and ignored — startup
+   never blocks on it.
+2. **`team_join` event** — when a new person joins the workspace,
+   we trigger a single-user `observed()` upsert.
+3. **`member_joined_channel` event** — when the bot itself is the
+   joiner, we walk `conversations.members` for that channel and
+   refresh every roster member; when someone else joins, we call
+   `observed()` for that user.
+
+Manual backfill: `python -m ops.sync_employees` runs the workspace
+sync from the command line; useful right after a fresh deploy or
+when permissions on `users.list` have just been granted.
+
+Required Slack scopes (Bot Token):
+- `users:read` — `users.list`, `users.info`.
+- `users:read.email` — optional, fills `Employee.email`.
+- `channels:read` / `groups:read` / `mpim:read` / `im:read` —
+  `conversations.members` per the channel kind the bot lives in.
+
 #### FR-CR-04-16 — Bot UI is English
 
 All user-visible bot strings are in English: button labels, modal
@@ -1022,5 +1052,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-14  | `test_daily_plan.py` (evening approval card with Skip/Approve, morning execution card, idempotency, tracking) |
 | FR-CR-04-15  | `test_task_recurring.py` (recurring checkbox, weekdays, optional time range, card render)                     |
 | FR-CR-04-16  | English UI strings across the bot (assertions in many test modules; specifically `test_units_support.py::test_soft_prompt_*`, `test_mention_always_replies.py`, `test_passive_draft_card.py`, `test_daily_plan.py`, `test_cr03_thread_reminders.py`) |
+| FR-CR-04-17  | `test_employees_workspace_sync.py` (sync_workspace_members + sync_channel_members + bot startup hook) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

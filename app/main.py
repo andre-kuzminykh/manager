@@ -82,6 +82,18 @@ def run() -> None:
         google_tasks_service_factory=gtasks_factory,
     )
 
+    # Register the central syncer so handlers can push status changes,
+    # edits and deletes to Google Sheets / Tasks without threading the
+    # factories through every signature.
+    from app.sync.task_sync import TaskSyncer, set_active_syncer
+
+    set_active_syncer(
+        TaskSyncer(
+            sheets_factory=sheets_factory,
+            google_tasks_factory=gtasks_factory,
+        )
+    )
+
     app = build_app(settings=settings, classifier=classifier, finalizer=finalizer)
 
     # One-shot workspace-wide employees sync. Best-effort: a Slack

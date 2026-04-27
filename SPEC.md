@@ -723,6 +723,55 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-23 — Live Google Sheets sync (Service Account, all events)
+
+The bot pushes the current state of every task to Google Sheets on
+every change — not only at draft finalize. Three sub-changes:
+
+1. **Service Account auth.** New env vars `GOOGLE_SERVICE_ACCOUNT_JSON`
+   (inline JSON) or `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` (file path).
+   `app/sync/factories._resolve_credentials` prefers Service Account
+   over the legacy OAuth-from-DB path; OAuth is kept as a fall-back so
+   existing deploys don't regress. The Sheets / Tasks API scopes are
+   bound to the SA at credential build time.
+2. **Configurable tab name.** `GOOGLE_SHEETS_TAB_NAME`, default `Main`
+   (was `Tasks`). Threaded through `build_sheets_factory` →
+   `SheetsSyncService(sheet_name=…)`.
+3. **`TaskSyncer` invoked on every mutation.** A new
+   `app/sync/task_sync.py` module exposes a process-wide singleton:
+   `set_active_syncer()` is called once at startup, `sync_task(id)` is
+   a best-effort hook called from every handler that mutates a task —
+   `_apply_transition` (Start), `handle_complete_task_submit`
+   (Mark done), `handle_cancel_task`, `handle_delete_task_submit`,
+   `handle_task_edit_submit`. Failures are logged, never raised, so
+   Slack interactions don't break when Google is down.
+
+Row schema gains two columns:
+
+| column                | semantics                                                |
+|-----------------------|----------------------------------------------------------|
+| `deleted_at`          | ISO timestamp when the row was soft-deleted; empty otherwise |
+| `completion_artifact` | The URL or text saved when the task was marked done      |
+
+When `deleted_at` is set, the `status` column reads `deleted` (instead
+of the underlying lifecycle status) so a glance at the sheet tells
+the user what happened. The row stays in place for traceability.
+
+Operator setup:
+
+1. Create a Google Cloud Service Account; download its JSON key.
+2. Enable the *Google Sheets API* (and *Google Tasks API* if you
+   plan to keep Tasks sync alive) on the project.
+3. Open the spreadsheet in Sheets and share it as **Editor** with
+   the SA's email (looks like `something@project-id.iam.gserviceaccount.com`).
+4. Set `GOOGLE_SHEETS_SPREADSHEET_ID` to the long ID from the
+   spreadsheet URL, and `GOOGLE_SHEETS_TAB_NAME` to the tab name
+   (defaults to `Main`).
+5. Set `GOOGLE_SERVICE_ACCOUNT_JSON_PATH=/path/to/sa.json` (or paste
+   the JSON inline into `GOOGLE_SERVICE_ACCOUNT_JSON=…`).
+6. Restart the bot. The next task creation appends a row; subsequent
+   transitions / edits / deletes update the same row.
+
 #### FR-CR-04-22 — Per-channel employees sync + owner hallucination guard
 
 Two coupled fixes for owner-attribution accuracy.
@@ -1204,5 +1253,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-20  | `test_cr01_lifecycle.py` (four-state enum, allowed transitions graph, retired values rejected), `test_task_cancel_delete.py` (review enum value gone, soft-delete excluded from workload + daily plan), migration `0013_soft_delete_drop_review.py` |
 | FR-CR-04-21  | `test_task_cancel_delete.py` (Cancel routing — within-week → todo, later → backlog; owner+admin only; Delete confirmation modal; soft-delete with audit row; tombstone card refresh; completion modal accepts an empty form) |
 | FR-CR-04-22  | `test_owner_hallucination_guard.py` (real-name match against the employees table; drop unresolvable-and-not-in-source name so quiet-author-fallback fires), `test_employees_per_channel_sync.py` (`ensure_channel_synced` upserts roster, throttles repeats, isolates channels) |
+| FR-CR-04-23  | `test_sheets_sync_hooks.py` (Service-Account preferred, OAuth fall-back; configurable tab name; `_task_row` flips status to `deleted` when soft-deleted; TaskSyncer no-op without factory; Cancel / Delete / Start handlers call the active syncer); plus updated `test_sync_factories.py` |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

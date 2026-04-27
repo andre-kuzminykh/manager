@@ -18,6 +18,7 @@ from app.services import (
     refresh_task_card,
 )
 from app.slack_bot import blocks as bk
+from app.sync.task_sync import sync_task as _sync_task
 
 
 log = get_logger(__name__)
@@ -119,6 +120,8 @@ def _apply_transition(
         # visually evolves through its lifecycle.
         if hasattr(sender, "update_message"):
             refresh_task_card(sender, task)
+    # Push the transition to Google Sheets / Tasks (best-effort).
+    _sync_task(task_id)
 
 
 def handle_start_work(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> None:
@@ -208,6 +211,7 @@ def handle_complete_task_submit(
         )
         if hasattr(sender, "update_message"):
             refresh_task_card(sender, task)
+    _sync_task(task_id)
 
 
 def _state_value(values: dict[str, Any], block_id: str, action_id: str) -> Any:
@@ -291,6 +295,7 @@ def handle_cancel_task(
         )
         if hasattr(sender, "update_message"):
             refresh_task_card(sender, task)
+    _sync_task(task_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -402,6 +407,8 @@ def handle_delete_task_submit(
                             channel=ch,
                             error=str(e),
                         )
+    # Push the soft-delete to Sheets so the row's status flips to "deleted".
+    _sync_task(task_id)
 
 
 def _toggle_subscription(
@@ -804,3 +811,5 @@ def handle_task_edit_submit(
         session.flush()
         if hasattr(sender, "update_message"):
             refresh_task_card(sender, task)
+    # Push the edited fields to Google Sheets / Tasks.
+    _sync_task(int(task_id))

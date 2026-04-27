@@ -131,3 +131,31 @@ def credentials_payload(creds: Credentials) -> dict[str, Any]:
         "expires_at": creds.expiry.replace(tzinfo=timezone.utc) if creds.expiry else None,
         "scopes": list(creds.scopes or []),
     }
+
+
+def load_service_account_credentials(scopes: list[str]):
+    """Build google-auth Service Account credentials from settings.
+
+    Recommended path for production: a single GOOGLE_SERVICE_ACCOUNT_JSON
+    env (or _PATH) replaces the entire OAuth dance. Returns ``None`` if
+    neither is configured. Raised exceptions bubble up — a misconfigured
+    SA is a startup-time bug, not a runtime one.
+    """
+    import json
+    from pathlib import Path
+
+    from google.oauth2 import service_account
+
+    settings = get_settings()
+    raw = (settings.google_service_account_json or "").strip()
+    path = (settings.google_service_account_json_path or "").strip()
+
+    info: dict[str, Any] | None = None
+    if raw:
+        info = json.loads(raw)
+    elif path:
+        info = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    if info is None:
+        return None
+    return service_account.Credentials.from_service_account_info(info, scopes=scopes)

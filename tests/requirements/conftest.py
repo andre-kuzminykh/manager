@@ -91,6 +91,7 @@ def patched_session_scope(monkeypatch, SessionFactory):  # noqa: N803
         "app.slack_bot.handlers.daily_plan.session_scope",
         "app.orchestrator.finalize.session_scope",
         "app.sync.factories.session_scope",
+        "app.sync.task_sync.session_scope",
     ]
     for t in targets:
         monkeypatch.setattr(t, fake_scope, raising=False)

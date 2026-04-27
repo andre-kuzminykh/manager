@@ -34,10 +34,16 @@ _HEADER_ROW = [
     "source_permalink",
     "created_at",
     "updated_at",
+    "deleted_at",
+    "completion_artifact",
 ]
 
 
 def _task_row(task: Task) -> list[str]:
+    # Soft-deleted tasks: keep the row in the sheet but flip status to
+    # "deleted" so the user sees what happened. The `deleted_at`
+    # timestamp carries the audit info.
+    status_text = "deleted" if task.deleted_at is not None else task.status.value
     return [
         str(task.id),
         task.title,
@@ -53,11 +59,13 @@ def _task_row(task: Task) -> list[str]:
         ",".join(task.recurring_weekdays) if task.recurring_weekdays else "",
         task.recurring_start_time.strftime("%H:%M") if task.recurring_start_time else "",
         task.recurring_end_time.strftime("%H:%M") if task.recurring_end_time else "",
-        task.status.value,
+        status_text,
         str(task.parent_task_id) if task.parent_task_id else "",
         task.source_permalink or "",
         task.created_at.isoformat() if task.created_at else "",
         task.updated_at.isoformat() if task.updated_at else "",
+        task.deleted_at.isoformat() if task.deleted_at else "",
+        task.completion_artifact or "",
     ]
 
 
@@ -73,8 +81,11 @@ class SheetsSyncService:
         *,
         credentials: Credentials,
         spreadsheet_id: str,
-        sheet_name: str = "Tasks",
+        sheet_name: str = "Main",
     ) -> None:
+        # `Credentials` here is the type from google.oauth2.credentials, but
+        # google.oauth2.service_account.Credentials also satisfies the
+        # signed-request protocol — googleapiclient accepts both.
         self._service = build(
             "sheets", "v4", credentials=credentials, cache_discovery=False
         )

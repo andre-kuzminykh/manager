@@ -26,7 +26,7 @@ def test_sheets_factory_returns_none_when_no_credentials():
     factory = build_sheets_factory(settings)
     assert factory is not None
     with patch(
-        "app.sync.factories._load_service_credentials", return_value=None
+        "app.sync.factories._resolve_credentials", return_value=None
     ):
         assert factory() is None
 
@@ -40,7 +40,7 @@ def test_sheets_factory_builds_service_when_credentials_present():
         pass
 
     with patch(
-        "app.sync.factories._load_service_credentials", return_value=_StubCreds()
+        "app.sync.factories._resolve_credentials", return_value=_StubCreds()
     ), patch("app.sync.factories.SheetsSyncService") as MockService:
         factory()
     MockService.assert_called_once()
@@ -58,7 +58,7 @@ def test_gtasks_factory_returns_none_when_no_credentials():
     factory = build_google_tasks_factory(settings)
     assert factory is not None
     with patch(
-        "app.sync.factories._load_service_credentials", return_value=None
+        "app.sync.factories._resolve_credentials", return_value=None
     ):
         assert factory() is None
 
@@ -72,7 +72,7 @@ def test_gtasks_factory_builds_service_when_credentials_present():
         pass
 
     with patch(
-        "app.sync.factories._load_service_credentials", return_value=_StubCreds()
+        "app.sync.factories._resolve_credentials", return_value=_StubCreds()
     ), patch("app.sync.factories.GoogleTasksSyncService") as MockService:
         factory()
     MockService.assert_called_once()
@@ -80,16 +80,16 @@ def test_gtasks_factory_builds_service_when_credentials_present():
     assert kwargs["tasklist_id"] == "@default"
 
 
-def test_load_service_credentials_returns_none_without_key(monkeypatch):
+def test_load_oauth_credentials_returns_none_without_key(monkeypatch):
     """TokenCipher() raises RuntimeError when SECRETS_ENCRYPTION_KEY is
-    empty; _load_service_credentials catches and returns None so sync
-    is silently disabled."""
+    empty; _load_oauth_credentials catches and returns None so OAuth
+    fall-back is silently disabled."""
     monkeypatch.setenv("SECRETS_ENCRYPTION_KEY", "")
     from app.config import get_settings
-    from app.sync.factories import _load_service_credentials
+    from app.sync.factories import _load_oauth_credentials
 
     get_settings.cache_clear()  # type: ignore[attr-defined]
     try:
-        assert _load_service_credentials() is None
+        assert _load_oauth_credentials() is None
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]

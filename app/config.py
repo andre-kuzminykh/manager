@@ -47,6 +47,23 @@ class Settings(BaseSettings):
         alias="GOOGLE_REDIRECT_URI",
     )
     google_sheets_spreadsheet_id: str = Field(default="", alias="GOOGLE_SHEETS_SPREADSHEET_ID")
+    # Tab name inside the spreadsheet. Defaults to "Main" so existing
+    # `Tasks` spreadsheets with a "Main" tab work out of the box.
+    google_sheets_tab_name: str = Field(
+        default="Main", alias="GOOGLE_SHEETS_TAB_NAME"
+    )
+    # Service-Account auth — alternative to OAuth. Provide ONE of:
+    # - GOOGLE_SERVICE_ACCOUNT_JSON: full JSON key inline (single line);
+    # - GOOGLE_SERVICE_ACCOUNT_JSON_PATH: filesystem path to the key file.
+    # Service Account is the recommended path: simpler than OAuth (no
+    # browser flow, no token refresh), and the bot acts as a tech account.
+    # Share the spreadsheet with the service account's email as Editor.
+    google_service_account_json: str = Field(
+        default="", alias="GOOGLE_SERVICE_ACCOUNT_JSON"
+    )
+    google_service_account_json_path: str = Field(
+        default="", alias="GOOGLE_SERVICE_ACCOUNT_JSON_PATH"
+    )
     google_tasks_default_tasklist_id: str = Field(
         default="@default", alias="GOOGLE_TASKS_DEFAULT_TASKLIST_ID"
     )

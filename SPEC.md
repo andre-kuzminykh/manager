@@ -720,9 +720,35 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-11 — Full message archive
+
+Every Slack event the bot receives is persisted verbatim into a
+new audit table `slack_events_archive` BEFORE any
+`_is_ignorable` filtering. The table has no unique constraint, so
+edits (`message_changed`), deletes (`message_deleted`), system
+notices (`channel_join`, `bot_message`) and replays each get their
+own row. Columns: `event_id`, `event_type`, `subtype`,
+`conversation_id`, `ts`, `thread_ts`, `user_id`, `text`,
+`transcript`, `raw` (full event JSON), `received_at`. Archive
+writes are best-effort: a failure logs and continues, never blocks
+event handling.
+
+The "useful" `slack_messages` table now also stores:
+- `subtype` — original event subtype if any.
+- `transcript` — newline-joined Whisper transcripts of audio
+  attachments on this message.
+- `has_audio` — boolean, true when the event carried an audio
+  file (even if Whisper failed).
+- `raw` — the full Slack event payload (was nullable & unused).
+
 ### 10.4 Data model delta
 
-No schema changes. CR-04 reuses:
+Migration `0008_archive_and_transcript`:
+- New table `slack_events_archive`.
+- New columns on `slack_messages`: `subtype`, `transcript`,
+  `has_audio`.
+
+CR-04 also reuses:
 
 - `action_drafts.card_channel / card_ts / awaiting_field` (from CR-02)
   to morph widgets on Accept.
@@ -840,5 +866,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-8   | `test_audio_transcription.py`                                                                                |
 | FR-CR-04-9   | `test_prefilter_override.py`, `test_passive_pipeline_runs_always.py`                                         |
 | FR-CR-04-10  | `test_task_edit_button.py`                                                                                   |
+| FR-CR-04-11  | `test_message_archive.py` (slack_events_archive + raw / transcript / has_audio on slack_messages)             |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

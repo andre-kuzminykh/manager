@@ -7,6 +7,7 @@ from app.models.slack import (
     ContextSnapshot,
     ProcessedSlackEvent,
     SlackConversation,
+    SlackEventArchive,
     SlackMessage,
 )
 from app.models.sync import GoogleSheetsSync, GoogleTasksSync, SyncStatus
@@ -30,6 +31,7 @@ __all__ = [
     "ContextSnapshot",
     "ProcessedSlackEvent",
     "SlackConversation",
+    "SlackEventArchive",
     "SlackMessage",
     "GoogleSheetsSync",
     "GoogleTasksSync",

@@ -14,7 +14,13 @@ from sqlalchemy.orm import Session
 from app.context import ContextRetriever
 from app.db import session_scope
 from app.intent import IntentClassifier
-from app.models import ActionDraft, ContextSnapshot, SlackConversation, SlackMessage
+from app.models import (
+    ActionDraft,
+    ContextSnapshot,
+    SlackConversation,
+    SlackEventArchive,
+    SlackMessage,
+)
 from app.orchestrator import Orchestrator
 from app.schemas.intent import IntentClassification, InvocationType
 from app.services import EmployeeDirectory
@@ -65,6 +71,9 @@ def upsert_message(
     conversation: SlackConversation,
     message: dict[str, Any],
     raw: dict[str, Any] | None = None,
+    transcript: str | None = None,
+    has_audio: bool = False,
+    subtype: str | None = None,
 ) -> SlackMessage:
     ts = message["ts"]
     existing = (
@@ -81,7 +90,10 @@ def upsert_message(
         "ts": ts,
         "thread_ts": message.get("thread_ts"),
         "user_id": message.get("user") or message.get("bot_id"),
+        "subtype": subtype or message.get("subtype"),
         "text": message.get("text") or "",
+        "transcript": transcript,
+        "has_audio": has_audio,
         "raw": raw,
     }
     if dialect == "postgresql":
@@ -113,6 +125,44 @@ def upsert_message(
     else:
         sp.commit()
     return record
+
+
+def archive_event(
+    session: Session,
+    *,
+    event: dict[str, Any],
+    body: dict[str, Any] | None = None,
+    transcript: str | None = None,
+) -> None:
+    """Append a row to slack_events_archive.
+
+    Captures EVERY Slack event the bot received — including ones that
+    `_is_ignorable` will later drop (message_changed, message_deleted,
+    bot_message, channel_join, mentions in passive path). The full
+    Slack event JSON is stored verbatim in `raw`.
+
+    Best-effort: a failure here should not abort event handling.
+    """
+    try:
+        record = SlackEventArchive(
+            event_id=(body or {}).get("event_id"),
+            event_type=event.get("type") or "unknown",
+            subtype=event.get("subtype"),
+            conversation_id=event.get("channel"),
+            ts=event.get("ts"),
+            thread_ts=event.get("thread_ts"),
+            user_id=event.get("user") or event.get("bot_id"),
+            text=event.get("text") or "",
+            transcript=transcript,
+            raw=event,
+        )
+        session.add(record)
+        session.flush()
+    except Exception:  # noqa: BLE001 — never block on the archive
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def fetch_permalink(client: WebClient, *, channel: str, ts: str) -> str | None:
@@ -175,11 +225,22 @@ def classify_and_persist(
     source_message: dict[str, Any],
     invocation_type: InvocationType,
     slack_user_id: str | None,
+    raw_event: dict[str, Any] | None = None,
+    transcript: str | None = None,
+    has_audio: bool = False,
 ) -> tuple[IntentClassification, ActionDraft | None, ContextSnapshot]:
     """End-to-end: load context, classify, persist snapshot + inference + draft."""
 
     conversation = upsert_conversation(session, channel_id=conversation_id, kind=kind)
-    upsert_message(session, conversation=conversation, message=source_message)
+    upsert_message(
+        session,
+        conversation=conversation,
+        message=source_message,
+        raw=raw_event,
+        transcript=transcript,
+        has_audio=has_audio,
+        subtype=source_message.get("subtype"),
+    )
 
     # CR-03: keep the Employees directory fresh for everyone we see.
     if services.employees is not None and slack_user_id:

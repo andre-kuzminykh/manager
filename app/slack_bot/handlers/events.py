@@ -18,6 +18,7 @@ from app.slack_bot import blocks as bk
 from app.slack_bot.dedup import claim_event
 from app.slack_bot.handlers.shared import (
     Services,
+    archive_event,
     classify_and_persist,
     draft_private_metadata,
     fetch_permalink,
@@ -375,6 +376,15 @@ def handle_message(
     event_id = body.get("event_id") or ""
     bot_user_id = context.bot_user_id
 
+    # Archive every event verbatim BEFORE filtering so the audit trail
+    # captures edits, deletes, system subtypes too. Best-effort — a
+    # failure here must not abort the handler.
+    try:
+        with session_scope() as session:
+            archive_event(session, event=event, body=body)
+    except Exception as e:  # noqa: BLE001
+        log.warning("archive_event_failed", error=str(e))
+
     if _is_ignorable(event, bot_user_id):
         return
 
@@ -404,12 +414,19 @@ def handle_message(
                 return
 
         kind = _kind_from_channel_type(event.get("channel_type"), channel)
-        text = _enrich_text_with_audio(event, reply_text)
+        text, transcripts = _enrich_text_with_audio(event, reply_text)
+        transcript_blob = "\n".join(t for t in transcripts if t) or None
+        has_audio = bool(transcripts) or any(
+            (f.get("mimetype") or "").startswith("audio/")
+            for f in (event.get("files") or [])
+            if isinstance(f, dict)
+        )
 
         source_message = {
             "ts": event["ts"],
             "thread_ts": thread_ts,
             "user": event.get("user"),
+            "subtype": event.get("subtype"),
             "text": text,
         }
 
@@ -421,6 +438,9 @@ def handle_message(
             source_message=source_message,
             invocation_type=InvocationType.passive,
             slack_user_id=event.get("user"),
+            raw_event=event,
+            transcript=transcript_blob,
+            has_audio=has_audio,
         )
 
         decision = services.orchestrator.decide_passive(
@@ -602,19 +622,33 @@ def handle_app_mention(
     event_id = body.get("event_id") or ""
     bot_user_id = context.bot_user_id
 
+    # Verbatim audit row, even if dedup later short-circuits. Best-effort.
+    try:
+        with session_scope() as session:
+            archive_event(session, event=event, body=body)
+    except Exception as e:  # noqa: BLE001
+        log.warning("archive_event_failed", error=str(e))
+
     try:
         with session_scope() as session:
             if not claim_event(session, event_id):
                 log.info("duplicate_event_skipped", event_id=event_id)
                 return
 
-            text = _enrich_text_with_audio(
+            text, transcripts = _enrich_text_with_audio(
                 event, strip_bot_mentions(event.get("text", ""), bot_user_id)
+            )
+            transcript_blob = "\n".join(t for t in transcripts if t) or None
+            has_audio = bool(transcripts) or any(
+                (f.get("mimetype") or "").startswith("audio/")
+                for f in (event.get("files") or [])
+                if isinstance(f, dict)
             )
             source_message = {
                 "ts": event["ts"],
                 "thread_ts": event.get("thread_ts"),
                 "user": event.get("user"),
+                "subtype": event.get("subtype"),
                 "text": text,
             }
 
@@ -626,6 +660,9 @@ def handle_app_mention(
                 source_message=source_message,
                 invocation_type=InvocationType.mention,
                 slack_user_id=event.get("user"),
+                raw_event=event,
+                transcript=transcript_blob,
+                has_audio=has_audio,
             )
 
             permalink = fetch_permalink(client, channel=channel, ts=event["ts"])
@@ -772,11 +809,18 @@ def _auto_finalize(
     return entity_id if entity_type == "task" else None
 
 
-def _enrich_text_with_audio(event: dict[str, Any], base_text: str) -> str:
+def _enrich_text_with_audio(
+    event: dict[str, Any], base_text: str
+) -> tuple[str, list[str]]:
     """If the event carries audio attachments, transcribe them and
-    merge the transcripts into the text the pipeline will see. Returns
-    base_text unchanged when there are no audio files, Whisper is not
-    configured, or transcription fails."""
+    merge the transcripts into the text the pipeline will see.
+
+    Returns a (text, transcripts) tuple. The transcripts list is the
+    raw per-file output (joined separately so the caller can persist
+    it on slack_messages.transcript). Returns (base_text, []) when
+    there are no audio files, Whisper is not configured, or
+    transcription fails.
+    """
     from app.services.transcription import (
         extract_audio_files,
         merge_transcripts_into_text,
@@ -785,7 +829,7 @@ def _enrich_text_with_audio(event: dict[str, Any], base_text: str) -> str:
 
     audio_files = extract_audio_files(event)
     if not audio_files:
-        return base_text
+        return base_text, []
 
     settings = get_settings()
     transcripts = transcribe_audio_files(
@@ -794,8 +838,8 @@ def _enrich_text_with_audio(event: dict[str, Any], base_text: str) -> str:
         openai_api_key=settings.openai_api_key,
     )
     if not transcripts:
-        return base_text
-    return merge_transcripts_into_text(base_text, transcripts)
+        return base_text, []
+    return merge_transcripts_into_text(base_text, transcripts), transcripts
 
 
 def _task_payload(task: Task | None) -> dict:

@@ -49,6 +49,10 @@ BLOCK_ARTIFACT_TEXT = "artifact_text_block"
 ACTION_WEEKLY_ACCEPT = "weekly_plan_accept"
 ACTION_WEEKLY_DEFER = "weekly_plan_defer"
 
+# CR-04 daily plan (evening approval / morning execution)
+ACTION_PLAN_SKIP = "plan_skip_task"
+ACTION_PLAN_APPROVE = "plan_approve"
+
 BLOCK_TITLE = "title_block"
 BLOCK_DESCRIPTION = "description_block"
 BLOCK_OWNER = "owner_block"

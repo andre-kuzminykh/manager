@@ -29,6 +29,8 @@ from app.slack_bot.blocks import (
     ACTION_EDIT_TASK,
     ACTION_WEEKLY_ACCEPT,
     ACTION_WEEKLY_DEFER,
+    ACTION_PLAN_APPROVE,
+    ACTION_PLAN_SKIP,
     MODAL_CALLBACK_ADMIN_EDIT,
     MODAL_CALLBACK_COMPLETE_TASK,
     MODAL_CALLBACK_EDIT_TASK,
@@ -66,6 +68,10 @@ from app.slack_bot.handlers.task_actions import (
 from app.slack_bot.handlers.weekly_plan import (
     handle_weekly_accept,
     handle_weekly_defer,
+)
+from app.slack_bot.handlers.daily_plan import (
+    handle_plan_approve,
+    handle_plan_skip,
 )
 from app.slack_bot.handlers.views import (
     handle_meeting_modal_submit,
@@ -257,6 +263,15 @@ def build_app(
     @app.action(ACTION_WEEKLY_DEFER)
     def _on_weekly_defer(body, ack):
         handle_weekly_defer(body=body, sender=sender, ack=ack)
+
+    # CR-04 daily plan
+    @app.action(ACTION_PLAN_SKIP)
+    def _on_plan_skip(body, ack):
+        handle_plan_skip(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_PLAN_APPROVE)
+    def _on_plan_approve(body, ack):
+        handle_plan_approve(body=body, sender=sender, ack=ack)
 
     return app
 

@@ -4,6 +4,8 @@ Usage:
     python -m ops.send_digest --type daily
     python -m ops.send_digest --type weekly
     python -m ops.send_digest --type deadlines
+    python -m ops.send_digest --type plan-evening   # 18:00 London
+    python -m ops.send_digest --type plan-morning   # 09:00 London
 
 Intended to be invoked by cron / Cloud Scheduler. Idempotency is handled by
 `DigestService` via `audit_logs` so repeat runs on the same day are no-ops.
@@ -26,6 +28,7 @@ from app.services import (
     send_thread_reminders,
     send_weekly_plan,
 )
+from app.services.daily_plan import send_evening_plan, send_morning_plan
 from app.slack_bot.rate_limiter import RateAwareSlackSender
 
 log = get_logger(__name__)
@@ -43,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
             "admin-evening",
             "admin-morning",
             "thread-reminders",
+            "plan-evening",
+            "plan-morning",
         ],
         help="Digest to send.",
     )
@@ -86,6 +91,48 @@ def main(argv: list[str] | None = None) -> int:
             recipients=report.recipients,
             tasks_included=report.tasks_included,
             skipped_idempotent=report.skipped_idempotent,
+        )
+        return 0
+
+    if args.type in ("plan-evening", "plan-morning"):
+        from datetime import date, timedelta
+
+        from app.models import Task
+
+        # Plan-date: tomorrow for evening, today for morning. Run at
+        # the user's expected local time so London 18:00 = +0/+1 from
+        # UTC works out — cron is expected to fire at the right hour.
+        plan_date = date.today() + (
+            timedelta(days=1) if args.type == "plan-evening" else timedelta(days=0)
+        )
+
+        with session_scope() as session:
+            # All distinct task owners with at least one open task —
+            # we send the plan to anyone who could plausibly have
+            # work tomorrow.
+            user_ids = sorted(
+                {
+                    uid
+                    for (uid,) in session.query(Task.owner_user_id)
+                    .filter(Task.owner_user_id.isnot(None))
+                    .distinct()
+                }
+            )
+            if args.type == "plan-evening":
+                report = send_evening_plan(
+                    session, sender=sender, plan_date=plan_date, user_ids=user_ids
+                )
+            else:
+                report = send_morning_plan(
+                    session, sender=sender, plan_date=plan_date, user_ids=user_ids
+                )
+        log.info(
+            "daily_plan_sent",
+            phase=args.type,
+            plan_date=plan_date.isoformat(),
+            sent=report.sent,
+            skipped_idempotent=report.skipped_idempotent,
+            no_tasks=report.no_tasks,
         )
         return 0
 

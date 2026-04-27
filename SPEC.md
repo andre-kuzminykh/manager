@@ -720,6 +720,46 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-14 — Daily plan workflow (evening approval + morning execution)
+
+Two cron jobs per user per day cover the daily routine:
+
+**Evening (default 18:00 London) — `python -m ops.send_digest --type
+plan-evening`.** For each user, the bot:
+1. Picks "candidate" tasks for *tomorrow*: tasks they own, not done,
+   matching at least one of: `start_date == tomorrow`,
+   `due_date == tomorrow`, OR (`is_current_week` AND status in
+   {todo, in_progress}).
+2. Inserts a row into `daily_plan_items` per candidate task. Rows
+   are unique per `(user_id, plan_date, task_id)`.
+3. DMs the user a single message with one *Skip* button per task
+   plus a single *Принять план* button at the bottom. Below the
+   plan — a Tracking section listing every task they're subscribed
+   to (the "favourites").
+
+The user clicks *Skip* on tasks they won't do tomorrow. Each click
+sets `daily_plan_items.excluded_at` and writes an audit row. *Принять
+план* is symbolic — the plan is whatever rows are still
+non-excluded; the click just records explicit confirmation.
+
+**Morning (default 09:00 London next day) — `python -m
+ops.send_digest --type plan-morning`.** Reads `daily_plan_items`
+where `excluded_at IS NULL` for today and DMs the user one full
+`task_card` per surviving task (so the existing *Start* / *Mark
+done* / *Edit* buttons all work straight from the morning DM).
+Tracking section appears below.
+
+Idempotency — both jobs check `audit_logs` for
+`(category=daily_plan, action={evening_sent,morning_sent},
+actor=user_id, payload.plan_date=YYYY-MM-DD)` and short-circuit on
+re-run. So cron retries / double-fires don't duplicate DMs.
+
+Schema:
+- migration `0011_daily_plan_items` adds the
+  `daily_plan_items(id, user_id, plan_date, task_id, excluded_at,
+  created_at)` table with `UNIQUE(user_id, plan_date, task_id)` and
+  `INDEX(user_id, plan_date)`.
+
 #### FR-CR-04-13 — Start time, category, subtasks
 
 Three additional fields on `tasks`, all optional, all settable via
@@ -919,5 +959,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-11  | `test_message_archive.py` (slack_events_archive + raw / transcript / has_audio on slack_messages)             |
 | FR-CR-04-12  | `test_owner_employees_table.py` (employees table in owner prompt; id validation; name → id resolution)        |
 | FR-CR-04-13  | `test_task_extras.py` (start_date/start_time, category, subtasks via parent_task_id)                          |
+| FR-CR-04-14  | `test_daily_plan.py` (evening approval card with Skip/Approve, morning execution card, idempotency, tracking) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

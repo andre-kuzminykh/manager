@@ -34,7 +34,11 @@ def list_known_owners(session: Session) -> list[dict[str, str]]:
     for e in rows:
         if not e.slack_user_id:
             continue
-        name = e.display_name or e.real_name or e.slack_user_id
+        # `real_name` first because Slack's `display_name` often falls
+        # back to a low-quality value (the @username, e.g. "admin"),
+        # whereas `real_name_normalized` almost always carries the
+        # actual person's name.
+        name = e.real_name or e.display_name or e.slack_user_id
         out.append({"slack_user_id": e.slack_user_id, "display_name": name})
     if out:
         return out

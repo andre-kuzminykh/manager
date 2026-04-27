@@ -723,10 +723,43 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-24 — Owner picker + sheet-side names from the employees table
+
+A pair of QoL fixes that flow from the same observation: the bot already
+has a fresh `employees` directory (FR-CR-04-12 / 17), so any UI surface
+that lists / displays a person should read from it instead of relying
+on the static `ALLOWED_OWNERS` env or whatever happens to be cached on
+the `Task` row.
+
+**Edit-modal owner picker.** `app/services/owners.py:list_known_owners`
+queries `employees` (excluding bots), sorts by name, and falls back to
+`ALLOWED_OWNERS` only when the table is empty. Wired into:
+- `task_actions.handle_task_edit_open` (Edit on a confirmed task)
+- `shortcuts.handle_shortcut` (Create task from message shortcut)
+- `actions.handle_edit` (Edit on a draft card)
+
+So newcomers appear in the dropdown without an env redeploy as soon as
+the bot has seen them via workspace / per-channel sync.
+
+**Sheets owner column.** `app/sync/sheets._resolve_owner_name` looks
+up the owner via the same `employees` table and renders a
+human-readable name. Order of preference:
+
+1. `Employee.real_name` — Slack's `display_name` often falls back to
+   the @username (e.g. `"admin"`), while `real_name_normalized`
+   almost always carries the actual person's name. Real name first.
+2. `Employee.display_name` — used when there's no real name.
+3. `task.owner_display_name` with a leading `<@Uxxx>` Slack mention
+   stripped to a bare uid (so the cell never shows raw mention syntax).
+4. `task.owner_user_id` as a last resort.
+
+The `list_known_owners` helper applies the same priority, so the Edit
+dropdown and the spreadsheet stay consistent.
+
 #### FR-CR-04-23 — Live Google Sheets sync (Service Account, all events)
 
 The bot pushes the current state of every task to Google Sheets on
-every change — not only at draft finalize. Three sub-changes:
+every change — not only at draft finalize. Four sub-changes:
 
 1. **Service Account auth.** New env vars `GOOGLE_SERVICE_ACCOUNT_JSON`
    (inline JSON) or `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` (file path).
@@ -745,13 +778,22 @@ every change — not only at draft finalize. Three sub-changes:
    (Mark done), `handle_cancel_task`, `handle_delete_task_submit`,
    `handle_task_edit_submit`. Failures are logged, never raised, so
    Slack interactions don't break when Google is down.
+4. **Auto-write header row.** `SheetsSyncService._ensure_headers`
+   reads row 1 of the configured tab on the first sync per process.
+   If it's empty or doesn't match `_HEADER_ROW`, the bot overwrites
+   row 1 with its schema — column order in the sheet is now driven by
+   the code, not by hand-typed headers that drift out of sync. One
+   GET per process; flagged so subsequent syncs short-circuit.
 
-Row schema gains two columns:
+Row schema (21 columns; the bot's order is the source of truth):
 
-| column                | semantics                                                |
-|-----------------------|----------------------------------------------------------|
-| `deleted_at`          | ISO timestamp when the row was soft-deleted; empty otherwise |
-| `completion_artifact` | The URL or text saved when the task was marked done      |
+```
+task_id, title, description, owner, priority, category,
+start_date, start_time, due_date, due_time,
+is_recurring, recurring_weekdays, recurring_start_time, recurring_end_time,
+status, parent_task_id, source_permalink,
+created_at, updated_at, deleted_at, completion_artifact
+```
 
 When `deleted_at` is set, the `status` column reads `deleted` (instead
 of the underlying lifecycle status) so a glance at the sheet tells
@@ -769,8 +811,8 @@ Operator setup:
    (defaults to `Main`).
 5. Set `GOOGLE_SERVICE_ACCOUNT_JSON_PATH=/path/to/sa.json` (or paste
    the JSON inline into `GOOGLE_SERVICE_ACCOUNT_JSON=…`).
-6. Restart the bot. The next task creation appends a row; subsequent
-   transitions / edits / deletes update the same row.
+6. Restart the bot. The next task event appends/updates the row; the
+   header row is written automatically on first sync.
 
 #### FR-CR-04-22 — Per-channel employees sync + owner hallucination guard
 
@@ -1253,6 +1295,7 @@ pure unit tests for internal helpers.
 | FR-CR-04-20  | `test_cr01_lifecycle.py` (four-state enum, allowed transitions graph, retired values rejected), `test_task_cancel_delete.py` (review enum value gone, soft-delete excluded from workload + daily plan), migration `0013_soft_delete_drop_review.py` |
 | FR-CR-04-21  | `test_task_cancel_delete.py` (Cancel routing — within-week → todo, later → backlog; owner+admin only; Delete confirmation modal; soft-delete with audit row; tombstone card refresh; completion modal accepts an empty form) |
 | FR-CR-04-22  | `test_owner_hallucination_guard.py` (real-name match against the employees table; drop unresolvable-and-not-in-source name so quiet-author-fallback fires), `test_employees_per_channel_sync.py` (`ensure_channel_synced` upserts roster, throttles repeats, isolates channels) |
-| FR-CR-04-23  | `test_sheets_sync_hooks.py` (Service-Account preferred, OAuth fall-back; configurable tab name; `_task_row` flips status to `deleted` when soft-deleted; TaskSyncer no-op without factory; Cancel / Delete / Start handlers call the active syncer); plus updated `test_sync_factories.py` |
+| FR-CR-04-23  | `test_sheets_sync_hooks.py` (Service-Account preferred, OAuth fall-back; configurable tab name; `_task_row` flips status to `deleted` when soft-deleted; TaskSyncer no-op without factory; Cancel / Delete / Start handlers call the active syncer; `_ensure_headers` writes / overwrites / no-ops correctly and runs at most once per process); plus updated `test_sync_factories.py` |
+| FR-CR-04-24  | `test_owners_from_employees.py` (`list_known_owners`: real_name first, display_name fallback, env fallback when DB empty, bots excluded, classic "admin" → real-name case); `test_sheets_sync_hooks.py::test_owner_resolves_to_real_name_via_employees`, `::test_owner_strips_slack_mention_when_employee_unknown`, `::test_owner_uses_display_name_when_no_real_name`, `::test_owner_returns_owner_user_id_as_last_resort` |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

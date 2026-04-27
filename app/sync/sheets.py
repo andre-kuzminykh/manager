@@ -46,7 +46,10 @@ def _resolve_owner_name(session: Session | None, task: Task) -> str:
     """Pick the most human-readable owner string for the spreadsheet.
 
     Order of preference:
-    1. Employee.display_name / real_name (looked up by `owner_user_id`).
+    1. Employee.real_name / display_name (looked up by `owner_user_id`).
+       Real name first because Slack's `display_name` often falls back
+       to the @username (e.g. "admin"), while `real_name_normalized`
+       almost always carries the actual person's name.
     2. `owner_display_name`, with a leading `<@Uxxx>` Slack mention
        stripped to a bare uid (so the cell never shows raw mention syntax).
     3. `owner_user_id` as last resort.
@@ -54,7 +57,7 @@ def _resolve_owner_name(session: Session | None, task: Task) -> str:
     if task.owner_user_id and session is not None:
         emp = session.get(Employee, task.owner_user_id)
         if emp is not None:
-            name = emp.display_name or emp.real_name
+            name = emp.real_name or emp.display_name
             if name:
                 return name
     raw = (task.owner_display_name or "").strip()

@@ -74,6 +74,193 @@ def test_task_row_includes_completion_artifact():
 
 
 # --------------------------------------------------------------------------- #
+# Owner column: human-readable, never raw "<@Uxxx>" mention
+# --------------------------------------------------------------------------- #
+
+
+def test_owner_resolves_to_real_name_via_employees(session):
+    """When the owner is in the employees table, the sheet shows the
+    person's real name — not `<@Uxxx>`, not their @username."""
+    from app.models import Employee
+    from app.sync.sheets import _resolve_owner_name
+
+    session.add(
+        Employee(
+            slack_user_id="U-andre",
+            display_name="admin",  # @username fallback in Slack
+            real_name="Andre Kuzminykh",
+        )
+    )
+    session.flush()
+    t = Task(
+        id=1,
+        title="t",
+        owner_user_id="U-andre",
+        owner_display_name="<@U-andre>",  # set by the quiet-author fallback
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+    )
+    assert _resolve_owner_name(session, t) == "Andre Kuzminykh"
+
+
+def test_owner_strips_slack_mention_when_employee_unknown(session):
+    """If the owner isn't in employees yet, fall back to the bare uid
+    (stripped of `<@...>` wrapping) rather than dumping the mention."""
+    from app.sync.sheets import _resolve_owner_name
+
+    t = Task(
+        id=1,
+        title="t",
+        owner_user_id="U09STRANGER",
+        owner_display_name="<@U09STRANGER>",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+    )
+    assert _resolve_owner_name(session, t) == "U09STRANGER"
+
+
+def test_owner_uses_display_name_when_no_real_name(session):
+    from app.models import Employee
+    from app.sync.sheets import _resolve_owner_name
+
+    session.add(
+        Employee(slack_user_id="U-d", display_name="Dee", real_name=None)
+    )
+    session.flush()
+    t = Task(
+        id=1,
+        title="t",
+        owner_user_id="U-d",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+    )
+    assert _resolve_owner_name(session, t) == "Dee"
+
+
+def test_owner_returns_owner_user_id_as_last_resort():
+    from app.sync.sheets import _resolve_owner_name
+
+    t = Task(
+        id=1,
+        title="t",
+        owner_user_id="U-ghost",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+    )
+    # No session → no employees lookup; no display_name set.
+    assert _resolve_owner_name(None, t) == "U-ghost"
+
+
+# --------------------------------------------------------------------------- #
+# Auto-write header row
+# --------------------------------------------------------------------------- #
+
+
+def _make_svc():
+    from app.sync.sheets import SheetsSyncService
+
+    svc = SheetsSyncService.__new__(SheetsSyncService)
+    svc._service = None  # we'll assign a fake below
+    svc._spreadsheet_id = "SHEET"
+    svc._sheet_name = "Main"
+    svc._headers_checked = False
+    return svc
+
+
+class _FakeSheets:
+    """Minimal stub of `service.spreadsheets().values().get/.update()`."""
+
+    def __init__(self, *, current_headers: list | None = None):
+        self.gets: list[str] = []
+        self.updates: list[dict] = []
+        self._current_headers = current_headers
+
+    # The chain `service.spreadsheets().values().get(...).execute()` is
+    # implemented as nested objects that all return self where useful.
+    def spreadsheets(self):
+        return self
+
+    def values(self):
+        return self
+
+    def get(self, spreadsheetId, range):  # noqa: N803
+        self.gets.append(range)
+        self._last_op = (
+            "get",
+            {"spreadsheetId": spreadsheetId, "range": range},
+        )
+        return self
+
+    def update(self, spreadsheetId, range, valueInputOption, body):  # noqa: N803
+        self.updates.append(
+            {
+                "spreadsheetId": spreadsheetId,
+                "range": range,
+                "valueInputOption": valueInputOption,
+                "body": body,
+            }
+        )
+        self._last_op = ("update", {})
+        return self
+
+    def execute(self):
+        if self._last_op[0] == "get":
+            return {"values": [self._current_headers]} if self._current_headers else {}
+        return {}
+
+
+def test_ensure_headers_writes_when_row1_empty():
+    from app.sync.sheets import _HEADER_ROW
+
+    svc = _make_svc()
+    fake = _FakeSheets(current_headers=None)
+    svc._service = fake
+
+    svc._ensure_headers()
+    assert len(fake.updates) == 1
+    upd = fake.updates[0]
+    assert upd["range"].startswith("Main!A1:")
+    assert upd["body"]["values"][0] == _HEADER_ROW
+
+
+def test_ensure_headers_overwrites_when_row1_mismatches():
+    """The user's manually-typed headers were a different schema; the
+    bot must take over to keep column order in sync with `_task_row`."""
+    svc = _make_svc()
+    fake = _FakeSheets(
+        current_headers=["task_id", "title", "owner"]  # not our shape
+    )
+    svc._service = fake
+
+    svc._ensure_headers()
+    assert len(fake.updates) == 1
+
+
+def test_ensure_headers_no_op_when_already_correct():
+    from app.sync.sheets import _HEADER_ROW
+
+    svc = _make_svc()
+    fake = _FakeSheets(current_headers=list(_HEADER_ROW))
+    svc._service = fake
+
+    svc._ensure_headers()
+    assert fake.updates == []
+
+
+def test_ensure_headers_runs_at_most_once_per_process():
+    svc = _make_svc()
+    fake = _FakeSheets(current_headers=None)
+    svc._service = fake
+
+    svc._ensure_headers()
+    svc._ensure_headers()
+    svc._ensure_headers()
+    # Only the first call hit the Sheets API; subsequent ones short-circuit.
+    assert len(fake.gets) == 1
+    assert len(fake.updates) == 1
+
+
+# --------------------------------------------------------------------------- #
 # Configurable tab name
 # --------------------------------------------------------------------------- #
 

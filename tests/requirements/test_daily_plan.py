@@ -431,3 +431,132 @@ def test_morning_dm_lists_tracking_subscriptions(
     flat = str(sender.posts[0]["blocks"])
     assert "Tracking" in flat
     assert f"#{watched.id}" in flat
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-04-25: Approve is optional — morning runs as-is + writes
+# auto_approved audit row + flags the morning DM.
+# --------------------------------------------------------------------------- #
+
+
+def test_morning_runs_without_explicit_approve(
+    patched_session_scope, SessionFactory
+):
+    plan_date = date(2026, 5, 1)
+    with SessionFactory() as s:
+        t = _mk_task(s, due_date=plan_date)
+        s.add(DailyPlanItem(user_id="U-owner", plan_date=plan_date, task_id=t.id))
+        s.commit()
+        sender = _Sender()
+        report = send_morning_plan(
+            s, sender=sender, plan_date=plan_date, user_ids=["U-owner"]
+        )
+        s.commit()
+    assert report.sent == 1
+    assert sender.posts  # morning DM was delivered
+
+
+def test_morning_writes_auto_approved_audit_when_no_approve(
+    patched_session_scope, SessionFactory
+):
+    plan_date = date(2026, 5, 1)
+    with SessionFactory() as s:
+        t = _mk_task(s, due_date=plan_date)
+        s.add(DailyPlanItem(user_id="U-owner", plan_date=plan_date, task_id=t.id))
+        s.commit()
+        sender = _Sender()
+        send_morning_plan(
+            s, sender=sender, plan_date=plan_date, user_ids=["U-owner"]
+        )
+        s.commit()
+
+    with SessionFactory() as s:
+        rows = (
+            s.query(AuditLog)
+            .filter(
+                AuditLog.category == "daily_plan",
+                AuditLog.action == "auto_approved",
+                AuditLog.actor == "U-owner",
+                AuditLog.entity_id == plan_date.isoformat(),
+            )
+            .all()
+        )
+        assert len(rows) == 1
+
+
+def test_morning_dm_shows_auto_approve_note_when_no_approve(
+    patched_session_scope, SessionFactory
+):
+    plan_date = date(2026, 5, 1)
+    with SessionFactory() as s:
+        t = _mk_task(s, due_date=plan_date)
+        s.add(DailyPlanItem(user_id="U-owner", plan_date=plan_date, task_id=t.id))
+        s.commit()
+        sender = _Sender()
+        send_morning_plan(
+            s, sender=sender, plan_date=plan_date, user_ids=["U-owner"]
+        )
+        s.commit()
+
+    flat = str(sender.posts[0]["blocks"])
+    assert "wasn't explicitly approved" in flat
+
+
+def test_morning_skips_auto_approve_when_user_clicked_approve(
+    patched_session_scope, SessionFactory
+):
+    plan_date = date(2026, 5, 1)
+    with SessionFactory() as s:
+        t = _mk_task(s, due_date=plan_date)
+        s.add(DailyPlanItem(user_id="U-owner", plan_date=plan_date, task_id=t.id))
+        # Simulate user clicking Approve in the evening: row of the same
+        # shape as `handle_plan_approve` writes after FR-CR-04-25.
+        s.add(
+            AuditLog(
+                category="daily_plan",
+                action="approved",
+                entity_type="daily_plan",
+                entity_id=plan_date.isoformat(),
+                actor="U-owner",
+                payload={"plan_date": plan_date.isoformat()},
+            )
+        )
+        s.commit()
+        sender = _Sender()
+        send_morning_plan(
+            s, sender=sender, plan_date=plan_date, user_ids=["U-owner"]
+        )
+        s.commit()
+
+    # No `auto_approved` row should be written when the user explicitly approved.
+    with SessionFactory() as s:
+        n = (
+            s.query(AuditLog)
+            .filter(
+                AuditLog.category == "daily_plan",
+                AuditLog.action == "auto_approved",
+                AuditLog.actor == "U-owner",
+            )
+            .count()
+        )
+        assert n == 0
+    # And the DM should NOT carry the "wasn't approved" note.
+    flat = str(sender.posts[0]["blocks"])
+    assert "wasn't explicitly approved" not in flat
+
+
+def test_evening_card_copy_says_approve_is_optional(
+    patched_session_scope, SessionFactory
+):
+    plan_date = date(2026, 5, 1)
+    with SessionFactory() as s:
+        _mk_task(s, due_date=plan_date)
+        s.commit()
+        sender = _Sender()
+        send_evening_plan(
+            s, sender=sender, plan_date=plan_date, user_ids=["U-owner"]
+        )
+        s.commit()
+    flat = str(sender.posts[0]["blocks"])
+    assert "optional" in flat.lower()
+    assert "as-is" in flat

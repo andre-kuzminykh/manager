@@ -13,6 +13,13 @@ Two cron jobs per day per user:
     task as a card + Start button, and a Tracking section listing
     every task the user is subscribed to (the "favourites").
 
+The Approve button is **optional** (FR-CR-04-25). If the user never
+clicks it, the morning run still goes ahead "as is" — the plan rows
+that survived Skip clicks become today's plan. We write a
+`plan_auto_approved` audit row when that happens so the trail is
+explicit, and we prepend a short note to the morning DM so the user
+sees what was used.
+
 Idempotency: every send writes an audit_logs row keyed by
 (category=daily_plan, action={evening,morning}, payload.user, day).
 Re-running the cron on the same day for the same user is a no-op.
@@ -127,6 +134,28 @@ def _mark_sent(session: Session, *, action: str, user_id: str, plan_date: date) 
     )
 
 
+def _was_explicitly_approved(
+    session: Session, *, user_id: str, plan_date: date
+) -> bool:
+    """True iff the user clicked Approve on the evening card.
+
+    `handle_plan_approve` writes the audit row with the same schema as
+    `_mark_sent` (entity_id = plan_date ISO, actor = user_id), so this
+    is a plain index-friendly equality query — no JSON contains.
+    """
+    return (
+        session.query(AuditLog)
+        .filter(
+            AuditLog.category == "daily_plan",
+            AuditLog.action == "approved",
+            AuditLog.actor == user_id,
+            AuditLog.entity_id == plan_date.isoformat(),
+        )
+        .first()
+        is not None
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Evening: build plan + send approval DM
 # --------------------------------------------------------------------------- #
@@ -219,7 +248,13 @@ def send_morning_plan(
     user_ids: Iterable[str],
 ) -> PlanReport:
     """Morning run. Read the surviving plan items and DM the user
-    actionable cards + their tracking list."""
+    actionable cards + their tracking list.
+
+    FR-CR-04-25: explicit Approve is optional. If the user never
+    clicked Approve on yesterday's evening card, we still ship the
+    plan — and write a `plan_auto_approved` audit row + flag the
+    morning DM so the trail is clear.
+    """
     report = PlanReport()
     for user_id in user_ids:
         if _already_sent(
@@ -254,6 +289,24 @@ def send_morning_plan(
         )
         tracking = _subscribed_tracking(session, user_id)
 
+        # If the user never clicked Approve, write an auto-approve
+        # audit row and set the flag so the morning DM shows a small
+        # "wasn't approved — running as is" note.
+        was_approved = _was_explicitly_approved(
+            session, user_id=user_id, plan_date=plan_date
+        )
+        if not was_approved:
+            session.add(
+                AuditLog(
+                    category="daily_plan",
+                    action="auto_approved",
+                    entity_type="daily_plan",
+                    entity_id=plan_date.isoformat(),
+                    actor=user_id,
+                    payload={"plan_date": plan_date.isoformat()},
+                )
+            )
+
         try:
             sender.post_message(
                 channel=user_id,
@@ -262,6 +315,7 @@ def send_morning_plan(
                     user_id=user_id,
                     tasks=tasks,
                     tracking=tracking,
+                    auto_approved=not was_approved,
                 ),
                 text=f":sunny: Today's plan — {plan_date.isoformat()}",
             )
@@ -333,7 +387,8 @@ def _evening_blocks(
                     "type": "mrkdwn",
                     "text": (
                         "Your plan for tomorrow. Drop tasks you won't get to "
-                        "with *Skip*. When you're ready — *Approve plan*."
+                        "with *Skip*. *Approve plan* is optional — if you "
+                        "don't, we'll run this as-is in the morning."
                     ),
                 }
             ],
@@ -406,7 +461,18 @@ def _morning_blocks(
     user_id: str,
     tasks: list[Task],
     tracking: list[Task],
+    auto_approved: bool = False,
 ) -> list[dict[str, Any]]:
+    intro_text = (
+        "Click *Start* on a task when you begin it. "
+        "Close it with *Mark done* on the card."
+    )
+    if auto_approved:
+        # FR-CR-04-25: make the auto-approve path visible to the user.
+        intro_text = (
+            ":memo: Plan wasn't explicitly approved last night — running "
+            "as-is. " + intro_text
+        )
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
@@ -418,13 +484,7 @@ def _morning_blocks(
         {
             "type": "context",
             "elements": [
-                {
-                    "type": "mrkdwn",
-                    "text": (
-                        "Click *Start* on a task when you begin it. "
-                        "Close it with *Mark done* on the card."
-                    ),
-                }
+                {"type": "mrkdwn", "text": intro_text}
             ],
         },
         {"type": "divider"},

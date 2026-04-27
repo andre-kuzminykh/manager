@@ -723,6 +723,37 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-25 — Daily plan: explicit Approve is optional
+
+The evening DM still carries an *Approve plan* button, but it's now
+explicitly **optional**. If the user goes to bed without clicking it
+the morning run goes ahead anyway with whatever survived their
+*Skip* clicks — no plan ever vanishes silently because the user
+forgot one button.
+
+Implementation lives in `app/services/daily_plan.py`:
+
+- The evening DM context line reads
+  *"Approve plan is optional — if you don't, we'll run this as-is in
+  the morning."* — so the user knows the button isn't a gate.
+- `handle_plan_approve` writes its `audit_logs` row in the same
+  shape as `_mark_sent` (entity_id = plan_date ISO, actor = user_id)
+  so the new `_was_explicitly_approved(user_id, plan_date)` helper
+  can match by index without scanning JSON payload (avoids the
+  Postgres `LIKE`-on-JSON gotcha noted in `_already_sent`).
+- `send_morning_plan` calls `_was_explicitly_approved` first. When
+  the user **didn't** click Approve, the bot:
+  1. writes a `plan_auto_approved` audit row
+     (category=`daily_plan`, action=`auto_approved`, actor=user,
+     entity_id=plan_date) so the trail is explicit;
+  2. passes `auto_approved=True` into `_morning_blocks` so the
+     morning DM gets a small *":memo: Plan wasn't explicitly approved
+     last night — running as-is."* note above the task cards.
+
+The behaviour is symmetric for "approved": the morning DM looks the
+same as before (no auto-approve note) and no `auto_approved` row is
+written.
+
 #### FR-CR-04-24 — Owner picker + sheet-side names from the employees table
 
 A pair of QoL fixes that flow from the same observation: the bot already
@@ -1297,5 +1328,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-22  | `test_owner_hallucination_guard.py` (real-name match against the employees table; drop unresolvable-and-not-in-source name so quiet-author-fallback fires), `test_employees_per_channel_sync.py` (`ensure_channel_synced` upserts roster, throttles repeats, isolates channels) |
 | FR-CR-04-23  | `test_sheets_sync_hooks.py` (Service-Account preferred, OAuth fall-back; configurable tab name; `_task_row` flips status to `deleted` when soft-deleted; TaskSyncer no-op without factory; Cancel / Delete / Start handlers call the active syncer; `_ensure_headers` writes / overwrites / no-ops correctly and runs at most once per process); plus updated `test_sync_factories.py` |
 | FR-CR-04-24  | `test_owners_from_employees.py` (`list_known_owners`: real_name first, display_name fallback, env fallback when DB empty, bots excluded, classic "admin" → real-name case); `test_sheets_sync_hooks.py::test_owner_resolves_to_real_name_via_employees`, `::test_owner_strips_slack_mention_when_employee_unknown`, `::test_owner_uses_display_name_when_no_real_name`, `::test_owner_returns_owner_user_id_as_last_resort` |
+| FR-CR-04-25  | `test_daily_plan.py::test_morning_runs_without_explicit_approve`, `::test_morning_writes_auto_approved_audit_when_no_approve`, `::test_morning_dm_shows_auto_approve_note_when_no_approve`, `::test_morning_skips_auto_approve_when_user_clicked_approve`, `::test_evening_card_copy_says_approve_is_optional` |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

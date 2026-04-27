@@ -99,8 +99,10 @@ def handle_plan_approve(*, body: dict[str, Any], sender, ack: Ack) -> None:
             AuditLog(
                 category="daily_plan",
                 action="approved",
-                entity_type="user",
-                entity_id=actor,
+                entity_type="daily_plan",
+                # entity_id = plan_date so `_was_explicitly_approved`
+                # can match by index without scanning JSON payload.
+                entity_id=plan_date.isoformat(),
                 actor=actor,
                 payload={"plan_date": plan_date.isoformat()},
             )

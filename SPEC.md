@@ -720,6 +720,31 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-13 — Start time, category, subtasks
+
+Three additional fields on `tasks`, all optional, all settable via
+the Edit modal (no UI in the LLM pipeline — these are not derived
+from message text):
+
+- `start_date` (Date) + `start_time` (Time) — when the assignee
+  plans to start the work. Reserved for a future calendar-booking
+  integration; right now they're shown on the task card as
+  `start: YYYY-MM-DD HH:MM` and synced to Google Sheets.
+- `category` (String 64) — free-form direction label
+  ("маркетинг" / "разработка" / "ops" / …). String not enum so
+  adding a new bucket doesn't need a migration.
+- `parent_task_id` (Integer FK → tasks.id, ON DELETE SET NULL) —
+  one-parent-per-child subtask hierarchy. SQLAlchemy
+  `Task.subtasks` (children) and `Task.parent` (back-ref). Deleting
+  a parent leaves children with `parent_task_id = NULL` rather
+  than cascading.
+
+Migration `0010_task_extras` adds the columns and indexes
+`ix_tasks_parent_task_id`, `ix_tasks_category`. Sheets sync row
+header gains `category`, `start_date`, `start_time`,
+`parent_task_id` columns; the diff audit row in admin-edit
+captures changes to all three.
+
 #### FR-CR-04-12 — Employees table in the owner prompt
 
 The owner LLM stage receives a structured `known_employees` table —
@@ -893,5 +918,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-10  | `test_task_edit_button.py`                                                                                   |
 | FR-CR-04-11  | `test_message_archive.py` (slack_events_archive + raw / transcript / has_audio on slack_messages)             |
 | FR-CR-04-12  | `test_owner_employees_table.py` (employees table in owner prompt; id validation; name → id resolution)        |
+| FR-CR-04-13  | `test_task_extras.py` (start_date/start_time, category, subtasks via parent_task_id)                          |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

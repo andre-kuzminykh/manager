@@ -57,6 +57,11 @@ def _extract_task_payload(view: dict[str, Any]) -> dict[str, Any]:
         "priority": _state_value(values, bk.BLOCK_PRIORITY, bk.INPUT_PRIORITY) or "medium",
         "due_date": _state_value(values, bk.BLOCK_DUE, bk.INPUT_DUE),
         "due_time": _state_value(values, bk.BLOCK_DUE_TIME, bk.INPUT_DUE_TIME),
+        "start_date": _state_value(values, bk.BLOCK_START_DATE, bk.INPUT_START_DATE),
+        "start_time": _state_value(values, bk.BLOCK_START_TIME, bk.INPUT_START_TIME),
+        "category": (
+            _state_value(values, bk.BLOCK_CATEGORY, bk.INPUT_CATEGORY) or ""
+        ).strip() or None,
         "estimated_minutes": estimated_minutes,
     }
 

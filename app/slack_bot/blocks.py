@@ -55,6 +55,9 @@ BLOCK_OWNER = "owner_block"
 BLOCK_PRIORITY = "priority_block"
 BLOCK_DUE = "due_block"
 BLOCK_DUE_TIME = "due_time_block"
+BLOCK_START_DATE = "start_date_block"
+BLOCK_START_TIME = "start_time_block"
+BLOCK_CATEGORY = "category_block"
 BLOCK_PARTICIPANTS = "participants_block"
 BLOCK_DATETIME = "datetime_block"
 BLOCK_NOTES = "notes_block"
@@ -66,6 +69,9 @@ INPUT_OWNER = "owner_input"
 INPUT_PRIORITY = "priority_input"
 INPUT_DUE = "due_input"
 INPUT_DUE_TIME = "due_time_input"
+INPUT_START_DATE = "start_date_input"
+INPUT_START_TIME = "start_time_input"
+INPUT_CATEGORY = "category_input"
 INPUT_PARTICIPANTS = "participants_input"
 INPUT_DATETIME = "datetime_input"
 INPUT_NOTES = "notes_input"
@@ -337,6 +343,31 @@ def task_modal(
     if initial.get("due_time"):
         due_time_element["initial_time"] = initial["due_time"]
 
+    start_date_element: dict[str, Any] = {
+        "type": "datepicker",
+        "action_id": INPUT_START_DATE,
+    }
+    if initial.get("start_date"):
+        start_date_element["initial_date"] = initial["start_date"]
+
+    start_time_element: dict[str, Any] = {
+        "type": "timepicker",
+        "action_id": INPUT_START_TIME,
+    }
+    if initial.get("start_time"):
+        start_time_element["initial_time"] = initial["start_time"]
+
+    category_element: dict[str, Any] = {
+        "type": "plain_text_input",
+        "action_id": INPUT_CATEGORY,
+        "placeholder": {
+            "type": "plain_text",
+            "text": "e.g. marketing / dev / ops (optional)",
+        },
+    }
+    if initial.get("category"):
+        category_element["initial_value"] = initial["category"]
+
     effort_element = {
         "type": "plain_text_input",
         "action_id": INPUT_EFFORT,
@@ -400,6 +431,27 @@ def task_modal(
             },
             {
                 "type": "input",
+                "block_id": BLOCK_START_DATE,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Start date (optional)"},
+                "element": start_date_element,
+            },
+            {
+                "type": "input",
+                "block_id": BLOCK_START_TIME,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Start time (optional)"},
+                "element": start_time_element,
+            },
+            {
+                "type": "input",
+                "block_id": BLOCK_CATEGORY,
+                "optional": True,
+                "label": {"type": "plain_text", "text": "Category (optional)"},
+                "element": category_element,
+            },
+            {
+                "type": "input",
                 "block_id": BLOCK_EFFORT,
                 "optional": True,
                 "label": {"type": "plain_text", "text": "Estimated effort (min)"},
@@ -443,6 +495,13 @@ def task_card(
         if getattr(task, "due_time", None):
             due_str += f" {task.due_time.strftime('%H:%M')}"
         meta_parts.append(f"due: {due_str}")
+    if getattr(task, "start_date", None):
+        start_str = task.start_date.isoformat()
+        if getattr(task, "start_time", None):
+            start_str += f" {task.start_time.strftime('%H:%M')}"
+        meta_parts.append(f"start: {start_str}")
+    if getattr(task, "category", None):
+        meta_parts.append(f"category: {task.category}")
     if task.priority:
         meta_parts.append(f"priority: {task.priority.value}")
 

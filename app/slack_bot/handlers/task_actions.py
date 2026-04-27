@@ -488,6 +488,9 @@ def handle_task_edit_open(
             "priority": task.priority.value,
             "due_date": task.due_date.isoformat() if task.due_date else None,
             "due_time": task.due_time.strftime("%H:%M") if task.due_time else None,
+            "start_date": task.start_date.isoformat() if task.start_date else None,
+            "start_time": task.start_time.strftime("%H:%M") if task.start_time else None,
+            "category": task.category,
             "estimated_minutes": task.estimated_minutes,
         }
 
@@ -558,15 +561,27 @@ def handle_task_edit_submit(
                 new_due_d = None
         task.due_date = new_due_d
 
-        new_time = payload.get("due_time")
-        new_time_t: _time | None = None
-        if isinstance(new_time, str) and new_time:
-            try:
-                hh, mm = new_time.split(":")[:2]
-                new_time_t = _time(int(hh), int(mm))
-            except (ValueError, IndexError):
-                new_time_t = None
-        task.due_time = new_time_t
+        def _parse_time(raw):
+            if isinstance(raw, str) and raw:
+                try:
+                    hh, mm = raw.split(":")[:2]
+                    return _time(int(hh), int(mm))
+                except (ValueError, IndexError):
+                    return None
+            return None
+
+        def _parse_date(raw):
+            if isinstance(raw, str) and raw:
+                try:
+                    return _date.fromisoformat(raw)
+                except ValueError:
+                    return None
+            return None
+
+        task.due_time = _parse_time(payload.get("due_time"))
+        task.start_date = _parse_date(payload.get("start_date"))
+        task.start_time = _parse_time(payload.get("start_time"))
+        task.category = payload.get("category")
 
         if payload.get("estimated_minutes") is not None:
             task.estimated_minutes = payload.get("estimated_minutes")

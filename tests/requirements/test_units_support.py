@@ -589,15 +589,21 @@ def test_sheets_task_row_has_expected_columns(session):
     session.add(t)
     session.flush()
     row = _task_row(t)
+    # Header order: id, title, description, owner, priority, category,
+    # start_date, start_time, due_date, due_time, status,
+    # parent_task_id, source_permalink, created_at, updated_at.
     assert row[1] == "hello"
     assert row[2] == "world"
     assert row[3] == "@a"
     assert row[4] == "high"
-    assert row[5] == "2026-07-01"
-    # row[6] is due_time — empty when not set
-    assert row[6] == ""
-    assert row[7] == "todo"
-    assert row[8] == "https://p"
+    assert row[5] == ""           # category
+    assert row[6] == ""           # start_date
+    assert row[7] == ""           # start_time
+    assert row[8] == "2026-07-01" # due_date
+    assert row[9] == ""           # due_time
+    assert row[10] == "todo"
+    assert row[11] == ""          # parent_task_id
+    assert row[12] == "https://p"
 
 
 def test_sheets_task_row_handles_missing_optional_fields(session):
@@ -612,10 +618,12 @@ def test_sheets_task_row_handles_missing_optional_fields(session):
     session.add(t)
     session.flush()
     row = _task_row(t)
-    assert row[2] == ""  # description
-    assert row[5] == ""  # no due date
-    assert row[6] == ""  # no due time
-    assert row[8] == ""  # no permalink
+    assert row[2] == ""   # description
+    assert row[5] == ""   # category
+    assert row[6] == ""   # start_date
+    assert row[8] == ""   # due_date
+    assert row[9] == ""   # due_time
+    assert row[12] == ""  # source_permalink
 
 
 # =============================================================================

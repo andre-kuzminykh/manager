@@ -59,6 +59,25 @@ class Task(Base, TimestampMixin):
     # due_date it gives a full datetime; without due_date the time is
     # ignored on display.
     due_time: Mapped[time | None] = mapped_column(Time, nullable=True)
+
+    # When the assignee plans to start. Pure data fields right now;
+    # they'll feed a future calendar-booking integration but no UI
+    # depends on them yet.
+    start_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
+
+    # Free-form direction / department label ("маркетинг", "разработка",
+    # "ops", …). String so adding a new category never needs a
+    # migration. Drop-down list lives in CATEGORIES env config.
+    category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    # Subtask hierarchy: one parent per child task, no enforced depth
+    # limit. ondelete=SET NULL so deleting a parent leaves the child
+    # rows alive (orphaned, but not lost).
+    parent_task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
+    )
+
     status: Mapped[TaskStatus] = mapped_column(
         Enum(TaskStatus, name="task_status"), nullable=False, default=TaskStatus.backlog
     )
@@ -111,6 +130,14 @@ class Task(Base, TimestampMixin):
     )
     subscriptions: Mapped[list["TaskSubscription"]] = relationship(
         back_populates="task", cascade="all, delete-orphan"
+    )
+
+    # Self-referencing parent/children for subtasks.
+    parent: Mapped["Task | None"] = relationship(
+        "Task", remote_side="Task.id", back_populates="subtasks"
+    )
+    subtasks: Mapped[list["Task"]] = relationship(
+        "Task", back_populates="parent",
     )
 
 

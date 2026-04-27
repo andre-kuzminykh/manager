@@ -164,6 +164,9 @@ def handle_admin_edit_open(
             "priority": task.priority.value,
             "due_date": task.due_date.isoformat() if task.due_date else None,
             "due_time": task.due_time.strftime("%H:%M") if task.due_time else None,
+            "start_date": task.start_date.isoformat() if task.start_date else None,
+            "start_time": task.start_time.strftime("%H:%M") if task.start_time else None,
+            "category": task.category,
             "estimated_minutes": task.estimated_minutes,
         }
 
@@ -270,6 +273,41 @@ def handle_admin_edit_submit(
                 new_time_t.strftime("%H:%M") if new_time_t else None,
             ]
             task.due_time = new_time_t
+
+        # start_date / start_time / category — same diff pattern.
+        new_start = payload.get("start_date")
+        new_start_d = None
+        if isinstance(new_start, str) and new_start:
+            try:
+                new_start_d = _date.fromisoformat(new_start)
+            except ValueError:
+                new_start_d = None
+        if new_start_d != task.start_date:
+            diff["start_date"] = [
+                task.start_date.isoformat() if task.start_date else None,
+                new_start_d.isoformat() if new_start_d else None,
+            ]
+            task.start_date = new_start_d
+
+        new_st = payload.get("start_time")
+        new_st_t = None
+        if isinstance(new_st, str) and new_st:
+            try:
+                hh, mm = new_st.split(":")[:2]
+                new_st_t = _time(int(hh), int(mm))
+            except (ValueError, IndexError):
+                new_st_t = None
+        if new_st_t != task.start_time:
+            diff["start_time"] = [
+                task.start_time.strftime("%H:%M") if task.start_time else None,
+                new_st_t.strftime("%H:%M") if new_st_t else None,
+            ]
+            task.start_time = new_st_t
+
+        new_cat = payload.get("category") or None
+        if new_cat != task.category:
+            diff["category"] = [task.category, new_cat]
+            task.category = new_cat
 
         if payload.get("estimated_minutes") != task.estimated_minutes:
             diff["estimated_minutes"] = [

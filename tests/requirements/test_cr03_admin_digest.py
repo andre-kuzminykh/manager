@@ -134,7 +134,7 @@ def test_evening_idempotent_same_day(session, monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_morning_watch_lists_in_progress_review_overdue(session, monkeypatch):
+def test_morning_watch_lists_in_progress_and_overdue(session, monkeypatch):
     monkeypatch.setenv("ADMIN_SLACK_USER_IDS", "U-a")
     from app.config import get_settings
 
@@ -142,7 +142,6 @@ def test_morning_watch_lists_in_progress_review_overdue(session, monkeypatch):
 
     today = date(2026, 4, 23)
     _task(session, status=TaskStatus.in_progress, owner_user_id="U1", title="doing")
-    _task(session, status=TaskStatus.review, owner_user_id="U2", title="reviewing")
     _task(
         session,
         status=TaskStatus.todo,
@@ -162,7 +161,6 @@ def test_morning_watch_lists_in_progress_review_overdue(session, monkeypatch):
     send_admin_morning_watch(session, sender=sender, today=today)
     body = sender.posts[0]["blocks"][0]["text"]["text"]
     assert "doing" in body
-    assert "reviewing" in body
     assert "late" in body
     assert "future" not in body
     get_settings.cache_clear()  # type: ignore[attr-defined]

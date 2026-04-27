@@ -131,12 +131,10 @@ def test_weekly_digest_idempotent_same_week(session):
 def test_weekly_digest_highlights_attention_items(session):
     monday = date(2026, 4, 20)
     _task(session, owner="U1", status=TaskStatus.in_progress, title="in_prog")
-    _task(session, owner="U1", status=TaskStatus.review, title="in_review")
     sender = _RecordingSender()
     DigestService(sender=sender).send(session, DigestKind.weekly, today=monday)
     body = sender.messages[0]["blocks"][0]["text"]["text"]
     assert "in_prog" in body
-    assert "in_review" in body
 
 
 # =========================================================================== #

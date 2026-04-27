@@ -2,7 +2,7 @@
 
 Heuristic:
 - For a given owner, sum `estimated_minutes` of open tasks
-  (status in {backlog, todo, in_progress, review}).
+  (status in {backlog, todo, in_progress}).
 - Given a daily minute budget (default 6h = 360 min), compute how many
   *business days* (Mon-Fri) are needed to clear the queue + the new task.
 - Propose a due date that lands on the first business day with enough slack.
@@ -16,12 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Task, TaskStatus
 
-_OPEN_STATUSES = (
-    TaskStatus.backlog,
-    TaskStatus.todo,
-    TaskStatus.in_progress,
-    TaskStatus.review,
-)
+_OPEN_STATUSES = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress)
 
 
 @dataclass
@@ -65,6 +60,7 @@ class WorkloadEstimator:
             .filter(
                 Task.owner_user_id == owner_user_id,
                 Task.status.in_(_OPEN_STATUSES),
+                Task.deleted_at.is_(None),
             )
             .all()
         )

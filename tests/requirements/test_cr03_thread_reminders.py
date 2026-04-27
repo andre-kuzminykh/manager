@@ -54,13 +54,6 @@ def test_reminder_pings_in_progress_task_in_source_thread(session):
     assert "what's the progress" in msg["text"]
 
 
-def test_reminder_review_text(session):
-    _task(session, status=TaskStatus.review, thread="11.0", title="r")
-    sender = _S()
-    send_thread_reminders(session, sender=sender, today=date(2026, 4, 23))
-    assert "review needed" in sender.posts[0]["text"]
-
-
 def test_reminder_todo_only_if_due_this_week(session):
     today = date(2026, 4, 23)  # Thursday
     _task(

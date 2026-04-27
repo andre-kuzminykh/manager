@@ -39,13 +39,17 @@ class DigestReport:
     details: list[str] = field(default_factory=list)
 
 
-_OPEN = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress, TaskStatus.review)
+_OPEN = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress)
 
 
 def _owners(session: Session) -> list[str]:
     rows = (
         session.query(Task.owner_user_id)
-        .filter(Task.owner_user_id.isnot(None), Task.status.in_(_OPEN))
+        .filter(
+            Task.owner_user_id.isnot(None),
+            Task.status.in_(_OPEN),
+            Task.deleted_at.is_(None),
+        )
         .distinct()
         .all()
     )
@@ -58,7 +62,7 @@ def _daily_recipients(session: Session) -> list[str]:
     sub_rows = (
         session.query(TaskSubscription.slack_user_id)
         .join(Task, TaskSubscription.task_id == Task.id)
-        .filter(Task.status.in_(_OPEN))
+        .filter(Task.status.in_(_OPEN), Task.deleted_at.is_(None))
         .distinct()
         .all()
     )
@@ -74,6 +78,7 @@ def _tracked_by(session: Session, user: str) -> list[Task]:
         .filter(
             TaskSubscription.slack_user_id == user,
             Task.status.in_(_OPEN),
+            Task.deleted_at.is_(None),
             (Task.owner_user_id != user) | (Task.owner_user_id.is_(None)),
         )
         .order_by(Task.id)
@@ -226,6 +231,7 @@ class DigestService:
             session.query(Task)
             .filter(
                 Task.status.in_(_OPEN),
+                Task.deleted_at.is_(None),
                 Task.due_date.isnot(None),
                 Task.due_date <= soon,
             )
@@ -271,6 +277,7 @@ class DigestService:
             .filter(
                 Task.owner_user_id == user,
                 Task.status.in_(_OPEN),
+                Task.deleted_at.is_(None),
                 Task.due_date == d,
             )
             .all()
@@ -284,6 +291,7 @@ class DigestService:
             .filter(
                 Task.owner_user_id == user,
                 Task.status.in_(_OPEN),
+                Task.deleted_at.is_(None),
                 Task.due_date.isnot(None),
                 Task.due_date >= a,
                 Task.due_date <= b,
@@ -297,6 +305,7 @@ class DigestService:
             .filter(
                 Task.owner_user_id == user,
                 Task.status.in_(_OPEN),
+                Task.deleted_at.is_(None),
                 Task.due_date.isnot(None),
                 Task.due_date < today,
             )
@@ -310,7 +319,8 @@ class DigestService:
             session.query(Task)
             .filter(
                 Task.owner_user_id == user,
-                Task.status.in_((TaskStatus.review, TaskStatus.in_progress)),
+                Task.status == TaskStatus.in_progress,
+                Task.deleted_at.is_(None),
             )
             .all()
         )

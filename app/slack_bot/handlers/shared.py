@@ -249,6 +249,19 @@ def classify_and_persist(
         except Exception:  # noqa: BLE001 — directory is best-effort
             pass
 
+    # FR-CR-04-22: pull the conversation roster via
+    # `conversations.members` so the owner LLM stage knows about every
+    # member, not just people who have posted in this thread. Throttled
+    # internally so each channel hits Slack at most once per 30 min per
+    # process. Best-effort — never block on it.
+    if services.employees is not None and conversation_id:
+        try:
+            services.employees.ensure_channel_synced(
+                session, channel_id=conversation_id
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     context = services.context_retriever.build(
         conversation_id=conversation_id, source_message=source_message
     )

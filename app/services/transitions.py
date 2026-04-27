@@ -15,13 +15,15 @@ class InvalidTransition(ValueError):
     """Raised when a status transition is not allowed."""
 
 
-# Directed graph of allowed transitions.
+# Directed graph of allowed transitions. The `review` status was retired
+# in FR-CR-04-20; the four-node lifecycle is backlog → todo → in_progress
+# → done with arbitrary back-edges so a Cancel button can drop a task to
+# todo / backlog from any state.
 ALLOWED_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.backlog: {TaskStatus.todo, TaskStatus.in_progress, TaskStatus.done},
     TaskStatus.todo: {TaskStatus.in_progress, TaskStatus.backlog, TaskStatus.done},
-    TaskStatus.in_progress: {TaskStatus.review, TaskStatus.done, TaskStatus.todo},
-    TaskStatus.review: {TaskStatus.done, TaskStatus.in_progress},
-    TaskStatus.done: {TaskStatus.in_progress},  # reopen
+    TaskStatus.in_progress: {TaskStatus.done, TaskStatus.todo, TaskStatus.backlog},
+    TaskStatus.done: {TaskStatus.in_progress, TaskStatus.todo, TaskStatus.backlog},  # reopen / cancel-after-done
 }
 
 

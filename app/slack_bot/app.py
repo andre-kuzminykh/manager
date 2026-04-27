@@ -11,7 +11,9 @@ from app.logging_setup import get_logger
 from app.orchestrator import Orchestrator
 from app.orchestrator.finalize import FinalizeService
 from app.slack_bot.blocks import (
+    ACTION_CANCEL_TASK,
     ACTION_CONFIRM,
+    ACTION_DELETE_TASK,
     ACTION_EDIT,
     ACTION_IGNORE,
     ACTION_MANAGE_SUBSCRIPTIONS,
@@ -19,7 +21,6 @@ from app.slack_bot.blocks import (
     ACTION_OPEN_SOURCE,
     ACTION_SHOW_CONTEXT,
     ACTION_START_WORK,
-    ACTION_SUBMIT_REVIEW,
     ACTION_SUBSCRIBE,
     ACTION_UNSUBSCRIBE,
     ACTION_UNSUBSCRIBE_IN_MODAL,
@@ -33,6 +34,7 @@ from app.slack_bot.blocks import (
     ACTION_PLAN_SKIP,
     MODAL_CALLBACK_ADMIN_EDIT,
     MODAL_CALLBACK_COMPLETE_TASK,
+    MODAL_CALLBACK_DELETE_TASK,
     MODAL_CALLBACK_EDIT_TASK,
     MODAL_CALLBACK_MEETING,
     MODAL_CALLBACK_TASK,
@@ -52,13 +54,15 @@ from app.slack_bot.handlers.shortcuts import (
     handle_shortcut,
 )
 from app.slack_bot.handlers.task_actions import (
+    handle_cancel_task,
     handle_complete_task_submit,
+    handle_delete_task_open,
+    handle_delete_task_submit,
     handle_manage_subscriptions,
     handle_mark_done,
     handle_open_source,
     handle_show_context,
     handle_start_work,
-    handle_submit_review,
     handle_subscribe,
     handle_task_edit_open,
     handle_task_edit_submit,
@@ -189,14 +193,10 @@ def build_app(
             ack=ack,
         )
 
-    # ---- CR-01: Task card actions ----
+    # ---- Task card actions ----
     @app.action(ACTION_START_WORK)
     def _on_start_work(body, ack):
         handle_start_work(body=body, sender=sender, ack=ack)
-
-    @app.action(ACTION_SUBMIT_REVIEW)
-    def _on_submit_review(body, ack):
-        handle_submit_review(body=body, sender=sender, ack=ack)
 
     @app.action(ACTION_MARK_DONE)
     def _on_mark_done(body, client, ack):
@@ -213,6 +213,18 @@ def build_app(
     @app.view(MODAL_CALLBACK_EDIT_TASK)
     def _on_task_edit_submit(body, ack, view):
         handle_task_edit_submit(body=body, view=view, sender=sender, ack=ack)
+
+    @app.action(ACTION_CANCEL_TASK)
+    def _on_cancel_task(body, ack):
+        handle_cancel_task(body=body, sender=sender, ack=ack)
+
+    @app.action(ACTION_DELETE_TASK)
+    def _on_delete_task_open(body, client, ack):
+        handle_delete_task_open(body=body, client=client, sender=sender, ack=ack)
+
+    @app.view(MODAL_CALLBACK_DELETE_TASK)
+    def _on_delete_task_submit(body, ack, view):
+        handle_delete_task_submit(body=body, view=view, sender=sender, ack=ack)
 
     @app.action(ACTION_SUBSCRIBE)
     def _on_subscribe(body, client, ack):

@@ -83,6 +83,7 @@ def _eligible_tasks(
         .filter(
             Task.owner_user_id == user,
             Task.status == TaskStatus.backlog,
+            Task.deleted_at.is_(None),
             Task.due_date.isnot(None),
             Task.due_date >= week_start,
             Task.due_date <= week_end,
@@ -98,6 +99,7 @@ def _owners_with_backlog(session: Session) -> list[str]:
         .filter(
             Task.owner_user_id.isnot(None),
             Task.status == TaskStatus.backlog,
+            Task.deleted_at.is_(None),
         )
         .distinct()
         .all()

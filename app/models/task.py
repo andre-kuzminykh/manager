@@ -27,12 +27,16 @@ class TaskPriority(str, enum.Enum):
 
 
 class TaskStatus(str, enum.Enum):
-    """CR-01: lifecycle is backlog → todo → in_progress → review → done."""
+    """Lifecycle is backlog → todo → in_progress → done.
+
+    The `review` value was retired in FR-CR-04-20 (migration 0013).
+    Soft-deleted tasks aren't a status — they keep their last status
+    plus a non-null `deleted_at` timestamp.
+    """
 
     backlog = "backlog"
     todo = "todo"
     in_progress = "in_progress"
-    review = "review"
     done = "done"
 
 
@@ -98,6 +102,12 @@ class Task(Base, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     estimated_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_current_week: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # FR-CR-04-20: soft delete. When non-null the task is hidden from UI,
+    # digests, plans, workload — but preserved in audit logs.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     # source linkage
     source_conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

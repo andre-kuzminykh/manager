@@ -27,7 +27,10 @@ def _subscribed_tasks(session, user_id: str) -> list[Task]:
     return (
         session.query(Task)
         .join(TaskSubscription, TaskSubscription.task_id == Task.id)
-        .filter(TaskSubscription.slack_user_id == user_id)
+        .filter(
+            TaskSubscription.slack_user_id == user_id,
+            Task.deleted_at.is_(None),
+        )
         .order_by(Task.id)
         .all()
     )
@@ -50,6 +53,17 @@ def _actor(body: dict[str, Any]) -> str | None:
 
 def _channel(body: dict[str, Any]) -> str | None:
     return (body.get("channel") or {}).get("id")
+
+
+def _may_edit_task(actor: str | None, task: Task) -> bool:
+    """Owner or admin can edit / cancel / delete the task."""
+    from app.services.employees import is_admin as _is_admin
+
+    if actor is None:
+        return False
+    if task.owner_user_id == actor:
+        return True
+    return _is_admin(actor)
 
 
 def _apply_transition(
@@ -113,10 +127,6 @@ def handle_start_work(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> Non
     )
 
 
-def handle_submit_review(*, body: dict[str, Any], sender: _Sender, ack: Ack) -> None:
-    _apply_transition(body, new_status=TaskStatus.review, sender=sender, ack=ack)
-
-
 def handle_mark_done(
     *,
     body: dict[str, Any],
@@ -151,22 +161,14 @@ def handle_complete_task_submit(
     sender: _Sender,
     ack: Ack,
 ) -> None:
-    """CR-03 FR-CR-03-7 modal submit: save artifact, transition to done,
-    refresh in-channel and DM cards."""
+    """Modal submit: optionally save an artifact, transition to done,
+    refresh in-channel and DM cards. Both fields are optional
+    (FR-CR-04-21) — submitting an empty modal is a valid completion."""
     values = view.get("state", {}).get("values", {})
     url = _state_value(values, bk.BLOCK_ARTIFACT, bk.INPUT_ARTIFACT_URL)
     text = _state_value(values, bk.BLOCK_ARTIFACT_TEXT, bk.INPUT_ARTIFACT_TEXT)
     url = (url or "").strip()
     text = (text or "").strip()
-
-    if not url and not text:
-        ack(
-            response_action="errors",
-            errors={
-                bk.BLOCK_ARTIFACT: "Provide a link or a description (at least one).",
-            },
-        )
-        return
     ack()
 
     try:
@@ -180,19 +182,22 @@ def handle_complete_task_submit(
 
     with session_scope() as session:
         task = session.get(Task, task_id)
-        if task is None:
+        if task is None or task.deleted_at is not None:
             return
-        artifact = url if url else text
-        kind = "url" if url else "text"
-        task.completion_artifact = artifact
-        task.completion_artifact_kind = kind
+        # Both fields optional — only persist artifact when present.
+        if url:
+            task.completion_artifact = url
+            task.completion_artifact_kind = "url"
+        elif text:
+            task.completion_artifact = text
+            task.completion_artifact_kind = "text"
         old = task.status
         try:
             transitions.apply(
                 session, task=task, new_status=TaskStatus.done, actor_slack_user_id=actor
             )
         except InvalidTransition as e:
-            # Already done — still keep the artifact.
+            # Already done — still keep the artifact if one was provided.
             log.info("complete_on_done_task", task_id=task_id, err=str(e))
         notifier.broadcast_status_change(
             session,
@@ -209,6 +214,194 @@ def _state_value(values: dict[str, Any], block_id: str, action_id: str) -> Any:
     block = values.get(block_id, {})
     element = block.get(action_id, {})
     return element.get("value")
+
+
+# --------------------------------------------------------------------------- #
+# Cancel — drop the task back to todo (this week) or backlog (later).
+# --------------------------------------------------------------------------- #
+
+
+def _route_on_cancel(task: Task, *, today=None) -> TaskStatus:
+    """Pick the destination status when the user hits *Cancel*.
+
+    Tasks with a deadline within the current calendar week (Mon-Sun)
+    land in `todo` so they stay scheduled; everything else drops to
+    `backlog` so it doesn't clutter the active queue.
+    """
+    from datetime import date as _date
+    from datetime import timedelta as _timedelta
+
+    today = today or _date.today()
+    week_end = today + _timedelta(days=(6 - today.weekday()))
+    if task.due_date and task.due_date <= week_end:
+        return TaskStatus.todo
+    return TaskStatus.backlog
+
+
+def handle_cancel_task(
+    *, body: dict[str, Any], sender: _Sender, ack: Ack
+) -> None:
+    """FR-CR-04-21: cancel = "I'm not finishing this now". Routes the
+    task back to todo (within the current week) or backlog (later)."""
+    ack()
+    task_id = _draft_id_from(body)
+    if task_id is None:
+        return
+    actor = _actor(body)
+    transitions = TransitionService()
+    notifier = NotificationService(sender=sender)
+
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        if task is None or task.deleted_at is not None:
+            return
+        if not _may_edit_task(actor, task):
+            channel = _channel(body)
+            if channel and actor and hasattr(sender, "post_ephemeral"):
+                try:
+                    sender.post_ephemeral(
+                        channel=channel,
+                        user=actor,
+                        text=":lock: Only the owner or an admin can cancel this.",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        target = _route_on_cancel(task)
+        if task.status == target:
+            return  # already there — no-op
+        old = task.status
+        try:
+            transitions.apply(
+                session,
+                task=task,
+                new_status=target,
+                actor_slack_user_id=actor,
+                reason="cancelled",
+            )
+        except InvalidTransition as e:
+            log.warning("cancel_invalid", task_id=task_id, err=str(e))
+            return
+        notifier.broadcast_status_change(
+            session,
+            task=task,
+            from_status=old,
+            to_status=target,
+            actor_slack_user_id=actor,
+        )
+        if hasattr(sender, "update_message"):
+            refresh_task_card(sender, task)
+
+
+# --------------------------------------------------------------------------- #
+# Delete — owner+admin only, confirmation modal, soft delete.
+# --------------------------------------------------------------------------- #
+
+
+def handle_delete_task_open(
+    *, body: dict[str, Any], client: WebClient, sender: _Sender, ack: Ack
+) -> None:
+    ack()
+    task_id = _draft_id_from(body)
+    trigger_id = body.get("trigger_id")
+    actor = _actor(body)
+    if task_id is None or not trigger_id:
+        return
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        if task is None or task.deleted_at is not None:
+            return
+        if not _may_edit_task(actor, task):
+            channel = _channel(body)
+            if channel and actor and hasattr(sender, "post_ephemeral"):
+                try:
+                    sender.post_ephemeral(
+                        channel=channel,
+                        user=actor,
+                        text=":lock: Only the owner or an admin can delete this.",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            return
+        view = bk.delete_task_modal(task_id=task_id, title=task.title)
+    try:
+        client.views_open(trigger_id=trigger_id, view=view)
+    except Exception as e:  # noqa: BLE001
+        log.warning("delete_modal_open_failed", error=str(e))
+
+
+def handle_delete_task_submit(
+    *, body: dict[str, Any], view: dict[str, Any], sender: _Sender, ack: Ack
+) -> None:
+    """Confirm-modal submit: stamp `deleted_at`, write an audit row, then
+    update the channel widget and DM mirror to a tombstone block so it's
+    obvious the task is gone."""
+    from datetime import datetime, timezone
+
+    from app.models import AuditLog
+
+    ack()
+    try:
+        task_id = int(view.get("private_metadata") or 0)
+    except ValueError:
+        return
+    actor = (body.get("user") or {}).get("id")
+
+    with session_scope() as session:
+        task = session.get(Task, task_id)
+        if task is None or task.deleted_at is not None:
+            return
+        if not _may_edit_task(actor, task):
+            return
+        task.deleted_at = datetime.now(timezone.utc)
+        session.add(
+            AuditLog(
+                category="task",
+                action="task_deleted",
+                entity_type="task",
+                entity_id=str(task.id),
+                actor=actor,
+                payload={
+                    "title": task.title,
+                    "owner_user_id": task.owner_user_id,
+                    "status_at_delete": task.status.value,
+                },
+            )
+        )
+        session.flush()
+        # Replace both cards with a tombstone so the user gets visual
+        # confirmation that the task is gone.
+        tomb_blocks = [
+            {
+                "type": "context",
+                "elements": [
+                    {
+                        "type": "mrkdwn",
+                        "text": (
+                            f":wastebasket: Task #{task.id} — *{task.title}* "
+                            f"deleted by <@{actor}>"
+                        ),
+                    }
+                ],
+            }
+        ]
+        tomb_text = f":wastebasket: Task #{task.id} deleted"
+        if hasattr(sender, "update_message"):
+            for ch, ts in (
+                (task.card_channel, task.card_ts),
+                (task.dm_channel, task.dm_ts),
+            ):
+                if ch and ts:
+                    try:
+                        sender.update_message(
+                            channel=ch, ts=ts, blocks=tomb_blocks, text=tomb_text
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.warning(
+                            "delete_card_refresh_failed",
+                            channel=ch,
+                            error=str(e),
+                        )
 
 
 def _toggle_subscription(
@@ -443,16 +636,6 @@ def handle_unsubscribe_in_modal(
 # description, and estimated_minutes from the task card itself. This is the
 # non-admin-review counterpart to handle_admin_edit_*.
 # --------------------------------------------------------------------------- #
-
-
-def _may_edit_task(actor: str | None, task: Task) -> bool:
-    from app.services.employees import is_admin as _is_admin
-
-    if actor is None:
-        return False
-    if task.owner_user_id == actor:
-        return True
-    return _is_admin(actor)
 
 
 def handle_task_edit_open(

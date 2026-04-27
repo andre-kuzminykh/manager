@@ -28,7 +28,7 @@ class _Sender(Protocol):
     def post_message(self, **kwargs) -> dict: ...
 
 
-_OPEN = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress, TaskStatus.review)
+_OPEN = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress)
 
 
 @dataclass
@@ -99,7 +99,11 @@ def send_admin_evening_digest(
 
     tomorrow_tasks = (
         session.query(Task)
-        .filter(Task.status.in_(_OPEN), Task.due_date == tomorrow)
+        .filter(
+            Task.status.in_(_OPEN),
+            Task.deleted_at.is_(None),
+            Task.due_date == tomorrow,
+        )
         .order_by(Task.owner_user_id, Task.id)
         .all()
     )
@@ -108,6 +112,7 @@ def send_admin_evening_digest(
         session.query(Task)
         .filter(
             Task.status == TaskStatus.in_progress,
+            Task.deleted_at.is_(None),
             Task.started_at.isnot(None),
             Task.started_at < stale_cutoff,
         )
@@ -168,13 +173,10 @@ def send_admin_morning_watch(
 
     in_progress = (
         session.query(Task)
-        .filter(Task.status == TaskStatus.in_progress)
-        .order_by(Task.id)
-        .all()
-    )
-    review = (
-        session.query(Task)
-        .filter(Task.status == TaskStatus.review)
+        .filter(
+            Task.status == TaskStatus.in_progress,
+            Task.deleted_at.is_(None),
+        )
         .order_by(Task.id)
         .all()
     )
@@ -182,6 +184,7 @@ def send_admin_morning_watch(
         session.query(Task)
         .filter(
             Task.status.in_(_OPEN),
+            Task.deleted_at.is_(None),
             Task.due_date.isnot(None),
             Task.due_date < today,
         )
@@ -198,7 +201,6 @@ def send_admin_morning_watch(
             [
                 f"*Watch-list — {today.isoformat()}*",
                 _fmt_group("In progress", in_progress),
-                _fmt_group("On review", review),
                 _fmt_group("Overdue", overdue),
             ]
         )
@@ -219,12 +221,9 @@ def send_admin_morning_watch(
             admin_id=admin_id,
             payload={
                 "in_progress": len(in_progress),
-                "review": len(review),
                 "overdue": len(overdue),
             },
         )
         report.recipients += 1
-        report.tasks_included += (
-            len(in_progress) + len(review) + len(overdue)
-        )
+        report.tasks_included += len(in_progress) + len(overdue)
     return report

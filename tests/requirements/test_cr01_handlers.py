@@ -1,5 +1,5 @@
-"""Tests for CR-01 task-card handlers (FR-CR-4 start_work, submit_review,
-mark_done, subscribe, unsubscribe, show_context)."""
+"""Tests for task-card handlers: start_work, mark_done (with optional
+artifact modal), subscribe / unsubscribe, show_context, cancel, delete."""
 from __future__ import annotations
 
 from datetime import date
@@ -12,7 +12,6 @@ from app.slack_bot.handlers.task_actions import (
     handle_open_source,
     handle_show_context,
     handle_start_work,
-    handle_submit_review,
     handle_subscribe,
     handle_unsubscribe,
 )
@@ -141,25 +140,15 @@ def test_start_work_invalid_transition_sends_warning(
 
 
 # --------------------------------------------------------------------------- #
-# Submit review / mark done
+# Mark done (the `review` status was retired in FR-CR-04-20)
 # --------------------------------------------------------------------------- #
 
 
-def test_submit_review_moves_to_review(patched_session_scope, SessionFactory, sender, ack):
-    with SessionFactory() as s:
-        task = _make_task(s, status=TaskStatus.in_progress, owner="U1")
-        s.commit()
-        tid = task.id
-    handle_submit_review(body=_body(tid, user="U1"), sender=sender, ack=ack)
-    with SessionFactory() as s:
-        assert s.get(Task, tid).status == TaskStatus.review
-
-
-def test_mark_done_from_review_closes_task(
+def test_mark_done_from_in_progress_closes_task(
     patched_session_scope, SessionFactory, sender, ack
 ):
     with SessionFactory() as s:
-        task = _make_task(s, status=TaskStatus.review, owner="U1")
+        task = _make_task(s, status=TaskStatus.in_progress, owner="U1")
         s.commit()
         tid = task.id
     handle_mark_done(body=_body(tid, user="U1"), sender=sender, ack=ack)

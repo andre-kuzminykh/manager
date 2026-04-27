@@ -186,13 +186,17 @@ def node_describe(state: IntentState) -> dict[str, Any]:
 
 def node_owner(state: IntentState) -> dict[str, Any]:
     known_employees: list[dict] = state.get("known_employees") or []
+    source_text: str = state.get("source_text") or ""
+    context_messages: list[dict] = state.get("context_messages") or []
+    author_user_id: str | None = state.get("author_user_id")
+
     data = _safe_call_tool(
         state["backend"],
         system_prompt=OWNER_SYSTEM_PROMPT,
         user_prompt=build_owner_user_prompt(
-            source_text=state["source_text"],
-            context_messages=state.get("context_messages", []),
-            author_user_id=state.get("author_user_id"),
+            source_text=source_text,
+            context_messages=context_messages,
+            author_user_id=author_user_id,
             known_employees=known_employees,
         ),
         tool_name=OWNER_TOOL_NAME,
@@ -209,24 +213,85 @@ def node_owner(state: IntentState) -> dict[str, Any]:
             slack_user_id = None
 
     # If LLM returned only a name, try to resolve it locally to a real
-    # slack_user_id from the same table.
+    # slack_user_id from the same table. Match against BOTH display_name
+    # and real_name — the LLM sometimes echoes the user's full real name
+    # (e.g. "Андре Кузьминых") even though our display_name is shorter
+    # (e.g. "Andre").
     if not slack_user_id and display_name and known_employees:
         from app.services.owners import resolve_owner_hint
 
-        candidates = [
-            {"slack_user_id": e["slack_user_id"], "display_name": e.get("display_name") or e["slack_user_id"]}
-            for e in known_employees
-            if e.get("slack_user_id")
-        ]
+        candidates: list[dict[str, str]] = []
+        for e in known_employees:
+            sid = e.get("slack_user_id")
+            if not sid:
+                continue
+            primary = e.get("display_name") or sid
+            candidates.append({"slack_user_id": sid, "display_name": primary})
+            real = e.get("real_name")
+            if real and real != primary:
+                # A second pseudo-row lets resolve_owner_hint match on
+                # the real name without needing a second pass.
+                candidates.append({"slack_user_id": sid, "display_name": real})
         match = resolve_owner_hint(hint_text=display_name, allowed_owners=candidates)
         if match is not None:
             slack_user_id = match["slack_user_id"]
-            display_name = match["display_name"]
+            # Re-pick the canonical display_name for the row.
+            for e in known_employees:
+                if e.get("slack_user_id") == slack_user_id:
+                    display_name = e.get("display_name") or e.get("real_name") or slack_user_id
+                    break
+
+    # Hallucination guard (FR-CR-04-22): the LLM occasionally returns the
+    # author's full real name (e.g. "Андре Кузьминых") as `display_name`
+    # even though the prompt forbids self-assignment, and even though the
+    # message uses "we"/"мы" with no explicit doer. When the unresolved
+    # name (a) doesn't appear anywhere in the source / context and
+    # (b) the author IS in the employees table, we drop the
+    # hallucinated name so the downstream "quiet author fallback" kicks
+    # in instead of producing an unanswerable "I couldn't find X" prompt.
+    if (
+        not slack_user_id
+        and display_name
+        and author_user_id
+        and known_employees
+    ):
+        author_in_table = any(
+            e.get("slack_user_id") == author_user_id for e in known_employees
+        )
+        if author_in_table and not _name_present(
+            display_name, source_text=source_text, context_messages=context_messages
+        ):
+            display_name = None
 
     return {
         "owner_user_id": slack_user_id,
         "owner_display_name": display_name,
     }
+
+
+def _name_present(
+    name: str, *, source_text: str, context_messages: list[dict]
+) -> bool:
+    """True iff `name` (or any of its space-separated tokens of length >= 3)
+    appears, case-insensitively, in the source message or any context line.
+    Used to tell "the LLM extracted a real name from the text" from "the
+    LLM hallucinated the author's name from the metadata header"."""
+    needle = (name or "").strip().lower()
+    if not needle:
+        return False
+    haystacks: list[str] = [source_text or ""]
+    for m in context_messages or []:
+        t = m.get("text") or ""
+        if t:
+            haystacks.append(t)
+    blob = " \n ".join(haystacks).lower()
+    if needle in blob:
+        return True
+    # Token match: any 3+ char fragment of the name appearing in text.
+    for token in needle.split():
+        if len(token) >= 3 and token in blob:
+            return True
+    return False
 
 
 def node_date(state: IntentState) -> dict[str, Any]:

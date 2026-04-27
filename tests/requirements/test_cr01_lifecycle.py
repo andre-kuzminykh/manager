@@ -1,5 +1,10 @@
-"""Tests for CR-01: lifecycle (backlog/todo/in_progress/review/done),
-TransitionService, persistence defaults, start_work button, status history."""
+"""Tests for the task lifecycle (backlog/todo/in_progress/done),
+TransitionService, persistence defaults, start_work button, status history.
+
+Note: the `review` status was retired in FR-CR-04-20. The four-node
+lifecycle is `backlog → todo → in_progress → done` with arbitrary
+back-edges so a Cancel button can drop a task to todo / backlog from
+any state."""
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -89,26 +94,26 @@ def _make_task(
 # =========================================================================== #
 
 
-def test_fr_cr3_status_enum_has_exactly_five_values():
+def test_fr_cr3_status_enum_has_exactly_four_values():
     assert {s.value for s in TaskStatus} == {
         "backlog",
         "todo",
         "in_progress",
-        "review",
         "done",
     }
 
 
 @pytest.mark.parametrize(
     "value",
-    ["backlog", "todo", "in_progress", "review", "done"],
+    ["backlog", "todo", "in_progress", "done"],
 )
 def test_fr_cr3_enum_accepts_each_value(value):
     assert TaskStatus(value).value == value
 
 
-def test_fr_cr3_old_values_are_gone():
-    for old in ("open", "cancelled"):
+def test_fr_cr3_retired_values_are_gone():
+    # `review` was retired in FR-CR-04-20.
+    for old in ("open", "cancelled", "review"):
         with pytest.raises(ValueError):
             TaskStatus(old)
 
@@ -116,8 +121,10 @@ def test_fr_cr3_old_values_are_gone():
 def test_fr_cr3_allowed_transitions_graph_matches_spec():
     assert TaskStatus.todo in ALLOWED_TRANSITIONS[TaskStatus.backlog]
     assert TaskStatus.in_progress in ALLOWED_TRANSITIONS[TaskStatus.todo]
-    assert TaskStatus.review in ALLOWED_TRANSITIONS[TaskStatus.in_progress]
-    assert TaskStatus.done in ALLOWED_TRANSITIONS[TaskStatus.review]
+    assert TaskStatus.done in ALLOWED_TRANSITIONS[TaskStatus.in_progress]
+    # Cancel = back-edges to todo / backlog from in_progress.
+    assert TaskStatus.todo in ALLOWED_TRANSITIONS[TaskStatus.in_progress]
+    assert TaskStatus.backlog in ALLOWED_TRANSITIONS[TaskStatus.in_progress]
 
 
 @pytest.mark.parametrize(
@@ -126,29 +133,18 @@ def test_fr_cr3_allowed_transitions_graph_matches_spec():
         (TaskStatus.backlog, TaskStatus.todo),
         (TaskStatus.backlog, TaskStatus.in_progress),
         (TaskStatus.todo, TaskStatus.in_progress),
-        (TaskStatus.in_progress, TaskStatus.review),
-        (TaskStatus.review, TaskStatus.done),
+        (TaskStatus.in_progress, TaskStatus.done),
+        (TaskStatus.in_progress, TaskStatus.todo),  # cancel → this week
+        (TaskStatus.in_progress, TaskStatus.backlog),  # cancel → later
         (TaskStatus.done, TaskStatus.in_progress),
+        (TaskStatus.done, TaskStatus.todo),
+        (TaskStatus.done, TaskStatus.backlog),
     ],
 )
 def test_fr_cr3_allowed_transitions_apply(session, old, new):
     task = _make_task(session, status=old)
     TransitionService().apply(session, task=task, new_status=new, actor_slack_user_id="U1")
     assert task.status == new
-
-
-@pytest.mark.parametrize(
-    "old, new",
-    [
-        (TaskStatus.backlog, TaskStatus.review),
-        (TaskStatus.review, TaskStatus.todo),
-        (TaskStatus.todo, TaskStatus.review),  # must go via in_progress
-    ],
-)
-def test_fr_cr3_disallowed_transitions_raise(session, old, new):
-    task = _make_task(session, status=old)
-    with pytest.raises(InvalidTransition):
-        TransitionService().apply(session, task=task, new_status=new)
 
 
 def test_fr_cr3_transition_to_same_state_raises(session):
@@ -225,9 +221,6 @@ def test_fr_cr7_history_row_written_per_transition(session):
         session, task=task, new_status=TaskStatus.in_progress, actor_slack_user_id="U1"
     )
     TransitionService().apply(
-        session, task=task, new_status=TaskStatus.review, actor_slack_user_id="U1"
-    )
-    TransitionService().apply(
         session, task=task, new_status=TaskStatus.done, actor_slack_user_id="U1"
     )
     hist = session.query(TaskStatusHistory).filter_by(task_id=task.id).order_by(
@@ -235,7 +228,6 @@ def test_fr_cr7_history_row_written_per_transition(session):
     ).all()
     assert [h.to_status for h in hist] == [
         TaskStatus.in_progress,
-        TaskStatus.review,
         TaskStatus.done,
     ]
     assert hist[0].from_status == TaskStatus.todo
@@ -248,7 +240,7 @@ def test_fr_cr4_transition_to_in_progress_sets_started_at(session):
 
 
 def test_fr_cr4_transition_to_done_sets_completed_at(session):
-    task = _make_task(session, status=TaskStatus.review)
+    task = _make_task(session, status=TaskStatus.in_progress)
     TransitionService().apply(session, task=task, new_status=TaskStatus.done)
     assert task.completed_at is not None
 
@@ -257,7 +249,8 @@ def test_fr_cr4_started_at_is_not_overwritten_on_second_in_progress(session):
     task = _make_task(session, status=TaskStatus.todo)
     TransitionService().apply(session, task=task, new_status=TaskStatus.in_progress)
     first = task.started_at
-    TransitionService().apply(session, task=task, new_status=TaskStatus.review)
+    # Cancel back to todo and start again — started_at must stick.
+    TransitionService().apply(session, task=task, new_status=TaskStatus.todo)
     TransitionService().apply(session, task=task, new_status=TaskStatus.in_progress)
     assert task.started_at == first
 
@@ -440,26 +433,14 @@ def test_task_card_shows_start_work_only_for_owner(session):
 
 
 def test_task_card_in_progress_exposes_only_done(session):
-    # Product decision: the Review state is still in the model (some legacy
-    # rows may sit there) but the UI no longer offers "Submit for review".
-    # From in_progress the owner goes straight to Done.
+    # FR-CR-04-20: review was retired; from in_progress the owner goes
+    # straight to Done (or hits Cancel to drop back to todo / backlog).
     task = _make_task(session, status=TaskStatus.in_progress, owner="U-owner")
     blocks = bk.task_card(task=task, viewer_slack_user_id="U-owner")
     ids = [
         el["action_id"] for b in blocks if b["type"] == "actions" for el in b["elements"]
     ]
     assert bk.ACTION_MARK_DONE in ids
-    assert bk.ACTION_SUBMIT_REVIEW not in ids
-
-
-def test_task_card_review_exposes_only_done(session):
-    task = _make_task(session, status=TaskStatus.review, owner="U-owner")
-    blocks = bk.task_card(task=task, viewer_slack_user_id="U-owner")
-    ids = [
-        el["action_id"] for b in blocks if b["type"] == "actions" for el in b["elements"]
-    ]
-    assert bk.ACTION_MARK_DONE in ids
-    assert bk.ACTION_START_WORK not in ids
 
 
 def test_task_card_done_has_no_transition_buttons(session):
@@ -468,10 +449,9 @@ def test_task_card_done_has_no_transition_buttons(session):
     ids = [
         el["action_id"] for b in blocks if b["type"] == "actions" for el in b["elements"]
     ]
-    # No lifecycle buttons on done
+    # No lifecycle "forward" buttons on done.
     for lifecycle in (
         bk.ACTION_START_WORK,
-        bk.ACTION_SUBMIT_REVIEW,
         bk.ACTION_MARK_DONE,
     ):
         assert lifecycle not in ids

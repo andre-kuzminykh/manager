@@ -135,9 +135,11 @@ def _ack_recorder():
     return _ack, captured
 
 
-def test_complete_submit_requires_non_empty_artifact(
+def test_complete_submit_accepts_empty_form_and_transitions(
     patched_session_scope, SessionFactory
 ):
+    """FR-CR-04-21: both artifact fields are optional. An empty submit
+    is a valid completion — task transitions to done with no artifact."""
     with SessionFactory() as s:
         t = Task(title="t", status=TaskStatus.in_progress, owner_user_id="U1")
         s.add(t)
@@ -160,11 +162,13 @@ def test_complete_submit_requires_non_empty_artifact(
         sender=_Sender(),
         ack=ack_fn,
     )
-    assert captured["response_action"] == "errors"
-    assert bk.BLOCK_ARTIFACT in captured["errors"]
-    # Task stays in_progress.
+    # No errors payload — ack() called without arguments.
+    assert captured.get("response_action") is None
     with SessionFactory() as s:
-        assert s.get(Task, tid).status == TaskStatus.in_progress
+        t = s.get(Task, tid)
+        assert t.status == TaskStatus.done
+        assert t.completion_artifact is None
+        assert t.completion_artifact_kind is None
 
 
 def test_complete_submit_saves_url_artifact_and_transitions(

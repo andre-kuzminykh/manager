@@ -5,14 +5,13 @@ thread tagging the assignee. Dedup per (task_id, date) via
 ``audit_logs``.
 
 Text per status:
-- in_progress: ":raised_hand: <@owner> задача #N — как прогресс?"
-- todo (due this week): ":calendar: <@owner> на этой неделе ожидаем:
-  *<title>* — до <due>"
-- review: ":eyes: <@owner> нужен ревью задачи #N"
-- backlog (due this week): ":bookmark: <@owner> задача *#N* ждёт
-  старта — до <due>"
+- in_progress: ":raised_hand: <@owner> task #N — what's the progress?"
+- todo (due this week): ":calendar: <@owner> this week we expect:
+  *<title>* — by <due>"
+- backlog (due this week): ":bookmark: <@owner> *<title>* waiting to
+  start — by <due>"
 
-Done / out-of-week backlog / overdue-past tasks are left alone.
+Done / out-of-week backlog / soft-deleted tasks are left alone.
 """
 from __future__ import annotations
 
@@ -69,8 +68,6 @@ def _reminder_text(task: Task, *, today: date) -> str | None:
 
     if task.status == TaskStatus.in_progress:
         return f":raised_hand: {owner} task *#{task.id}* — what's the progress?"
-    if task.status == TaskStatus.review:
-        return f":eyes: {owner} review needed for task *#{task.id}*"
     if task.status == TaskStatus.todo:
         if task.due_date and task.due_date <= week_end:
             return (
@@ -101,11 +98,13 @@ def send_thread_reminders(
         TaskStatus.backlog,
         TaskStatus.todo,
         TaskStatus.in_progress,
-        TaskStatus.review,
     )
     tasks = (
         session.query(Task)
-        .filter(Task.status.in_(open_statuses))
+        .filter(
+            Task.status.in_(open_statuses),
+            Task.deleted_at.is_(None),
+        )
         .order_by(Task.id)
         .all()
     )

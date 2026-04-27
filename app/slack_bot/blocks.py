@@ -13,11 +13,13 @@ ACTION_EDIT = "draft_edit"
 ACTION_IGNORE = "draft_ignore"
 ACTION_RETRY = "draft_retry"
 
-# CR-01 task card actions
+# Task card actions
 ACTION_START_WORK = "task_start_work"
-ACTION_SUBMIT_REVIEW = "task_submit_review"
 ACTION_MARK_DONE = "task_mark_done"
 ACTION_EDIT_TASK = "task_edit"
+ACTION_CANCEL_TASK = "task_cancel"
+ACTION_DELETE_TASK = "task_delete"
+ACTION_DELETE_CONFIRM = "task_delete_confirm"
 ACTION_SUBSCRIBE = "task_subscribe"
 ACTION_UNSUBSCRIBE = "task_unsubscribe"
 ACTION_OPEN_SOURCE = "task_open_source"
@@ -39,6 +41,7 @@ MODAL_CALLBACK_SUBSCRIPTIONS = "subscriptions_modal"
 MODAL_CALLBACK_ADMIN_EDIT = "admin_edit_task_modal"
 MODAL_CALLBACK_EDIT_TASK = "edit_task_modal"
 MODAL_CALLBACK_COMPLETE_TASK = "complete_task_modal"
+MODAL_CALLBACK_DELETE_TASK = "delete_task_modal"
 
 BLOCK_ARTIFACT = "artifact_block"
 INPUT_ARTIFACT_URL = "artifact_url_input"
@@ -671,16 +674,6 @@ def task_card(
                 "value": str(task.id),
             }
         )
-    if task.status == TaskStatus.review:
-        elements.append(
-            {
-                "type": "button",
-                "style": "primary",
-                "action_id": ACTION_MARK_DONE,
-                "text": {"type": "plain_text", "text": "Mark done"},
-                "value": str(task.id),
-            }
-        )
 
     # Edit is available to the owner and to admins (not to bystanders).
     if task.status != TaskStatus.done and (is_owner or viewer_is_admin):
@@ -689,6 +682,18 @@ def task_card(
                 "type": "button",
                 "action_id": ACTION_EDIT_TASK,
                 "text": {"type": "plain_text", "text": "Edit"},
+                "value": str(task.id),
+            }
+        )
+
+    # Cancel — drops in_progress / todo / done back to todo (this week)
+    # or backlog (later), without requiring an artifact. Owner + admin.
+    if task.status != TaskStatus.backlog and (is_owner or viewer_is_admin):
+        elements.append(
+            {
+                "type": "button",
+                "action_id": ACTION_CANCEL_TASK,
+                "text": {"type": "plain_text", "text": "Cancel"},
                 "value": str(task.id),
             }
         )
@@ -720,6 +725,18 @@ def task_card(
                 "action_id": ACTION_SHOW_CONTEXT,
                 "text": {"type": "plain_text", "text": "Show context"},
                 "value": str(task.context_snapshot_id),
+            }
+        )
+
+    # Delete — destructive, owner + admin only, opens a confirmation modal.
+    if is_owner or viewer_is_admin:
+        elements.append(
+            {
+                "type": "button",
+                "style": "danger",
+                "action_id": ACTION_DELETE_TASK,
+                "text": {"type": "plain_text", "text": "Delete"},
+                "value": str(task.id),
             }
         )
 
@@ -943,8 +960,10 @@ def daily_digest_blocks(
 
 
 def complete_task_modal(*, task_id: int) -> dict[str, Any]:
-    """Modal shown when the assignee clicks *Complete* — asks for an
-    artifact (URL or a text note). At least one of the two is required."""
+    """Modal shown when the assignee clicks *Mark done* — both fields
+    (URL + text note) are optional. The submit handler accepts an empty
+    form: completing without an artifact is a valid choice (FR-CR-04-21).
+    """
     return {
         "type": "modal",
         "callback_id": MODAL_CALLBACK_COMPLETE_TASK,
@@ -957,7 +976,7 @@ def complete_task_modal(*, task_id: int) -> dict[str, Any]:
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "Attach an artifact — a link or a short description of the result.",
+                    "text": "Optional — attach a link or a short note about the result.",
                 },
             },
             {
@@ -985,6 +1004,34 @@ def complete_task_modal(*, task_id: int) -> dict[str, Any]:
                     "multiline": True,
                 },
             },
+        ],
+    }
+
+
+def delete_task_modal(*, task_id: int, title: str) -> dict[str, Any]:
+    """Confirmation modal shown when the owner / admin clicks *Delete*.
+    Submit performs the soft delete; close cancels. The destructive
+    button style is reinforced visually inside the modal copy.
+    """
+    return {
+        "type": "modal",
+        "callback_id": MODAL_CALLBACK_DELETE_TASK,
+        "private_metadata": str(task_id),
+        "title": {"type": "plain_text", "text": "Delete task?"},
+        "submit": {"type": "plain_text", "text": "Delete"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "blocks": [
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f":warning: This will delete *task #{task_id} — {title}*. "
+                        "The task is hidden from the UI immediately; the row "
+                        "stays in the audit log so we can trace what happened."
+                    ),
+                },
+            }
         ],
     }
 

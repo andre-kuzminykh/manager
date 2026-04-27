@@ -182,7 +182,7 @@ def test_fr_cr2_done_tasks_not_counted(session):
 
 @pytest.mark.parametrize(
     "status",
-    [TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress, TaskStatus.review],
+    [TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress],
 )
 def test_fr_cr2_all_open_statuses_count_as_workload(session, status):
     est = WorkloadEstimator()

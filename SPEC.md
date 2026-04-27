@@ -723,6 +723,89 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-22 — Per-channel employees sync + owner hallucination guard
+
+Two coupled fixes for owner-attribution accuracy.
+
+**(a) Per-channel sync.** `EmployeeDirectory.ensure_channel_synced`
+walks `conversations.members` for the conversation the bot was just
+addressed in and upserts every member through `observed()`. Called
+from `classify_and_persist` for every passive / mention event. The
+call is throttled in process memory: each channel hits Slack at most
+once per `ttl_seconds` (default 1800). On bot restart the cache is
+empty → first event in each channel re-syncs the roster, plugging
+the long-standing gap where the directory only knew about people
+who had already posted.
+
+**(b) Owner hallucination guard.** `node_owner` was promoting the
+LLM's `display_name` to a follow-up question even when the name
+clearly came from the metadata header rather than the message text.
+Two changes in `app/intent/pipeline.py`:
+
+1. `resolve_owner_hint` candidates now include the employees'
+   `real_name` as a second pseudo-row, so when the LLM emits the
+   user's full real name (e.g. *"Андре Кузьминых"*) we still resolve
+   it to the matching `slack_user_id`.
+2. When the LLM emits an unresolvable name AND that name doesn't
+   appear in the source / context AND the source author is in the
+   employees table, drop the hallucinated `display_name`. The
+   downstream "quiet author fallback" then quietly assigns the task
+   to the author with `owner_assumed=True` instead of asking
+   *"I couldn't find Андре Кузьминых in the list"*.
+
+#### FR-CR-04-21 — Cancel + Delete on the task card; optional artifact
+
+Three task-card / completion-modal changes per product feedback.
+
+- **Cancel button.** Visible to owner and admins on every status
+  except `backlog`. On click the task is routed to:
+  - `todo`  — if the due date is within the current calendar week
+    (Mon–Sun, today's local timezone);
+  - `backlog` — otherwise (no due date, or due later than this week).
+  Implemented as a normal `TransitionService.apply` so a status
+  history row is written with `reason="cancelled"`. Subscribers are
+  broadcast a status-change DM, and both the channel widget and the
+  DM mirror are `chat.update`-d.
+- **Delete button + confirmation modal.** Visible to owner and
+  admins on every status. Opens a small confirmation modal
+  (`MODAL_CALLBACK_DELETE_TASK`) that explains the action and asks
+  the user to press *Delete* once more. Submit performs the soft
+  delete (FR-CR-04-20) and replaces the channel widget + DM mirror
+  with a tombstone context line — *":wastebasket: Task #N — title
+  deleted by @actor"*.
+- **Completion modal — both fields optional.** The `Mark done`
+  modal previously enforced "at least one of link / description"
+  with an explicit `response_action: errors`. That validation is
+  removed: an empty submit is a valid completion. The artifact is
+  only persisted when one of the inputs is non-empty.
+
+#### FR-CR-04-20 — Four-state lifecycle + soft delete
+
+Lifecycle simplification driven by product feedback ("ревью нет
+статуса"):
+
+- `TaskStatus` is reduced from five values to four:
+  `backlog → todo → in_progress → done`. The `review` value is
+  dropped from the Python enum. Migration `0013_soft_delete_drop_review`
+  data-migrates any task stuck in `review` to `in_progress` and, on
+  Postgres, recreates `task_status` without the value (the standard
+  rename / create / cast / drop dance — `ALTER TYPE … REMOVE VALUE`
+  doesn't exist).
+- `ALLOWED_TRANSITIONS` is rewritten so every cross-state move is
+  legal except a self-loop. This is what lets *Cancel* drop a task
+  to `todo` / `backlog` from any state without complicated
+  exception paths. Self-loops still raise `InvalidTransition`.
+- `tasks.deleted_at: datetime | None` (indexed). Every query that
+  feeds the UI, digests, daily / weekly plans, workload estimator,
+  and thread reminders adds `Task.deleted_at IS NULL`. A soft-deleted
+  task is hidden from every view but its row stays in the DB
+  alongside an `audit_logs` row of category `task` / action
+  `task_deleted` so we can trace deletions.
+- `Submit for review` button + `handle_submit_review` handler +
+  `ACTION_SUBMIT_REVIEW` constant are removed. The post-confirm
+  task card now offers `Start → Mark done` plus the cross-cutting
+  `Cancel` and `Delete` from FR-CR-04-21.
+
 #### FR-CR-04-19 — Meetings out of scope
 
 Per product direction the bot is now task-only. Meeting capture and
@@ -1118,5 +1201,8 @@ pure unit tests for internal helpers.
 | FR-CR-04-17  | `test_employees_workspace_sync.py` (sync_workspace_members + sync_channel_members + bot startup hook) |
 | FR-CR-04-18  | `test_priority_emoji.py` (modal cleanup: no recurring checkbox / no effort block, weekdays-as-toggle, coloured priority emoji on options + card meta) |
 | FR-CR-04-19  | `test_meetings_disabled.py` (prefilter never synthesises a meeting draft, meeting shortcut posts ephemeral "tasks-only" notice, task shortcut still opens the task modal); also `test_prefilter_override.py::test_prefilter_does_not_override_for_meeting_keywords`, `test_fr_06_10_explicit.py::test_fr10_meeting_shortcut_shows_disabled_notice` |
+| FR-CR-04-20  | `test_cr01_lifecycle.py` (four-state enum, allowed transitions graph, retired values rejected), `test_task_cancel_delete.py` (review enum value gone, soft-delete excluded from workload + daily plan), migration `0013_soft_delete_drop_review.py` |
+| FR-CR-04-21  | `test_task_cancel_delete.py` (Cancel routing — within-week → todo, later → backlog; owner+admin only; Delete confirmation modal; soft-delete with audit row; tombstone card refresh; completion modal accepts an empty form) |
+| FR-CR-04-22  | `test_owner_hallucination_guard.py` (real-name match against the employees table; drop unresolvable-and-not-in-source name so quiet-author-fallback fires), `test_employees_per_channel_sync.py` (`ensure_channel_synced` upserts roster, throttles repeats, isolates channels) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

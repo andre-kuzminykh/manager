@@ -44,7 +44,7 @@ log = get_logger(__name__)
 # --------------------------------------------------------------------------- #
 
 # Statuses that count as "still to do".
-_OPEN_STATUSES = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress, TaskStatus.review)
+_OPEN_STATUSES = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress)
 
 
 def _candidate_tasks_for(session: Session, user_id: str, plan_date: date) -> list[Task]:
@@ -59,6 +59,7 @@ def _candidate_tasks_for(session: Session, user_id: str, plan_date: date) -> lis
         session.query(Task)
         .filter(Task.owner_user_id == user_id)
         .filter(Task.status.in_(_OPEN_STATUSES))
+        .filter(Task.deleted_at.is_(None))
         .filter(
             or_(
                 Task.start_date == plan_date,
@@ -81,6 +82,7 @@ def _subscribed_tracking(session: Session, user_id: str) -> list[Task]:
         .filter(TaskSubscription.slack_user_id == user_id)
         .filter(Task.owner_user_id != user_id)
         .filter(Task.status.in_(_OPEN_STATUSES))
+        .filter(Task.deleted_at.is_(None))
         .order_by(Task.due_date.asc().nullslast(), Task.id.asc())
         .all()
     )
@@ -246,6 +248,7 @@ def send_morning_plan(
             session.query(Task)
             .filter(Task.id.in_([i.task_id for i in items]))
             .filter(Task.status.in_(_OPEN_STATUSES))
+            .filter(Task.deleted_at.is_(None))
             .order_by(Task.due_date.asc().nullslast(), Task.id.asc())
             .all()
         )

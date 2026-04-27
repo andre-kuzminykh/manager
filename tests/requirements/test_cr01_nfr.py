@@ -91,7 +91,7 @@ def test_nfr_cr1_broadcast_throttles_per_user_channel(session):
         session,
         task=task,
         from_status=TaskStatus.in_progress,
-        to_status=TaskStatus.review,
+        to_status=TaskStatus.done,
         actor_slack_user_id="U1",
     )
     elapsed = time.monotonic() - t0
@@ -240,7 +240,9 @@ def test_nfr_cr3_transition_writes_history_in_same_transaction(session):
 
 
 def test_nfr_cr3_invalid_transition_does_not_write_history(session):
-    task = Task(title="t", status=TaskStatus.review, owner_user_id="U1")
+    # The 4-state graph allows every cross-state move; only a self-loop
+    # is disallowed (transitioning a task to its current state).
+    task = Task(title="t", status=TaskStatus.todo, owner_user_id="U1")
     session.add(task)
     session.flush()
     from app.services import InvalidTransition
@@ -250,7 +252,7 @@ def test_nfr_cr3_invalid_transition_does_not_write_history(session):
     before = session.query(TaskStatusHistory).count()
     with pytest.raises(InvalidTransition):
         TransitionService().apply(
-            session, task=task, new_status=TaskStatus.backlog
+            session, task=task, new_status=TaskStatus.todo
         )
     after = session.query(TaskStatusHistory).count()
     assert after == before

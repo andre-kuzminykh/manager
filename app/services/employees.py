@@ -46,6 +46,10 @@ class EmployeeDirectory:
     ) -> None:
         self._client = client
         self._settings = settings or get_settings()
+        # FR-CR-04-22: per-process throttle for `ensure_channel_synced` so
+        # that we don't hit `conversations.members` on every event. Maps
+        # channel_id → last sync datetime.
+        self._channel_sync_cache: dict[str, datetime] = {}
 
     def observed(
         self,
@@ -209,6 +213,32 @@ class EmployeeDirectory:
             "employees_channel_synced", channel=channel_id, touched=touched
         )
         return touched
+
+    def ensure_channel_synced(
+        self,
+        session: Session,
+        *,
+        channel_id: str,
+        ttl_seconds: int = 1800,
+    ) -> int:
+        """Throttled wrapper around `sync_channel_members` (FR-CR-04-22).
+
+        Slack passes us the conversation id on every event, so calling
+        `sync_channel_members` from each handler would hammer
+        `conversations.members`. This method caches the last sync time
+        per channel in process memory and skips when the TTL hasn't
+        elapsed. On first sight of a channel, sync runs — that fixes
+        the long-standing "bot only knows people who have posted" gap
+        without flooding the Slack API.
+        """
+        if self._client is None or not channel_id:
+            return 0
+        last = self._channel_sync_cache.get(channel_id)
+        now = datetime.now(timezone.utc)
+        if last is not None and (now - last).total_seconds() < ttl_seconds:
+            return 0
+        self._channel_sync_cache[channel_id] = now
+        return self.sync_channel_members(session, channel_id=channel_id)
 
     def _upsert_from_users_list(
         self, session: Session, raw: dict[str, Any]

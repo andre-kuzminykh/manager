@@ -36,6 +36,36 @@ from app.logging_setup import get_logger
 log = get_logger(__name__)
 
 
+def _resolve_ipv4(database_url: str) -> str | None:
+    """Best-effort IPv4 lookup for the host in a SQLAlchemy DSN.
+
+    Returns the dotted-quad string if the host has at least one A
+    record, otherwise None (we then fall through to libpq's default
+    resolution, which may pick an AAAA record).
+
+    Used to dodge the "Supabase free tier serves IPv6 only" gotcha
+    on cloud VMs without outbound IPv6.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(database_url)
+        host = parsed.hostname
+        port = parsed.port or 5432
+    except Exception:  # noqa: BLE001
+        return None
+    if not host:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    if not infos:
+        return None
+    return infos[0][4][0]
+
+
 _FIELD_MAP: dict[str, tuple[str, ...]] = {
     "chat_id": ("chat_id", "chatid"),
     "message_id": ("message_id", "messageid", "id"),
@@ -138,12 +168,27 @@ class TelegramSourceReader:
                 url = "postgresql+psycopg://" + url[len("postgresql://"):]
             elif url.startswith("postgres://"):
                 url = "postgresql+psycopg://" + url[len("postgres://"):]
+
+            connect_args: dict[str, str] = {
+                # Read-only role; setting `default_transaction_read_only`
+                # via connect_args defends against accidental writes.
+                "options": "-c default_transaction_read_only=on",
+            }
+            # Supabase quirk: `db.<project>.supabase.co` resolves to an
+            # IPv6 address on the free tier, and many cloud VMs (incl.
+            # GCE in europe-west1 with the default network) don't have
+            # outbound IPv6. Pre-resolve the hostname to IPv4 ourselves
+            # and pass it to libpq via `hostaddr` so it never tries the
+            # AAAA record. The `host` field stays the original hostname
+            # so TLS SNI / cert verification still works.
+            ipv4 = _resolve_ipv4(url)
+            if ipv4 is not None:
+                connect_args["hostaddr"] = ipv4
+
             self._engine = create_engine(
                 url,
                 pool_pre_ping=True,
-                # Read-only role; setting `default_transaction_read_only`
-                # via connect_args defends against accidental writes.
-                connect_args={"options": "-c default_transaction_read_only=on"},
+                connect_args=connect_args,
             )
         else:
             self._engine = None

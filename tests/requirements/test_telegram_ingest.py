@@ -106,6 +106,32 @@ def test_reader_unconfigured_yields_nothing():
     assert list(reader.page()) == []
 
 
+def test_reader_resolves_ipv4_and_passes_hostaddr(monkeypatch):
+    """Supabase free-tier hostnames resolve to IPv6 only, which kills
+    GCE VMs without outbound IPv6. The reader must pre-resolve to
+    IPv4 and pass `hostaddr` to libpq so the connection never tries
+    an AAAA address."""
+    captured: dict = {}
+
+    def fake_create_engine(url, *args, **kwargs):  # noqa: ANN001
+        captured["url"] = url
+        captured["connect_args"] = kwargs.get("connect_args", {})
+        return object()
+
+    def fake_resolve(database_url):  # noqa: ANN001
+        return "203.0.113.7"
+
+    monkeypatch.setattr("app.telegram_ingest.reader.create_engine", fake_create_engine)
+    monkeypatch.setattr("app.telegram_ingest.reader._resolve_ipv4", fake_resolve)
+
+    TelegramSourceReader(
+        database_url="postgresql://u:p@db.example.supabase.co:5432/postgres",
+        view_name="v",
+    )
+    assert captured["connect_args"].get("hostaddr") == "203.0.113.7"
+    assert "default_transaction_read_only" in captured["connect_args"]["options"]
+
+
 def test_reader_rewrites_postgresql_scheme_to_psycopg3(monkeypatch):
     """The image ships psycopg3 only — SQLAlchemy's default driver
     for the bare `postgresql://` scheme is psycopg2, which would

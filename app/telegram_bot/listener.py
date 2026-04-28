@@ -334,6 +334,7 @@ class TelegramListener:
                                 task=task,
                                 chat_id=msg.chat_id,
                                 reply_to_message_id=msg.message_id,
+                                author_user_id=str(msg.user_id) if msg.user_id else None,
                             )
                         except Exception as e:  # noqa: BLE001
                             log.warning(

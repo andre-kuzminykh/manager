@@ -723,6 +723,62 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-31 — Telegram card privacy: DM author / owner / admins, never the group
+
+The Telegram bot used to post the task card under the source
+message in the chat where it was captured. In a group that means
+*every member* sees the card — not the privacy model the team
+wanted. New behaviour:
+
+- The card is **never** posted in the source chat.
+- One DM per recipient goes to:
+  - the author of the source message (the user who wrote it);
+  - the assignee, if the LLM resolved a different owner;
+  - every Telegram admin from ``TELEGRAM_ADMIN_USER_IDS``.
+- For a DM source the recipient set collapses to the user
+  themselves and the card lands in the same DM the user wrote in
+  — no behavioural difference vs. the old design.
+
+Each delivered DM has its own `(chat_id, message_id)` pair. We
+persist the full list on ``Task.extra["telegram_cards"]`` so a
+status change can ``editMessageText`` every delivered copy.
+``Task.card_channel`` / ``Task.card_ts`` keep pointing at the
+first card for back-compat with the Slack-shaped fields.
+
+The keyboard is rendered per-recipient from THEIR perspective
+(`is_owner` / `is_admin`-aware), so the author, the owner and an
+admin each see the buttons that make sense for their role —
+exactly like Slack's "viewer" pattern on the task card.
+
+Telegram quirk: the Bot API can DM only users who have already
+started a private conversation with the bot (sent ``/start`` or
+any DM). DMs to never-started users fail silently with a logged
+`telegram_card_dm_failed` warning. Operator should ask team
+members to ``/start`` the bot once.
+
+Permissions enforcement is unchanged — the existing
+`_ensure_can_edit` already gates Edit / Cancel / Delete /
+Mark done by owner-or-admin. Bystanders (everyone else) simply
+no longer see the card at all under FR-CR-04-31.
+
+#### FR-CR-04-30 — TG ingest uses sender's user_name as fallback owner display
+
+When the LLM owner stage runs without a `known_employees` table
+(the typical Telegram path), it almost never extracts a display
+name. The quiet-author-fallback then sets `owner_user_id` to the
+sender's numeric Telegram id and leaves `owner_display_name`
+empty, so the card and the Sheet end up showing "222968032"
+instead of "Andre".
+
+`TelegramIngestService.process_one` now copies `msg.user_name`
+into `owner_display_name` when the LLM didn't provide one — but
+**doesn't** overwrite an LLM-derived name, so explicit
+"@Petya сделай X" still wins. The sheet renderer
+(`_resolve_owner_name`) and the card text builder
+(`build_task_card_text`) already prefer `owner_display_name`
+over `owner_user_id`, so the fix takes effect everywhere
+without further changes.
+
 #### FR-CR-04-29 — Full Slack-parity for the Telegram bot
 
 Closes the remaining gap between Slack and Telegram:
@@ -1644,5 +1700,7 @@ pure unit tests for internal helpers.
 | FR-CR-04-27  | `test_telegram_listener.py` (`parse_update` for message / edited_message / channel_post; caption fallback; first+last name composition; service updates dropped; tick processes updates and advances offset; no_action bookmark without task; non-message updates skipped; second tick with same offset is a no-op; disabled when token empty); migration `0015_telegram_listener_state.py` |
 | FR-CR-04-28  | `test_telegram_handlers.py` (Start owner / unowned-claim / stranger-rejected; Done owner-only; Cancel routes by due_date; Delete soft-deletes + audit row + via=telegram + stranger-blocked; Subscribe/Unsubscribe for bystanders, owner is no-op; Edit help text; `_route_on_cancel`); `test_telegram_listener.py::test_listener_tick_routes_callback_query_to_handler` |
 | FR-CR-04-29  | `test_telegram_conversations.py` (PendingRegistry register / take / TTL eviction / no-match guards; `prompt_done` + `apply_done_artifact_reply` for /skip / URL / text; `prompt_edit` includes current values; `parse_edit_payload` filters unknown keys + handles empty values; `apply_edit_reply` flips fields, clears on empty value, silently ignores invalid priority, drops `owner_assumed`, blocks stranger; `admin_user_ids` env parsing; admin can edit, non-admin/non-owner blocked); `test_telegram_notifications.py` (numeric-uid filter, owner ids list, morning digest content + idempotency + skip-empty, evening plan persists items, morning plan needs seeded items, deadline reminder per-day dedup, thread reminders post to source chat with reply_to, admin watch-list DMs each admin, no-admins is a no-op) |
+| FR-CR-04-30  | `test_telegram_ingest.py::test_process_one_uses_user_name_as_fallback_owner_display_name`, `::test_process_one_keeps_llm_display_name_when_present` |
+| FR-CR-04-31  | `test_telegram_cards.py` (TG-uid filter; recipient set order author → owner → admins, dedup when author == owner, Slack uids dropped; `post_initial_card` sends one DM per recipient, persists `extra["telegram_cards"]` + back-compat `card_channel`/`card_ts`, no `reply_to_message_id` forwarded, no-op when no recipients or task is Slack-sourced; `refresh_card` iterates every stored card; legacy single-pair fallback; `render_tombstone` updates every card with empty keyboard) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

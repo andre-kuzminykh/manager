@@ -512,33 +512,44 @@ The two ingest paths run in parallel and dedupe via the (chat_id,
 message_id) primary key — a message captured by either path is
 indistinguishable in the DB once written.
 
-#### 12.4 — Live task card with buttons in the Telegram chat
+#### 12.4 — Private task card with buttons (DM only — group stays clean)
 
-> **As a Telegram contributor**, I want a card under my message with
-> Start / Mark done / Cancel / Edit / Delete / Subscribe buttons —
-> exactly like the Slack one, **so that** I can drive the task through
-> its lifecycle without leaving Telegram.
+> **As a Telegram contributor in a group**, I want the task card
+> to be visible only to the people who care about it — me (the
+> author), the assignee, and admins — so that the rest of the
+> group doesn't see noise from every captured task.
 
 **Flow:**
 1. The listener captures a message and creates a task (see 12.3).
-2. The bot replies under the source message with a card: title,
-   description, status / owner / priority / due meta line, source
-   link, plus an inline keyboard with the matching buttons.
-3. Tapping a button drives the task:
-   - **Start** flips backlog/todo → in_progress; an unowned task
-     gets claimed by whoever clicked.
-   - **Mark done** transitions to done.
+2. The bot **DMs** the card to a small recipient set:
+   - the message author;
+   - the assignee, if the LLM resolved a different owner;
+   - every Telegram admin from `TELEGRAM_ADMIN_USER_IDS`.
+
+   The source group / chat does **not** get a copy. Telegram
+   doesn't do per-recipient visibility within a group, so the
+   only privacy-preserving option is to skip the group post
+   entirely.
+3. Each recipient sees a keyboard rendered from THEIR perspective:
+   - the author always sees Edit / Cancel / Subscribe;
+   - the owner sees Start / Mark done / Edit / Cancel / Delete;
+   - admins see Edit / Cancel / Delete on every task.
+4. Tapping a button drives the task — the change applies once,
+   and the bot edits **every delivered DM** so author / owner /
+   admin all see the same state without re-fetching anything:
+   - **Start** flips backlog/todo → in_progress.
+   - **Mark done** opens the optional-artifact reply (see 12.5).
    - **Cancel** routes back to todo (this week) or backlog (later).
    - **Subscribe / Unsubscribe** toggles for bystanders.
-   - **Delete** soft-deletes (owner+admin), card flips to a
-     tombstone line.
-   - **Edit** posts a help message pointing at Slack for the full
-     edit; the Telegram-native edit conversation lands in a follow-up.
-4. The card is edited in place after every action, so it always
-   reflects the current task state without spamming new messages.
-5. The same Google Sheet row updates after every change, so a
-   manager watching the spreadsheet sees the same state regardless
-   of which client did the click.
+   - **Delete** soft-deletes; every card flips to a tombstone line.
+   - **Edit** opens the key=value reply conversation (see 12.5).
+5. The same Google Sheet row updates after every change.
+
+**Important for the operator**: Telegram's Bot API can DM only
+users who have already started a private chat with the bot (sent
+`/start` or any DM). Recipients who never started the bot won't
+get a card — the bot logs `telegram_card_dm_failed` and moves on.
+Ask team members to `/start` the bot once.
 
 **Permissions** match the Slack card: only the owner (or admin)
 can do destructive things (Mark done / Cancel / Delete / Edit);

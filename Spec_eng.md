@@ -544,19 +544,82 @@ indistinguishable in the DB once written.
 can do destructive things (Mark done / Cancel / Delete / Edit);
 bystanders can subscribe.
 
-#### 12.5 — Live confirmation back into the Telegram chat (planned)
+#### 12.5 — Mark done + Edit via reply conversation
 
-> **As a Telegram contributor**, I want a confirmation message back
-> in my chat when the bot creates a task from my message, **so that**
-> I know it was captured and I can act on the buttons (Confirm /
-> Edit / Reject) without leaving Telegram.
+> **As a Telegram task owner**, I want the same Edit and Mark-done-
+> with-artifact flows as Slack — without modal dialogs Telegram
+> doesn't support, **so that** I can drive a task end-to-end
+> without switching to Slack.
 
-**Status:** the outbound surface is in place
-(`app/telegram_bot/sender.py` + inline-keyboard builders), but the
-inbound callback handler that reacts to the buttons is not yet
-wired. The MVP ingest path runs **silently** — tasks land in the
-DB and the sheet, but the Telegram chat doesn't get a confirmation
-message yet. Tracked in the roadmap.
+**Mark done flow:**
+1. Owner taps *Mark done* on the card.
+2. Bot replies in the chat: *"Optional: reply with a link or short
+   note. Or `/skip` to complete without."* The reply triggers a
+   force-reply UX in the user's client.
+3. User replies with one of:
+   - a URL (e.g. `https://drive.example.com/file`) → saved as
+     `kind=url`;
+   - free text → saved as `kind=text`;
+   - `/skip` → no artifact.
+4. Bot transitions the task to *done*, refreshes the original
+   card in place, and updates the Google Sheet row.
+
+**Edit flow:**
+1. Owner / admin taps *Edit*.
+2. Bot replies with the current values formatted as `key=value`
+   pairs and a list of allowed keys: `title`, `description`,
+   `priority`, `due`, `due_time`, `start`, `start_time`,
+   `category`, `owner`.
+3. User replies with one or more `key=value` lines for the fields
+   they want to change. Empty value clears the field. Invalid
+   values (e.g. `priority=critical`) are silently ignored.
+4. Bot applies the changes, refreshes the card, drops the
+   `owner_assumed` flag, updates the sheet.
+
+The matching between bot prompts and user replies uses Telegram's
+`reply_to_message_id` field and a 10-minute in-memory TTL —
+unrelated chat traffic never accidentally triggers a handler.
+
+#### 12.6 — DM digests, daily plan, reminders for Telegram users
+
+> **As a Telegram user who owns tasks**, I want the same morning
+> digest / daily plan / weekly plan / deadline / thread reminders
+> that Slack users get, **so that** my channel of choice gets the
+> same coverage.
+
+**What's covered:**
+- *Morning digest* — DM with Today / Approaching (2 days) /
+  Overdue per Telegram owner.
+- *Daily plan* — evening heads-up DM, morning execution DM with
+  today's tasks. Approve is optional (matches FR-CR-04-25).
+- *Weekly plan* — Sunday evening DM listing next week's backlog.
+- *Deadline reminders* — DM the owner of any task ≤ 2 days from
+  due (or already overdue).
+- *Thread reminders* — daily nudge posted in the source Telegram
+  chat under the original message.
+- *Admin watch-list* — DM each TG admin with the team-wide *In
+  progress* + *Overdue* lists.
+
+**Routing rule:** numeric user ids → Telegram, others (Slack
+shape `U…` / `W…`) → Slack. A Slack subscriber never gets a
+Telegram DM and vice-versa. Per-user / per-day idempotency lives
+in `audit_logs` under category prefix `telegram_*`.
+
+**TG admins** are configured via the `TELEGRAM_ADMIN_USER_IDS` env
+var (comma-separated numeric ids). Same role as Slack admins:
+edit / cancel / delete any task, plus admin watch-list digest.
+
+**Operator setup** — the cron schedule mirrors the Slack one,
+just doubled with a Telegram call per slot:
+```
+09:00  python -m ops.telegram_digest --type morning-digest
+09:00  python -m ops.telegram_digest --type plan-morning
+10:00  python -m ops.telegram_digest --type thread-reminders   (Mon-Fri)
+18:00  python -m ops.telegram_digest --type plan-evening
+20:00  python -m ops.telegram_digest --type weekly             (Sundays)
+every 6h python -m ops.telegram_digest --type deadlines
+09:00  python -m ops.telegram_digest --type admin-watchlist
+```
 
 
 ---

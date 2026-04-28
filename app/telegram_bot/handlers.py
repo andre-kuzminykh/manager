@@ -1,32 +1,41 @@
-"""Telegram-side button handlers (FR-CR-04-28).
+"""Telegram-side button handlers (FR-CR-04-28 / FR-CR-04-29).
 
 Mirror the Slack task-card actions so a Telegram user can drive a
 task through its full lifecycle without leaving the chat. Each
 handler:
 
   - takes a `Session`, `task_id` and the actor's Telegram user id;
-  - performs an authorisation check (owner-only for destructive
+  - performs an authorisation check (owner / admin for destructive
     actions; bystanders can subscribe);
   - applies the state change via the existing services
     (`TransitionService`, `SubscriptionService`, soft-delete);
   - returns the refreshed `Task` so the caller can post / edit the
     Telegram card with the new state.
 
-Edit and Mark-done-with-artifact use Telegram's reply pattern
-rather than a modal — that's a planned follow-up; for MVP the Edit
-button just posts a help message and Mark done transitions
-without an artifact (matching the FR-CR-04-21 "both fields
-optional" semantic).
+Two flows use Telegram's reply pattern in lieu of a modal:
+
+- **Mark done with artifact** — the bot posts a prompt; the user's
+  reply (text or `/skip`) is parsed by `apply_done_artifact_reply`.
+- **Edit** — the bot posts a help message; the user's reply with
+  ``key=value`` lines is parsed by `apply_edit_reply`.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+import re
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.logging_setup import get_logger
-from app.models import AuditLog, Task, TaskSourceKind, TaskStatus
+from app.models import (
+    AuditLog,
+    Task,
+    TaskPriority,
+    TaskSourceKind,
+    TaskStatus,
+)
 from app.services import (
     InvalidTransition,
     SubscriptionService,
@@ -42,9 +51,23 @@ log = get_logger(__name__)
 # --------------------------------------------------------------------------- #
 
 
+def admin_user_ids() -> set[str]:
+    """Read TELEGRAM_ADMIN_USER_IDS env into a set of strings."""
+    raw = (get_settings().telegram_admin_user_ids or "").strip()
+    if not raw:
+        return set()
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
+def is_admin(user_id: str | None) -> bool:
+    if not user_id:
+        return False
+    return user_id in admin_user_ids()
+
+
 class NotAuthorised(Exception):
-    """Raised when the actor isn't the task owner or admin and the
-    action requires it (e.g. Cancel, Delete, Edit)."""
+    """Raised when the actor isn't the task owner or an admin and
+    the action requires it (e.g. Cancel, Delete, Edit)."""
 
 
 def _is_owner(task: Task, actor: str | None) -> bool:
@@ -52,13 +75,15 @@ def _is_owner(task: Task, actor: str | None) -> bool:
 
 
 def _ensure_can_edit(task: Task, actor: str | None) -> None:
-    """Owner-only for now. Admin support comes when we wire a
-    TELEGRAM_ADMIN_USER_IDS env (see roadmap)."""
-    if not _is_owner(task, actor):
-        raise NotAuthorised(
-            "Only the task owner can do this. Ask "
-            f"<@{task.owner_user_id}>."
-        )
+    """Owner or TG admin."""
+    if _is_owner(task, actor):
+        return
+    if is_admin(actor):
+        return
+    raise NotAuthorised(
+        "Only the task owner or an admin can do this. Ask "
+        f"<@{task.owner_user_id}>." if task.owner_user_id else "Only an admin can do this."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -93,12 +118,14 @@ def handle_start(session: Session, *, task_id: int, actor: str) -> Task | None:
 
 
 def handle_done(session: Session, *, task_id: int, actor: str) -> Task | None:
-    """*Mark done* button — straight transition, no artifact modal.
+    """*Mark done* button — direct transition without artifact.
 
-    The Slack flow opens an optional-artifact modal here; the
-    equivalent in Telegram (a follow-up reply conversation) is
-    deferred. Both artifact fields are optional anyway (FR-CR-04-21),
-    so transitioning with neither set is a valid completion.
+    The full FR-CR-04-29 flow opens a follow-up "reply with link or
+    note (or /skip)" conversation via `prompt_done` +
+    `apply_done_artifact_reply`. This direct entry is kept for
+    callers that want the no-artifact path explicitly (tests,
+    legacy in-memory paths). The Slack-equivalent fields are both
+    optional anyway (FR-CR-04-21).
     """
     task = session.get(Task, task_id)
     if task is None or task.deleted_at is not None:
@@ -113,6 +140,68 @@ def handle_done(session: Session, *, task_id: int, actor: str) -> Task | None:
         )
     except InvalidTransition:
         return task
+    _sync_task_to_sheets(task_id)
+    return task
+
+
+# --------------------------------------------------------------------------- #
+# Mark done — reply-conversation flow (FR-CR-04-29)
+# --------------------------------------------------------------------------- #
+
+
+def prompt_done(
+    session: Session, *, task_id: int, actor: str
+) -> tuple[Task, str]:
+    """Step 1 of the Mark-done conversation: return the prompt text
+    the listener should post in the chat. Raises ``NotAuthorised``
+    when the actor isn't allowed to complete the task."""
+    task = session.get(Task, task_id)
+    if task is None or task.deleted_at is not None:
+        raise NotAuthorised("Task not found or already deleted.")
+    _ensure_can_edit(task, actor)
+    text = (
+        f"✔ *Mark done — task #{task.id}*\n"
+        f"Optional: reply to this message with a link or a short note "
+        f"about the result.\n"
+        f"Or reply `/skip` to complete without an artifact."
+    )
+    return task, text
+
+
+def apply_done_artifact_reply(
+    session: Session,
+    *,
+    task_id: int,
+    actor: str,
+    reply_text: str,
+) -> Task | None:
+    """Step 2 of the Mark-done conversation: parse the user's
+    reply, persist the artifact (URL → kind=url, anything else →
+    kind=text), and transition the task to done."""
+    task = session.get(Task, task_id)
+    if task is None or task.deleted_at is not None:
+        return None
+    _ensure_can_edit(task, actor)
+
+    text = (reply_text or "").strip()
+    if text and text != "/skip":
+        if re.match(r"^https?://", text):
+            task.completion_artifact = text
+            task.completion_artifact_kind = "url"
+        else:
+            task.completion_artifact = text
+            task.completion_artifact_kind = "text"
+
+    try:
+        TransitionService().apply(
+            session,
+            task=task,
+            new_status=TaskStatus.done,
+            actor_slack_user_id=actor,
+        )
+    except InvalidTransition:
+        # Already done — keep the artifact we just stored.
+        log.info("telegram_done_already_done", task_id=task_id)
     _sync_task_to_sheets(task_id)
     return task
 
@@ -202,17 +291,153 @@ def handle_subscribe(
 
 
 def handle_edit_help() -> str:
-    """*Edit* button MVP: returns the help text the listener should
-    post in the chat. Full edit-via-conversation is a planned
-    follow-up — for now we point users at Slack or a future syntax.
-    """
+    """Legacy stub kept for back-compat. Use `prompt_edit` for the
+    full reply-conversation flow."""
     return (
-        "✏ *Edit task*\n"
-        "Inline editing is in progress. For now, edits go through "
-        "the Slack card (which lives next to this task in the same "
-        "shared task DB). The Telegram-native edit flow will land "
-        "in the next iteration."
+        "✏ Edit task — use the inline reply flow now (see prompt_edit)."
     )
+
+
+# --------------------------------------------------------------------------- #
+# Edit — reply-conversation flow (FR-CR-04-29)
+# --------------------------------------------------------------------------- #
+
+
+_EDIT_KEYS = (
+    "title",
+    "description",
+    "priority",
+    "due",
+    "due_time",
+    "start",
+    "start_time",
+    "category",
+    "owner",
+)
+
+
+def prompt_edit(
+    session: Session, *, task_id: int, actor: str
+) -> tuple[Task, str]:
+    """Step 1 of the Edit conversation: return a prompt with the
+    current values + format reminder. Raises ``NotAuthorised`` if
+    the actor isn't allowed to edit."""
+    task = session.get(Task, task_id)
+    if task is None or task.deleted_at is not None:
+        raise NotAuthorised("Task not found or already deleted.")
+    _ensure_can_edit(task, actor)
+
+    cur = (
+        f"title={task.title}\n"
+        f"description={task.description or ''}\n"
+        f"priority={task.priority.value}\n"
+        f"due={task.due_date.isoformat() if task.due_date else ''}\n"
+        f"due_time={task.due_time.strftime('%H:%M') if task.due_time else ''}\n"
+        f"start={task.start_date.isoformat() if task.start_date else ''}\n"
+        f"start_time={task.start_time.strftime('%H:%M') if task.start_time else ''}\n"
+        f"category={task.category or ''}\n"
+        f"owner={task.owner_user_id or ''}"
+    )
+    text = (
+        f"✏ *Edit task #{task.id}*\n"
+        f"Reply to this message with `key=value` lines for the "
+        f"fields you want to change. Empty value clears the field.\n\n"
+        f"Available keys: {', '.join(_EDIT_KEYS)}.\n\n"
+        f"Current values:\n```\n{cur}\n```"
+    )
+    return task, text
+
+
+def parse_edit_payload(text: str) -> dict[str, str]:
+    """Parse a multi-line ``key=value`` reply into a dict, dropping
+    unknown keys."""
+    out: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip().lower()
+        if k in _EDIT_KEYS:
+            out[k] = v.strip()
+    return out
+
+
+def _parse_date_or_none(s: str | None) -> date | None:
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _parse_time_or_none(s: str | None) -> time | None:
+    if not s:
+        return None
+    try:
+        hh, mm = s.split(":")[:2]
+        return time(int(hh), int(mm))
+    except (ValueError, IndexError):
+        return None
+
+
+def apply_edit_reply(
+    session: Session,
+    *,
+    task_id: int,
+    actor: str,
+    reply_text: str,
+) -> Task | None:
+    """Step 2 of the Edit conversation: apply the parsed
+    ``key=value`` payload to the task. Empty value clears the
+    field; unknown keys are ignored.
+
+    Returns the refreshed Task (or None if the task is missing /
+    soft-deleted). Raises ``NotAuthorised`` if the actor lost the
+    permission between prompt and reply.
+    """
+    task = session.get(Task, task_id)
+    if task is None or task.deleted_at is not None:
+        return None
+    _ensure_can_edit(task, actor)
+
+    payload = parse_edit_payload(reply_text)
+    if not payload:
+        return task
+
+    if "title" in payload and payload["title"]:
+        # Empty title isn't allowed — keep the old one in that case.
+        task.title = payload["title"]
+    if "description" in payload:
+        task.description = payload["description"] or None
+    if "priority" in payload:
+        try:
+            task.priority = TaskPriority(payload["priority"])
+        except ValueError:
+            pass  # invalid value → leave unchanged
+    if "due" in payload:
+        task.due_date = _parse_date_or_none(payload["due"]) if payload["due"] else None
+    if "due_time" in payload:
+        task.due_time = _parse_time_or_none(payload["due_time"]) if payload["due_time"] else None
+    if "start" in payload:
+        task.start_date = _parse_date_or_none(payload["start"]) if payload["start"] else None
+    if "start_time" in payload:
+        task.start_time = _parse_time_or_none(payload["start_time"]) if payload["start_time"] else None
+    if "category" in payload:
+        task.category = payload["category"] or None
+    if "owner" in payload:
+        task.owner_user_id = payload["owner"] or None
+
+    # Drop the "owner_assumed" flag — once a human has explicitly
+    # edited the task, we no longer hedge the owner label.
+    if task.extra and task.extra.get("owner_assumed"):
+        extra = dict(task.extra)
+        extra.pop("owner_assumed", None)
+        task.extra = extra or None
+
+    session.flush()
+    _sync_task_to_sheets(task_id)
+    return task
 
 
 # --------------------------------------------------------------------------- #

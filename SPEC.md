@@ -723,6 +723,77 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-29 — Full Slack-parity for the Telegram bot
+
+Closes the remaining gap between Slack and Telegram:
+
+1. **TG admins** — `TELEGRAM_ADMIN_USER_IDS` env (comma-separated
+   numeric Telegram user ids). Mirrors `ADMIN_SLACK_USER_IDS`.
+   `_ensure_can_edit` now passes for owner OR admin.
+
+2. **Mark done with optional artifact** via reply conversation.
+   Click *Mark done* → bot posts a force-reply prompt (`Optional:
+   reply with a link or short note. Or /skip.`) and registers a
+   `PendingQuestion` in the listener's in-memory registry.
+   When the user replies, `apply_done_artifact_reply`:
+   - parses the text — URL prefix → `kind=url`, anything else →
+     `kind=text`, `/skip` → no artifact;
+   - persists `task.completion_artifact` + `_kind`;
+   - transitions the task to done;
+   - calls `sync_task` so Sheets updates.
+   The card is then refreshed in place.
+
+3. **Edit via key=value reply**. Click *Edit* → bot posts a
+   force-reply prompt that includes the current values formatted
+   as `title=...`, `description=...`, etc. The user replies with
+   one or more `key=value` lines for fields they want to change.
+   `parse_edit_payload` drops unknown keys; `apply_edit_reply`
+   coerces dates / times / priority / etc and applies. Empty
+   value clears the field. Invalid values (e.g. priority=critical)
+   are silently ignored. `owner_assumed` is dropped on edit, same
+   as the Slack flow.
+
+4. **Pending registry** — `app/telegram_bot/pending.py`. In-memory
+   `PendingRegistry` keyed by `(chat_id, user_id, prompt_message_id)`
+   with a 10-minute TTL. Listener calls `register` after posting
+   a prompt and `take` (atomic fetch+remove) when an inbound
+   message has a matching `reply_to_message_id`. State is
+   per-process; restart loses in-flight pendings — user just
+   clicks again. Acceptable for the single-listener deployment.
+
+5. **DM-based notifications for Telegram users** —
+   `app/telegram_bot/notifications.py` mirrors the Slack
+   notification surface for Telegram task owners and TG admins:
+   - `send_morning_digest` — Today / Approaching (2 days) /
+     Overdue per Telegram owner.
+   - `send_evening_plan` — heads-up for tomorrow's plan,
+     persists `daily_plan_items` so the morning execution path
+     can read them. (Skip / Approve buttons are deferred — the
+     Slack version's optional Approve already runs as-is in the
+     morning per FR-CR-04-25, and the Telegram morning path
+     mirrors that.)
+   - `send_morning_plan` — today's tasks for Telegram owners.
+   - `send_weekly_plan` — backlog for the upcoming week, sent
+     Sunday evening.
+   - `send_deadline_reminders` — DM the owner of any task with a
+     due_date ≤ 2 days away (or already overdue).
+   - `send_thread_reminders` — daily nudge in the source Telegram
+     chat for each open Telegram-sourced task. Replies under the
+     original message when we have its id.
+   - `send_admin_watchlist` — DMs each TG admin with the team-
+     wide *In progress* + *Overdue* lists.
+   Recipients are filtered to numeric user ids only — Slack
+   subscribers (`U…` / `W…`) never get a Telegram DM (and vice-
+   versa). Per-user / per-day idempotency lives in `audit_logs`
+   under category prefix `telegram_*` so Slack and Telegram
+   digests don't shadow each other.
+
+6. **Cron entry-point** — `python -m ops.telegram_digest --type
+   <morning-digest|plan-evening|plan-morning|weekly|deadlines|
+   thread-reminders|admin-watchlist>`. One-shot, idempotent,
+   exits 0 on success. Operator runs the same schedule as the
+   Slack cron, doubled with a Telegram entry per slot.
+
 #### FR-CR-04-28 — Telegram task cards + button-driven lifecycle
 
 Closes the loop on the Telegram channel: a task captured by the
@@ -1572,5 +1643,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-26  | `test_task_source_kind.py` (default slack, telegram persisted, enum coverage, `create_task_from_draft` honours `source.kind='telegram'`); `test_telegram_ingest.py` (reader maps canonical and alternative column names, drops orphans, no-op when unconfigured; `_telegram_permalink` for super-group / private; `_build_window` shape; `process_one` creates Task with source_kind=telegram + bookmark; records no_action without creating a task; idempotent on repeat; skips empty text without invoking classifier; batch counters per outcome; psycopg2→psycopg3 scheme rewrite; IPv4 hostaddr injection); `test_telegram_bot.py` (confirm + task-card keyboards, callback round-trip, card text rendering, sender disabled when token empty); migration `0014_telegram_source.py` |
 | FR-CR-04-27  | `test_telegram_listener.py` (`parse_update` for message / edited_message / channel_post; caption fallback; first+last name composition; service updates dropped; tick processes updates and advances offset; no_action bookmark without task; non-message updates skipped; second tick with same offset is a no-op; disabled when token empty); migration `0015_telegram_listener_state.py` |
 | FR-CR-04-28  | `test_telegram_handlers.py` (Start owner / unowned-claim / stranger-rejected; Done owner-only; Cancel routes by due_date; Delete soft-deletes + audit row + via=telegram + stranger-blocked; Subscribe/Unsubscribe for bystanders, owner is no-op; Edit help text; `_route_on_cancel`); `test_telegram_listener.py::test_listener_tick_routes_callback_query_to_handler` |
+| FR-CR-04-29  | `test_telegram_conversations.py` (PendingRegistry register / take / TTL eviction / no-match guards; `prompt_done` + `apply_done_artifact_reply` for /skip / URL / text; `prompt_edit` includes current values; `parse_edit_payload` filters unknown keys + handles empty values; `apply_edit_reply` flips fields, clears on empty value, silently ignores invalid priority, drops `owner_assumed`, blocks stranger; `admin_user_ids` env parsing; admin can edit, non-admin/non-owner blocked); `test_telegram_notifications.py` (numeric-uid filter, owner ids list, morning digest content + idempotency + skip-empty, evening plan persists items, morning plan needs seeded items, deadline reminder per-day dedup, thread reminders post to source chat with reply_to, admin watch-list DMs each admin, no-admins is a no-op) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

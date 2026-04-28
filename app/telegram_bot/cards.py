@@ -26,20 +26,15 @@ from app.telegram_bot.sender import TelegramSender, build_task_card_text
 log = get_logger(__name__)
 
 
-def _admin_user_ids() -> set[str]:
-    """Telegram admins are not yet wired (no env var). Returns
-    empty set for now; owner is the only privileged actor."""
-    return set()
-
-
 def _keyboard_for(task: Task, viewer: str | None, *, subscribed: bool) -> dict[str, Any]:
+    from app.telegram_bot.handlers import is_admin as _is_admin
+
     is_owner = bool(viewer) and task.owner_user_id == viewer
-    is_admin = viewer in _admin_user_ids() if viewer else False
     return task_card_keyboard(
         task_id=task.id,
         status=task.status.value,
         is_owner=is_owner,
-        is_admin=is_admin,
+        is_admin=_is_admin(viewer),
         subscribed=subscribed,
     )
 

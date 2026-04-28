@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     telegram_ingest_batch_size: int = Field(
         default=200, alias="TELEGRAM_INGEST_BATCH_SIZE"
     )
+    # FR-CR-04-29 — comma-separated Telegram user ids with admin
+    # privileges (Edit / Cancel / Delete on any task, plus admin
+    # watch-list digest delivery).
+    telegram_admin_user_ids: str = Field(
+        default="", alias="TELEGRAM_ADMIN_USER_IDS"
+    )
 
     # CR-01: Workload heuristic (minutes per business day for a single owner).
     workload_minutes_per_day: int = Field(default=360, alias="WORKLOAD_MINUTES_PER_DAY")

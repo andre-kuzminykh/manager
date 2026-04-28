@@ -57,6 +57,7 @@ from app.telegram_bot.keyboards import (
     ACTION_UNSUBSCRIBE,
     parse_callback_data,
 )
+from app.telegram_bot.pending import PendingRegistry
 from app.telegram_bot.sender import TelegramSender
 from app.telegram_ingest.reader import TelegramSourceMessage
 from app.telegram_ingest.service import TelegramIngestService
@@ -77,6 +78,7 @@ class ListenerReport:
     no_action: int = 0
     skipped_non_message: int = 0
     callbacks_handled: int = 0
+    pending_replies_handled: int = 0
     errors: int = 0
 
 
@@ -176,6 +178,7 @@ class TelegramListener:
         ingest: TelegramIngestService,
         sender: TelegramSender | None = None,
         long_poll_timeout: int = 30,
+        pending: PendingRegistry | None = None,
     ) -> None:
         self._token = token
         self._ingest = ingest
@@ -184,6 +187,9 @@ class TelegramListener:
         # standard Bot API setup.
         self._sender = sender if sender is not None else TelegramSender(token=token)
         self._long_poll_timeout = long_poll_timeout
+        # FR-CR-04-29 — in-memory state for reply-conversation flows
+        # (Mark done with artifact, Edit via key=value reply).
+        self._pending = pending if pending is not None else PendingRegistry()
 
     @property
     def enabled(self) -> bool:
@@ -279,6 +285,36 @@ class TelegramListener:
                 msg = parse_update(upd)
                 if msg is None:
                     report.skipped_non_message += 1
+                    continue
+
+                # FR-CR-04-29: a reply-to-bot message may be an
+                # answer to a previously-posted prompt (artifact
+                # for Mark done, key=value payload for Edit). When
+                # it is, route to the conversation handler instead
+                # of feeding it as a fresh capture.
+                pending = self._pending.take(
+                    chat_id=msg.chat_id,
+                    user_id=msg.user_id or 0,
+                    reply_to_message_id=msg.reply_to,
+                )
+                if pending is not None:
+                    try:
+                        self._handle_pending_reply(session, pending, msg)
+                        report.pending_replies_handled += 1
+                    except tg_handlers.NotAuthorised as e:
+                        self._sender.send_message(
+                            chat_id=msg.chat_id,
+                            text=f":lock: {e}",
+                            reply_to_message_id=msg.message_id,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.warning(
+                            "telegram_pending_reply_failed",
+                            action=pending.action,
+                            task_id=pending.task_id,
+                            error=str(e),
+                        )
+                        report.errors += 1
                     continue
 
                 try:
@@ -392,7 +428,11 @@ class TelegramListener:
         if action == ACTION_START:
             return tg_handlers.handle_start(session, task_id=entity_id, actor=actor)
         if action == ACTION_DONE:
-            return tg_handlers.handle_done(session, task_id=entity_id, actor=actor)
+            # FR-CR-04-29: open the optional-artifact reply
+            # conversation instead of transitioning immediately.
+            return self._open_done_conversation(
+                session, task_id=entity_id, actor=actor, cq=cq
+            )
         if action == ACTION_CANCEL:
             return tg_handlers.handle_cancel(session, task_id=entity_id, actor=actor)
         if action == ACTION_DELETE:
@@ -406,14 +446,10 @@ class TelegramListener:
                 session, task_id=entity_id, actor=actor, subscribe=False
             )
         if action == ACTION_EDIT:
-            # Post the help text as a chat message; nothing to refresh.
-            chat = (cq.get("message") or {}).get("chat") or {}
-            chat_id = chat.get("id")
-            if chat_id is not None:
-                self._sender.send_message(
-                    chat_id=chat_id, text=tg_handlers.handle_edit_help()
-                )
-            return None
+            # FR-CR-04-29: open the key=value reply conversation.
+            return self._open_edit_conversation(
+                session, task_id=entity_id, actor=actor, cq=cq
+            )
         if action in (ACTION_CONFIRM, ACTION_IGNORE):
             # Draft cards aren't posted yet (we create tasks
             # immediately on ingest). These actions are reserved for
@@ -421,6 +457,120 @@ class TelegramListener:
             return None
         log.info("telegram_unknown_action", action=action)
         return None
+
+    # ---- conversation flows (Mark done with artifact, Edit) -------------
+
+    def _open_done_conversation(
+        self,
+        session: Session,
+        *,
+        task_id: int,
+        actor: str,
+        cq: dict[str, Any],
+    ) -> Task | None:
+        """Click on Mark done → post the artifact prompt and register
+        a pending question. The user's reply (text or `/skip`) lands
+        in `_handle_pending_reply` on the next tick."""
+        task, prompt_text = tg_handlers.prompt_done(
+            session, task_id=task_id, actor=actor
+        )
+        chat = (cq.get("message") or {}).get("chat") or {}
+        chat_id = chat.get("id")
+        if chat_id is None:
+            return None
+        resp = self._sender.send_message(
+            chat_id=chat_id,
+            text=prompt_text,
+            reply_markup={"force_reply": True, "selective": True},
+        )
+        prompt_msg_id = resp.get("message_id")
+        if prompt_msg_id:
+            self._pending.register(
+                action="artifact",
+                task_id=task_id,
+                chat_id=int(chat_id),
+                user_id=int(actor),
+                prompt_message_id=int(prompt_msg_id),
+            )
+        # Returning None means the listener won't try to refresh
+        # the original card right now — it'll happen after the
+        # user replies.
+        return None
+
+    def _open_edit_conversation(
+        self,
+        session: Session,
+        *,
+        task_id: int,
+        actor: str,
+        cq: dict[str, Any],
+    ) -> Task | None:
+        task, prompt_text = tg_handlers.prompt_edit(
+            session, task_id=task_id, actor=actor
+        )
+        chat = (cq.get("message") or {}).get("chat") or {}
+        chat_id = chat.get("id")
+        if chat_id is None:
+            return None
+        resp = self._sender.send_message(
+            chat_id=chat_id,
+            text=prompt_text,
+            reply_markup={"force_reply": True, "selective": True},
+        )
+        prompt_msg_id = resp.get("message_id")
+        if prompt_msg_id:
+            self._pending.register(
+                action="edit",
+                task_id=task_id,
+                chat_id=int(chat_id),
+                user_id=int(actor),
+                prompt_message_id=int(prompt_msg_id),
+            )
+        return None
+
+    def _handle_pending_reply(
+        self,
+        session: Session,
+        pending,  # PendingQuestion
+        msg: TelegramSourceMessage,
+    ) -> None:
+        """Apply the user's reply to a prompt. ``pending.action``
+        decides whether to complete the task with an artifact or
+        apply an edit payload."""
+        actor = str(msg.user_id) if msg.user_id else None
+        if not actor:
+            return
+
+        if pending.action == "artifact":
+            task = tg_handlers.apply_done_artifact_reply(
+                session,
+                task_id=pending.task_id,
+                actor=actor,
+                reply_text=msg.text,
+            )
+            if task is not None:
+                refresh_card(
+                    sender=self._sender,
+                    session=session,
+                    task=task,
+                    viewer=actor,
+                )
+        elif pending.action == "edit":
+            task = tg_handlers.apply_edit_reply(
+                session,
+                task_id=pending.task_id,
+                actor=actor,
+                reply_text=msg.text,
+            )
+            if task is not None:
+                refresh_card(
+                    sender=self._sender,
+                    session=session,
+                    task=task,
+                    viewer=actor,
+                )
+        else:
+            log.info("telegram_unknown_pending_action", action=pending.action)
 
     # ---- main loop --------------------------------------------------------
 

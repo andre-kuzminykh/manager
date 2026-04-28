@@ -33,10 +33,14 @@ from typing import Any, Iterable
 from sqlalchemy.orm import Session
 
 from app.logging_setup import get_logger
-from app.models import Task, TaskSourceKind
+from app.models import ActionDraft, Task, TaskSourceKind
 from app.services import SubscriptionService
-from app.telegram_bot.keyboards import task_card_keyboard
-from app.telegram_bot.sender import TelegramSender, build_task_card_text
+from app.telegram_bot.keyboards import confirm_keyboard, task_card_keyboard
+from app.telegram_bot.sender import (
+    TelegramSender,
+    _escape_md,
+    build_task_card_text,
+)
 
 log = get_logger(__name__)
 
@@ -236,7 +240,6 @@ def render_tombstone(
     cards = _stored_cards(task)
     if not cards:
         return
-    from app.telegram_bot.sender import _escape_md
 
     text = (
         f"🗑 Task #{task.id} — *{_escape_md(task.title)}* deleted"
@@ -255,5 +258,223 @@ def render_tombstone(
                 "telegram_tombstone_failed",
                 task_id=task.id,
                 chat_id=c["chat_id"],
+                error=str(e),
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Draft-confirm widgets (FR-CR-04-32)
+# --------------------------------------------------------------------------- #
+#
+# When a task-shaped message lands in a group / supergroup / channel
+# we don't materialise a Task immediately. Instead we DM each
+# recipient (author + admins) with a forward of the original message
+# plus a "Create this task?" widget carrying ✅ / ✏ / ✖ buttons.
+# Only on Accept does the draft get finalised into a Task.
+
+
+def _build_draft_widget_text(draft: ActionDraft) -> str:
+    """Render the draft as a human-readable preview for the widget."""
+    payload = draft.payload or {}
+    title = payload.get("title") or ""
+    owner_disp = payload.get("owner_display_name") or payload.get("owner_user_id") or ""
+    priority = payload.get("priority") or "medium"
+    due = payload.get("due_date") or ""
+    description = payload.get("description") or ""
+
+    lines = [f"*Create this task?* (draft #{draft.id})"]
+    lines.append(f"*Title:* {_escape_md(str(title))}")
+    if description:
+        lines.append(f"*Description:* {_escape_md(str(description))}")
+    if owner_disp:
+        lines.append(f"*Owner:* {_escape_md(str(owner_disp))}")
+    if due:
+        lines.append(f"*Due:* {_escape_md(str(due))}")
+    lines.append(f"*Priority:* {_escape_md(str(priority))}")
+    return "\n".join(lines)
+
+
+def _draft_widgets(draft: ActionDraft) -> list[dict[str, int]]:
+    """Read the per-recipient `(chat_id, message_id)` widget locations
+    from `draft.payload["_widgets"]`."""
+    widgets = ((draft.payload or {}).get("_widgets") or [])
+    return [
+        {"chat_id": int(w["chat_id"]), "message_id": int(w["message_id"])}
+        for w in widgets
+    ]
+
+
+def post_draft_confirmation(
+    *,
+    sender: TelegramSender,
+    session: Session,
+    draft: ActionDraft,
+    source_chat_id: int,
+    source_message_id: int,
+    author_user_id: str | None,
+    owner_user_id: str | None,
+) -> None:
+    """DM the source forward + a confirm widget to the author + admins.
+
+    Forwards the original message first (so the recipient sees the
+    sender attribution), then sends the widget as a follow-up. Each
+    delivered widget's `(chat_id, message_id)` is stashed on
+    ``draft.payload["_widgets"]`` so we can edit them all when the
+    user clicks Accept / Reject.
+    """
+    if not sender.enabled:
+        return
+    from app.telegram_bot.handlers import admin_user_ids
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for uid in (author_user_id, owner_user_id, *sorted(admin_user_ids())):
+        if not uid:
+            continue
+        s = str(uid)
+        if not s.lstrip("-").isdigit():
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+
+    if not out:
+        log.info("telegram_draft_no_recipients", draft_id=draft.id)
+        return
+
+    text = _build_draft_widget_text(draft)
+    keyboard = confirm_keyboard(draft_id=draft.id)
+    widgets: list[dict[str, int]] = []
+    for uid in out:
+        try:
+            uid_int = int(uid)
+        except ValueError:
+            continue
+        # Best-effort forward of the original message — fails silently
+        # for users who haven't /start-ed the bot yet, same as task
+        # cards. The widget itself is what carries the buttons.
+        try:
+            sender.forward_message(
+                chat_id=uid_int,
+                from_chat_id=source_chat_id,
+                message_id=source_message_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "telegram_draft_forward_failed",
+                draft_id=draft.id,
+                uid=uid,
+                error=str(e),
+            )
+        resp = sender.send_message(
+            chat_id=uid_int, text=text, reply_markup=keyboard
+        )
+        msg_id = resp.get("message_id")
+        if msg_id:
+            widgets.append({"chat_id": uid_int, "message_id": int(msg_id)})
+        else:
+            log.info(
+                "telegram_draft_widget_dm_failed",
+                draft_id=draft.id,
+                uid=uid,
+                hint="recipient probably hasn't /start-ed the bot",
+            )
+
+    if not widgets:
+        return
+
+    payload = dict(draft.payload or {})
+    payload["_widgets"] = widgets
+    draft.payload = payload
+    draft.card_channel = str(widgets[0]["chat_id"])
+    draft.card_ts = str(widgets[0]["message_id"])
+    session.flush()
+
+
+def replace_widgets_with_task_card(
+    *,
+    sender: TelegramSender,
+    session: Session,
+    draft: ActionDraft,
+    task: Task,
+) -> None:
+    """After Accept: edit each draft widget into the regular task
+    card. Also copies the widget locations onto the new Task so the
+    follow-up Edit / Delete actions edit the same DMs in place."""
+    if not sender.enabled:
+        return
+    widgets = _draft_widgets(draft)
+    if not widgets:
+        return
+    text = build_task_card_text(task)
+    cards: list[dict[str, int]] = []
+    for w in widgets:
+        recipient = str(w["chat_id"])
+        is_subscribed = (
+            SubscriptionService().is_subscribed(
+                session, task=task, slack_user_id=recipient
+            )
+            if task.owner_user_id
+            else False
+        )
+        kb = _keyboard_for(task, recipient, subscribed=is_subscribed)
+        try:
+            sender.update_message(
+                chat_id=w["chat_id"],
+                message_id=w["message_id"],
+                text=text,
+                reply_markup=kb,
+            )
+            cards.append({"chat_id": w["chat_id"], "message_id": w["message_id"]})
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "telegram_widget_replace_failed",
+                draft_id=draft.id,
+                task_id=task.id,
+                chat_id=w["chat_id"],
+                error=str(e),
+            )
+
+    if not cards:
+        return
+    extra = dict(task.extra or {})
+    extra["telegram_cards"] = cards
+    task.extra = extra
+    task.card_channel = str(cards[0]["chat_id"])
+    task.card_ts = str(cards[0]["message_id"])
+    session.flush()
+
+
+def render_draft_rejected(
+    *,
+    sender: TelegramSender,
+    draft: ActionDraft,
+    actor: str | None,
+) -> None:
+    """Replace every draft widget with a "Rejected" tombstone."""
+    if not sender.enabled:
+        return
+    widgets = _draft_widgets(draft)
+    if not widgets:
+        return
+    title = (draft.payload or {}).get("title") or ""
+    text = (
+        f"✖ Draft #{draft.id} — *{_escape_md(str(title))}* rejected"
+        + (f" by `{_escape_md(actor)}`" if actor else "")
+    )
+    for w in widgets:
+        try:
+            sender.update_message(
+                chat_id=w["chat_id"],
+                message_id=w["message_id"],
+                text=text,
+                reply_markup={"inline_keyboard": []},
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "telegram_draft_reject_render_failed",
+                draft_id=draft.id,
+                chat_id=w["chat_id"],
                 error=str(e),
             )

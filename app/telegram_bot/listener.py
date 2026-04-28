@@ -41,9 +41,12 @@ from app.models import Task, TelegramListenerState
 from app.orchestrator import Orchestrator
 from app.telegram_bot import handlers as tg_handlers
 from app.telegram_bot.cards import (
+    post_draft_confirmation,
     post_initial_card,
     refresh_card,
+    render_draft_rejected,
     render_tombstone,
+    replace_widgets_with_task_card,
 )
 from app.telegram_bot.keyboards import (
     ACTION_CANCEL,
@@ -75,6 +78,7 @@ class ListenerReport:
     updates_seen: int = 0
     messages_processed: int = 0
     tasks_created: int = 0
+    drafts_proposed: int = 0
     no_action: int = 0
     skipped_non_message: int = 0
     callbacks_handled: int = 0
@@ -137,8 +141,26 @@ def parse_update(update: dict[str, Any]) -> TelegramSourceMessage | None:
             or None
         ),
         chat_title=chat.get("title") or chat.get("username") or None,
+        chat_type=chat.get("type") or None,
         raw=msg,
     )
+
+
+def _looks_like_confirm_widget(cq: dict[str, Any]) -> bool:
+    """A draft confirm widget always carries exactly the row
+    ``[confirm, edit, ignore]``. Detect that pattern on the clicked
+    message so we can route Edit to a friendly stub instead of the
+    task-edit flow (FR-CR-04-32)."""
+    msg = cq.get("message") or {}
+    rm = msg.get("reply_markup") or {}
+    rows = rm.get("inline_keyboard") or []
+    if len(rows) != 1 or len(rows[0]) != 3:
+        return False
+    actions = []
+    for b in rows[0]:
+        cd = (b or {}).get("callback_data") or ""
+        actions.append(cd.split(":", 1)[0])
+    return actions == [ACTION_CONFIRM, ACTION_EDIT, ACTION_IGNORE]
 
 
 def _get_offset(session: Session) -> int:
@@ -325,30 +347,62 @@ class TelegramListener:
                     continue
 
                 try:
-                    task = self._ingest.process_one(session, msg)
-                    report.messages_processed += 1
-                    if task is None:
-                        report.no_action += 1
+                    if msg.is_private:
+                        # 1:1 DM with the bot — the user is talking to
+                        # us directly, so create the task immediately
+                        # and DM the live card back. (FR-CR-04-29.)
+                        task = self._ingest.process_one(session, msg)
+                        report.messages_processed += 1
+                        if task is None:
+                            report.no_action += 1
+                        else:
+                            report.tasks_created += 1
+                            try:
+                                post_initial_card(
+                                    sender=self._sender,
+                                    session=session,
+                                    task=task,
+                                    chat_id=msg.chat_id,
+                                    reply_to_message_id=msg.message_id,
+                                    author_user_id=str(msg.user_id) if msg.user_id else None,
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                log.warning(
+                                    "telegram_post_initial_card_failed",
+                                    task_id=task.id,
+                                    error=str(e),
+                                )
                     else:
-                        report.tasks_created += 1
-                        # Post the live card under the source message
-                        # so the user can drive the lifecycle without
-                        # leaving Telegram.
-                        try:
-                            post_initial_card(
-                                sender=self._sender,
-                                session=session,
-                                task=task,
-                                chat_id=msg.chat_id,
-                                reply_to_message_id=msg.message_id,
-                                author_user_id=str(msg.user_id) if msg.user_id else None,
-                            )
-                        except Exception as e:  # noqa: BLE001
-                            log.warning(
-                                "telegram_post_initial_card_failed",
-                                task_id=task.id,
-                                error=str(e),
-                            )
+                        # Group / supergroup / channel — defer task
+                        # creation. Persist a draft and DM each
+                        # recipient (author + admins) the source
+                        # forward + a "Create this task?" widget.
+                        # (FR-CR-04-32.)
+                        draft = self._ingest.prepare_draft(session, msg)
+                        report.messages_processed += 1
+                        if draft is None:
+                            report.no_action += 1
+                        else:
+                            report.drafts_proposed += 1
+                            try:
+                                payload = draft.payload or {}
+                                post_draft_confirmation(
+                                    sender=self._sender,
+                                    session=session,
+                                    draft=draft,
+                                    source_chat_id=msg.chat_id,
+                                    source_message_id=msg.message_id,
+                                    author_user_id=(
+                                        str(msg.user_id) if msg.user_id else None
+                                    ),
+                                    owner_user_id=payload.get("owner_user_id"),
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                log.warning(
+                                    "telegram_post_draft_confirmation_failed",
+                                    draft_id=draft.id,
+                                    error=str(e),
+                                )
                 except Exception as e:  # noqa: BLE001
                     report.errors += 1
                     log.warning(
@@ -386,7 +440,7 @@ class TelegramListener:
         action, entity_id = parsed
 
         try:
-            task = self._dispatch_action(
+            outcome = self._dispatch_action(
                 session, action=action, entity_id=entity_id, actor=actor, cq=cq
             )
         except tg_handlers.NotAuthorised as e:
@@ -407,11 +461,33 @@ class TelegramListener:
             return
 
         self._sender.answer_callback_query(callback_query_id=cq_id)
-        if task is None:
+        if outcome is None:
             return
 
-        # Re-render the card to reflect the new state (status,
-        # buttons, subscription label, etc.)
+        # FR-CR-04-32 — Confirm / Reject re-render every draft widget
+        # in place. Returned tuple is `(task_or_none, draft)`.
+        if action == ACTION_CONFIRM:
+            task, draft = outcome  # type: ignore[misc]
+            if task is not None and draft is not None:
+                replace_widgets_with_task_card(
+                    sender=self._sender,
+                    session=session,
+                    draft=draft,
+                    task=task,
+                )
+            return
+        if action == ACTION_IGNORE:
+            draft = outcome  # type: ignore[assignment]
+            if draft is not None:
+                render_draft_rejected(
+                    sender=self._sender, draft=draft, actor=actor
+                )
+            return
+
+        # Anything else returned a Task — re-render the regular card.
+        task = outcome  # type: ignore[assignment]
+        if task is None:
+            return
         if action == ACTION_DELETE:
             render_tombstone(sender=self._sender, task=task, actor=actor)
         else:
@@ -454,15 +530,32 @@ class TelegramListener:
                 session, task_id=entity_id, actor=actor, subscribe=False
             )
         if action == ACTION_EDIT:
+            # FR-CR-04-32: Edit on the confirm widget targets a draft,
+            # not a Task. For now we stub this — ask the user to
+            # Accept first, then use the task card's ✏ Edit. The
+            # draft-state edit could be wired later (parse the reply,
+            # update draft.payload, re-render every widget) but it's
+            # not blocking the primary "decide-before-create" flow.
+            if _looks_like_confirm_widget(cq):
+                raise tg_handlers.NotAuthorised(
+                    "Edit is only available after Accept. "
+                    "Tap ✅ first, then ✏ Edit on the task card."
+                )
             # FR-CR-04-29: open the key=value reply conversation.
             return self._open_edit_conversation(
                 session, task_id=entity_id, actor=actor, cq=cq
             )
-        if action in (ACTION_CONFIRM, ACTION_IGNORE):
-            # Draft cards aren't posted yet (we create tasks
-            # immediately on ingest). These actions are reserved for
-            # the next iteration when a confirm-first flow lands.
-            return None
+        if action == ACTION_CONFIRM:
+            # FR-CR-04-32 — finalise the draft into a Task. Returns a
+            # `(task, draft)` tuple so the caller can replace each
+            # widget DM with the regular task card.
+            return tg_handlers.handle_confirm_draft(
+                session, draft_id=entity_id, actor=actor
+            )
+        if action == ACTION_IGNORE:
+            return tg_handlers.handle_ignore_draft(
+                session, draft_id=entity_id, actor=actor
+            )
         log.info("telegram_unknown_action", action=action)
         return None
 

@@ -218,6 +218,28 @@ class TelegramSender:
             "deleteMessage", {"chat_id": chat_id, "message_id": message_id}
         )
 
+    def forward_message(
+        self,
+        *,
+        chat_id: int | str,
+        from_chat_id: int | str,
+        message_id: int,
+    ) -> dict[str, Any]:
+        """Forward a message from ``from_chat_id`` to ``chat_id``.
+
+        Used by the FR-CR-04-32 confirm flow so the recipient sees the
+        original message (with its sender attribution intact) above
+        the "Create this task?" widget.
+        """
+        return self._post(
+            "forwardMessage",
+            {
+                "chat_id": chat_id,
+                "from_chat_id": from_chat_id,
+                "message_id": message_id,
+            },
+        )
+
     def answer_callback_query(
         self, *, callback_query_id: str, text: str | None = None
     ) -> dict[str, Any]:

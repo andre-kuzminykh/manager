@@ -125,12 +125,28 @@ class TelegramSourceMessage:
     user_id: int | None = None
     user_name: str | None = None
     chat_title: str | None = None
+    # Telegram chat type: "private" (1:1 DM with the bot), "group",
+    # "supergroup", "channel". Used to decide whether a task-shaped
+    # message goes through the immediate-create or confirm-first
+    # flow (FR-CR-04-32). When unknown (e.g. Supabase ingest), we
+    # default to "supergroup" for negative chat_ids and "private" for
+    # positive ones — the same convention Telegram uses.
+    chat_type: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_textual(self) -> bool:
         """True when the message has any usable text content."""
         return bool((self.text or "").strip())
+
+    @property
+    def is_private(self) -> bool:
+        """True for 1:1 DMs with the bot. Falls back to chat_id sign
+        when `chat_type` wasn't provided (the convention is positive
+        ids = private, negative ids = group/supergroup/channel)."""
+        if self.chat_type:
+            return self.chat_type == "private"
+        return self.chat_id > 0
 
 
 def _pick(row: dict[str, Any], keys: tuple[str, ...]) -> Any | None:

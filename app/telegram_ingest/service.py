@@ -199,6 +199,119 @@ class TelegramIngestService:
         )
         return task
 
+    def prepare_draft(
+        self,
+        session: Session,
+        message: TelegramSourceMessage,
+    ):
+        """Confirm-first variant of `process_one` (FR-CR-04-32).
+
+        Same up-front classification as `process_one`, but stops at the
+        ActionDraft and skips Task creation. Used when a task-shaped
+        message arrives in a group / supergroup / channel — we DM a
+        confirmation widget to the author + admins and only finalise
+        into a Task on Accept.
+
+        Returns the persisted ``ActionDraft`` (state = ``proposed``)
+        or ``None`` when the message was already processed, has no
+        usable text, or didn't classify as a task.
+
+        Idempotent: a second call with the same (chat_id, message_id)
+        returns ``None`` (the bookmark in
+        ``processed_telegram_messages`` short-circuits us).
+        """
+        existing = session.get(
+            ProcessedTelegramMessage, (message.chat_id, message.message_id)
+        )
+        if existing is not None:
+            return None
+        if not message.is_textual:
+            session.add(
+                ProcessedTelegramMessage(
+                    chat_id=message.chat_id,
+                    message_id=message.message_id,
+                    processed_at=datetime.now(timezone.utc),
+                    task_id=None,
+                )
+            )
+            return None
+
+        window = _build_window(message)
+        classification = self._classifier.classify(
+            context=window,
+            invocation_type=InvocationType.passive,
+            known_employees=None,
+        )
+
+        if classification.intent != IntentType.create_task or classification.task is None:
+            session.add(
+                ProcessedTelegramMessage(
+                    chat_id=message.chat_id,
+                    message_id=message.message_id,
+                    processed_at=datetime.now(timezone.utc),
+                    task_id=None,
+                )
+            )
+            return None
+
+        # Same author/owner fallbacks as the immediate-create path so
+        # the confirm widget shows a meaningful preview (Andre vs.
+        # raw numeric id).
+        if not classification.task.owner_user_id and message.user_id:
+            classification.task.owner_user_id = str(message.user_id)
+        if not classification.task.owner_display_name and message.user_name:
+            classification.task.owner_display_name = message.user_name
+
+        snapshot = self._orchestrator.persist_context_snapshot(
+            session, window.to_snapshot_dict()
+        )
+        inference = self._orchestrator.persist_inference(
+            session,
+            context_snapshot=snapshot,
+            classification=classification,
+            invocation_type=InvocationType.passive,
+        )
+        author_id = window.source_message["user"]
+        draft = self._orchestrator.create_draft(
+            session,
+            inference=inference,
+            classification=classification,
+            created_by_slack_user_id=str(author_id) if author_id else None,
+            slack_message_ts=str(message.message_id),
+        )
+
+        # Stash the bits `create_task_from_draft` will need on Accept.
+        # Stored under a single underscore-prefixed key so they're
+        # easy to pop before persisting the Task.
+        payload = dict(draft.payload or {})
+        payload["_pending"] = {
+            "source_kind": "telegram",
+            "conversation_id": str(message.chat_id),
+            "message_ts": str(message.message_id),
+            "thread_ts": str(message.reply_to) if message.reply_to else None,
+            "permalink": _telegram_permalink(message),
+            "fallback_author": str(author_id) if author_id else None,
+            "context_snapshot_id": snapshot.id,
+            "source_chat_id": message.chat_id,
+            "source_message_id": message.message_id,
+        }
+        draft.payload = payload
+        session.flush()
+
+        # Bookmark the source message so it doesn't get re-classified
+        # on the next ingest pass. We attach `task_id=None` for now —
+        # if the user Accepts, the confirm handler updates this row
+        # to point at the new Task.
+        session.add(
+            ProcessedTelegramMessage(
+                chat_id=message.chat_id,
+                message_id=message.message_id,
+                processed_at=datetime.now(timezone.utc),
+                task_id=None,
+            )
+        )
+        return draft
+
     def process_batch(
         self,
         session: Session,

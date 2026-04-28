@@ -177,6 +177,9 @@ def _make_listener(
 def test_listener_tick_processes_updates_and_advances_offset(
     patched_session_scope, SessionFactory
 ):
+    """Private-chat (DM) messages take the immediate-create path:
+    classify → Task → live card. (Group messages now go through the
+    confirm-first draft flow — covered by a separate test below.)"""
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
@@ -191,7 +194,7 @@ def test_listener_tick_processes_updates_and_advances_offset(
                     "update_id": 100,
                     "message": {
                         "message_id": 1,
-                        "chat": {"id": -1, "type": "supergroup"},
+                        "chat": {"id": 7, "type": "private"},
                         "from": {"id": 1},
                         "text": "prepare a report",
                         "date": 0,
@@ -201,7 +204,7 @@ def test_listener_tick_processes_updates_and_advances_offset(
                     "update_id": 101,
                     "message": {
                         "message_id": 2,
-                        "chat": {"id": -1, "type": "supergroup"},
+                        "chat": {"id": 7, "type": "private"},
                         "from": {"id": 1},
                         "text": "another task",
                         "date": 0,
@@ -222,7 +225,7 @@ def test_listener_tick_processes_updates_and_advances_offset(
         assert state.last_update_id == 101
         assert s.query(Task).count() == 2
         rows = s.query(ProcessedTelegramMessage).all()
-        assert {(r.chat_id, r.message_id) for r in rows} == {(-1, 1), (-1, 2)}
+        assert {(r.chat_id, r.message_id) for r in rows} == {(7, 1), (7, 2)}
         # Both tasks are flagged as Telegram-sourced.
         for t in s.query(Task).all():
             assert t.source_kind == TaskSourceKind.telegram
@@ -373,6 +376,216 @@ def test_listener_second_tick_with_same_offset_is_a_noop(
     assert second.updates_seen == 0
     with SessionFactory() as s:
         assert s.query(Task).count() == 1
+
+
+def test_listener_routes_group_messages_to_draft_flow(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-04-32: a task-shaped message in a supergroup creates an
+    ActionDraft (state=proposed) and DMs a confirm widget — it does
+    NOT create a Task immediately. The user must Accept first."""
+    from app.models import ActionDraft, ActionDraftState
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="prepare deck"),
+        reasoning="r",
+    )
+    listener = _make_listener(
+        classification,
+        updates_per_call=[
+            [
+                {
+                    "update_id": 700,
+                    "message": {
+                        "message_id": 1,
+                        "chat": {
+                            "id": -1001,
+                            "type": "supergroup",
+                            "title": "Team",
+                        },
+                        "from": {"id": 222, "username": "andre"},
+                        "text": "к завтра подготовить презу",
+                        "date": 0,
+                    },
+                }
+            ]
+        ],
+    )
+    sent: list[dict] = []
+    listener._sender.forward_message = lambda **kw: sent.append({"forward": kw}) or {"message_id": 90}  # type: ignore
+    listener._sender.send_message = lambda **kw: sent.append({"send": kw}) or {"message_id": 91}  # type: ignore
+
+    report = listener.tick()
+    assert report.drafts_proposed == 1
+    assert report.tasks_created == 0
+
+    with SessionFactory() as s:
+        # No Task yet — only an ActionDraft in the proposed state.
+        assert s.query(Task).count() == 0
+        drafts = s.query(ActionDraft).all()
+        assert len(drafts) == 1
+        d = drafts[0]
+        assert d.state == ActionDraftState.proposed
+        # The widget locations were stored on the draft for later
+        # editing on Accept / Reject.
+        widgets = (d.payload or {}).get("_widgets") or []
+        assert len(widgets) == 1
+        # The pending source dict is also retained so the Accept
+        # handler can finalise the draft into a real Task.
+        assert (d.payload or {}).get("_pending", {}).get("source_chat_id") == -1001
+
+    # forwardMessage + sendMessage both called for the author DM.
+    kinds = [list(x.keys())[0] for x in sent]
+    assert "forward" in kinds and "send" in kinds
+
+
+def test_listener_confirm_button_finalises_draft_into_task(
+    patched_session_scope, SessionFactory
+):
+    """Clicking ✅ Accept on a draft widget creates the Task and
+    edits each widget DM into the regular task card."""
+    from app.models import ActionDraft, ActionDraftState
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="prepare deck"),
+    )
+    # Step 1 — feed a group message so the listener creates a draft.
+    listener = _make_listener(
+        classification,
+        updates_per_call=[
+            [
+                {
+                    "update_id": 800,
+                    "message": {
+                        "message_id": 5,
+                        "chat": {"id": -2002, "type": "supergroup"},
+                        "from": {"id": 333},
+                        "text": "сделать слайды к завтра",
+                        "date": 0,
+                    },
+                }
+            ],
+            # Step 2 — feed a callback_query (Accept). We patch the
+            # entity_id to the actual draft_id once we know it.
+            [],
+        ],
+    )
+    listener._sender.forward_message = lambda **kw: {"message_id": 1}  # type: ignore
+    listener._sender.send_message = lambda **kw: {"message_id": 2}  # type: ignore
+    listener._sender.update_message = lambda **kw: {}  # type: ignore
+    listener._sender.answer_callback_query = lambda **kw: {}  # type: ignore
+
+    listener.tick()
+    with SessionFactory() as s:
+        draft_id = s.query(ActionDraft).one().id
+
+    # Replace the second-call updates with a confirm callback for the
+    # actual draft id.
+    cb_state = {"served": False}
+
+    def fetch_cb(*, offset):
+        if cb_state["served"]:
+            return []
+        cb_state["served"] = True
+        return [
+            {
+                "update_id": 801,
+                "callback_query": {
+                    "id": "cb-c",
+                    "from": {"id": 333},
+                    "data": f"confirm:{draft_id}",
+                    "message": {
+                        "message_id": 2,
+                        "chat": {"id": 333, "type": "private"},
+                    },
+                },
+            }
+        ]
+
+    listener._fetch_updates = fetch_cb  # type: ignore[method-assign]
+    listener.tick()
+
+    with SessionFactory() as s:
+        # Now there's a Task and the draft is confirmed.
+        tasks = s.query(Task).all()
+        assert len(tasks) == 1
+        assert tasks[0].title == "prepare deck"
+        assert tasks[0].source_kind == TaskSourceKind.telegram
+        d = s.get(ActionDraft, draft_id)
+        assert d.state == ActionDraftState.confirmed
+        assert d.task_id == tasks[0].id
+
+
+def test_listener_reject_button_marks_draft_ignored(
+    patched_session_scope, SessionFactory
+):
+    """Clicking ✖ Reject leaves no Task and flips the draft to
+    ignored."""
+    from app.models import ActionDraft, ActionDraftState
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="x"),
+    )
+    listener = _make_listener(
+        classification,
+        updates_per_call=[
+            [
+                {
+                    "update_id": 900,
+                    "message": {
+                        "message_id": 1,
+                        "chat": {"id": -3003, "type": "supergroup"},
+                        "from": {"id": 444},
+                        "text": "task to reject",
+                        "date": 0,
+                    },
+                }
+            ]
+        ],
+    )
+    listener._sender.forward_message = lambda **kw: {"message_id": 1}  # type: ignore
+    listener._sender.send_message = lambda **kw: {"message_id": 2}  # type: ignore
+    listener._sender.update_message = lambda **kw: {}  # type: ignore
+    listener._sender.answer_callback_query = lambda **kw: {}  # type: ignore
+
+    listener.tick()
+    with SessionFactory() as s:
+        draft_id = s.query(ActionDraft).one().id
+
+    cb_state = {"served": False}
+
+    def fetch_cb(*, offset):
+        if cb_state["served"]:
+            return []
+        cb_state["served"] = True
+        return [
+            {
+                "update_id": 901,
+                "callback_query": {
+                    "id": "cb-r",
+                    "from": {"id": 444},
+                    "data": f"ignore:{draft_id}",
+                    "message": {
+                        "message_id": 2,
+                        "chat": {"id": 444, "type": "private"},
+                    },
+                },
+            }
+        ]
+
+    listener._fetch_updates = fetch_cb  # type: ignore[method-assign]
+    listener.tick()
+
+    with SessionFactory() as s:
+        assert s.query(Task).count() == 0
+        d = s.get(ActionDraft, draft_id)
+        assert d.state == ActionDraftState.ignored
 
 
 def test_listener_disabled_when_token_empty():

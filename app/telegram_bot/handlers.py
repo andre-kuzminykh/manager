@@ -592,3 +592,89 @@ def apply_edit_reply(
 
 def is_telegram_task(task: Task) -> bool:
     return task.source_kind == TaskSourceKind.telegram
+
+
+# --------------------------------------------------------------------------- #
+# Draft-confirm handlers (FR-CR-04-32)
+# --------------------------------------------------------------------------- #
+
+
+def handle_confirm_draft(
+    session: Session, *, draft_id: int, actor: str
+) -> tuple[Task | None, "ActionDraft | None"]:
+    """Accept a pending draft: finalise it into a Task using the same
+    `create_task_from_draft` helper the immediate-create path uses.
+
+    The draft's stashed source / fallback-author / context-snapshot
+    values (set by `TelegramIngestService.prepare_draft`) are popped
+    off ``payload["_pending"]`` and passed through. Returns the new
+    Task and the (now-confirmed) draft so the caller can replace the
+    DM widgets with the regular task card.
+
+    Idempotent: if the draft is already confirmed, return the existing
+    Task (looked up via ``draft.task_id``) so a second tap on Accept
+    just re-renders the card.
+    """
+    from app.models import ActionDraft, ActionDraftState, ProcessedTelegramMessage
+    from app.persistence import create_task_from_draft
+
+    draft = session.get(ActionDraft, draft_id)
+    if draft is None:
+        raise NotAuthorised("Draft not found.")
+    if draft.state == ActionDraftState.confirmed and draft.task_id:
+        return session.get(Task, draft.task_id), draft
+    if draft.state in (ActionDraftState.ignored, ActionDraftState.expired):
+        raise NotAuthorised("This draft is no longer active.")
+
+    pending = (draft.payload or {}).get("_pending") or {}
+    payload = dict(draft.payload or {})
+    payload.pop("_pending", None)
+    payload.pop("_widgets", None)
+    draft.payload = payload
+
+    source = {
+        "kind": pending.get("source_kind") or "telegram",
+        "conversation_id": pending.get("conversation_id"),
+        "message_ts": pending.get("message_ts"),
+        "thread_ts": pending.get("thread_ts"),
+        "permalink": pending.get("permalink"),
+    }
+    task = create_task_from_draft(
+        session,
+        draft=draft,
+        source=source,
+        context_snapshot_id=pending.get("context_snapshot_id"),
+        fallback_author_slack_id=pending.get("fallback_author"),
+    )
+
+    # Update the source-message bookmark so future ingest passes know
+    # this message produced a real task (not just a no-action skip).
+    src_chat = pending.get("source_chat_id")
+    src_msg = pending.get("source_message_id")
+    if src_chat is not None and src_msg is not None:
+        proc = session.get(
+            ProcessedTelegramMessage, (int(src_chat), int(src_msg))
+        )
+        if proc is not None:
+            proc.task_id = task.id
+
+    _sync_task_to_sheets(task.id)
+    return task, draft
+
+
+def handle_ignore_draft(
+    session: Session, *, draft_id: int, actor: str
+) -> "ActionDraft | None":
+    """Reject a pending draft: set state=ignored. Idempotent."""
+    from app.models import ActionDraft, ActionDraftState
+
+    draft = session.get(ActionDraft, draft_id)
+    if draft is None:
+        raise NotAuthorised("Draft not found.")
+    if draft.state == ActionDraftState.confirmed:
+        # Too late — already became a task. Caller should fall back
+        # to the regular Delete on the resulting task card.
+        return draft
+    draft.state = ActionDraftState.ignored
+    session.flush()
+    return draft

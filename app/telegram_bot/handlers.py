@@ -320,8 +320,10 @@ def prompt_edit(
     session: Session, *, task_id: int, actor: str
 ) -> tuple[Task, str]:
     """Step 1 of the Edit conversation: return a prompt with the
-    current values + format reminder. Raises ``NotAuthorised`` if
-    the actor isn't allowed to edit."""
+    current values. The user's reply is parsed by the LLM, so they
+    can write either ``key=value`` lines or free-form natural
+    language ("сдвинь дедлайн на пятницу, приоритет высокий"). Raises
+    ``NotAuthorised`` if the actor isn't allowed to edit."""
     task = session.get(Task, task_id)
     if task is None or task.deleted_at is not None:
         raise NotAuthorised("Task not found or already deleted.")
@@ -340,9 +342,10 @@ def prompt_edit(
     )
     text = (
         f"✏ *Edit task #{task.id}*\n"
-        f"Reply to this message with `key=value` lines for the "
-        f"fields you want to change. Empty value clears the field.\n\n"
-        f"Available keys: {', '.join(_EDIT_KEYS)}.\n\n"
+        f"Reply to this message — write naturally what to change "
+        f"(e.g. `сдвинь срок на пятницу, приоритет высокий`) or use "
+        f"`key=value` lines. Available fields: "
+        f"{', '.join(_EDIT_KEYS)}.\n\n"
         f"Current values:\n```\n{cur}\n```"
     )
     return task, text
@@ -359,6 +362,140 @@ def parse_edit_payload(text: str) -> dict[str, str]:
         k = k.strip().lower()
         if k in _EDIT_KEYS:
             out[k] = v.strip()
+    return out
+
+
+# Tool schema for the LLM-driven free-form parse. Each field is a
+# string (or omitted) so the model is free to say "keep it" by simply
+# leaving the key out — only fields the user actually mentioned end
+# up in the payload.
+_EDIT_TOOL_PARAMS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "description": "New task title."},
+        "description": {
+            "type": "string",
+            "description": "New task description; empty string clears it.",
+        },
+        "priority": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "urgent"],
+        },
+        "due": {
+            "type": "string",
+            "description": (
+                "New due date as ISO YYYY-MM-DD. Empty string clears the due date."
+            ),
+        },
+        "due_time": {
+            "type": "string",
+            "description": "New due time as HH:MM (24h). Empty clears.",
+        },
+        "start": {
+            "type": "string",
+            "description": "Start date ISO YYYY-MM-DD. Empty clears.",
+        },
+        "start_time": {
+            "type": "string",
+            "description": "Start time HH:MM (24h). Empty clears.",
+        },
+        "category": {
+            "type": "string",
+            "description": "Category label. Empty clears.",
+        },
+        "owner": {
+            "type": "string",
+            "description": (
+                "New owner — Slack/Telegram user id if the user gave "
+                "one explicitly, otherwise leave empty."
+            ),
+        },
+    },
+}
+
+
+def _build_edit_user_prompt(*, current: dict[str, str], reply_text: str) -> str:
+    """Build the user-side prompt for the Edit LLM call."""
+    today = date.today().isoformat()
+    cur_lines = "\n".join(f"  {k}={v}" for k, v in current.items())
+    return (
+        "You are editing an existing task. Read the user's reply (which "
+        "may be free-form natural language in any language, or "
+        "explicit `key=value` lines) and produce ONLY the fields the "
+        "user wants to change.\n\n"
+        f"Today is {today}.\n\n"
+        "Rules:\n"
+        "- Output a field only if the user actually mentioned it.\n"
+        "- Resolve relative dates ('завтра', 'next Friday', 'через "
+        "неделю') against today.\n"
+        "- For dates emit ISO YYYY-MM-DD; for times emit HH:MM 24h.\n"
+        "- To clear a field, set it to an empty string.\n"
+        "- Don't invent values. If unsure, omit the key.\n\n"
+        f"Current task values:\n{cur_lines}\n\n"
+        f"User reply:\n{reply_text}"
+    )
+
+
+def parse_edit_with_llm(
+    *,
+    task: Task,
+    reply_text: str,
+    backend: Any | None,
+) -> dict[str, str]:
+    """LLM-driven parse of a free-form Edit reply. Falls back to the
+    structured `key=value` parser when no backend is available, when
+    the reply looks like explicit ``key=value`` lines, or when the LLM
+    call fails.
+    """
+    text = (reply_text or "").strip()
+    if not text:
+        return {}
+
+    # If every non-empty line is `key=value` with a known key, skip
+    # the LLM — the user is being explicit.
+    structured = parse_edit_payload(text)
+    non_empty = [ln for ln in text.splitlines() if ln.strip()]
+    if structured and len(structured) == len(non_empty):
+        return structured
+
+    if backend is None or not hasattr(backend, "call_tool"):
+        # No LLM configured → best-effort structured parse only.
+        return structured
+
+    current = {
+        "title": task.title or "",
+        "description": task.description or "",
+        "priority": task.priority.value,
+        "due": task.due_date.isoformat() if task.due_date else "",
+        "due_time": task.due_time.strftime("%H:%M") if task.due_time else "",
+        "start": task.start_date.isoformat() if task.start_date else "",
+        "start_time": task.start_time.strftime("%H:%M") if task.start_time else "",
+        "category": task.category or "",
+        "owner": task.owner_user_id or "",
+    }
+    user_prompt = _build_edit_user_prompt(current=current, reply_text=text)
+    try:
+        result = backend.call_tool(
+            system_prompt=(
+                "Extract structured task edits from the user's reply. "
+                "Only include fields the user actually wants to change."
+            ),
+            user_prompt=user_prompt,
+            tool_name="record_task_edit",
+            tool_description="Record the fields the user wants to change.",
+            tool_parameters=_EDIT_TOOL_PARAMS,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("telegram_edit_llm_call_failed", error=str(e))
+        return structured
+
+    if not isinstance(result, dict):
+        return structured
+
+    out: dict[str, str] = {}
+    for k in _EDIT_KEYS:
+        if k in result and isinstance(result[k], str):
+            out[k] = result[k].strip()
     return out
 
 
@@ -387,10 +524,13 @@ def apply_edit_reply(
     task_id: int,
     actor: str,
     reply_text: str,
+    llm_backend: Any | None = None,
 ) -> Task | None:
-    """Step 2 of the Edit conversation: apply the parsed
-    ``key=value`` payload to the task. Empty value clears the
-    field; unknown keys are ignored.
+    """Step 2 of the Edit conversation: apply the parsed payload to
+    the task. The reply may be either explicit ``key=value`` lines or
+    free-form natural language — when ``llm_backend`` is provided, it
+    is used to extract structured field updates from the reply.
+    Empty value clears the field; unknown keys are ignored.
 
     Returns the refreshed Task (or None if the task is missing /
     soft-deleted). Raises ``NotAuthorised`` if the actor lost the
@@ -401,7 +541,12 @@ def apply_edit_reply(
         return None
     _ensure_can_edit(task, actor)
 
-    payload = parse_edit_payload(reply_text)
+    if llm_backend is not None:
+        payload = parse_edit_with_llm(
+            task=task, reply_text=reply_text, backend=llm_backend
+        )
+    else:
+        payload = parse_edit_payload(reply_text)
     if not payload:
         return task
 

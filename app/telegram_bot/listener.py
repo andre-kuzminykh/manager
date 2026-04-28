@@ -195,6 +195,13 @@ class TelegramListener:
     def enabled(self) -> bool:
         return bool(self._token)
 
+    def _llm_backend(self):
+        """The intent classifier's backend, or None when running in
+        rule-only mode. Surfaced so the Edit conversation can reuse the
+        same LLM for free-form reply parsing."""
+        classifier = getattr(self._ingest, "_classifier", None)
+        return getattr(classifier, "backend", None)
+
     # ---- API plumbing -----------------------------------------------------
 
     def _fetch_updates(self, *, offset: int) -> list[dict[str, Any]]:
@@ -557,11 +564,16 @@ class TelegramListener:
                     viewer=actor,
                 )
         elif pending.action == "edit":
+            # Pass the same LLM backend that drives intent extraction
+            # so the user can write the Edit reply in free-form natural
+            # language ("сдвинь срок на пятницу, приоритет высокий").
+            backend = self._llm_backend()
             task = tg_handlers.apply_edit_reply(
                 session,
                 task_id=pending.task_id,
                 actor=actor,
                 reply_text=msg.text,
+                llm_backend=backend,
             )
             if task is not None:
                 refresh_card(

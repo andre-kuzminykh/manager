@@ -264,6 +264,85 @@ def test_apply_edit_drops_owner_assumed_extra(session):
 
 
 # --------------------------------------------------------------------------- #
+# Edit — LLM-driven free-form parsing
+# --------------------------------------------------------------------------- #
+
+
+class _FakeBackend:
+    """Minimal LLMBackend stub: returns whatever was preset for the
+    next `call_tool` call, and records the prompt for assertions."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.last_user_prompt = None
+
+    def call_tool(self, **kw):
+        self.last_user_prompt = kw.get("user_prompt")
+        return self.payload
+
+
+def test_parse_edit_with_llm_explicit_kv_skips_llm(session):
+    tid = _mk(session, owner_user_id="11", title="Old")
+    task = session.get(Task, tid)
+    backend = _FakeBackend(payload={"title": "Should not be used"})
+    out = h.parse_edit_with_llm(
+        task=task,
+        reply_text="title=Renamed via kv\npriority=high",
+        backend=backend,
+    )
+    # Pure key=value — LLM not consulted.
+    assert backend.last_user_prompt is None
+    assert out == {"title": "Renamed via kv", "priority": "high"}
+
+
+def test_parse_edit_with_llm_freeform_calls_backend(session):
+    tid = _mk(
+        session, owner_user_id="11", title="Old", priority=TaskPriority.low
+    )
+    task = session.get(Task, tid)
+    backend = _FakeBackend(
+        payload={"priority": "high", "due": "2026-05-15"}
+    )
+    out = h.parse_edit_with_llm(
+        task=task,
+        reply_text="сделай высокий приоритет и срок 15 мая",
+        backend=backend,
+    )
+    assert backend.last_user_prompt is not None
+    # Current values appear in the prompt so the LLM has context.
+    assert "Old" in backend.last_user_prompt
+    assert out == {"priority": "high", "due": "2026-05-15"}
+
+
+def test_parse_edit_with_llm_no_backend_falls_back_to_kv(session):
+    tid = _mk(session, owner_user_id="11")
+    task = session.get(Task, tid)
+    out = h.parse_edit_with_llm(
+        task=task,
+        reply_text="just plain text, no kv",
+        backend=None,
+    )
+    # No backend + no key=value → empty payload.
+    assert out == {}
+
+
+def test_apply_edit_reply_uses_llm_backend_when_provided(session):
+    tid = _mk(
+        session, owner_user_id="11", title="Old", priority=TaskPriority.low
+    )
+    backend = _FakeBackend(payload={"priority": "urgent"})
+    task = h.apply_edit_reply(
+        session,
+        task_id=tid,
+        actor="11",
+        reply_text="сделай срочный приоритет",
+        llm_backend=backend,
+    )
+    assert task.priority == TaskPriority.urgent
+    assert backend.last_user_prompt is not None
+
+
+# --------------------------------------------------------------------------- #
 # TG admins
 # --------------------------------------------------------------------------- #
 

@@ -142,10 +142,15 @@ class TelegramIngestService:
             )
             return None
 
-        # FR-CR-04-30: when the LLM didn't extract a display name (the
+        # FR-CR-04-30: when the LLM didn't extract an owner (the
         # common case for TG ingest where we run with no employees
-        # table), fall back to the sender's `user_name` so the card /
-        # Sheet show "Andre" instead of the raw user id.
+        # table), fall back to the sender's identity so the card /
+        # Sheet show "Andre" instead of the raw user id, AND so the
+        # task gets a real `owner_user_id` (without it the card
+        # renders only the bystander Subscribe button — `is_owner`
+        # never matches a None owner).
+        if not classification.task.owner_user_id and message.user_id:
+            classification.task.owner_user_id = str(message.user_id)
         if not classification.task.owner_display_name and message.user_name:
             classification.task.owner_display_name = message.user_name
 

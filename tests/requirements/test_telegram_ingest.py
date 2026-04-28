@@ -252,6 +252,11 @@ def test_process_one_uses_user_name_as_fallback_owner_display_name(
         s.commit()
         assert task is not None
         assert task.owner_display_name == "Andre"
+        # FR-CR-04-30 regression: setting owner_display_name from
+        # user_name must NOT leave owner_user_id empty — without an
+        # owner id the task card renders only the bystander Subscribe
+        # button (is_owner never matches None).
+        assert task.owner_user_id == "222968032"
 
 
 def test_process_one_keeps_llm_display_name_when_present(

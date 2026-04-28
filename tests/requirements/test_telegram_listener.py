@@ -476,7 +476,8 @@ def test_listener_confirm_button_finalises_draft_into_task(
     )
     listener._sender.forward_message = lambda **kw: {"message_id": 1}  # type: ignore
     listener._sender.send_message = lambda **kw: {"message_id": 2}  # type: ignore
-    listener._sender.update_message = lambda **kw: {}  # type: ignore
+    edits: list[dict] = []
+    listener._sender.update_message = lambda **kw: edits.append(kw) or {}  # type: ignore
     listener._sender.answer_callback_query = lambda **kw: {}  # type: ignore
 
     listener.tick()
@@ -518,6 +519,15 @@ def test_listener_confirm_button_finalises_draft_into_task(
         d = s.get(ActionDraft, draft_id)
         assert d.state == ActionDraftState.confirmed
         assert d.task_id == tasks[0].id
+
+    # Crucial: the widget DM was edited in place into the regular
+    # task card. If `handle_confirm_draft` accidentally clears the
+    # widget locations off `draft.payload` before we can replace
+    # them, this `update_message` call is silently skipped — Accept
+    # would appear to do nothing in the UI.
+    assert any(
+        e.get("chat_id") == 333 and e.get("message_id") == 2 for e in edits
+    ), f"expected widget edit on (333, 2), got {edits}"
 
 
 def test_listener_reject_button_marks_draft_ignored(

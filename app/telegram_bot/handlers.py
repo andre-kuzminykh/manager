@@ -628,8 +628,12 @@ def handle_confirm_draft(
 
     pending = (draft.payload or {}).get("_pending") or {}
     payload = dict(draft.payload or {})
+    # Pop `_pending` so it doesn't leak into the Task — but KEEP
+    # `_widgets`. The listener calls `replace_widgets_with_task_card`
+    # right after this function returns, and that helper reads widget
+    # locations off `draft.payload["_widgets"]`. If we cleared them
+    # here, every Accept click would silently no-op the UI swap.
     payload.pop("_pending", None)
-    payload.pop("_widgets", None)
     draft.payload = payload
 
     source = {

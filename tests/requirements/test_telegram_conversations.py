@@ -62,12 +62,41 @@ def test_pending_register_and_take_round_trip():
     assert reg.take(chat_id=-100, user_id=1, reply_to_message_id=99) is None
 
 
-def test_pending_take_with_no_reply_to_returns_none():
+def test_pending_take_with_no_reply_to_falls_back_to_single_pending():
+    """Lenient fallback: Telegram's force-reply isn't binding — the
+    user can ignore it and just type into the main composer. When
+    the (chat, user) has exactly one unexpired pending, we still
+    consume it. Otherwise the registry would silently swallow the
+    user's reply, which we hit on the live bot."""
     reg = PendingRegistry()
     reg.register(
         action="edit", task_id=1, chat_id=1, user_id=1, prompt_message_id=10
     )
+    out = reg.take(chat_id=1, user_id=1, reply_to_message_id=None)
+    assert out is not None
+    assert out.action == "edit"
+    # Take consumed the entry — second call returns None.
     assert reg.take(chat_id=1, user_id=1, reply_to_message_id=None) is None
+
+
+def test_pending_take_no_reply_to_with_zero_pendings_returns_none():
+    reg = PendingRegistry()
+    assert reg.take(chat_id=1, user_id=1, reply_to_message_id=None) is None
+
+
+def test_pending_take_no_reply_to_bails_when_ambiguous():
+    """Two open prompts → can't tell which the user is answering;
+    safer to drop than guess."""
+    reg = PendingRegistry()
+    reg.register(
+        action="edit", task_id=1, chat_id=1, user_id=1, prompt_message_id=10
+    )
+    reg.register(
+        action="artifact", task_id=2, chat_id=1, user_id=1, prompt_message_id=20
+    )
+    assert reg.take(chat_id=1, user_id=1, reply_to_message_id=None) is None
+    # Both still in the registry — neither was consumed.
+    assert len(reg) == 2
 
 
 def test_pending_evict_expired_drops_old_entries():

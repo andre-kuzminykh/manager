@@ -13,10 +13,14 @@ Scope:
   deployment.
 - TTL bound (default 10 min). Older pendings are evicted on the
   next access so the registry doesn't grow unbounded.
-- Keyed by ``(chat_id, user_id, prompt_message_id)`` — a reply is
-  matched only when its ``reply_to_message.message_id`` equals the
-  prompt's id, so unrelated chat traffic doesn't accidentally
-  trigger a handler.
+- Keyed by ``(chat_id, user_id, prompt_message_id)``. The strict
+  match consumes a reply only when its
+  ``reply_to_message.message_id`` equals the prompt's id, so
+  unrelated chat traffic doesn't accidentally trigger a handler.
+  Telegram's force-reply isn't binding — the user can just type
+  into the main composer — so a *lenient* fallback also matches a
+  message when the (chat, user) pair has exactly one unexpired
+  pending. More than one open prompt ⇒ ambiguous and we bail.
 """
 from __future__ import annotations
 
@@ -75,14 +79,41 @@ class PendingRegistry:
         user_id: int,
         reply_to_message_id: int | None,
     ) -> PendingQuestion | None:
-        if reply_to_message_id is None:
+        """Match a reply to a registered prompt and remove it.
+
+        Strict path: ``reply_to_message_id`` matches a prompt id.
+        Lenient path (Telegram force-reply isn't binding — the user
+        can ignore it and just type into the main composer): if the
+        chat/user has exactly **one** unexpired pending right now,
+        consume it. This rescues the common "I just typed `завтра`
+        instead of replying" case without opening the registry up to
+        cross-flow ambiguity.
+        """
+        now = datetime.now(timezone.utc)
+        if reply_to_message_id is not None:
+            # Strict path: the user IS replying to a specific message.
+            # Either it's our prompt (consume) or it isn't (bail —
+            # don't grab an unrelated pending behind their back).
+            key = (chat_id, user_id, reply_to_message_id)
+            q = self._items.pop(key, None)
+            if q is None or q.expires_at < now:
+                return None
+            return q
+
+        # Lenient fallback: no `reply_to` at all. The user typed
+        # straight into the composer, ignoring force-reply (very
+        # common). If they have exactly one unexpired pending, take
+        # it; more than one ⇒ ambiguous, bail.
+        candidates = [
+            (k, v) for k, v in self._items.items()
+            if v.chat_id == chat_id
+            and v.user_id == user_id
+            and v.expires_at >= now
+        ]
+        if len(candidates) != 1:
             return None
-        key = (chat_id, user_id, reply_to_message_id)
-        q = self._items.pop(key, None)
-        if q is None:
-            return None
-        if q.expires_at < datetime.now(timezone.utc):
-            return None
+        k, q = candidates[0]
+        self._items.pop(k, None)
         return q
 
     def evict_expired(self) -> int:

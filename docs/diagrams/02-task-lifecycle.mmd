@@ -1,0 +1,18 @@
+stateDiagram-v2
+    [*] --> backlog: created (no due / far due)
+    [*] --> todo: created (due this week)
+
+    backlog --> todo: schedule
+    backlog --> in_progress: Start
+    todo --> in_progress: Start
+    in_progress --> done: Mark done
+    in_progress --> todo: Cancel (due this week)
+    in_progress --> backlog: Cancel (due later / no due)
+    done --> in_progress: reopen
+    done --> todo: reopen + reschedule
+    done --> backlog: reopen + defer
+
+    todo --> [*]: Delete (soft)
+    in_progress --> [*]: Delete (soft)
+    backlog --> [*]: Delete (soft)
+    done --> [*]: Delete (soft)

@@ -1,0 +1,38 @@
+flowchart TB
+    MSG[New Slack message<br/>or shortcut]
+    AUDIO{Audio file?}
+    WHISPER[OpenAI Whisper<br/>transcribe to text]
+    DETECT["node: detect<br/>is this a task?"]
+    NA[no_action<br/>nothing to do]
+
+    subgraph Parallel["parallel extraction stages"]
+        DESC["node: describe<br/>title + description<br/>+ priority"]
+        OWNER["node: owner<br/>assignee or null"]
+        DATE["node: date<br/>due_date (LLM-first,<br/>Python validator)"]
+    end
+
+    PREFILTER["rule-based prefilter<br/>safety net"]
+    ASSEMBLE["node: assemble<br/>build TaskDraft"]
+    PERSIST[Persist as ActionDraft<br/>in Postgres]
+    CARD[Post draft card<br/>in source thread]
+
+    MSG --> AUDIO
+    AUDIO -- yes --> WHISPER --> DETECT
+    AUDIO -- no --> DETECT
+    DETECT -- not a task --> PREFILTER
+    PREFILTER -- still no --> NA
+    PREFILTER -- rule match --> ASSEMBLE
+    DETECT -- is a task --> DESC
+    DETECT --> OWNER
+    DETECT --> DATE
+    DESC --> ASSEMBLE
+    OWNER --> ASSEMBLE
+    DATE --> ASSEMBLE
+    ASSEMBLE --> PERSIST --> CARD
+
+    classDef llm fill:#dbeafe,stroke:#1d4ed8,color:#000
+    classDef rule fill:#fef3c7,stroke:#b45309,color:#000
+    classDef io fill:#e7e5e4,stroke:#57534e,color:#000
+    class WHISPER,DETECT,DESC,OWNER,DATE,ASSEMBLE llm
+    class PREFILTER rule
+    class MSG,PERSIST,CARD,NA io

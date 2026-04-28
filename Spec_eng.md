@@ -615,24 +615,52 @@ on the host (timezone `Europe/London`):
 Each job is its own `python -m ops.send_digest --type ...` call inside
 the bot container; idempotency means retries are safe.
 
-### Architecture at a glance
+### Diagrams
 
-```
-                   ┌──────────────────────────────┐
-       Slack ◀────▶│    slack-task-bot (Python)   │────▶ OpenAI / Whisper
-   (Socket Mode)   │  · Bolt + LangGraph pipeline │
-                   │  · cron-driven schedulers    │────▶ Google Sheets API
-                   └──────┬───────────────────────┘
-                          │ SQLAlchemy
-                          ▼
-                   ┌────────────────┐
-                   │ Postgres 16    │   ← Alembic migrations
-                   │ (Docker volume)│
-                   └────────────────┘
+Source `.mmd` files and rendered PNGs live in `docs/diagrams/`.
+Re-render after edits with:
 
-         all three containers on a private Docker network on a
-         single GCE VM (europe-west1); only outbound 443 leaves it
+```bash
+cd docs/diagrams
+for f in *.mmd; do
+  npx --yes -p @mermaid-js/mermaid-cli mmdc \
+    -i "$f" -o "${f%.mmd}.png" -b white -s 2 -p .puppeteer-config.json
+done
 ```
+
+#### System architecture
+
+How the bot, its database, and external services fit together on a
+single GCE VM. Slack speaks to the bot over an outbound WebSocket
+(Socket Mode), so no public HTTP endpoint is needed.
+
+![System architecture](docs/diagrams/01-architecture.png)
+
+#### Task lifecycle
+
+The four-state task model with all legal transitions, including the
+*Cancel* back-edges that route by `due_date` and the *Delete* soft-
+removal terminator.
+
+![Task lifecycle](docs/diagrams/02-task-lifecycle.png)
+
+#### Intent extraction pipeline
+
+How a single Slack message (or voice note) becomes a draft task.
+Detection gates the parallel extraction stages; a rule-based
+prefilter is a safety net for obviously task-shaped messages the
+LLM might miss.
+
+![Intent pipeline](docs/diagrams/03-intent-pipeline.png)
+
+#### Daily plan flow
+
+End-to-end sequence of the evening triage at 18:00 and the morning
+execution at 09:00 the next day, including the optional *Approve*
+shortcut and the *auto-approved* path when the user didn't explicitly
+confirm.
+
+![Daily plan flow](docs/diagrams/04-daily-plan.png)
 
 ---
 

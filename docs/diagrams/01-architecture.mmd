@@ -1,0 +1,32 @@
+flowchart LR
+    subgraph Slack["Slack Workspace"]
+        U[User]
+        SL[Slack Cloud]
+    end
+
+    subgraph VM["GCE VM &middot; europe-west1"]
+        subgraph Net["Docker network: slack-task-net"]
+            BOT["slack-task-bot<br/>Python 3.11<br/>Bolt + LangGraph"]
+            DB[("Postgres 16<br/>persistent volume")]
+            PROXY["socat<br/>read-only DB proxy"]
+        end
+        CRON["host cron<br/>Europe/London"]
+    end
+
+    OAI["OpenAI<br/>gpt-4o-mini &middot; gpt-4o &middot; whisper"]
+    ANT["Anthropic<br/>(optional fallback)"]
+    GS["Google Sheets API<br/>via Service Account"]
+
+    U -- types/voice/click --> SL
+    SL <-. WebSocket .-> BOT
+    BOT --> OAI
+    BOT -.-> ANT
+    BOT --> GS
+    BOT <--> DB
+    PROXY <--> DB
+    CRON --> BOT
+
+    classDef ext fill:#fff3cd,stroke:#666,color:#000
+    classDef vm fill:#e7f3ff,stroke:#3b82f6,color:#000
+    class OAI,ANT,GS,SL ext
+    class BOT,DB,PROXY,CRON vm

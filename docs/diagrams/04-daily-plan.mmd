@@ -1,0 +1,36 @@
+sequenceDiagram
+    participant Cron as Host cron<br/>(Europe/London)
+    participant Bot as slack-task-bot
+    participant DB as Postgres
+    participant U as User<br/>(Slack DM)
+
+    Note over Cron,U: 18:00 - evening triage
+    Cron->>Bot: python -m ops.send_digest --type plan-evening
+    Bot->>DB: select candidate tasks for tomorrow
+    DB-->>Bot: tasks list
+    Bot->>DB: insert daily_plan_items (excluded_at = NULL)
+    Bot->>U: DM "Plan for tomorrow" + Skip buttons + Approve plan (optional)
+
+    alt user clicks Skip on a task
+        U->>Bot: button click
+        Bot->>DB: set excluded_at on that item
+        Bot->>U: ":heavy_minus_sign: Removed task #N from the plan"
+    end
+
+    alt user clicks Approve plan
+        U->>Bot: button click
+        Bot->>DB: write audit_logs action="approved"
+        Bot->>U: ":white_check_mark: Plan accepted"
+    end
+
+    Note over Cron,U: 09:00 next day - execution
+    Cron->>Bot: python -m ops.send_digest --type plan-morning
+    Bot->>DB: select daily_plan_items WHERE excluded_at IS NULL
+    DB-->>Bot: surviving items
+    Bot->>DB: was approved? (audit_logs)
+
+    alt was NOT approved
+        Bot->>DB: write audit_logs action="auto_approved"
+    end
+
+    Bot->>U: DM "Today" cards + Tracking section<br/>(adds "wasn't approved - running as-is" note if auto-approved)

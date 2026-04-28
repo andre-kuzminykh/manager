@@ -1,4 +1,4 @@
-# Slack Task Manager — Product Spec (English)
+# Slack Task Manager — Product Spec
 
 **Version 1 · Product-facing, non-technical**
 For a developer-facing technical reference see `SPEC.md`.
@@ -12,14 +12,12 @@ messages, and turns conversations into tracked tasks without anyone
 leaving the chat. Tasks land in a shared Google Sheet in real time,
 and people get plans and reminders pushed into their Slack DMs.
 
-The product covers the full task lifecycle: capture → triage →
-schedule → execute → report. No separate UI, no second tool to learn.
 
 ## 2. Why it exists
 
 Most teams already coordinate work in Slack threads, voice notes, and
 DMs. Tasks discussed there get forgotten because moving them into
-Jira / Notion / Asana is friction nobody pays. This bot removes the
+Jira is friction nobody pays. This bot removes the
 friction:
 
 - It **captures the task in place** (mention, shortcut, voice, or
@@ -29,7 +27,7 @@ friction:
 - It **reports the state in place** (DMs for digests + reminders, plus
   a live-synced Google Sheet for managers).
 
-Net result: the team works where it already is; managers get
+The team works where it already is; managers get
 visibility through the sheet and DM digests they don't have to chase.
 
 ## 3. User roles
@@ -59,7 +57,7 @@ internal mechanics are deliberately omitted.
 
 ### Feature 1 — Task capture
 
-The bot supports four entry points so people can capture a task in
+The bot supports three entry points so people can capture a task in
 whatever way fits the moment.
 
 #### 1.1 Capture via @-mention
@@ -69,7 +67,7 @@ whatever way fits the moment.
 > another tool.
 
 **Flow:**
-1. User writes `@bot нужно к завтра подготовить презу` in a channel.
+1. User writes `@bot need to prepare presentation` in a channel.
 2. The bot reads the message, extracts title + due date + assignee
    from the text.
 3. The bot replies in the same thread with a **draft card** showing
@@ -77,22 +75,7 @@ whatever way fits the moment.
 4. User clicks *Accept*. The card morphs into a confirmed task card.
 5. The task is now in the system; a row appears in the Google Sheet.
 
-#### 1.2 Capture via message shortcut
-
-> **As a contributor**, I want to right-click a colleague's message
-> and turn it into a task, **so that** I don't have to retype what
-> they already wrote.
-
-**Flow:**
-1. User right-clicks any Slack message → *More actions* → *Create task
-   from message*.
-2. A modal opens, prefilled with the message text as the task title
-   and the message author as a possible owner.
-3. User adjusts owner / due date / priority and clicks *Submit*.
-4. Confirmed task card is posted in the source thread; row appears in
-   the sheet.
-
-#### 1.3 Capture from a voice note
+#### 1.2 Capture from a voice note
 
 > **As a contributor on the go**, I want to record a Slack voice
 > message describing a task, **so that** the bot transcribes it and
@@ -106,7 +89,7 @@ whatever way fits the moment.
 3. Bot replies with the same draft card as in flow 1.1.
 4. User Accepts / Edits / Rejects.
 
-#### 1.4 Passive capture (the bot notices for you)
+#### 1.3 Passive capture (the bot notices for you)
 
 > **As a contributor in a busy channel**, I want the bot to notice
 > when someone describes a task ("we need X by Friday"), **so that**
@@ -176,7 +159,7 @@ in_progress → done`. There are also two cross-cutting actions —
 5. Sheet row is updated, with `reason="cancelled"` recorded in the
    task's status history.
 
-#### 2.4 Delete — "this shouldn't exist"
+#### 2.4 Delete
 
 > **As the task owner or admin**, I want to remove a task entirely
 > with confirmation, **so that** I can clean up duplicates or
@@ -442,54 +425,11 @@ is idempotent (one notification per (user, day), no spam on retry).
 4. Selecting weekdays IS the toggle — there's no separate "Recurring"
    checkbox. Empty selection = not recurring.
 
----
-
-### Feature 12 — Categories & subtasks
-
-> **As an owner**, I want to tag tasks by direction (e.g. marketing,
-> engineering, ops) and break large tasks into subtasks, **so that**
-> the sheet is filterable and the work hierarchy is explicit.
-
-**Flow:**
-1. *Category* is a free-text field in the Edit modal — write whatever
-   makes sense (e.g. "marketing"). Stored as-is, used for filtering
-   in the sheet.
-2. *Subtasks* live in the data model as a self-reference (parent task
-   id). For now they appear as separate tasks in the sheet with a
-   `parent_task_id` column you can filter / group by. (No nested UI
-   in Slack yet — see roadmap.)
 
 ---
 
-## 5. What the bot does NOT do (intentional out-of-scope)
+## 5. Under the hood — how it's built
 
-| Not done | Why |
-|---|---|
-| Calendar events / meetings | Used to. Removed by product decision — bot is task-only now. |
-| Jira / Linear / Asana integration | The bot's own DB + Google Sheet are the single source of truth; no two-way sync needed. |
-| Per-user timezones for reminders | All reminders run on the bot's server timezone (London). Per-user settings on the roadmap. |
-| Multi-person DMs (group chats) | Bot doesn't request the `mpim:read` scope yet; per-channel sync skips MPIMs silently. Easy add — needs the scope and a re-install. |
-| Nested subtask UI in Slack | Subtask data model exists; the dedicated UI is on the roadmap. |
-
----
-
-## 6. Maturity
-
-- Runs 24/7 in production on a single GCE VM in Docker.
-- ~1055 automated tests, ~70 functional requirements documented in
-  `SPEC.md` (technical companion to this doc).
-- All migrations versioned with Alembic; safe rollback path on every
-  schema change.
-- All secrets (Slack tokens, OpenAI key, Google Service Account JSON)
-  live outside the code in an env file + a mounted secrets directory.
-
----
-
-## 7. Under the hood — how it's built
-
-A short, non-exhaustive map of the moving parts. Enough that a
-non-engineer can talk to engineers about the system; not so much that
-it overlaps with `SPEC.md`.
 
 ### Hosting & deployment
 
@@ -550,8 +490,7 @@ it overlaps with `SPEC.md`.
   `LLMBackend` abstraction.
 - **OpenAI Whisper** transcribes Slack voice notes. The transcript
   is fed into the same pipeline as text messages.
-- A small **rule-based prefilter** (regexes for "надо сделать", "к
-  понедельнику", etc.) acts as a safety net: if the LLM returns
+- A small **rule-based prefilter** acts as a safety net: if the LLM returns
   `no_action` on an obviously task-shaped message, the prefilter
   forces a draft.
 - **No data leaves the bot's process** except the literal LLM /
@@ -617,17 +556,6 @@ the bot container; idempotency means retries are safe.
 
 ### Diagrams
 
-Source `.mmd` files and rendered PNGs live in `docs/diagrams/`.
-Re-render after edits with:
-
-```bash
-cd docs/diagrams
-for f in *.mmd; do
-  npx --yes -p @mermaid-js/mermaid-cli mmdc \
-    -i "$f" -o "${f%.mmd}.png" -b white -s 2 -p .puppeteer-config.json
-done
-```
-
 #### System architecture
 
 How the bot, its database, and external services fit together on a
@@ -661,23 +589,3 @@ shortcut and the *auto-approved* path when the user didn't explicitly
 confirm.
 
 ![Daily plan flow](docs/diagrams/04-daily-plan.png)
-
----
-
-## 8. Roadmap (not built, ranked by easy → hard)
-
-1. **`mpim:read` Slack scope** — enable per-channel sync in group
-   DMs (~1h work, just a re-install).
-2. **Per-user timezones** — pull each user's Slack timezone and
-   schedule their digest / plan in that zone.
-3. **Subtask UI** — render subtasks under their parent on the card,
-   and let owners create subtasks from a parent's modal.
-4. **Sheet-side filters / pivots template** — ship a saved view in
-   the spreadsheet so managers see "by owner / by category / overdue"
-   without setting it up themselves.
-5. **Per-project / per-channel scoping** — currently every channel
-   feeds the same task list; teams might want isolated workspaces.
-6. **External tracker mirror** (Jira / Linear) — one-way sync, lower
-   priority because the sheet covers most reporting needs.
-7. **Calendar / meetings** — re-enable the meeting modal if/when
-   product decides it's back in scope.

@@ -271,14 +271,75 @@ def test_listener_tick_skips_non_message_updates(patched_session_scope):
         classification,
         updates_per_call=[
             [
-                {"update_id": 300, "callback_query": {"id": "cb"}},
+                # Service updates that aren't messages and aren't
+                # callback_queries — both skipped.
                 {"update_id": 301, "my_chat_member": {}},
+                {"update_id": 302, "chat_member": {}},
             ]
         ],
     )
     report = listener.tick()
     assert report.skipped_non_message == 2
     assert report.messages_processed == 0
+    assert report.callbacks_handled == 0
+
+
+def test_listener_tick_routes_callback_query_to_handler(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-04-28: a button press lands as `callback_query` on
+    `getUpdates`. The listener must dispatch it to the matching
+    handler (here: Start), persist the offset, and not count it as
+    a skipped message."""
+    from app.models import Task, TaskPriority, TaskSourceKind, TaskStatus
+
+    # Seed a task we can Start.
+    with SessionFactory() as s:
+        t = Task(
+            title="x",
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+            owner_user_id="55555",
+            source_kind=TaskSourceKind.telegram,
+            card_channel="-1001",
+            card_ts="42",
+        )
+        s.add(t)
+        s.commit()
+        tid = t.id
+
+    listener = _make_listener(
+        IntentClassification(intent=IntentType.no_action, confidence=0.0),
+        updates_per_call=[
+            [
+                {
+                    "update_id": 500,
+                    "callback_query": {
+                        "id": "cb-1",
+                        "from": {"id": 55555},
+                        "data": f"start:{tid}",
+                        "message": {
+                            "message_id": 42,
+                            "chat": {"id": -1001, "type": "supergroup"},
+                        },
+                    },
+                }
+            ]
+        ],
+    )
+    # Stub the outbound sender so the listener doesn't actually
+    # try to call api.telegram.org during the test.
+    listener._sender.send_message = lambda **kw: {"message_id": 99}  # type: ignore
+    listener._sender.update_message = lambda **kw: {}  # type: ignore
+    listener._sender.answer_callback_query = lambda **kw: {}  # type: ignore
+
+    report = listener.tick()
+    assert report.callbacks_handled == 1
+    assert report.skipped_non_message == 0
+
+    with SessionFactory() as s:
+        task = s.get(Task, tid)
+        assert task.status == TaskStatus.in_progress
 
 
 def test_listener_second_tick_with_same_offset_is_a_noop(

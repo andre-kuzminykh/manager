@@ -7,6 +7,12 @@ the Supabase view path uses, and feeds it through the existing
 per (chat_id, message_id), `source_kind = 'telegram'` on the resulting
 Task, same intent pipeline, same Sheets sync.
 
+FR-CR-04-28 — when a task is created, the listener posts a task card
+in the source chat with inline buttons (Start / Mark done / Cancel /
+Edit / Delete / Subscribe). Inbound `callback_query` updates from
+button presses are dispatched to the Telegram-side handlers in
+`app/telegram_bot/handlers.py` and the card is edited in place.
+
 Network shape: outbound long-poll only — no public HTTP endpoint, no
 inbound port. The bot doesn't have to be reachable from the internet,
 just able to reach `api.telegram.org:443`.
@@ -31,8 +37,27 @@ from sqlalchemy.orm import Session
 from app.db import session_scope
 from app.intent import IntentClassifier
 from app.logging_setup import get_logger
-from app.models import TelegramListenerState
+from app.models import Task, TelegramListenerState
 from app.orchestrator import Orchestrator
+from app.telegram_bot import handlers as tg_handlers
+from app.telegram_bot.cards import (
+    post_initial_card,
+    refresh_card,
+    render_tombstone,
+)
+from app.telegram_bot.keyboards import (
+    ACTION_CANCEL,
+    ACTION_CONFIRM,
+    ACTION_DELETE,
+    ACTION_DONE,
+    ACTION_EDIT,
+    ACTION_IGNORE,
+    ACTION_START,
+    ACTION_SUBSCRIBE,
+    ACTION_UNSUBSCRIBE,
+    parse_callback_data,
+)
+from app.telegram_bot.sender import TelegramSender
 from app.telegram_ingest.reader import TelegramSourceMessage
 from app.telegram_ingest.service import TelegramIngestService
 
@@ -51,6 +76,7 @@ class ListenerReport:
     tasks_created: int = 0
     no_action: int = 0
     skipped_non_message: int = 0
+    callbacks_handled: int = 0
     errors: int = 0
 
 
@@ -148,10 +174,15 @@ class TelegramListener:
         *,
         token: str,
         ingest: TelegramIngestService,
+        sender: TelegramSender | None = None,
         long_poll_timeout: int = 30,
     ) -> None:
         self._token = token
         self._ingest = ingest
+        # Default sender uses the same token for outbound messages
+        # so a single token both reads and writes — that's the
+        # standard Bot API setup.
+        self._sender = sender if sender is not None else TelegramSender(token=token)
         self._long_poll_timeout = long_poll_timeout
 
     @property
@@ -181,6 +212,8 @@ class TelegramListener:
                         "edited_message",
                         "channel_post",
                         "edited_channel_post",
+                        # FR-CR-04-28: inbound button presses
+                        "callback_query",
                     ]
                 ),
             }
@@ -227,6 +260,22 @@ class TelegramListener:
                 if isinstance(update_id, int) and update_id > max_update_id:
                     max_update_id = update_id
 
+                # FR-CR-04-28: inbound button presses come as
+                # `callback_query` updates, not messages.
+                if "callback_query" in upd:
+                    try:
+                        self._handle_callback_query(
+                            session, upd["callback_query"]
+                        )
+                        report.callbacks_handled += 1
+                    except Exception as e:  # noqa: BLE001
+                        report.errors += 1
+                        log.warning(
+                            "telegram_callback_handler_failed",
+                            error=str(e),
+                        )
+                    continue
+
                 msg = parse_update(upd)
                 if msg is None:
                     report.skipped_non_message += 1
@@ -239,6 +288,23 @@ class TelegramListener:
                         report.no_action += 1
                     else:
                         report.tasks_created += 1
+                        # Post the live card under the source message
+                        # so the user can drive the lifecycle without
+                        # leaving Telegram.
+                        try:
+                            post_initial_card(
+                                sender=self._sender,
+                                session=session,
+                                task=task,
+                                chat_id=msg.chat_id,
+                                reply_to_message_id=msg.message_id,
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            log.warning(
+                                "telegram_post_initial_card_failed",
+                                task_id=task.id,
+                                error=str(e),
+                            )
                 except Exception as e:  # noqa: BLE001
                     report.errors += 1
                     log.warning(
@@ -252,6 +318,109 @@ class TelegramListener:
                 _save_offset(session, last_update_id=max_update_id)
 
         return report
+
+    # ---- callback_query routing ------------------------------------------
+
+    def _handle_callback_query(
+        self, session: Session, cq: dict[str, Any]
+    ) -> None:
+        """Dispatch a single button press to the matching handler.
+
+        Always answers the callback_query (Telegram requires this
+        within ~15s) — with a notification message when the action
+        was rejected (e.g. "Only the owner can delete this") so the
+        user gets immediate feedback.
+        """
+        cq_id = cq.get("id")
+        actor_obj = cq.get("from") or {}
+        actor = str(actor_obj.get("id")) if actor_obj.get("id") is not None else None
+        data = cq.get("data") or ""
+        parsed = parse_callback_data(data)
+        if parsed is None:
+            self._sender.answer_callback_query(callback_query_id=cq_id, text="?")
+            return
+        action, entity_id = parsed
+
+        try:
+            task = self._dispatch_action(
+                session, action=action, entity_id=entity_id, actor=actor, cq=cq
+            )
+        except tg_handlers.NotAuthorised as e:
+            self._sender.answer_callback_query(
+                callback_query_id=cq_id, text=str(e)
+            )
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "telegram_callback_dispatch_failed",
+                action=action,
+                entity_id=entity_id,
+                error=str(e),
+            )
+            self._sender.answer_callback_query(
+                callback_query_id=cq_id, text="Error, try again."
+            )
+            return
+
+        self._sender.answer_callback_query(callback_query_id=cq_id)
+        if task is None:
+            return
+
+        # Re-render the card to reflect the new state (status,
+        # buttons, subscription label, etc.)
+        if action == ACTION_DELETE:
+            render_tombstone(sender=self._sender, task=task, actor=actor)
+        else:
+            refresh_card(
+                sender=self._sender,
+                session=session,
+                task=task,
+                viewer=actor,
+            )
+
+    def _dispatch_action(
+        self,
+        session: Session,
+        *,
+        action: str,
+        entity_id: int,
+        actor: str | None,
+        cq: dict[str, Any],
+    ) -> Task | None:
+        if not actor:
+            raise tg_handlers.NotAuthorised("Couldn't identify your user.")
+        if action == ACTION_START:
+            return tg_handlers.handle_start(session, task_id=entity_id, actor=actor)
+        if action == ACTION_DONE:
+            return tg_handlers.handle_done(session, task_id=entity_id, actor=actor)
+        if action == ACTION_CANCEL:
+            return tg_handlers.handle_cancel(session, task_id=entity_id, actor=actor)
+        if action == ACTION_DELETE:
+            return tg_handlers.handle_delete(session, task_id=entity_id, actor=actor)
+        if action == ACTION_SUBSCRIBE:
+            return tg_handlers.handle_subscribe(
+                session, task_id=entity_id, actor=actor, subscribe=True
+            )
+        if action == ACTION_UNSUBSCRIBE:
+            return tg_handlers.handle_subscribe(
+                session, task_id=entity_id, actor=actor, subscribe=False
+            )
+        if action == ACTION_EDIT:
+            # Post the help text as a chat message; nothing to refresh.
+            chat = (cq.get("message") or {}).get("chat") or {}
+            chat_id = chat.get("id")
+            if chat_id is not None:
+                self._sender.send_message(
+                    chat_id=chat_id, text=tg_handlers.handle_edit_help()
+                )
+            return None
+        if action in (ACTION_CONFIRM, ACTION_IGNORE):
+            # Draft cards aren't posted yet (we create tasks
+            # immediately on ingest). These actions are reserved for
+            # the next iteration when a confirm-first flow lands.
+            return None
+        log.info("telegram_unknown_action", action=action)
+        return None
 
     # ---- main loop --------------------------------------------------------
 

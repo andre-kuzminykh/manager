@@ -723,6 +723,69 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-28 — Telegram task cards + button-driven lifecycle
+
+Closes the loop on the Telegram channel: a task captured by the
+ingest path (live listener or Supabase view) gets a card posted in
+the source chat with the same buttons as the Slack task card, and
+each button press drives the task through its lifecycle without
+the user leaving Telegram.
+
+What lands in the chat after ingest:
+
+- A reply to the source message rendered by `build_task_card_text`
+  — title, description, status / owner / priority / due meta line,
+  source permalink (when public).
+- An inline keyboard from `task_card_keyboard` — same conditional
+  layout the Slack card uses:
+  - *Start* on backlog/todo (owner or anyone if unowned);
+  - *Mark done* on in_progress;
+  - *Edit*, *Cancel* on every status except backlog (owner+admin);
+  - *Subscribe* / *Unsubscribe* for bystanders;
+  - *Delete* for owner+admin.
+
+The bot stores the posted message's `(chat_id, message_id)` pair
+on the task row using the existing `card_channel` / `card_ts`
+columns (channel-agnostic; Slack reuses them too) so subsequent
+updates target the same message via `editMessageText`.
+
+Inbound flow (`callback_query` updates from button presses):
+
+- The listener now subscribes to `callback_query` in addition to
+  the four message kinds. Each press is parsed via
+  `parse_callback_data` (`<action>:<entity_id>`) and dispatched to
+  a Telegram-side handler in `app/telegram_bot/handlers.py`:
+  `handle_start`, `handle_done`, `handle_cancel`, `handle_delete`,
+  `handle_subscribe(subscribe=True/False)`, `handle_edit_help`.
+- Handlers reuse the channel-agnostic services (`TransitionService`,
+  `SubscriptionService`, soft-delete + audit log) and call
+  `app.sync.task_sync.sync_task` afterwards so Sheets stays
+  current.
+- Permissions: owner-only for Mark done / Cancel / Delete /
+  Edit; bystanders can subscribe / unsubscribe; an unowned task
+  can be claimed by whoever clicks *Start* (mirrors Slack).
+  `NotAuthorised` from a handler is surfaced as the
+  `answerCallbackQuery` toast text so the user sees the rejection
+  immediately.
+- After a successful action the listener edits the original card
+  in place via `app/telegram_bot/cards.refresh_card` (or
+  `render_tombstone` on Delete) so the keyboard reflects the new
+  state.
+
+What's still deferred:
+
+- *Mark done* opens a follow-up "reply with artifact" conversation
+  rather than a modal. Not yet implemented; the MVP transitions
+  with no artifact (matching FR-CR-04-21 — both fields optional).
+- *Edit* posts a help message pointing the user at Slack for now.
+  A Telegram-native edit conversation (`reply with title=...`,
+  `due=...`) is the next iteration.
+- DM-based digests / daily plan / reminders for Telegram users.
+  Slack is the only DM target right now.
+- TG admin support — currently only the task owner can do
+  destructive actions. A `TELEGRAM_ADMIN_USER_IDS` env analogous
+  to the Slack admin list will land alongside the digest work.
+
 #### FR-CR-04-27 — Telegram live listener (Bot API long-polling)
 
 A second ingest source for Telegram, parallel to the Supabase view
@@ -1508,5 +1571,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-25  | `test_daily_plan.py::test_morning_runs_without_explicit_approve`, `::test_morning_writes_auto_approved_audit_when_no_approve`, `::test_morning_dm_shows_auto_approve_note_when_no_approve`, `::test_morning_skips_auto_approve_when_user_clicked_approve`, `::test_evening_card_copy_says_approve_is_optional` |
 | FR-CR-04-26  | `test_task_source_kind.py` (default slack, telegram persisted, enum coverage, `create_task_from_draft` honours `source.kind='telegram'`); `test_telegram_ingest.py` (reader maps canonical and alternative column names, drops orphans, no-op when unconfigured; `_telegram_permalink` for super-group / private; `_build_window` shape; `process_one` creates Task with source_kind=telegram + bookmark; records no_action without creating a task; idempotent on repeat; skips empty text without invoking classifier; batch counters per outcome; psycopg2→psycopg3 scheme rewrite; IPv4 hostaddr injection); `test_telegram_bot.py` (confirm + task-card keyboards, callback round-trip, card text rendering, sender disabled when token empty); migration `0014_telegram_source.py` |
 | FR-CR-04-27  | `test_telegram_listener.py` (`parse_update` for message / edited_message / channel_post; caption fallback; first+last name composition; service updates dropped; tick processes updates and advances offset; no_action bookmark without task; non-message updates skipped; second tick with same offset is a no-op; disabled when token empty); migration `0015_telegram_listener_state.py` |
+| FR-CR-04-28  | `test_telegram_handlers.py` (Start owner / unowned-claim / stranger-rejected; Done owner-only; Cancel routes by due_date; Delete soft-deletes + audit row + via=telegram + stranger-blocked; Subscribe/Unsubscribe for bystanders, owner is no-op; Edit help text; `_route_on_cancel`); `test_telegram_listener.py::test_listener_tick_routes_callback_query_to_handler` |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

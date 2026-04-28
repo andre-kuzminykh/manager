@@ -512,7 +512,39 @@ The two ingest paths run in parallel and dedupe via the (chat_id,
 message_id) primary key — a message captured by either path is
 indistinguishable in the DB once written.
 
-#### 12.4 — Live confirmation back into the Telegram chat (planned)
+#### 12.4 — Live task card with buttons in the Telegram chat
+
+> **As a Telegram contributor**, I want a card under my message with
+> Start / Mark done / Cancel / Edit / Delete / Subscribe buttons —
+> exactly like the Slack one, **so that** I can drive the task through
+> its lifecycle without leaving Telegram.
+
+**Flow:**
+1. The listener captures a message and creates a task (see 12.3).
+2. The bot replies under the source message with a card: title,
+   description, status / owner / priority / due meta line, source
+   link, plus an inline keyboard with the matching buttons.
+3. Tapping a button drives the task:
+   - **Start** flips backlog/todo → in_progress; an unowned task
+     gets claimed by whoever clicked.
+   - **Mark done** transitions to done.
+   - **Cancel** routes back to todo (this week) or backlog (later).
+   - **Subscribe / Unsubscribe** toggles for bystanders.
+   - **Delete** soft-deletes (owner+admin), card flips to a
+     tombstone line.
+   - **Edit** posts a help message pointing at Slack for the full
+     edit; the Telegram-native edit conversation lands in a follow-up.
+4. The card is edited in place after every action, so it always
+   reflects the current task state without spamming new messages.
+5. The same Google Sheet row updates after every change, so a
+   manager watching the spreadsheet sees the same state regardless
+   of which client did the click.
+
+**Permissions** match the Slack card: only the owner (or admin)
+can do destructive things (Mark done / Cancel / Delete / Edit);
+bystanders can subscribe.
+
+#### 12.5 — Live confirmation back into the Telegram chat (planned)
 
 > **As a Telegram contributor**, I want a confirmation message back
 > in my chat when the bot creates a task from my message, **so that**

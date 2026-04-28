@@ -36,6 +36,34 @@ from app.logging_setup import get_logger
 log = get_logger(__name__)
 
 
+def _has_only_ipv6(database_url: str) -> bool:
+    """True when the URL's host has at least one AAAA but no A records.
+
+    Used to print a friendly "switch to the pooler URL" hint instead
+    of letting libpq blow up on an unreachable IPv6 address.
+    """
+    import socket
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(database_url)
+        host = parsed.hostname
+        port = parsed.port or 5432
+    except Exception:  # noqa: BLE001
+        return False
+    if not host:
+        return False
+    try:
+        v4 = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        v4 = []
+    try:
+        v6 = socket.getaddrinfo(host, port, socket.AF_INET6, socket.SOCK_STREAM)
+    except OSError:
+        v6 = []
+    return not v4 and bool(v6)
+
+
 def _resolve_ipv4(database_url: str) -> str | None:
     """Best-effort IPv4 lookup for the host in a SQLAlchemy DSN.
 
@@ -184,6 +212,23 @@ class TelegramSourceReader:
             ipv4 = _resolve_ipv4(url)
             if ipv4 is not None:
                 connect_args["hostaddr"] = ipv4
+            elif _has_only_ipv6(url):
+                # Fail fast with a clear message instead of letting
+                # libpq spam an unreachable IPv6 address.
+                from urllib.parse import urlparse
+
+                host = urlparse(url).hostname
+                log.warning(
+                    "telegram_source_host_is_ipv6_only",
+                    host=host,
+                    hint=(
+                        "This Supabase host has no IPv4 A record and "
+                        "the VM has no outbound IPv6. Switch "
+                        "TELEGRAM_SOURCE_DATABASE_URL to the Supabase "
+                        "Pooler URL "
+                        "(aws-0-<region>.pooler.supabase.com)."
+                    ),
+                )
 
             self._engine = create_engine(
                 url,

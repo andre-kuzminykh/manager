@@ -132,7 +132,11 @@ def parse_update(update: dict[str, Any]) -> TelegramSourceMessage | None:
         reply_to=int(reply_to["message_id"]) if reply_to.get("message_id") else None,
         user_id=int(sender["id"]) if sender.get("id") else None,
         user_name=(
-            sender.get("username")
+            # When the sender has a `username`, store it with the
+            # leading `@` so cards / Sheet show the canonical Telegram
+            # handle (e.g. `@andre_andreevich`). Falls back to the
+            # display name otherwise.
+            (f"@{sender['username']}" if sender.get("username") else None)
             or " ".join(
                 p
                 for p in (sender.get("first_name"), sender.get("last_name"))
@@ -144,6 +148,7 @@ def parse_update(update: dict[str, Any]) -> TelegramSourceMessage | None:
         chat_type=chat.get("type") or None,
         raw=msg,
     )
+
 
 
 def _looks_like_confirm_widget(cq: dict[str, Any]) -> bool:

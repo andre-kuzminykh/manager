@@ -242,8 +242,8 @@ def render_tombstone(
         return
 
     text = (
-        f"🗑 Task #{task.id} — *{_escape_md(task.title)}* deleted"
-        + (f" by `{_escape_md(actor)}`" if actor else "")
+        f"🗑 Task #{task.id} — <b>{_escape_md(task.title)}</b> deleted"
+        + (f" by <code>{_escape_md(actor)}</code>" if actor else "")
     )
     for c in cards:
         try:
@@ -274,7 +274,7 @@ def render_tombstone(
 
 
 def _build_draft_widget_text(draft: ActionDraft) -> str:
-    """Render the draft as a human-readable preview for the widget."""
+    """Render the draft as a compact HTML preview for the widget."""
     payload = draft.payload or {}
     title = payload.get("title") or ""
     owner_disp = payload.get("owner_display_name") or payload.get("owner_user_id") or ""
@@ -282,15 +282,18 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
     due = payload.get("due_date") or ""
     description = payload.get("description") or ""
 
-    lines = [f"*Create this task?* (draft #{draft.id})"]
-    lines.append(f"*Title:* {_escape_md(str(title))}")
+    lines = [f"<b>Create this task?</b>"]
+    lines.append(f"📌 {_escape_md(str(title))}")
     if description:
-        lines.append(f"*Description:* {_escape_md(str(description))}")
+        lines.append(_escape_md(str(description)))
+    meta: list[str] = []
     if owner_disp:
-        lines.append(f"*Owner:* {_escape_md(str(owner_disp))}")
+        meta.append(f"👤 {_escape_md(str(owner_disp))}")
+    meta.append(f"🟡 {priority}" if priority == "medium" else f"⚡ {priority}")
     if due:
-        lines.append(f"*Due:* {_escape_md(str(due))}")
-    lines.append(f"*Priority:* {_escape_md(str(priority))}")
+        meta.append(f"📅 {due}")
+    if meta:
+        lines.append(" · ".join(meta))
     return "\n".join(lines)
 
 
@@ -460,8 +463,8 @@ def render_draft_rejected(
         return
     title = (draft.payload or {}).get("title") or ""
     text = (
-        f"✖ Draft #{draft.id} — *{_escape_md(str(title))}* rejected"
-        + (f" by `{_escape_md(actor)}`" if actor else "")
+        f"✖ Draft #{draft.id} — <b>{_escape_md(str(title))}</b> rejected"
+        + (f" by <code>{_escape_md(actor)}</code>" if actor else "")
     )
     for w in widgets:
         try:

@@ -160,10 +160,9 @@ def prompt_done(
         raise NotAuthorised("Task not found or already deleted.")
     _ensure_can_edit(task, actor)
     text = (
-        f"✔ *Mark done — task #{task.id}*\n"
-        f"Optional: reply to this message with a link or a short note "
-        f"about the result.\n"
-        f"Or reply `/skip` to complete without an artifact."
+        f"✔ <b>Mark done — task #{task.id}</b>\n"
+        f"Optional: reply with a link or a short note about the result.\n"
+        f"Or reply <code>/skip</code> to complete without an artifact."
     )
     return task, text
 
@@ -329,25 +328,38 @@ def prompt_edit(
         raise NotAuthorised("Task not found or already deleted.")
     _ensure_can_edit(task, actor)
 
-    cur = (
-        f"title={task.title}\n"
-        f"description={task.description or ''}\n"
-        f"priority={task.priority.value}\n"
-        f"due={task.due_date.isoformat() if task.due_date else ''}\n"
-        f"due_time={task.due_time.strftime('%H:%M') if task.due_time else ''}\n"
-        f"start={task.start_date.isoformat() if task.start_date else ''}\n"
-        f"start_time={task.start_time.strftime('%H:%M') if task.start_time else ''}\n"
-        f"category={task.category or ''}\n"
-        f"owner={task.owner_user_id or ''}"
+    # Build a compact "filled / empty" preview so the prompt feels
+    # like a quick form, not a wall of `key=value` lines.
+    from app.telegram_bot.sender import _escape_html
+
+    filled: list[str] = []
+    empty: list[str] = []
+
+    def _row(label: str, value: object) -> None:
+        if value in (None, "", 0):
+            empty.append(label)
+        else:
+            filled.append(f"• <b>{label}:</b> {_escape_html(str(value))}")
+
+    _row("Title", task.title)
+    _row("Description", task.description)
+    _row("Priority", task.priority.value)
+    _row("Due", task.due_date.isoformat() if task.due_date else None)
+    _row("Due time", task.due_time.strftime("%H:%M") if task.due_time else None)
+    _row("Start", task.start_date.isoformat() if task.start_date else None)
+    _row("Start time", task.start_time.strftime("%H:%M") if task.start_time else None)
+    _row("Category", task.category)
+    _row("Owner", task.owner_display_name or task.owner_user_id)
+
+    parts = [f"✏ <b>Edit task #{task.id}</b>"]
+    if filled:
+        parts.append("\n".join(filled))
+    if empty:
+        parts.append(f"<i>Empty:</i> {', '.join(empty)}")
+    parts.append(
+        "Reply naturally — e.g. <i>«сдвинь срок на пятницу, приоритет высокий»</i>."
     )
-    text = (
-        f"✏ *Edit task #{task.id}*\n"
-        f"Reply to this message — write naturally what to change "
-        f"(e.g. `сдвинь срок на пятницу, приоритет высокий`) or use "
-        f"`key=value` lines. Available fields: "
-        f"{', '.join(_EDIT_KEYS)}.\n\n"
-        f"Current values:\n```\n{cur}\n```"
-    )
+    text = "\n\n".join(parts)
     return task, text
 
 

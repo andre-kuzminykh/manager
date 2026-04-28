@@ -64,7 +64,7 @@ def test_parse_update_extracts_message_fields():
     assert out.chat_id == -1001234567890
     assert out.message_id == 7
     assert out.user_id == 42
-    assert out.user_name == "andre"
+    assert out.user_name == "@andre"
     assert out.text == "к завтра подготовить презу"
     assert out.reply_to == 4
     assert out.chat_title == "T"

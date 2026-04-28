@@ -76,8 +76,8 @@ def task_card_keyboard(
     secondary: list[dict[str, Any]] = []
     if status != "done" and (is_owner or is_admin):
         secondary.append(_btn("✏ Edit", ACTION_EDIT, task_id))
-    if status != "backlog" and (is_owner or is_admin):
-        secondary.append(_btn("⤺ Cancel", ACTION_CANCEL, task_id))
+    # Cancel removed per UX feedback — Edit + Delete cover the
+    # same intent without the extra button.
     if secondary:
         rows.append(secondary)
 

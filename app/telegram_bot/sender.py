@@ -41,48 +41,53 @@ STATUS_EMOJI = {
 }
 
 
-def _escape_md(text: str | None) -> str:
-    """Escape the four characters Telegram's legacy Markdown parser
-    treats as formatting tokens: ``_``, ``*``, ``\\``` and ``[``.
+def _escape_html(text: str | None) -> str:
+    """Escape only the three characters Telegram's HTML parser treats
+    as special: ``<``, ``>``, ``&``.
 
-    Without this an owner whose Slack/Telegram username carries an
-    underscore (very common — e.g. ``andre_andreevich``) trips the
-    parser into thinking the rest of the line is italic, which
-    fails with ``HTTP 400: can't parse entities``.
+    HTML mode (vs. legacy Markdown) doesn't choke on underscores —
+    so a username like ``andre_andreevich`` renders as plain text
+    without needing backslash escapes that some Telegram clients
+    show literally. Bold becomes ``<b>x</b>``, code becomes
+    ``<code>x</code>``.
     """
     if not text:
         return ""
     return (
-        text.replace("\\", "\\\\")
-        .replace("_", "\\_")
-        .replace("*", "\\*")
-        .replace("`", "\\`")
-        .replace("[", "\\[")
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
     )
 
 
-def build_task_card_text(task: Task, *, header: str | None = None) -> str:
-    """Render a Task as plain text suitable for `send_message` with
-    ``parse_mode='Markdown'``.
+# Back-compat alias — older modules still import `_escape_md`.
+# It's a thin shim onto the HTML escape now that we no longer use
+# the Markdown parse mode.
+_escape_md = _escape_html
 
-    Static structural text uses ``*bold*`` for the title prefix, but
-    every value that comes from user input or external profile data
-    (title, description, owner display name) is escaped via
-    ``_escape_md`` so a stray ``_`` / ``*`` / ``\\``` / ``[`` doesn't
-    turn into an unbalanced formatting token.
+
+def build_task_card_text(task: Task, *, header: str | None = None) -> str:
+    """Render a Task as HTML text suitable for ``send_message`` with
+    ``parse_mode='HTML'``.
+
+    Bold via ``<b>…</b>``; every dynamic value (title, description,
+    owner) is escaped via ``_escape_html`` so a stray ``<``, ``>``
+    or ``&`` doesn't break the parser. The status enum's underscore
+    becomes a space (``in_progress`` → ``in progress``) so the card
+    reads naturally.
     """
     lines: list[str] = []
     if header:
-        lines.append(f"*{_escape_md(header)}*")
-    lines.append(f"*#{task.id}* {_escape_md(task.title)}")
+        lines.append(f"<b>{_escape_html(header)}</b>")
+    lines.append(f"<b>#{task.id}</b> {_escape_html(task.title)}")
     if task.description:
-        lines.append(_escape_md(task.description))
+        lines.append(_escape_html(task.description))
     meta: list[str] = []
     status_em = STATUS_EMOJI.get(task.status.value, "")
-    meta.append(f"{status_em} {task.status.value}")
+    meta.append(f"{status_em} {task.status.value.replace('_', ' ')}")
     owner = task.owner_display_name or task.owner_user_id
     if owner:
-        meta.append(f"👤 {_escape_md(str(owner))}")
+        meta.append(f"👤 {_escape_html(str(owner))}")
     pri_em = PRIORITY_EMOJI.get(task.priority.value, "")
     meta.append(f"{pri_em} {task.priority.value}")
     if task.due_date:
@@ -90,7 +95,7 @@ def build_task_card_text(task: Task, *, header: str | None = None) -> str:
     if meta:
         lines.append(" · ".join(meta))
     if task.source_permalink:
-        lines.append(f"🔗 {_escape_md(task.source_permalink)}")
+        lines.append(f"🔗 {_escape_html(task.source_permalink)}")
     return "\n".join(lines)
 
 
@@ -176,7 +181,7 @@ class TelegramSender:
         text: str,
         reply_markup: dict[str, Any] | None = None,
         reply_to_message_id: int | None = None,
-        parse_mode: str | None = "Markdown",
+        parse_mode: str | None = "HTML",
     ) -> dict[str, Any]:
         """Returns the result body (with `message_id`) or empty dict
         on failure."""
@@ -200,7 +205,7 @@ class TelegramSender:
         message_id: int,
         text: str,
         reply_markup: dict[str, Any] | None = None,
-        parse_mode: str | None = "Markdown",
+        parse_mode: str | None = "HTML",
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "chat_id": chat_id,

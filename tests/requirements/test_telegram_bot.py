@@ -107,41 +107,39 @@ def test_parse_callback_data_rejects_garbage():
 # --------------------------------------------------------------------------- #
 
 
-def test_build_task_card_text_escapes_markdown_chars_in_owner_username():
-    """Slack/Telegram usernames with underscores ('andre_andreevich')
-    must not break the legacy Markdown parser — every dynamic field
-    is escaped before being interpolated into the card."""
+def test_build_task_card_text_renders_underscore_username_as_plain_html():
+    """HTML parse mode renders ``andre_andreevich`` as-is — no
+    Markdown italic-trigger problems, no backslash escapes."""
     t = Task(
         id=42,
         title="prep deck",
-        owner_display_name="andre_andreevich",
+        owner_display_name="@andre_andreevich",
         priority=TaskPriority.medium,
         status=TaskStatus.todo,
         source_kind=TaskSourceKind.telegram,
     )
     text = build_task_card_text(t)
-    # The underscore is escaped → "andre\\_andreevich"
-    assert "andre\\_andreevich" in text
-    # Bare unescaped underscore must NOT appear in the rendered text
-    # (other than inside our escape sequence).
-    assert "andre_andreevich" not in text.replace("andre\\_andreevich", "")
+    # Underscore stays literal; @ stays literal. No backslash escapes.
+    assert "@andre_andreevich" in text
+    assert "\\_" not in text
 
 
-def test_build_task_card_text_escapes_title_with_special_chars():
+def test_build_task_card_text_escapes_html_special_chars_in_title():
     t = Task(
         id=1,
-        title="*urgent* task with [brackets]",
+        title="<urgent> task & follow-up",
         owner_user_id="U1",
         priority=TaskPriority.high,
         status=TaskStatus.in_progress,
     )
     text = build_task_card_text(t)
-    # Asterisks and the opening bracket from the title are escaped.
-    assert "\\*urgent\\*" in text
-    assert "\\[brackets" in text
+    # `<`, `>`, `&` are escaped to entity references.
+    assert "&lt;urgent&gt;" in text
+    assert "task &amp; follow-up" in text
 
 
-def test_build_task_card_text_includes_title_status_owner_priority_due():
+def test_build_task_card_text_renders_status_with_space():
+    """Status `in_progress` is shown to users as `in progress`."""
     t = Task(
         id=42,
         title="prepare deck",
@@ -154,7 +152,9 @@ def test_build_task_card_text_includes_title_status_owner_priority_due():
     text = build_task_card_text(t)
     assert "#42" in text
     assert "prepare deck" in text
-    assert "in_progress" in text
+    # Space, not underscore.
+    assert "in progress" in text
+    assert "in_progress" not in text
     assert "Andre" in text
     assert "high" in text
 

@@ -60,21 +60,22 @@ def _build_window(msg: TelegramSourceMessage) -> ContextWindow:
 
 
 def _telegram_permalink(msg: TelegramSourceMessage) -> str | None:
-    """Best-effort link to the original Telegram message.
+    """Best-effort shareable link to the original Telegram message.
 
-    Public chats: ``https://t.me/c/<chat>/<msg>`` (works for super-
-    groups / channels; renders as a link card in Slack and Sheets).
-    Private chats: returns None — there's no shareable URL.
+    The ``t.me/c/<id>/<msg>`` URL scheme **only works for supergroups
+    and channels** — those carry chat_ids with the ``-100`` prefix
+    (so ``|id| > 10**12``). Basic groups have small negative ids and
+    no public URL form: a generated link would 404 with «no access»
+    even for members. Private chats: same — no shareable URL.
     """
-    if msg.chat_id < 0:
-        # Telegram supergroups / channels live at chat ids < 0 with a
-        # `-100` prefix on the public id. Strip that prefix per t.me's
-        # /c/<id>/<msg> URL scheme.
-        public = abs(msg.chat_id)
-        if public > 1000000000000:
-            public -= 1000000000000
-        return f"https://t.me/c/{public}/{msg.message_id}"
-    return None
+    if msg.chat_id >= 0:
+        return None
+    public = abs(msg.chat_id)
+    if public <= 1000000000000:
+        # Basic group — no shareable URL.
+        return None
+    public -= 1000000000000
+    return f"https://t.me/c/{public}/{msg.message_id}"
 
 
 class TelegramIngestService:

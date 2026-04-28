@@ -73,6 +73,17 @@ def create_task_from_draft(
     due = _coerce_due(payload.get("due_date"))
     status = _initial_status(due)
 
+    # FR-CR-04-26: discriminate Slack vs Telegram tasks. Source dict
+    # may carry `kind` ('slack' | 'telegram'); defaults to slack for
+    # back-compat with all existing call sites.
+    from app.models import TaskSourceKind
+
+    source_kind_raw = (source.get("kind") or "slack")
+    try:
+        source_kind = TaskSourceKind(source_kind_raw)
+    except ValueError:
+        source_kind = TaskSourceKind.slack
+
     task = Task(
         title=title,
         description=payload.get("description"),
@@ -83,6 +94,7 @@ def create_task_from_draft(
         status=status,
         is_current_week=(status == TaskStatus.todo),
         estimated_minutes=payload.get("estimated_minutes"),
+        source_kind=source_kind,
         source_conversation_id=source.get("conversation_id"),
         source_message_ts=source.get("message_ts"),
         source_thread_ts=source.get("thread_ts"),

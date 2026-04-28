@@ -428,6 +428,81 @@ is idempotent (one notification per (user, day), no spam on retry).
 
 ---
 
+### Feature 12 — Telegram as a second source channel
+
+The bot grows a second input channel: Telegram. Tasks captured from
+Telegram messages live in the **same** task table and the **same**
+Google Sheet as Slack tasks — managers see one combined view,
+filterable by source channel.
+
+The Telegram side has a fundamentally different shape: the bot is
+NOT added to chats by itself. Instead, an upstream pipeline (out of
+scope for us) collects Telegram messages into a read-only Supabase
+view; we read from that view on a schedule and process every new
+message through the same intent pipeline as Slack.
+
+#### 12.1 — Continuous Telegram task capture
+
+> **As a contributor in a team Telegram chat**, I want my requests
+> ("к понедельнику нужен отчёт") to land in the shared task tracker
+> just like in Slack, **so that** my team has one home for tasks
+> regardless of where the conversation happened.
+
+**Flow:**
+1. Contributor writes a message in a Telegram chat that the
+   upstream pipeline indexes into the Supabase view.
+2. Every few minutes (cron-driven), the bot's Telegram ingest
+   worker (`python -m ops.telegram_ingest`) reads new rows from the
+   view, strictly after the last `(chat_id, message_id)` it has
+   already processed.
+3. Each new message goes through the same intent pipeline as a
+   Slack message — language-agnostic detection, owner / date / title
+   extraction, prefilter safety net.
+4. If a task is detected, the bot creates a `Task` row with
+   `source_kind = 'telegram'`. The row carries the original chat
+   id, message id, reply-to id, and a `https://t.me/c/<chat>/<msg>`
+   permalink (when the chat is a public super-group).
+5. The new task appears in the same Google Sheet next to Slack
+   tasks; admins see it in the morning watch-list digest. Source
+   channel is filterable in the sheet via the `source_kind` column.
+
+#### 12.2 — Historical Telegram backfill
+
+> **As an operator deploying the bot in a team that's already used
+> Telegram for months**, I want to import the entire Telegram
+> history at once, **so that** the bot starts with the team's full
+> backlog instead of only seeing future messages.
+
+**Flow:**
+1. Operator runs `python -m ops.migrate_telegram_history` once,
+   optionally with `--dry-run` first to preview counts.
+2. The script walks the entire Supabase view from oldest to newest
+   in batches.
+3. Each batch is processed inside a transaction; errors per-message
+   are caught and counted, not aborting the run.
+4. At the end, a summary line in the log: total seen, tasks
+   created, no-action, errors.
+5. The script is **idempotent**: re-running it picks up only
+   messages added since the last run (the same `(chat_id,
+   message_id)` bookmarks are reused).
+
+#### 12.3 — Live updates back to Telegram (planned)
+
+> **As a Telegram contributor**, I want a confirmation message back
+> in my chat when the bot creates a task from my message, **so that**
+> I know it was captured and I can act on the buttons (Confirm /
+> Edit / Reject) without leaving Telegram.
+
+**Status:** the outbound surface is in place
+(`app/telegram_bot/sender.py` + inline-keyboard builders), but the
+inbound callback handler that reacts to the buttons is not yet
+wired. The MVP ingest path runs **silently** — tasks land in the
+DB and the sheet, but the Telegram chat doesn't get a confirmation
+message yet. Tracked in the roadmap.
+
+
+---
+
 ## 5. Under the hood — how it's built
 
 
@@ -589,3 +664,13 @@ shortcut and the *auto-approved* path when the user didn't explicitly
 confirm.
 
 ![Daily plan flow](docs/diagrams/04-daily-plan.png)
+
+#### Telegram channel
+
+How Telegram messages enter the system from a separate read-only
+Supabase view, get processed by the same intent pipeline as Slack,
+and land in the same task DB + Google Sheet. The Telegram bot
+itself only handles outbound notifications back into Telegram —
+it isn't a peer in the chat the way the Slack app is.
+
+![Telegram channel](docs/diagrams/05-telegram-channel.png)

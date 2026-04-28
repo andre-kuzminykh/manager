@@ -16,10 +16,12 @@ from app.models.task import (
     Meeting,
     Task,
     TaskPriority,
+    TaskSourceKind,
     TaskStatus,
     TaskStatusHistory,
     TaskSubscription,
 )
+from app.models.telegram import ProcessedTelegramMessage
 
 __all__ = [
     "Base",
@@ -32,6 +34,7 @@ __all__ = [
     "OAuthCredential",
     "ContextSnapshot",
     "ProcessedSlackEvent",
+    "ProcessedTelegramMessage",
     "SlackConversation",
     "SlackEventArchive",
     "SlackMessage",
@@ -41,6 +44,7 @@ __all__ = [
     "Meeting",
     "Task",
     "TaskPriority",
+    "TaskSourceKind",
     "TaskStatus",
     "TaskStatusHistory",
     "TaskSubscription",

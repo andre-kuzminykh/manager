@@ -89,6 +89,25 @@ class Settings(BaseSettings):
     # Example: '[{"slack_user_id":"U123","display_name":"Ivan"},...]'
     allowed_owners_json: str = Field(default="[]", alias="ALLOWED_OWNERS")
 
+    # FR-CR-04-26 — Telegram channel.
+    # Token of the bot used to push messages back into Telegram.
+    telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
+    # Read-only DSN for the Supabase view that holds the team's Telegram
+    # message archive. The bot reads from `humanoid_tg_chats_readonly`
+    # via this URL — never writes. Empty disables the Telegram channel.
+    telegram_source_database_url: str = Field(
+        default="", alias="TELEGRAM_SOURCE_DATABASE_URL"
+    )
+    # Name of the read-only Supabase view we ingest from (override only
+    # if the operator has renamed it).
+    telegram_source_view: str = Field(
+        default="humanoid_tg_chats_readonly", alias="TELEGRAM_SOURCE_VIEW"
+    )
+    # Default page size for ingest reads.
+    telegram_ingest_batch_size: int = Field(
+        default=200, alias="TELEGRAM_INGEST_BATCH_SIZE"
+    )
+
     # CR-01: Workload heuristic (minutes per business day for a single owner).
     workload_minutes_per_day: int = Field(default=360, alias="WORKLOAD_MINUTES_PER_DAY")
     workload_default_task_minutes: int = Field(

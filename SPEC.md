@@ -723,6 +723,103 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-26 — Telegram channel as a second source
+
+The bot grows a second input channel: Telegram. Tasks captured from
+Telegram messages live in the **same** `tasks` table as Slack tasks
+and show up in the **same** Google Sheet. A new `tasks.source_kind`
+ENUM (`'slack'` | `'telegram'`) discriminates which channel a row
+came from.
+
+The Telegram source is exposed to us as a **read-only Supabase view**
+(`humanoid_tg_chats_readonly`) that's populated by an upstream
+ingestion pipeline outside our control. We never write to it; we
+only page through new rows on a cron and feed each through the
+existing intent pipeline.
+
+Layout — strictly separate from Slack code:
+
+- `app/telegram_ingest/` — view reader + ingest service.
+  - `reader.TelegramSourceReader` opens a SQLAlchemy engine against
+    `TELEGRAM_SOURCE_DATABASE_URL` with
+    `default_transaction_read_only=on` and pages through the view in
+    `(chat_id, message_id)` order. The mapping from view columns to
+    our internal `TelegramSourceMessage` is loose — common name
+    variants (`chat_id` / `chatid`, `message_id` / `messageid` / `id`,
+    etc.) are accepted, so renaming a column upstream doesn't break
+    the ingest.
+  - `service.TelegramIngestService.process_one(session, msg)` wraps
+    the message in a `ContextWindow` (using Telegram identifiers in
+    Slack-shaped fields), runs `IntentClassifier.classify`, and on
+    `create_task` creates an `ActionDraft` + immediately finalises
+    a `Task` with `source_kind='telegram'`. Per FR-CR-04-19 the
+    pipeline only emits `create_task`; meeting hints are still
+    out of scope.
+  - `process_batch` iterates a list and returns an `IngestReport`
+    with per-outcome counters. Per-message errors are caught so one
+    bad row never aborts the batch.
+  - Idempotency lives in the new `processed_telegram_messages`
+    table (PK = `(chat_id, message_id)`). Every processed message
+    records a row, with `task_id` set when a task was created and
+    NULL otherwise. `process_one` checks the bookmark first and
+    no-ops on a hit.
+
+- `app/telegram_bot/` — outbound surface.
+  - `sender.TelegramSender` is a synchronous wrapper around the
+    Bot HTTP API (stdlib `urllib`, no async runtime, no extra
+    dependency on python-telegram-bot). Three methods —
+    `send_message`, `update_message`, `delete_message` — plus
+    `answer_callback_query`. Empty token disables the sender;
+    every method then no-ops with a debug log line so calling code
+    stays oblivious.
+  - `keyboards.confirm_keyboard` / `keyboards.task_card_keyboard`
+    build inline keyboards mirroring the Slack draft / task cards.
+    Callback data uses a flat `<action>:<entity_id>` shape;
+    `parse_callback_data` is the inverse for the inbound handler.
+  - `sender.build_task_card_text` renders a `Task` as Markdown
+    matching the Slack card visual order (title → meta line with
+    status / owner / priority / due → permalink).
+
+Ops:
+
+- `python -m ops.telegram_ingest` — periodic cron (every few minutes).
+  Resumes from the last `processed_telegram_messages` row and
+  ingests one batch (`TELEGRAM_INGEST_BATCH_SIZE`, default 200).
+- `python -m ops.migrate_telegram_history` — one-shot historical
+  ingest. Walks the entire view start-to-finish, processes every
+  message, persists tasks. Idempotent over re-runs (bookmarks).
+  Supports `--dry-run`, `--limit`, `--batch-size`.
+
+Schema layer (migration `0014_telegram_source`):
+
+- `tasks.source_kind` enum column with default `'slack'`. Existing
+  rows are backfilled to `'slack'` by the column default.
+- `processed_telegram_messages` table — idempotency bookkeeping for
+  the ingest worker. PK is `(chat_id, message_id)` (BigInteger);
+  carries `processed_at` and an optional `task_id` FK.
+
+Persistence:
+
+- `create_task_from_draft(... source={...})` accepts an optional
+  `source.kind` ('slack'|'telegram'). Slack call sites pass
+  nothing → default `'slack'`. The Telegram ingest passes
+  `kind='telegram'` → flag is set on the new row, and downstream
+  Sheets sync renders the `source_permalink` column with a `t.me/c/`
+  URL when the message lives in a public super-group.
+
+Out of scope for this iteration (deferred):
+
+- Telegram-side modal-equivalent UX for Edit / Mark done. The
+  inline-keyboard buttons exist (`task_card_keyboard`); the inbound
+  callback router that reacts to clicks is the next iteration.
+- Telegram-side digests / daily plan / reminders. Telegram users
+  don't yet receive evening / morning plan DMs; that's a planned
+  follow-up.
+- Telegram-side employees directory. The Slack `employees` table
+  stays single-channel for now; Telegram messages carry the source
+  user's id / name verbatim, and the owner of an auto-created
+  Telegram task defaults to the message author.
+
 #### FR-CR-04-25 — Daily plan: explicit Approve is optional
 
 The evening DM still carries an *Approve plan* button, but it's now
@@ -1329,5 +1426,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-23  | `test_sheets_sync_hooks.py` (Service-Account preferred, OAuth fall-back; configurable tab name; `_task_row` flips status to `deleted` when soft-deleted; TaskSyncer no-op without factory; Cancel / Delete / Start handlers call the active syncer; `_ensure_headers` writes / overwrites / no-ops correctly and runs at most once per process); plus updated `test_sync_factories.py` |
 | FR-CR-04-24  | `test_owners_from_employees.py` (`list_known_owners`: real_name first, display_name fallback, env fallback when DB empty, bots excluded, classic "admin" → real-name case); `test_sheets_sync_hooks.py::test_owner_resolves_to_real_name_via_employees`, `::test_owner_strips_slack_mention_when_employee_unknown`, `::test_owner_uses_display_name_when_no_real_name`, `::test_owner_returns_owner_user_id_as_last_resort` |
 | FR-CR-04-25  | `test_daily_plan.py::test_morning_runs_without_explicit_approve`, `::test_morning_writes_auto_approved_audit_when_no_approve`, `::test_morning_dm_shows_auto_approve_note_when_no_approve`, `::test_morning_skips_auto_approve_when_user_clicked_approve`, `::test_evening_card_copy_says_approve_is_optional` |
+| FR-CR-04-26  | `test_task_source_kind.py` (default slack, telegram persisted, enum coverage, `create_task_from_draft` honours `source.kind='telegram'`); `test_telegram_ingest.py` (reader maps canonical and alternative column names, drops orphans, no-op when unconfigured; `_telegram_permalink` for super-group / private; `_build_window` shape; `process_one` creates Task with source_kind=telegram + bookmark; records no_action without creating a task; idempotent on repeat; skips empty text without invoking classifier; batch counters per outcome); `test_telegram_bot.py` (confirm + task-card keyboards, callback round-trip, card text rendering, sender disabled when token empty); migration `0014_telegram_source.py` |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

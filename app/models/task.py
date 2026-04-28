@@ -40,6 +40,19 @@ class TaskStatus(str, enum.Enum):
     done = "done"
 
 
+class TaskSourceKind(str, enum.Enum):
+    """FR-CR-04-26 — discriminator for the channel a task came from.
+
+    Both kinds share the same `source_conversation_id /
+    source_message_ts / source_thread_ts / source_permalink` fields:
+    for Slack they hold Slack identifiers, for Telegram they hold the
+    chat id / message id / reply-to id / a t.me link respectively.
+    """
+
+    slack = "slack"
+    telegram = "telegram"
+
+
 class MeetingStatus(str, enum.Enum):
     scheduled = "scheduled"
     cancelled = "cancelled"
@@ -109,7 +122,17 @@ class Task(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True, index=True
     )
 
-    # source linkage
+    # FR-CR-04-26: which channel did this task come from?
+    source_kind: Mapped[TaskSourceKind] = mapped_column(
+        Enum(TaskSourceKind, name="task_source_kind"),
+        nullable=False,
+        default=TaskSourceKind.slack,
+        server_default="slack",
+    )
+
+    # source linkage — fields are channel-agnostic.
+    # Slack: conversation_id = channel id, message_ts / thread_ts as ts strings.
+    # Telegram: conversation_id = chat id, message_ts = message_id, thread_ts = reply_to_message_id.
     source_conversation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_message_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_thread_ts: Mapped[str | None] = mapped_column(String(32), nullable=True)

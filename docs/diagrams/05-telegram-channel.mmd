@@ -1,0 +1,39 @@
+flowchart LR
+    subgraph TG["Telegram"]
+        TGUSER[Team member]
+        TGAPP["Telegram Cloud<br/>(messages live here)"]
+        TGBOT["Telegram bot<br/>(token-based)"]
+    end
+
+    subgraph Upstream["Upstream ingestion (out of scope)"]
+        SUPABASE[("Supabase Postgres<br/>view: humanoid_tg_chats_readonly<br/>read-only")]
+    end
+
+    subgraph VM["GCE VM"]
+        CRON["host cron<br/>(every N minutes)"]
+        INGEST["app.telegram_ingest<br/>· reader<br/>· service<br/>· bookmarks"]
+        BOT["slack-task-bot<br/>(shared classifier +<br/>orchestrator + DB)"]
+        DB[("Postgres<br/>tasks, processed_telegram_messages,<br/>action_drafts, ...")]
+    end
+
+    subgraph Out["External outputs"]
+        SHEETS["Google Sheets<br/>(combined Slack+Telegram tasks)"]
+    end
+
+    TGUSER -- writes --> TGAPP
+    TGAPP -. populated by upstream pipeline .-> SUPABASE
+    CRON --> INGEST
+    INGEST -- read-only SELECT --> SUPABASE
+    INGEST -- "classify + create task<br/>(source_kind=telegram)" --> DB
+    INGEST -- bookmarks (chat_id, message_id) --> DB
+    BOT --> DB
+    DB --> SHEETS
+    INGEST -. notify .-> TGBOT
+    TGBOT -- send_message/edit/delete --> TGAPP
+
+    classDef ext fill:#fff3cd,stroke:#666,color:#000
+    classDef vm fill:#e7f3ff,stroke:#3b82f6,color:#000
+    classDef tg fill:#cffafe,stroke:#0891b2,color:#000
+    class SUPABASE,SHEETS,TGAPP ext
+    class CRON,INGEST,BOT,DB vm
+    class TGUSER,TGBOT tg

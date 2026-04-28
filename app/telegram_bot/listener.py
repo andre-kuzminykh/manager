@@ -44,6 +44,7 @@ from app.telegram_bot.cards import (
     post_draft_confirmation,
     post_initial_card,
     refresh_card,
+    refresh_draft_widgets,
     render_draft_rejected,
     render_tombstone,
     replace_widgets_with_task_card,
@@ -536,17 +537,12 @@ class TelegramListener:
             )
         if action == ACTION_EDIT:
             # FR-CR-04-32: Edit on the confirm widget targets a draft,
-            # not a Task. For now we stub this — ask the user to
-            # Accept first, then use the task card's ✏ Edit. The
-            # draft-state edit could be wired later (parse the reply,
-            # update draft.payload, re-render every widget) but it's
-            # not blocking the primary "decide-before-create" flow.
+            # not a Task. Open the LLM-driven draft-edit conversation.
             if _looks_like_confirm_widget(cq):
-                raise tg_handlers.NotAuthorised(
-                    "Edit is only available after Accept. "
-                    "Tap ✅ first, then ✏ Edit on the task card."
+                return self._open_edit_draft_conversation(
+                    session, draft_id=entity_id, actor=actor, cq=cq
                 )
-            # FR-CR-04-29: open the key=value reply conversation.
+            # FR-CR-04-29: free-form Edit on a real Task.
             return self._open_edit_conversation(
                 session, task_id=entity_id, actor=actor, cq=cq
             )
@@ -601,6 +597,42 @@ class TelegramListener:
         # Returning None means the listener won't try to refresh
         # the original card right now — it'll happen after the
         # user replies.
+        return None
+
+    def _open_edit_draft_conversation(
+        self,
+        session: Session,
+        *,
+        draft_id: int,
+        actor: str,
+        cq: dict[str, Any],
+    ) -> Task | None:
+        """Edit-on-draft (FR-CR-04-32 ext): user tapped ✏ Edit on
+        a confirm widget. Post a force-reply prompt with the draft's
+        current values; the reply hits ``_handle_pending_reply`` with
+        action=``edit_draft`` and is parsed by the same LLM helper
+        that drives Edit-on-task."""
+        draft, prompt_text = tg_handlers.prompt_edit_draft(
+            session, draft_id=draft_id, actor=actor
+        )
+        chat = (cq.get("message") or {}).get("chat") or {}
+        chat_id = chat.get("id")
+        if chat_id is None:
+            return None
+        resp = self._sender.send_message(
+            chat_id=chat_id,
+            text=prompt_text,
+            reply_markup={"force_reply": True, "selective": True},
+        )
+        prompt_msg_id = resp.get("message_id")
+        if prompt_msg_id:
+            self._pending.register(
+                action="edit_draft",
+                task_id=draft_id,
+                chat_id=int(chat_id),
+                user_id=int(actor),
+                prompt_message_id=int(prompt_msg_id),
+            )
         return None
 
     def _open_edit_conversation(
@@ -664,22 +696,64 @@ class TelegramListener:
         elif pending.action == "edit":
             # Pass the same LLM backend that drives intent extraction
             # so the user can write the Edit reply in free-form natural
-            # language ("сдвинь срок на пятницу, приоритет высокий").
+            # language ("push the deadline to Friday, priority high").
             backend = self._llm_backend()
-            task = tg_handlers.apply_edit_reply(
+            task, applied = tg_handlers.apply_edit_reply_ex(
                 session,
                 task_id=pending.task_id,
                 actor=actor,
                 reply_text=msg.text,
                 llm_backend=backend,
             )
-            if task is not None:
-                refresh_card(
-                    sender=self._sender,
-                    session=session,
-                    task=task,
-                    viewer=actor,
+            if task is None:
+                return
+            if not applied:
+                # LLM couldn't extract anything actionable (e.g. user
+                # typed a single word with no field hint). Send a
+                # short hint instead of silently doing nothing.
+                self._sender.send_message(
+                    chat_id=msg.chat_id,
+                    text=(
+                        "🤔 Couldn't tell what to change. "
+                        "Try something like: <i>«push the deadline "
+                        "to Friday, priority high»</i>."
+                    ),
+                    reply_to_message_id=msg.message_id,
                 )
+                return
+            refresh_card(
+                sender=self._sender,
+                session=session,
+                task=task,
+                viewer=actor,
+            )
+        elif pending.action == "edit_draft":
+            # Edit-on-draft — user tapped ✏ Edit on a confirm widget.
+            # Same LLM backend; on success re-render every widget DM
+            # so author + admins see the updated preview.
+            backend = self._llm_backend()
+            draft, applied = tg_handlers.apply_edit_draft_reply(
+                session,
+                draft_id=pending.task_id,
+                actor=actor,
+                reply_text=msg.text,
+                llm_backend=backend,
+            )
+            if draft is None:
+                return
+            if not applied:
+                self._sender.send_message(
+                    chat_id=msg.chat_id,
+                    text=(
+                        "🤔 Couldn't tell what to change. "
+                        "Try: <i>«push deadline to Friday, priority "
+                        "high»</i>. When ready, tap ✅ Accept on the "
+                        "original widget."
+                    ),
+                    reply_to_message_id=msg.message_id,
+                )
+                return
+            refresh_draft_widgets(sender=self._sender, draft=draft)
         else:
             log.info("telegram_unknown_pending_action", action=pending.action)
 

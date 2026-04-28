@@ -453,6 +453,38 @@ def replace_widgets_with_task_card(
     session.flush()
 
 
+def refresh_draft_widgets(
+    *,
+    sender: TelegramSender,
+    draft: ActionDraft,
+) -> None:
+    """Re-render every delivered confirm widget from the current
+    `draft.payload`. Used after Edit-on-draft to reflect the LLM's
+    field updates without re-sending the widget."""
+    if not sender.enabled:
+        return
+    widgets = _draft_widgets(draft)
+    if not widgets:
+        return
+    text = _build_draft_widget_text(draft)
+    keyboard = confirm_keyboard(draft_id=draft.id)
+    for w in widgets:
+        try:
+            sender.update_message(
+                chat_id=w["chat_id"],
+                message_id=w["message_id"],
+                text=text,
+                reply_markup=keyboard,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "telegram_widget_refresh_failed",
+                draft_id=draft.id,
+                chat_id=w["chat_id"],
+                error=str(e),
+            )
+
+
 def render_draft_rejected(
     *,
     sender: TelegramSender,

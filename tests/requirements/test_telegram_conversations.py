@@ -342,6 +342,108 @@ def test_apply_edit_reply_uses_llm_backend_when_provided(session):
     assert backend.last_user_prompt is not None
 
 
+def test_apply_edit_reply_ex_returns_empty_payload_when_llm_silent(session):
+    """When the LLM extracts nothing actionable, the listener gets an
+    empty payload back so it can post a hint instead of silently
+    refreshing the card."""
+    tid = _mk(session, owner_user_id="11", title="Old")
+    backend = _FakeBackend(payload={})
+    task, applied = h.apply_edit_reply_ex(
+        session,
+        task_id=tid,
+        actor="11",
+        reply_text="завтра",
+        llm_backend=backend,
+    )
+    assert task is not None
+    assert applied == {}
+
+
+# --------------------------------------------------------------------------- #
+# Edit-on-draft (FR-CR-04-32 ext)
+# --------------------------------------------------------------------------- #
+
+
+def _mk_draft(session, **kw):
+    """Helper to seed a proposed ActionDraft for the tests below."""
+    from app.models import ActionDraft, ActionDraftState, IntentInference
+    from app.models.intent import IntentType as IT
+
+    inference = IntentInference(
+        intent=IT.create_task,
+        confidence=0.9,
+        invocation_type="passive",
+    )
+    session.add(inference)
+    session.flush()
+    payload = {
+        "title": kw.get("title", "draft title"),
+        "priority": kw.get("priority", "medium"),
+        "due_date": kw.get("due_date"),
+        "owner_user_id": kw.get("owner_user_id", "11"),
+        "_widgets": [{"chat_id": 11, "message_id": 99}],
+    }
+    d = ActionDraft(
+        inference_id=inference.id,
+        intent=IT.create_task,
+        state=ActionDraftState.proposed,
+        payload=payload,
+        created_by_slack_user_id=kw.get("author", "11"),
+    )
+    session.add(d)
+    session.flush()
+    return d.id
+
+
+def test_prompt_edit_draft_lists_filled_and_missing(session):
+    did = _mk_draft(session, title="Old", priority="low", due_date=None)
+    _, text = h.prompt_edit_draft(session, draft_id=did, actor="11")
+    assert "Edit draft" in text
+    assert "Title" in text
+    # Due not set → mentioned in the "Missing:" line.
+    assert "Missing" in text
+    assert "due" in text
+
+
+def test_prompt_edit_draft_blocks_stranger(session):
+    did = _mk_draft(session, author="11")
+    with pytest.raises(h.NotAuthorised):
+        h.prompt_edit_draft(session, draft_id=did, actor="99")
+
+
+def test_apply_edit_draft_reply_updates_payload(session):
+    did = _mk_draft(session, title="Old", priority="low")
+    backend = _FakeBackend(payload={"priority": "urgent", "due": "2026-05-15"})
+    draft, applied = h.apply_edit_draft_reply(
+        session,
+        draft_id=did,
+        actor="11",
+        reply_text="сделай срочный приоритет до 15 мая",
+        llm_backend=backend,
+    )
+    assert draft is not None
+    assert applied == {"priority": "urgent", "due": "2026-05-15"}
+    # The draft.payload mutated in-place; widgets list survives so
+    # the listener can still re-render every DM.
+    assert draft.payload["priority"] == "urgent"
+    assert draft.payload["due_date"] == "2026-05-15"
+    assert draft.payload["_widgets"] == [{"chat_id": 11, "message_id": 99}]
+
+
+def test_apply_edit_draft_reply_returns_empty_when_llm_silent(session):
+    did = _mk_draft(session)
+    backend = _FakeBackend(payload={})
+    draft, applied = h.apply_edit_draft_reply(
+        session,
+        draft_id=did,
+        actor="11",
+        reply_text="hmm",
+        llm_backend=backend,
+    )
+    assert draft is not None
+    assert applied == {}
+
+
 # --------------------------------------------------------------------------- #
 # TG admins
 # --------------------------------------------------------------------------- #

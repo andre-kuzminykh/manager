@@ -441,13 +441,17 @@ def _build_edit_user_prompt(*, current: dict[str, str], reply_text: str) -> str:
     today = date.today().isoformat()
     cur_lines = "\n".join(f"  {k}={v}" for k, v in current.items())
     return (
-        "You are editing an existing task. Read the user's reply (which "
-        "may be free-form natural language in any language, or "
-        "explicit `key=value` lines) and produce ONLY the fields the "
-        "user wants to change.\n\n"
+        "You are editing an existing task. Read the user's reply "
+        "(which may be free-form natural language in any language, "
+        "or explicit `key=value` lines) and produce ONLY the fields "
+        "the user wants to change.\n\n"
         f"Today is {today}.\n\n"
         "Rules:\n"
         "- Output a field only if the user actually mentioned it.\n"
+        "- If the user wrote nothing but a date / time phrase "
+        "('завтра', 'tomorrow', 'next Friday', '15 мая в 18:00'), "
+        "default it to the `due` field (and `due_time` if a time "
+        "was given). This is the most common one-word edit.\n"
         "- Resolve relative dates ('завтра', 'next Friday', 'через "
         "неделю') against today.\n"
         "- For dates emit ISO YYYY-MM-DD; for times emit HH:MM 24h.\n"
@@ -557,10 +561,37 @@ def apply_edit_reply(
     Returns the refreshed Task (or None if the task is missing /
     soft-deleted). Raises ``NotAuthorised`` if the actor lost the
     permission between prompt and reply.
+
+    Sister helper :func:`apply_edit_reply_ex` returns ``(task, payload)``
+    so the listener can post a friendly hint when the LLM extracted
+    nothing actionable.
+    """
+    task, _ = apply_edit_reply_ex(
+        session,
+        task_id=task_id,
+        actor=actor,
+        reply_text=reply_text,
+        llm_backend=llm_backend,
+    )
+    return task
+
+
+def apply_edit_reply_ex(
+    session: Session,
+    *,
+    task_id: int,
+    actor: str,
+    reply_text: str,
+    llm_backend: Any | None = None,
+) -> tuple[Task | None, dict[str, str]]:
+    """Like :func:`apply_edit_reply`, but also returns the parsed
+    payload dict. An empty dict means the reply produced no changes
+    (e.g. the LLM couldn't extract a field) — callers can branch on
+    this to decide whether to refresh the card or send a hint.
     """
     task = session.get(Task, task_id)
     if task is None or task.deleted_at is not None:
-        return None
+        return None, {}
     _ensure_can_edit(task, actor)
 
     if llm_backend is not None:
@@ -570,7 +601,7 @@ def apply_edit_reply(
     else:
         payload = parse_edit_payload(reply_text)
     if not payload:
-        return task
+        return task, {}
 
     if "title" in payload and payload["title"]:
         # Empty title isn't allowed — keep the old one in that case.
@@ -604,7 +635,7 @@ def apply_edit_reply(
 
     session.flush()
     _sync_task_to_sheets(task_id)
-    return task
+    return task, payload
 
 
 # --------------------------------------------------------------------------- #
@@ -686,6 +717,173 @@ def handle_confirm_draft(
 
     _sync_task_to_sheets(task.id)
     return task, draft
+
+
+def prompt_edit_draft(
+    session: Session, *, draft_id: int, actor: str
+) -> tuple["ActionDraft", str]:
+    """Step 1 of Edit-on-draft: build a conversational prompt with
+    the draft's current preview values. The reply is parsed by the
+    same LLM helper that drives Edit-on-task — see
+    :func:`parse_edit_with_llm`. Raises :class:`NotAuthorised` when
+    the actor isn't an admin and didn't author the draft.
+    """
+    from app.models import ActionDraft, ActionDraftState
+    from app.telegram_bot.sender import _escape_html
+
+    draft = session.get(ActionDraft, draft_id)
+    if draft is None or draft.state != ActionDraftState.proposed:
+        raise NotAuthorised("Draft not found or no longer pending.")
+    # Author or any TG admin can edit the draft.
+    author = draft.created_by_slack_user_id
+    if actor != author and not is_admin(actor):
+        raise NotAuthorised("Only the author or an admin can edit this draft.")
+
+    payload = draft.payload or {}
+    priority = payload.get("priority") or "medium"
+    priority_em = {
+        "low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴",
+    }.get(priority, "🟡")
+
+    fields: list[tuple[str, str, object | None]] = [
+        ("📌", "Title", payload.get("title")),
+        ("📝", "Description", payload.get("description")),
+        (priority_em, "Priority", priority),
+        ("📅", "Due", payload.get("due_date")),
+        ("👤", "Owner", payload.get("owner_display_name") or payload.get("owner_user_id")),
+    ]
+    filled: list[str] = []
+    missing: list[str] = []
+    for emoji, label, value in fields:
+        if value in (None, "", 0):
+            missing.append(f"{emoji} {label.lower()}")
+        else:
+            filled.append(f"{emoji} <b>{label}</b> — {_escape_html(str(value))}")
+
+    parts: list[str] = [f"✏ <b>Edit draft #{draft.id}</b> (before Accept)"]
+    if filled:
+        parts.append("Here's what's set:\n" + "\n".join(filled))
+    if missing:
+        parts.append("Missing: " + ", ".join(missing))
+    parts.append(
+        "Reply with what to change — plain text works fine.\n"
+        "For example: <i>«push deadline to Friday, priority high»</i>.\n"
+        "When you're happy, tap ✅ Accept on the original widget."
+    )
+    return draft, "\n\n".join(parts)
+
+
+def parse_draft_edit_with_llm(
+    *,
+    draft: "ActionDraft",
+    reply_text: str,
+    backend: Any | None,
+) -> dict[str, str]:
+    """Free-form parse for Edit-on-draft. Mirrors
+    :func:`parse_edit_with_llm` but reads the «current values» from
+    `draft.payload` (the in-flight draft preview) instead of the
+    saved Task. Falls back to a structured `key=value` parse when
+    no backend is available.
+    """
+    text = (reply_text or "").strip()
+    if not text:
+        return {}
+
+    structured = parse_edit_payload(text)
+    non_empty = [ln for ln in text.splitlines() if ln.strip()]
+    if structured and len(structured) == len(non_empty):
+        return structured
+
+    if backend is None or not hasattr(backend, "call_tool"):
+        return structured
+
+    payload = draft.payload or {}
+    current = {
+        "title": payload.get("title") or "",
+        "description": payload.get("description") or "",
+        "priority": payload.get("priority") or "medium",
+        "due": payload.get("due_date") or "",
+        "due_time": "",
+        "start": "",
+        "start_time": "",
+        "category": payload.get("category") or "",
+        "owner": payload.get("owner_user_id") or "",
+    }
+    user_prompt = _build_edit_user_prompt(current=current, reply_text=text)
+    try:
+        result = backend.call_tool(
+            system_prompt=(
+                "Extract structured task edits from the user's reply. "
+                "Only include fields the user actually wants to change."
+            ),
+            user_prompt=user_prompt,
+            tool_name="record_task_edit",
+            tool_description="Record the fields the user wants to change.",
+            tool_parameters=_EDIT_TOOL_PARAMS,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("telegram_draft_edit_llm_call_failed", error=str(e))
+        return structured
+
+    if not isinstance(result, dict):
+        return structured
+    out: dict[str, str] = {}
+    for k in _EDIT_KEYS:
+        if k in result and isinstance(result[k], str):
+            out[k] = result[k].strip()
+    return out
+
+
+def apply_edit_draft_reply(
+    session: Session,
+    *,
+    draft_id: int,
+    actor: str,
+    reply_text: str,
+    llm_backend: Any | None = None,
+) -> tuple["ActionDraft | None", dict[str, str]]:
+    """Step 2 of Edit-on-draft: apply LLM-parsed updates directly to
+    `draft.payload` — the draft is still `proposed`, no Task exists
+    yet. Returns ``(draft, applied_payload)``; an empty payload
+    means «couldn't parse anything actionable» so the listener can
+    post a hint.
+    """
+    from app.models import ActionDraft, ActionDraftState
+
+    draft = session.get(ActionDraft, draft_id)
+    if draft is None or draft.state != ActionDraftState.proposed:
+        return None, {}
+    author = draft.created_by_slack_user_id
+    if actor != author and not is_admin(actor):
+        raise NotAuthorised("Only the author or an admin can edit this draft.")
+
+    parsed = parse_draft_edit_with_llm(
+        draft=draft, reply_text=reply_text, backend=llm_backend
+    )
+    if not parsed:
+        return draft, {}
+
+    payload = dict(draft.payload or {})
+    if "title" in parsed and parsed["title"]:
+        payload["title"] = parsed["title"]
+    if "description" in parsed:
+        payload["description"] = parsed["description"] or None
+    if "priority" in parsed:
+        try:
+            payload["priority"] = TaskPriority(parsed["priority"]).value
+        except ValueError:
+            pass
+    if "due" in parsed:
+        d = _parse_date_or_none(parsed["due"]) if parsed["due"] else None
+        payload["due_date"] = d.isoformat() if d else None
+    if "category" in parsed:
+        payload["category"] = parsed["category"] or None
+    if "owner" in parsed:
+        payload["owner_user_id"] = parsed["owner"] or None
+
+    draft.payload = payload
+    session.flush()
+    return draft, parsed
 
 
 def handle_ignore_draft(

@@ -142,6 +142,13 @@ class TelegramIngestService:
             )
             return None
 
+        # FR-CR-04-30: when the LLM didn't extract a display name (the
+        # common case for TG ingest where we run with no employees
+        # table), fall back to the sender's `user_name` so the card /
+        # Sheet show "Andre" instead of the raw user id.
+        if not classification.task.owner_display_name and message.user_name:
+            classification.task.owner_display_name = message.user_name
+
         # Persist context + inference + draft, then immediately
         # finalise into a Task. This mirrors the @mention path: high
         # confidence → create now, ask for follow-up later if fields

@@ -226,6 +226,59 @@ def _make_service(classification: IntentClassification) -> TelegramIngestService
     )
 
 
+def test_process_one_uses_user_name_as_fallback_owner_display_name(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-04-30: when the LLM didn't extract a display name (the
+    common case for TG ingest with no employees table), the sender's
+    user_name is used so cards / sheet show "Andre" instead of the
+    raw numeric user id."""
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="prepare deck"),  # no owner_display_name
+        reasoning="...",
+    )
+    service = _make_service(classification)
+    msg = TelegramSourceMessage(
+        chat_id=-100,
+        message_id=1,
+        text="prepare deck for tomorrow",
+        user_id=222968032,
+        user_name="Andre",
+    )
+    with SessionFactory() as s:
+        task = service.process_one(s, msg)
+        s.commit()
+        assert task is not None
+        assert task.owner_display_name == "Andre"
+
+
+def test_process_one_keeps_llm_display_name_when_present(
+    patched_session_scope, SessionFactory
+):
+    """If the LLM did extract a display name, the fallback must NOT
+    overwrite it."""
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="x", owner_display_name="From LLM"),
+        reasoning="...",
+    )
+    service = _make_service(classification)
+    msg = TelegramSourceMessage(
+        chat_id=-100,
+        message_id=2,
+        text="x",
+        user_id=42,
+        user_name="ShouldNotWin",
+    )
+    with SessionFactory() as s:
+        task = service.process_one(s, msg)
+        s.commit()
+        assert task.owner_display_name == "From LLM"
+
+
 def test_process_one_creates_task_with_telegram_source_kind(
     patched_session_scope, SessionFactory
 ):

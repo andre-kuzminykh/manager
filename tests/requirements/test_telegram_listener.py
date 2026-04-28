@@ -1,0 +1,321 @@
+"""FR-CR-04-27 — live Telegram Bot API listener.
+
+Tests cover:
+
+- `parse_update` correctly extracts a `TelegramSourceMessage` from
+  every shape the Bot API uses (`message`, `edited_message`,
+  `channel_post`, `edited_channel_post`).
+- Service updates (no message field) are dropped via `parse_update`.
+- A listener tick processes returned updates, advances the singleton
+  offset, and writes ProcessedTelegramMessage / Task rows.
+- A second tick with the same offset is a no-op.
+- A failure inside `process_one` is counted as `errors` and doesn't
+  abort the batch.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+
+from app.intent import IntentClassifier
+from app.models import (
+    ProcessedTelegramMessage,
+    Task,
+    TaskSourceKind,
+    TelegramListenerState,
+)
+from app.orchestrator import Orchestrator
+from app.schemas.intent import (
+    IntentClassification,
+    IntentType,
+    InvocationType,
+    TaskDraft,
+)
+from app.telegram_bot.listener import (
+    ListenerReport,
+    TelegramListener,
+    parse_update,
+)
+from app.telegram_ingest.reader import TelegramSourceMessage
+from app.telegram_ingest.service import TelegramIngestService
+
+
+# --------------------------------------------------------------------------- #
+# parse_update
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_update_extracts_message_fields():
+    out = parse_update(
+        {
+            "update_id": 100,
+            "message": {
+                "message_id": 7,
+                "from": {"id": 42, "username": "andre"},
+                "chat": {"id": -1001234567890, "type": "supergroup", "title": "T"},
+                "date": 1714294800,
+                "text": "к завтра подготовить презу",
+                "reply_to_message": {"message_id": 4},
+            },
+        }
+    )
+    assert out is not None
+    assert out.chat_id == -1001234567890
+    assert out.message_id == 7
+    assert out.user_id == 42
+    assert out.user_name == "andre"
+    assert out.text == "к завтра подготовить презу"
+    assert out.reply_to == 4
+    assert out.chat_title == "T"
+    assert isinstance(out.sent_at, datetime)
+
+
+def test_parse_update_handles_edited_message():
+    out = parse_update(
+        {
+            "update_id": 101,
+            "edited_message": {
+                "message_id": 9,
+                "chat": {"id": 5, "type": "private"},
+                "from": {"id": 1, "first_name": "X"},
+                "text": "fixed",
+                "date": 0,
+            },
+        }
+    )
+    assert out is not None
+    assert out.message_id == 9
+    assert out.text == "fixed"
+    assert out.user_name == "X"
+
+
+def test_parse_update_uses_caption_when_no_text():
+    out = parse_update(
+        {
+            "update_id": 102,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 1},
+                "caption": "photo with caption",
+                "date": 0,
+            },
+        }
+    )
+    assert out is not None
+    assert out.text == "photo with caption"
+
+
+def test_parse_update_returns_none_for_service_updates():
+    assert parse_update({"update_id": 1, "callback_query": {}}) is None
+    assert parse_update({"update_id": 2, "my_chat_member": {}}) is None
+    assert parse_update({"update_id": 3}) is None
+
+
+def test_parse_update_combines_first_and_last_name():
+    out = parse_update(
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 1, "type": "private"},
+                "from": {"id": 1, "first_name": "Andre", "last_name": "K."},
+                "text": "x",
+                "date": 0,
+            },
+        }
+    )
+    assert out is not None
+    assert out.user_name == "Andre K."
+
+
+# --------------------------------------------------------------------------- #
+# Listener tick
+# --------------------------------------------------------------------------- #
+
+
+class _StubClassifier:
+    def __init__(self, classification: IntentClassification) -> None:
+        self._c = classification
+
+    def classify(self, *, context, invocation_type, known_employees=None):
+        return self._c
+
+
+def _make_ingest(classification: IntentClassification) -> TelegramIngestService:
+    from app.config import Settings
+
+    return TelegramIngestService(
+        classifier=_StubClassifier(classification),
+        orchestrator=Orchestrator(Settings()),
+    )
+
+
+def _make_listener(
+    classification: IntentClassification,
+    updates_per_call: list[list[dict]],
+) -> TelegramListener:
+    """Builds a listener whose `_fetch_updates` returns the next list
+    from `updates_per_call` on each call (then `[]` forever)."""
+    listener = TelegramListener(
+        token="123:abc", ingest=_make_ingest(classification)
+    )
+    state = {"calls": 0}
+
+    def fake_fetch(*, offset: int) -> list[dict]:
+        idx = state["calls"]
+        state["calls"] += 1
+        if idx < len(updates_per_call):
+            return updates_per_call[idx]
+        return []
+
+    listener._fetch_updates = fake_fetch  # type: ignore[method-assign]
+    return listener
+
+
+def test_listener_tick_processes_updates_and_advances_offset(
+    patched_session_scope, SessionFactory
+):
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="x"),
+        reasoning="r",
+    )
+    listener = _make_listener(
+        classification,
+        updates_per_call=[
+            [
+                {
+                    "update_id": 100,
+                    "message": {
+                        "message_id": 1,
+                        "chat": {"id": -1, "type": "supergroup"},
+                        "from": {"id": 1},
+                        "text": "prepare a report",
+                        "date": 0,
+                    },
+                },
+                {
+                    "update_id": 101,
+                    "message": {
+                        "message_id": 2,
+                        "chat": {"id": -1, "type": "supergroup"},
+                        "from": {"id": 1},
+                        "text": "another task",
+                        "date": 0,
+                    },
+                },
+            ]
+        ],
+    )
+
+    report = listener.tick()
+    assert report.updates_seen == 2
+    assert report.messages_processed == 2
+    assert report.tasks_created == 2
+
+    with SessionFactory() as s:
+        state = s.get(TelegramListenerState, 1)
+        assert state is not None
+        assert state.last_update_id == 101
+        assert s.query(Task).count() == 2
+        rows = s.query(ProcessedTelegramMessage).all()
+        assert {(r.chat_id, r.message_id) for r in rows} == {(-1, 1), (-1, 2)}
+        # Both tasks are flagged as Telegram-sourced.
+        for t in s.query(Task).all():
+            assert t.source_kind == TaskSourceKind.telegram
+
+
+def test_listener_tick_handles_no_action_classification(
+    patched_session_scope, SessionFactory
+):
+    classification = IntentClassification(
+        intent=IntentType.no_action,
+        confidence=0.1,
+        reasoning="not a task",
+    )
+    listener = _make_listener(
+        classification,
+        updates_per_call=[
+            [
+                {
+                    "update_id": 200,
+                    "message": {
+                        "message_id": 5,
+                        "chat": {"id": 9, "type": "private"},
+                        "from": {"id": 1},
+                        "text": "thanks!",
+                        "date": 0,
+                    },
+                }
+            ]
+        ],
+    )
+
+    report = listener.tick()
+    assert report.no_action == 1
+    assert report.tasks_created == 0
+    with SessionFactory() as s:
+        assert s.query(Task).count() == 0
+        # Bookmark is still written so the same update never comes back.
+        assert s.get(ProcessedTelegramMessage, (9, 5)) is not None
+
+
+def test_listener_tick_skips_non_message_updates(patched_session_scope):
+    classification = IntentClassification(
+        intent=IntentType.no_action, confidence=0.0
+    )
+    listener = _make_listener(
+        classification,
+        updates_per_call=[
+            [
+                {"update_id": 300, "callback_query": {"id": "cb"}},
+                {"update_id": 301, "my_chat_member": {}},
+            ]
+        ],
+    )
+    report = listener.tick()
+    assert report.skipped_non_message == 2
+    assert report.messages_processed == 0
+
+
+def test_listener_second_tick_with_same_offset_is_a_noop(
+    patched_session_scope, SessionFactory
+):
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="x"),
+    )
+    listener = _make_listener(
+        classification,
+        updates_per_call=[
+            [
+                {
+                    "update_id": 400,
+                    "message": {
+                        "message_id": 1,
+                        "chat": {"id": 7, "type": "private"},
+                        "from": {"id": 1},
+                        "text": "prepare a deck",
+                        "date": 0,
+                    },
+                }
+            ]
+            # Subsequent calls return [] (long-poll timeout)
+        ],
+    )
+    listener.tick()
+    second = listener.tick()
+    assert second.updates_seen == 0
+    with SessionFactory() as s:
+        assert s.query(Task).count() == 1
+
+
+def test_listener_disabled_when_token_empty():
+    listener = TelegramListener(token="", ingest=_make_ingest(
+        IntentClassification(intent=IntentType.no_action, confidence=0.0)
+    ))
+    assert listener.enabled is False

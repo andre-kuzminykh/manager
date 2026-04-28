@@ -723,6 +723,86 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-27 — Telegram live listener (Bot API long-polling)
+
+A second ingest source for Telegram, parallel to the Supabase view
+of FR-CR-04-26. The bot opens an outbound long-poll connection to
+Telegram's Bot API (`getUpdates`) and processes each new message
+through the same intent pipeline + same `processed_telegram_messages`
+bookmarks + same `source_kind = 'telegram'` flag — so a message
+captured by the live listener is **indistinguishable** in the DB
+from one ingested via Supabase.
+
+Why two paths:
+- **Supabase view** (FR-CR-04-26) backfills the team's existing
+  Telegram history and is the authoritative archive owned by the
+  upstream pipeline.
+- **Live listener** captures new messages instantly without waiting
+  for the Supabase view to update, and works for chats / groups
+  where the operator added the bot directly (no upstream pipeline
+  needed).
+
+The two paths race-process some new messages — that's fine. The
+unique key on `processed_telegram_messages(chat_id, message_id)`
+plus the bookmark check inside `process_one` make a duplicate a
+no-op.
+
+Layout (still strictly under `app/telegram_bot/` and `app/
+telegram_ingest/`, no Slack code touched):
+
+- `app/telegram_bot/listener.py`
+  - `parse_update(update_dict)` maps a Bot API `Update` payload to
+    the same `TelegramSourceMessage` shape `app/telegram_ingest/
+    reader.py` uses for the Supabase rows. Picks the first
+    message-shaped field present (`message`, `edited_message`,
+    `channel_post`, `edited_channel_post`); returns None for
+    service updates (callback queries, my_chat_member, etc).
+  - `TelegramListener.tick()` — one long-poll cycle: read offset,
+    call `getUpdates`, parse + process each message via the shared
+    `TelegramIngestService.process_one`, advance the offset row.
+    All inside a single `session_scope`.
+  - `TelegramListener.run_forever()` — block-until-killed wrapper
+    with a 1s sleep on idle and exception swallowing so transient
+    failures don't crash the worker.
+  - Outbound long-poll only — no public HTTP endpoint, no inbound
+    port. The bot doesn't have to be reachable from the internet.
+
+- `ops/telegram_listener.py` — daemon entry point. Run as a
+  separate Docker container with `python -m ops.telegram_listener`.
+
+Schema (migration `0015_telegram_listener_state`):
+
+- `telegram_listener_state` — singleton row holding the highest
+  `update_id` we've acked back to Telegram. Resume-from-this-offset
+  on restart so we don't reprocess every update Telegram has
+  retained in its 24h queue.
+
+Operator setup:
+
+1. Set `TELEGRAM_BOT_TOKEN` in the env file (already there if
+   FR-CR-04-26 was done).
+2. **Disable Group Privacy** in BotFather: `/mybots` → bot →
+   *Bot Settings* → *Group Privacy* → *Turn off*. Otherwise the bot
+   only sees `/commands` and direct mentions in group chats.
+3. Add the bot to each chat / group that should be tracked.
+4. Run as a sidecar container:
+   ```
+   docker run -d --name slack-task-tg-listener \
+     --network slack-task-net --env-file /root/slack-task/.env \
+     --restart unless-stopped \
+     slack-task-bot:local \
+     python -m ops.telegram_listener
+   ```
+
+Out of scope this iteration:
+
+- Outbound replies to Telegram (the bot doesn't yet post draft
+  cards back into the chat where the message originated; tasks
+  land silently in the DB and the Sheet, same as FR-CR-04-26).
+- Inline-button callback handler (the keyboards exist; the
+  inbound dispatcher is the next iteration).
+- Telegram-side digests / daily plan / reminders.
+
 #### FR-CR-04-26 — Telegram channel as a second source
 
 The bot grows a second input channel: Telegram. Tasks captured from
@@ -1426,6 +1506,7 @@ pure unit tests for internal helpers.
 | FR-CR-04-23  | `test_sheets_sync_hooks.py` (Service-Account preferred, OAuth fall-back; configurable tab name; `_task_row` flips status to `deleted` when soft-deleted; TaskSyncer no-op without factory; Cancel / Delete / Start handlers call the active syncer; `_ensure_headers` writes / overwrites / no-ops correctly and runs at most once per process); plus updated `test_sync_factories.py` |
 | FR-CR-04-24  | `test_owners_from_employees.py` (`list_known_owners`: real_name first, display_name fallback, env fallback when DB empty, bots excluded, classic "admin" → real-name case); `test_sheets_sync_hooks.py::test_owner_resolves_to_real_name_via_employees`, `::test_owner_strips_slack_mention_when_employee_unknown`, `::test_owner_uses_display_name_when_no_real_name`, `::test_owner_returns_owner_user_id_as_last_resort` |
 | FR-CR-04-25  | `test_daily_plan.py::test_morning_runs_without_explicit_approve`, `::test_morning_writes_auto_approved_audit_when_no_approve`, `::test_morning_dm_shows_auto_approve_note_when_no_approve`, `::test_morning_skips_auto_approve_when_user_clicked_approve`, `::test_evening_card_copy_says_approve_is_optional` |
-| FR-CR-04-26  | `test_task_source_kind.py` (default slack, telegram persisted, enum coverage, `create_task_from_draft` honours `source.kind='telegram'`); `test_telegram_ingest.py` (reader maps canonical and alternative column names, drops orphans, no-op when unconfigured; `_telegram_permalink` for super-group / private; `_build_window` shape; `process_one` creates Task with source_kind=telegram + bookmark; records no_action without creating a task; idempotent on repeat; skips empty text without invoking classifier; batch counters per outcome); `test_telegram_bot.py` (confirm + task-card keyboards, callback round-trip, card text rendering, sender disabled when token empty); migration `0014_telegram_source.py` |
+| FR-CR-04-26  | `test_task_source_kind.py` (default slack, telegram persisted, enum coverage, `create_task_from_draft` honours `source.kind='telegram'`); `test_telegram_ingest.py` (reader maps canonical and alternative column names, drops orphans, no-op when unconfigured; `_telegram_permalink` for super-group / private; `_build_window` shape; `process_one` creates Task with source_kind=telegram + bookmark; records no_action without creating a task; idempotent on repeat; skips empty text without invoking classifier; batch counters per outcome; psycopg2→psycopg3 scheme rewrite; IPv4 hostaddr injection); `test_telegram_bot.py` (confirm + task-card keyboards, callback round-trip, card text rendering, sender disabled when token empty); migration `0014_telegram_source.py` |
+| FR-CR-04-27  | `test_telegram_listener.py` (`parse_update` for message / edited_message / channel_post; caption fallback; first+last name composition; service updates dropped; tick processes updates and advances offset; no_action bookmark without task; non-message updates skipped; second tick with same offset is a no-op; disabled when token empty); migration `0015_telegram_listener_state.py` |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

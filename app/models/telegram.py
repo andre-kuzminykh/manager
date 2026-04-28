@@ -1,4 +1,4 @@
-"""Telegram-channel bookkeeping (FR-CR-04-26)."""
+"""Telegram-channel bookkeeping (FR-CR-04-26 / FR-CR-04-27)."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -36,4 +36,26 @@ class ProcessedTelegramMessage(Base):
     )
 
 
-__all__ = ["ProcessedTelegramMessage"]
+class TelegramListenerState(Base):
+    """FR-CR-04-27 — singleton row holding the last `update_id` we
+    acked to Telegram's getUpdates long-polling endpoint.
+
+    Resume-from-this-offset on listener restart so we don't reprocess
+    every update Telegram has retained in its 24h queue. The
+    `processed_telegram_messages` table still backstops idempotency
+    if anything sneaks through (live listener and Supabase ingest
+    can race-process the same message).
+    """
+
+    __tablename__ = "telegram_listener_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_update_id: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+
+__all__ = ["ProcessedTelegramMessage", "TelegramListenerState"]

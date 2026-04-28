@@ -21,7 +21,10 @@ from app.models.task import (
     TaskStatusHistory,
     TaskSubscription,
 )
-from app.models.telegram import ProcessedTelegramMessage
+from app.models.telegram import (
+    ProcessedTelegramMessage,
+    TelegramListenerState,
+)
 
 __all__ = [
     "Base",
@@ -35,6 +38,7 @@ __all__ = [
     "ContextSnapshot",
     "ProcessedSlackEvent",
     "ProcessedTelegramMessage",
+    "TelegramListenerState",
     "SlackConversation",
     "SlackEventArchive",
     "SlackMessage",

@@ -486,7 +486,33 @@ message through the same intent pipeline as Slack.
    messages added since the last run (the same `(chat_id,
    message_id)` bookmarks are reused).
 
-#### 12.3 — Live updates back to Telegram (planned)
+#### 12.3 — Bot-as-listener mode
+
+> **As an operator who can't (yet) hook into the team's existing
+> Telegram archive**, I want to add the bot to a chat / group and
+> have it capture messages directly via the Bot API, **so that** I
+> can test the whole pipeline end-to-end without waiting for the
+> upstream Supabase setup.
+
+**Flow:**
+1. Operator sets `TELEGRAM_BOT_TOKEN` in the env file.
+2. **One-time BotFather step**: `/mybots → bot → Bot Settings →
+   Group Privacy → Turn off`. Without this the bot only sees
+   `/commands` and direct mentions in group chats.
+3. Operator adds the bot to a chat or group as a normal member.
+4. A separate container runs `python -m ops.telegram_listener` —
+   long-poll on Telegram's Bot API, no public HTTP endpoint
+   exposed, just outbound 443.
+5. Every new message in those chats lands in the same `tasks`
+   table with `source_kind = 'telegram'`, sharing `processed_
+   telegram_messages` bookmarks with the Supabase ingest path.
+   Same Google Sheet, same admin digests.
+
+The two ingest paths run in parallel and dedupe via the (chat_id,
+message_id) primary key — a message captured by either path is
+indistinguishable in the DB once written.
+
+#### 12.4 — Live confirmation back into the Telegram chat (planned)
 
 > **As a Telegram contributor**, I want a confirmation message back
 > in my chat when the bot creates a task from my message, **so that**

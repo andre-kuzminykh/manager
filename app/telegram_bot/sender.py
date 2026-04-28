@@ -15,6 +15,7 @@ but in plain Markdown — Telegram Bot API uses MarkdownV2 / HTML.
 from __future__ import annotations
 
 import json
+import urllib.error
 from typing import Any
 
 from app.logging_setup import get_logger
@@ -115,6 +116,22 @@ class TelegramSender:
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            # Telegram returns the helpful `description` field on 4xx
+            # too — read the body so we surface it instead of just
+            # "HTTP Error 400: Bad Request".
+            try:
+                error_body = json.loads(e.read().decode("utf-8"))
+                description = error_body.get("description", "")
+            except Exception:  # noqa: BLE001
+                description = ""
+            log.warning(
+                "telegram_api_call_failed",
+                method=method,
+                http_status=e.code,
+                description=description,
+            )
+            return {}
         except Exception as e:  # noqa: BLE001
             log.warning("telegram_api_call_failed", method=method, error=str(e))
             return {}

@@ -107,6 +107,40 @@ def test_parse_callback_data_rejects_garbage():
 # --------------------------------------------------------------------------- #
 
 
+def test_build_task_card_text_escapes_markdown_chars_in_owner_username():
+    """Slack/Telegram usernames with underscores ('andre_andreevich')
+    must not break the legacy Markdown parser — every dynamic field
+    is escaped before being interpolated into the card."""
+    t = Task(
+        id=42,
+        title="prep deck",
+        owner_display_name="andre_andreevich",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t)
+    # The underscore is escaped → "andre\\_andreevich"
+    assert "andre\\_andreevich" in text
+    # Bare unescaped underscore must NOT appear in the rendered text
+    # (other than inside our escape sequence).
+    assert "andre_andreevich" not in text.replace("andre\\_andreevich", "")
+
+
+def test_build_task_card_text_escapes_title_with_special_chars():
+    t = Task(
+        id=1,
+        title="*urgent* task with [brackets]",
+        owner_user_id="U1",
+        priority=TaskPriority.high,
+        status=TaskStatus.in_progress,
+    )
+    text = build_task_card_text(t)
+    # Asterisks and the opening bracket from the title are escaped.
+    assert "\\*urgent\\*" in text
+    assert "\\[brackets" in text
+
+
 def test_build_task_card_text_includes_title_status_owner_priority_due():
     t = Task(
         id=42,

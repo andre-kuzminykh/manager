@@ -236,9 +236,11 @@ def render_tombstone(
     cards = _stored_cards(task)
     if not cards:
         return
+    from app.telegram_bot.sender import _escape_md
+
     text = (
-        f"🗑 Task #{task.id} — *{task.title}* deleted"
-        + (f" by `{actor}`" if actor else "")
+        f"🗑 Task #{task.id} — *{_escape_md(task.title)}* deleted"
+        + (f" by `{_escape_md(actor)}`" if actor else "")
     )
     for c in cards:
         try:

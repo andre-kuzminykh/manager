@@ -41,23 +41,48 @@ STATUS_EMOJI = {
 }
 
 
-def build_task_card_text(task: Task, *, header: str | None = None) -> str:
-    """Render a Task as plain text suitable for `send_message`.
+def _escape_md(text: str | None) -> str:
+    """Escape the four characters Telegram's legacy Markdown parser
+    treats as formatting tokens: ``_``, ``*``, ``\\``` and ``[``.
 
-    Kept Markdown-light so we can switch parse_mode without breaking
-    the layout — Telegram's MarkdownV2 has finicky escaping rules.
+    Without this an owner whose Slack/Telegram username carries an
+    underscore (very common — e.g. ``andre_andreevich``) trips the
+    parser into thinking the rest of the line is italic, which
+    fails with ``HTTP 400: can't parse entities``.
+    """
+    if not text:
+        return ""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("_", "\\_")
+        .replace("*", "\\*")
+        .replace("`", "\\`")
+        .replace("[", "\\[")
+    )
+
+
+def build_task_card_text(task: Task, *, header: str | None = None) -> str:
+    """Render a Task as plain text suitable for `send_message` with
+    ``parse_mode='Markdown'``.
+
+    Static structural text uses ``*bold*`` for the title prefix, but
+    every value that comes from user input or external profile data
+    (title, description, owner display name) is escaped via
+    ``_escape_md`` so a stray ``_`` / ``*`` / ``\\``` / ``[`` doesn't
+    turn into an unbalanced formatting token.
     """
     lines: list[str] = []
     if header:
-        lines.append(f"*{header}*")
-    lines.append(f"*#{task.id}* {task.title}")
+        lines.append(f"*{_escape_md(header)}*")
+    lines.append(f"*#{task.id}* {_escape_md(task.title)}")
     if task.description:
-        lines.append(task.description)
+        lines.append(_escape_md(task.description))
     meta: list[str] = []
     status_em = STATUS_EMOJI.get(task.status.value, "")
     meta.append(f"{status_em} {task.status.value}")
-    if task.owner_display_name or task.owner_user_id:
-        meta.append(f"👤 {task.owner_display_name or task.owner_user_id}")
+    owner = task.owner_display_name or task.owner_user_id
+    if owner:
+        meta.append(f"👤 {_escape_md(str(owner))}")
     pri_em = PRIORITY_EMOJI.get(task.priority.value, "")
     meta.append(f"{pri_em} {task.priority.value}")
     if task.due_date:
@@ -65,7 +90,7 @@ def build_task_card_text(task: Task, *, header: str | None = None) -> str:
     if meta:
         lines.append(" · ".join(meta))
     if task.source_permalink:
-        lines.append(f"🔗 {task.source_permalink}")
+        lines.append(f"🔗 {_escape_md(task.source_permalink)}")
     return "\n".join(lines)
 
 

@@ -689,6 +689,13 @@ the bot now skips the link entirely — generating it would
 produce a *"no access"* error in Telegram even for the group's
 own admins.
 
+**@-mention shortcut:** when the source message contains an
+explicit Telegram username mention (`@petya подготовь презу`),
+intent is unambiguous and the listener bypasses the confirm
+widget — the Task is created immediately, just like in a private
+DM with the bot. The widget is reserved for the «detected, not
+addressed» case where consent matters.
+
 **Rendering & copy:** all Telegram messages now use HTML parse
 mode (no Markdown italic-trigger problems with usernames like
 `@andre_andreevich`). Status `in_progress` displays as
@@ -697,6 +704,147 @@ mode (no Markdown italic-trigger problems with usernames like
 fields, one-line *"missing: …"* note, single-line hint to reply
 in plain English. Cancel was removed from the task-card
 keyboard — Edit + Delete cover the same intent.
+
+
+---
+
+### Feature 13 — Unified daily rhythm (Slack + Telegram)
+
+Five small additions cluster into one «day in the life» story.
+Identical behaviour in Slack and Telegram — same SQL helpers,
+same idempotency keys, only the channel layer differs.
+
+#### 13.1 — Multi-task extraction from one message
+
+> **As a contributor**, when I write «к завтра сделать презу и
+> отчёт к пятнице» I want **two** tasks created, not one with a
+> munged title — **so that** my list reflects what I actually said.
+
+The intent pipeline grows a list-of-tasks shape:
+
+1. Stage 1 (detect) returns `task_count` and a list of disjoint
+   spans of the source text — one chunk per task. Default for
+   ambiguous cases is one chunk = whole message (current behaviour).
+2. Stages 2a / 2b / 2c run **per chunk**, so each task gets its
+   own title / description / priority / owner / due.
+3. `IntentClassification.tasks` carries the list; `task` is kept
+   as `tasks[0]` so legacy callers don't break.
+4. Persistence iterates: one `Task` per chunk in the immediate-
+   create flow, one `ActionDraft` per chunk in the confirm-first
+   flow (the confirm widget then carries «Create 3 tasks?»).
+
+The detect-stage prompt teaches «split only when each chunk has
+its own imperative + object». A phrase like «сделать отчёт и
+презентацию по нему» stays one task because the second clause is
+a sub-item of the first.
+
+#### 13.2 — Morning digest at 09:00 local: today only
+
+> **As an owner of tasks**, I want my 09:00 DM to contain *only*
+> what I'm doing today — not Approaching / Overdue / etc — **so
+> that** the message is short and actionable.
+
+Behaviour:
+- One section: «Today's tasks» — the user's own Tasks with
+  `due_date == today`, ordered by `status` (in-progress first,
+  then todo, then backlog) then `priority`.
+- Two buttons: 🔄 *Refresh* (re-renders) and 📋 *Show
+  subscriptions* (toggles a follow-up DM with the list of tasks
+  the user is subscribed to but doesn't own).
+- If yesterday's evening plan was Approved (or auto-run via
+  FR-CR-04-25), today's order matches that plan; otherwise it's
+  derived from priority + due.
+
+The Approaching-window list moves to the existing per-task
+deadline reminder (FR-CR-04-15) and a weekly digest. Overdue
+already DMs separately as a deadline reminder; no duplication.
+
+#### 13.3 — Subscription updates throughout the day
+
+> **As a subscriber**, I want a one-line DM whenever a task I
+> follow changes status / gets edited / gets cancelled — **so
+> that** I don't have to poll the Sheet or the original card.
+
+What triggers a fanout DM:
+- Status transition: backlog ↔ todo ↔ in_progress ↔ done.
+- Edit applied via Edit-on-task or Edit-on-draft (the field
+  diff goes in the DM).
+- Cancel.
+- Soft-delete.
+
+The fanout fires inside `TransitionService.apply` and
+`apply_edit_reply` — not at the keyboard level — so any future
+trigger (slash command, scheduled rule) inherits it. Owner is
+excluded (they already see the card update). Per-recipient
+idempotency lives in `audit_logs.category='subscriber_update'`
+keyed by `(task_id, recipient_user_id, transition_id)`.
+
+The DM is short — title, what changed, link to the source.
+
+#### 13.4 — «Task starting now» nudge
+
+> **As an owner**, when a task with a `start_time` reaches that
+> moment, I want a quick DM — **so that** I don't lose
+> calendar-shaped work in the noise.
+
+A 5-minute cron tick selects rows where ``start_date == today``
+AND ``start_time`` is between ``now-5m`` and ``now``. Owner gets
+the full card-shaped DM; subscribers get a one-liner. No
+`start_time` ⇒ falls back to `09:00 local` on `start_date`.
+
+Idempotency: an `audit_logs` row per
+`(task_id, recipient_user_id, kind='start')` blocks repeats —
+re-runs of the cron tick (or a worker restart) don't double-DM.
+
+Cron line:
+```
+*/5 * * * *   python -m ops.send_digest         --type starts-now
+*/5 * * * *   python -m ops.telegram_digest     --type starts-now
+```
+
+#### 13.5 — Evening report at 18:00 local: 3-section DM
+
+> **As a contributor**, my 18:00 DM should give me a wrap-up: what
+> I closed today, where the things I'm watching stand, and a draft
+> of tomorrow — **so that** the next morning starts with a
+> confirmed plan instead of a fresh exercise.
+
+The DM has three sections:
+
+1. **Done today** — the user's tasks that flipped to `done` at
+   any point today (uses `task_status_history.changed_at >=
+   today midnight`). Each carries the completion artifact (link
+   or note) when present.
+2. **Subscriptions update** — every non-owner-subscribed Task with
+   its current status, plus a small *delta vs the previous
+   evening report* note when a status changed since yesterday's
+   18:00. Diff source: `audit_logs.category='evening_report'`
+   snapshot for the prior day.
+3. **Tomorrow's plan** — the same auto-curated list that the
+   former «evening plan» message carried. Two buttons attach:
+   ✅ *Approve* / ✏ *Edit*. *Edit* opens the LLM-driven free-form
+   reply ([13.6](#136--llm-edit-on-the-evening-plan)) — same
+   parser as Edit-on-task. If the user neither Approves nor Edits
+   by 09:00 next day, the plan auto-runs (FR-CR-04-25 — already
+   implemented for Slack, ported to TG here).
+
+#### 13.6 — LLM-edit on the evening plan
+
+The Edit button on the tomorrow's-plan section opens the same
+free-form reply we use for Edit-on-task — the user can say
+«убери задачу #42, добавь подготовку отчёта в начало,
+сдвинь презу на четверг». The same `parse_edit_with_llm`
+backend converts that into structured operations:
+
+- `remove`: list of task ids to drop from the plan
+- `reorder`: list of task ids in the desired order
+- `add`: list of `{title, due, priority}` items (these create
+  fresh Tasks, then add them to the plan)
+- `move_due`: list of `{task_id, due}` for date shifts
+
+Approval becomes implicit on Edit — once the user confirms the
+edited plan, the bot stores it and the morning digest will run
+in approved mode the next day.
 
 
 ---

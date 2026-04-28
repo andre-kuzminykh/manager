@@ -152,6 +152,27 @@ def parse_update(update: dict[str, Any]) -> TelegramSourceMessage | None:
 
 
 
+_AT_MENTION_RE = __import__("re").compile(r"@[A-Za-z][A-Za-z0-9_]{4,31}\b")
+
+
+def _has_at_mention(text: str | None) -> bool:
+    """Detect a Telegram username mention (``@andre_andreevich``).
+
+    The regex matches the same character class Telegram uses for
+    usernames (5-32 chars, ASCII alnum + underscore, must start with
+    a letter). When a contributor types ``@petya подготовь презу``
+    the intent is unambiguous, so the listener can skip the
+    confirm-first widget and create the task immediately.
+
+    A false positive would be an email-like ``user@example.com`` —
+    accepted, but the «task» it produces is harmless and easy to
+    Reject via the regular task card.
+    """
+    if not text:
+        return False
+    return bool(_AT_MENTION_RE.search(text))
+
+
 def _looks_like_confirm_widget(cq: dict[str, Any]) -> bool:
     """A draft confirm widget always carries exactly the row
     ``[confirm, edit, ignore]``. Detect that pattern on the clicked
@@ -353,10 +374,18 @@ class TelegramListener:
                     continue
 
                 try:
-                    if msg.is_private:
-                        # 1:1 DM with the bot — the user is talking to
+                    # FR-CR-04-32 ext: when the author *explicitly*
+                    # @-mentioned a teammate, intent is unambiguous —
+                    # skip the «Create this task?» widget and fall
+                    # through to immediate-create. Same shortcut as
+                    # private chats.
+                    has_explicit_mention = _has_at_mention(msg.text)
+                    if msg.is_private or has_explicit_mention:
+                        # 1:1 DM with the bot — or an explicit @
+                        # mention in a group — the user is asking
                         # us directly, so create the task immediately
-                        # and DM the live card back. (FR-CR-04-29.)
+                        # and DM the live card back. (FR-CR-04-29 /
+                        # FR-CR-04-32 ext.)
                         task = self._ingest.process_one(session, msg)
                         report.messages_processed += 1
                         if task is None:

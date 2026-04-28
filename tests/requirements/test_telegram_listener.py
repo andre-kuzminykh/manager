@@ -378,6 +378,47 @@ def test_listener_second_tick_with_same_offset_is_a_noop(
         assert s.query(Task).count() == 1
 
 
+def test_listener_at_mention_in_group_skips_confirm_widget(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-04-32 ext: an explicit @-mention in a group message
+    bypasses the confirm widget — intent is unambiguous, so the
+    listener creates the Task immediately like in a private DM."""
+    from app.models import Task
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.95,
+        task=TaskDraft(title="prepare deck"),
+    )
+    listener = _make_listener(
+        classification,
+        updates_per_call=[
+            [
+                {
+                    "update_id": 920,
+                    "message": {
+                        "message_id": 1,
+                        "chat": {"id": -7007, "type": "supergroup"},
+                        "from": {"id": 555, "username": "andre"},
+                        "text": "@petya подготовь презу к завтра",
+                        "date": 0,
+                    },
+                }
+            ]
+        ],
+    )
+    listener._sender.send_message = lambda **kw: {"message_id": 1}  # type: ignore
+    listener._sender.update_message = lambda **kw: {}  # type: ignore
+
+    report = listener.tick()
+    # Immediate-create — Task created, NOT a draft.
+    assert report.tasks_created == 1
+    assert report.drafts_proposed == 0
+    with SessionFactory() as s:
+        assert s.query(Task).count() == 1
+
+
 def test_listener_routes_group_messages_to_draft_flow(
     patched_session_scope, SessionFactory
 ):

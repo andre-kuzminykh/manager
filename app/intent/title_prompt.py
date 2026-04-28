@@ -23,7 +23,10 @@ Produce three fields:
 - description:  any supplementary detail present in the source
                 message — references, numbers, sub-items, rationale.
                 null when the title already captures everything. Do
-                NOT copy the date phrase here either.
+                NOT copy the date phrase here either. NEVER set
+                description to a single bare token (a name, an
+                interjection, "ивана" / "сегодня" / "ok") — return
+                null if there's no real explanation to add.
 - priority:     one of "low" | "medium" | "high" | "urgent".
                 Default "medium". Use "urgent" only when the author
                 says so ("срочно", "ASAP", "blocker", "сегодня же"),
@@ -42,6 +45,18 @@ Examples (every date-like tail is removed from the title):
       → title: "запустить лендинг"
   "отправь письмо завтра утром"
       → title: "отправить письмо"
+
+A name is only a stripped *assignee* when it stands at the start
+in vocative / @-mention form, or appears in dative ("Ивану", "to
+Ivan"). A name in **accusative case** ("ивана", "машу" — i.e. the
+*object* of the verb) MUST stay in the title — that person is
+the subject of the work, not the doer. Examples:
+  "подготовить ивана к среде"
+      → title: "подготовить ивана"   (Иван is the object — keep)
+  "Иван, подготовь презу"
+      → title: "подготовить презу"   (Иван is the assignee — drop)
+  "@petya сделай отчёт"
+      → title: "сделать отчёт"       (explicit @ mention — drop)
 
 Do NOT try to extract the assignee or the due date — those are
 handled in separate passes. It is fine to leave hints about them in

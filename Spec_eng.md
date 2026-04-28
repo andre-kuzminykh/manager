@@ -485,7 +485,158 @@ is idempotent (one notification per (user, day), no spam on retry).
 
 ---
 
-## 7. Roadmap (not built, ranked by easy → hard)
+## 7. Under the hood — how it's built
+
+A short, non-exhaustive map of the moving parts. Enough that a
+non-engineer can talk to engineers about the system; not so much that
+it overlaps with `SPEC.md`.
+
+### Hosting & deployment
+
+- **One Google Cloud VM** (Compute Engine, region `europe-west1`)
+  hosts the entire stack. No Kubernetes, no autoscaling — single box,
+  Docker, restart-on-failure.
+- Three Docker containers run side by side, on a private Docker
+  network so they talk to each other but not to the public internet:
+  - **`slack-task-bot`** — the application itself. Python 3.11.
+    Restart policy `unless-stopped`, so a crash brings it back.
+  - **`slack-task-db`** — PostgreSQL 16 (Alpine). Persistent volume
+    so data survives container restarts.
+  - **`slack-task-db-proxy`** — small `socat` container exposing the
+    DB on a non-default host port for read-only inspection from
+    outside (admin convenience, not used by the bot itself).
+- Source code lives in a Git repository; deploys are `git pull` →
+  `docker build` → `docker run`. No CI/CD pipeline yet.
+
+### How the bot talks to Slack
+
+- **Slack Bolt for Python** is the framework that handles incoming
+  events, button clicks, modal submits, and slash commands.
+- The bot connects to Slack over **Socket Mode** — an outbound
+  WebSocket from the bot to Slack — so we don't have to expose a
+  public HTTP endpoint, no inbound firewall rules, no SSL cert. The
+  VM can sit fully behind a firewall; only outbound 443 needs to
+  work.
+- A Slack App **manifest** is checked into the repo (`ops/
+  slack-manifest.yaml`) — it pins the bot's scopes, shortcuts and
+  events as code, so re-installing the app from scratch is a copy-
+  paste away.
+
+### Data layer
+
+- **PostgreSQL 16** is the single source of truth. Tables cover:
+  - tasks (with status history, subscriptions, sync state);
+  - employees directory;
+  - daily plan items;
+  - draft pipeline (intent inference, action drafts, context
+    snapshots);
+  - audit log (every significant action keyed for indexed lookup);
+  - full Slack message archive (with voice transcripts).
+- **Alembic** versions every schema change — currently at migration
+  `0013`. Rolling back to any historical state is one command.
+- SQLite is used in tests (in-memory) so the test suite runs without
+  a Postgres instance — same SQLAlchemy code path.
+
+### Intelligence layer (LLM + speech)
+
+- **LangGraph** drives a small state machine that runs every captured
+  message through four focused stages: *detect → describe → owner →
+  date → assemble*. Each stage is a separate LLM call with a tiny
+  tool schema, which is much more reliable than one mega-prompt.
+- **OpenAI** (default `gpt-4o-mini` for routing/title/owner,
+  `gpt-4o` for date) is the primary LLM. **Anthropic Claude** is
+  available as a fallback / alternate provider via a single env
+  setting (`LLM_PROVIDER=anthropic`). Both go through the same
+  `LLMBackend` abstraction.
+- **OpenAI Whisper** transcribes Slack voice notes. The transcript
+  is fed into the same pipeline as text messages.
+- A small **rule-based prefilter** (regexes for "надо сделать", "к
+  понедельнику", etc.) acts as a safety net: if the LLM returns
+  `no_action` on an obviously task-shaped message, the prefilter
+  forces a draft.
+- **No data leaves the bot's process** except the literal LLM /
+  Whisper API calls — no analytics, no telemetry to third parties.
+
+### External integrations
+
+- **Google Sheets API** — live sync. Auth via a **Service Account**
+  (JSON key mounted into the container as `/app/secrets/sa.json`).
+  The spreadsheet is shared with the SA's email as Editor; the SA
+  has no other access.
+- **Google Tasks API** — optional, off by default. Same auth.
+
+### Reliability primitives
+
+- **Idempotency.** Every digest, plan, and reminder is keyed
+  `(category, action, actor, date)` in the audit log. Re-running the
+  cron on the same day is a no-op.
+- **Retries.** Outbound HTTP (Slack, Sheets) is wrapped in
+  `tenacity` with exponential backoff for transient failures. Slack
+  rate-limits (HTTP 429) are honoured automatically.
+- **Soft delete.** Deleted tasks set `deleted_at` and are filtered
+  out of every query, but the row stays for audit. Nothing is ever
+  hard-deleted from `tasks`.
+- **Best-effort sync.** Google Sheets sync is wrapped so a Google
+  outage logs a warning but never breaks the Slack interaction —
+  task state in Postgres is always authoritative; Sheets is a
+  derived view.
+- **Per-stage isolation.** A failure in one LangGraph node (e.g. the
+  owner stage timing out) leaves that field empty rather than
+  aborting the whole capture; the follow-up loop fills it in later.
+
+### Secrets & access
+
+- All secrets live in `/root/slack-task/.env` (loaded at container
+  start via `--env-file`):
+  - `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, `SLACK_SIGNING_SECRET`
+  - `OPENAI_API_KEY`, optionally `ANTHROPIC_API_KEY`
+  - `DATABASE_URL`
+  - `SECRETS_ENCRYPTION_KEY` (Fernet key for any OAuth tokens stored
+    in DB; not used in the SA path)
+  - `GOOGLE_SHEETS_SPREADSHEET_ID`, `GOOGLE_SHEETS_TAB_NAME`,
+    `GOOGLE_SERVICE_ACCOUNT_JSON_PATH`
+  - admin Slack user ids, allowed-owner overrides
+- The Service Account JSON is mounted into the container as a
+  read-only volume — never baked into the image.
+
+### What runs on cron
+
+The bot's daily / weekly notifications are kicked off by `cron`
+on the host (timezone `Europe/London`):
+
+| Time | Job | What it does |
+|---|---|---|
+| 09:00 | morning digest + morning plan | DM each user their plan + dailies |
+| 10:00 (Mon-Fri) | thread reminders | nudge each open task in its source thread |
+| 18:00 | evening plan | DM each user the next-day plan |
+| 20:00 (Sun) | weekly plan | DM each owner their next week |
+| every 6 h | deadline reminders | DM owners whose deadlines are ≤ 2 days |
+
+Each job is its own `python -m ops.send_digest --type ...` call inside
+the bot container; idempotency means retries are safe.
+
+### Architecture at a glance
+
+```
+                   ┌──────────────────────────────┐
+       Slack ◀────▶│    slack-task-bot (Python)   │────▶ OpenAI / Whisper
+   (Socket Mode)   │  · Bolt + LangGraph pipeline │
+                   │  · cron-driven schedulers    │────▶ Google Sheets API
+                   └──────┬───────────────────────┘
+                          │ SQLAlchemy
+                          ▼
+                   ┌────────────────┐
+                   │ Postgres 16    │   ← Alembic migrations
+                   │ (Docker volume)│
+                   └────────────────┘
+
+         all three containers on a private Docker network on a
+         single GCE VM (europe-west1); only outbound 443 leaves it
+```
+
+---
+
+## 8. Roadmap (not built, ranked by easy → hard)
 
 1. **`mpim:read` Slack scope** — enable per-channel sync in group
    DMs (~1h work, just a re-install).

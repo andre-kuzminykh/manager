@@ -19,7 +19,7 @@ import urllib.error
 from typing import Any
 
 from app.logging_setup import get_logger
-from app.models import Task
+from app.models import Task, TaskSourceKind
 
 log = get_logger(__name__)
 
@@ -66,6 +66,33 @@ def _escape_html(text: str | None) -> str:
 _escape_md = _escape_html
 
 
+def _format_owner(task: Task) -> str | None:
+    """Return a presentation-friendly owner label.
+
+    Prefers ``owner_display_name`` over the raw user id. For old
+    Telegram tasks where the username was stored without ``@`` (the
+    parse-update fix only applies to new captures), prefix it back —
+    but only when it really looks like a Telegram handle (ASCII
+    alnum + underscore, 5–32 chars, contains at least one letter, not
+    all-digits — the latter is a numeric user_id, not a username).
+    """
+    import re
+
+    raw = task.owner_display_name or task.owner_user_id
+    if not raw:
+        return None
+    s = str(raw)
+    if (
+        task.source_kind == TaskSourceKind.telegram
+        and not s.startswith("@")
+        and re.fullmatch(r"[A-Za-z0-9_]{5,32}", s)
+        and not s.isdigit()
+        and any(c.isalpha() for c in s)
+    ):
+        s = f"@{s}"
+    return s
+
+
 def build_task_card_text(task: Task, *, header: str | None = None) -> str:
     """Render a Task as HTML text suitable for ``send_message`` with
     ``parse_mode='HTML'``.
@@ -81,13 +108,13 @@ def build_task_card_text(task: Task, *, header: str | None = None) -> str:
         lines.append(f"<b>{_escape_html(header)}</b>")
     lines.append(f"<b>#{task.id}</b> {_escape_html(task.title)}")
     if task.description:
-        lines.append(_escape_html(task.description))
+        lines.append(f"📝 {_escape_html(task.description)}")
     meta: list[str] = []
     status_em = STATUS_EMOJI.get(task.status.value, "")
     meta.append(f"{status_em} {task.status.value.replace('_', ' ')}")
-    owner = task.owner_display_name or task.owner_user_id
+    owner = _format_owner(task)
     if owner:
-        meta.append(f"👤 {_escape_html(str(owner))}")
+        meta.append(f"👤 {_escape_html(owner)}")
     pri_em = PRIORITY_EMOJI.get(task.priority.value, "")
     meta.append(f"{pri_em} {task.priority.value}")
     if task.due_date:

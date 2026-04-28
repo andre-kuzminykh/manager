@@ -160,9 +160,9 @@ def prompt_done(
         raise NotAuthorised("Task not found or already deleted.")
     _ensure_can_edit(task, actor)
     text = (
-        f"✔ <b>Mark done — task #{task.id}</b>\n"
-        f"Optional: reply with a link or a short note about the result.\n"
-        f"Or reply <code>/skip</code> to complete without an artifact."
+        f"🎉 <b>Завершаем задачу #{task.id}</b>\n"
+        f"📎 Можешь приложить ссылку или короткую заметку о результате.\n"
+        f"Или ответь <code>/skip</code> — закрою без артефакта."
     )
     return task, text
 
@@ -328,36 +328,46 @@ def prompt_edit(
         raise NotAuthorised("Task not found or already deleted.")
     _ensure_can_edit(task, actor)
 
-    # Build a compact "filled / empty" preview so the prompt feels
-    # like a quick form, not a wall of `key=value` lines.
+    # Conversational "what's filled / what's missing" preview so the
+    # prompt reads like a friendly form rather than a wall of
+    # `key=value` lines. Each field gets its own emoji so the user
+    # can scan visually.
     from app.telegram_bot.sender import _escape_html
 
+    priority_em = {
+        "low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴",
+    }.get(task.priority.value, "🟡")
+
+    fields: list[tuple[str, str, object | None]] = [
+        ("📌", "Title", task.title),
+        ("📝", "Description", task.description),
+        (priority_em, "Priority", task.priority.value),
+        ("📅", "Due", task.due_date.isoformat() if task.due_date else None),
+        ("⏰", "Due time", task.due_time.strftime("%H:%M") if task.due_time else None),
+        ("🚦", "Start", task.start_date.isoformat() if task.start_date else None),
+        ("⏰", "Start time", task.start_time.strftime("%H:%M") if task.start_time else None),
+        ("🏷", "Category", task.category),
+        ("👤", "Owner", task.owner_display_name or task.owner_user_id),
+    ]
     filled: list[str] = []
-    empty: list[str] = []
-
-    def _row(label: str, value: object) -> None:
+    missing: list[str] = []
+    for emoji, label, value in fields:
         if value in (None, "", 0):
-            empty.append(label)
+            missing.append(f"{emoji} {label.lower()}")
         else:
-            filled.append(f"• <b>{label}:</b> {_escape_html(str(value))}")
+            filled.append(
+                f"{emoji} <b>{label}</b> — {_escape_html(str(value))}"
+            )
 
-    _row("Title", task.title)
-    _row("Description", task.description)
-    _row("Priority", task.priority.value)
-    _row("Due", task.due_date.isoformat() if task.due_date else None)
-    _row("Due time", task.due_time.strftime("%H:%M") if task.due_time else None)
-    _row("Start", task.start_date.isoformat() if task.start_date else None)
-    _row("Start time", task.start_time.strftime("%H:%M") if task.start_time else None)
-    _row("Category", task.category)
-    _row("Owner", task.owner_display_name or task.owner_user_id)
-
-    parts = [f"✏ <b>Edit task #{task.id}</b>"]
+    parts: list[str] = [f"✏ <b>Edit task #{task.id}</b>"]
     if filled:
-        parts.append("\n".join(filled))
-    if empty:
-        parts.append(f"<i>Empty:</i> {', '.join(empty)}")
+        parts.append("Здесь уже есть:\n" + "\n".join(filled))
+    if missing:
+        parts.append("Не хватает: " + ", ".join(missing))
     parts.append(
-        "Reply naturally — e.g. <i>«сдвинь срок на пятницу, приоритет высокий»</i>."
+        "Просто ответь, что хочешь поменять — в свободной форме, я разберусь.\n"
+        "Например: <i>«сдвинь срок на пятницу, приоритет высокий, "
+        "категория маркетинг»</i>."
     )
     text = "\n\n".join(parts)
     return task, text

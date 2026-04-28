@@ -138,7 +138,7 @@ def post_initial_card(
         log.info("telegram_post_initial_card_no_recipients", task_id=task.id)
         return
 
-    text = build_task_card_text(task, header="Captured from this message")
+    text = build_task_card_text(task, header="✨ Новая задача из сообщения")
     cards: list[dict[str, int]] = []
     for uid in recipients:
         try:
@@ -242,8 +242,8 @@ def render_tombstone(
         return
 
     text = (
-        f"🗑 Task #{task.id} — <b>{_escape_md(task.title)}</b> deleted"
-        + (f" by <code>{_escape_md(actor)}</code>" if actor else "")
+        f"🗑 Задача #{task.id} — <b>{_escape_md(task.title)}</b> — удалена"
+        + (f" пользователем <code>{_escape_md(actor)}</code>" if actor else "")
     )
     for c in cards:
         try:
@@ -282,14 +282,18 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
     due = payload.get("due_date") or ""
     description = payload.get("description") or ""
 
-    lines = [f"<b>Create this task?</b>"]
+    priority_em = {
+        "low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴",
+    }.get(priority, "🟡")
+
+    lines = [f"📥 <b>Создать задачу?</b>"]
     lines.append(f"📌 {_escape_md(str(title))}")
     if description:
-        lines.append(_escape_md(str(description)))
+        lines.append(f"📝 {_escape_md(str(description))}")
     meta: list[str] = []
     if owner_disp:
         meta.append(f"👤 {_escape_md(str(owner_disp))}")
-    meta.append(f"🟡 {priority}" if priority == "medium" else f"⚡ {priority}")
+    meta.append(f"{priority_em} {priority}")
     if due:
         meta.append(f"📅 {due}")
     if meta:
@@ -463,8 +467,8 @@ def render_draft_rejected(
         return
     title = (draft.payload or {}).get("title") or ""
     text = (
-        f"✖ Draft #{draft.id} — <b>{_escape_md(str(title))}</b> rejected"
-        + (f" by <code>{_escape_md(actor)}</code>" if actor else "")
+        f"❌ Черновик #{draft.id} — <b>{_escape_md(str(title))}</b> — отклонён"
+        + (f" пользователем <code>{_escape_md(actor)}</code>" if actor else "")
     )
     for w in widgets:
         try:

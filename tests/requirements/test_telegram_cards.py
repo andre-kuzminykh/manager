@@ -241,7 +241,9 @@ def test_render_tombstone_iterates_all_cards(session):
     render_tombstone(sender=sender, task=t, actor="111")
     assert len(sender.updated) == 2
     for u in sender.updated:
-        assert "deleted" in u["text"].lower()
+        # Tombstone marker — Russian copy "удалена" plus the
+        # universal 🗑 emoji.
+        assert "удалена" in u["text"].lower() or "🗑" in u["text"]
         assert u["reply_markup"] == {"inline_keyboard": []}
 
 

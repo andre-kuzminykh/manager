@@ -723,6 +723,87 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-04-32 — Confirm-first widget for tasks captured in groups
+
+Auto-creating a task from every task-shaped sentence in a group is
+noisy and irreversible — the team wanted an explicit "create or
+not?" step before the row lands in the DB. The Telegram listener
+now splits the routing by chat type:
+
+- **Private chat with the bot** (`chat.type == "private"`): the
+  user is talking to the bot directly; consent is implicit. The
+  flow stays *immediate-create* — `process_one` runs end-to-end
+  and `post_initial_card` DMs the live card.
+- **Group / supergroup / channel**: a new method
+  `TelegramIngestService.prepare_draft` mirrors `process_one` up
+  through the `ActionDraft` (state = `proposed`) but stops short
+  of `create_task_from_draft`. The source / context-snapshot /
+  fallback-author values are stashed under `payload["_pending"]`
+  so the Accept handler can resume cleanly. The bot then DMs
+  each recipient (author + admins; same set as FR-CR-04-31) a
+  forwarded copy of the original message followed by a
+  *"Создать задачу?"* widget with three inline buttons:
+
+      [✅ Accept]   [✏ Edit]   [✖ Reject]
+
+  Per-recipient `(chat_id, message_id)` pairs are recorded under
+  `payload["_widgets"]` so any handler can edit every delivered
+  copy when the draft resolves.
+
+Click handling:
+- **Accept** → `handle_confirm_draft` finalises the draft into a
+  Task via the same `create_task_from_draft` helper used by the
+  immediate-create path, points the
+  `processed_telegram_messages` bookmark at the new Task id, and
+  the listener calls `replace_widgets_with_task_card` which edits
+  every widget DM into the regular task card with the
+  `Start / Edit / Delete` keyboard. Idempotent — a second Accept
+  on an already-confirmed draft just re-renders the card.
+- **Reject** → `handle_ignore_draft` flips the draft to
+  `ignored`, and `render_draft_rejected` swaps every widget into
+  a `❌ Черновик #N — title — отклонён` tombstone with an empty
+  keyboard.
+- **Edit** on the widget is currently a friendly stub: "Accept
+  first, then ✏ Edit on the task card". A `_looks_like_confirm_widget`
+  helper inspects the click's `cq.message.reply_markup` to detect
+  the confirm row pattern so the listener can route this path
+  separately from a real task-edit click. Full draft-edit with
+  LLM parsing is a follow-up.
+
+Subtle correctness fix: `handle_confirm_draft` keeps `_widgets`
+on the draft when popping `_pending` — otherwise
+`replace_widgets_with_task_card` (called by the listener right
+after) would find the widget list empty and silently no-op,
+making Accept appear broken in the UI even though the Task was
+created.
+
+UX polish that landed alongside the confirm-first flow:
+- Sender flipped from `parse_mode='Markdown'` (legacy) to
+  `'HTML'` so usernames carrying underscores no longer trip the
+  italic parser. `_escape_html` replaces `_escape_md`; bold uses
+  `<b>…</b>`. The legacy alias is kept for back-compat.
+- Status display: `in_progress` is rendered to users as
+  `in progress` (underscore replaced with space).
+- Owner display: `parse_update` now stores Telegram usernames
+  with the leading `@` (e.g. `@andre_andreevich`). For old tasks
+  whose `owner_display_name` was stored without `@`, a
+  `_format_owner` heuristic prefixes one back at render time
+  iff the value looks like a Telegram handle.
+- Source permalink: the `https://t.me/c/<id>/<msg>` URL form
+  only works for supergroups / channels (chat ids with the
+  `-100` prefix). For basic groups it 404s with «no access»
+  even for admins, so we now skip the link entirely for those.
+- Edit-on-task prompt rewritten as a conversational form
+  («Здесь уже есть: 📌 Title — …, 🟡 Priority — …», then
+  «Не хватает: …», then a single-line "reply naturally" hint).
+  Reply parsing routes through `parse_edit_with_llm` — the same
+  intent backend that runs the classifier extracts structured
+  field updates from free-form text. Pure `key=value` replies
+  short-circuit the LLM call.
+- Task card keyboard simplified: ⤺ Cancel removed (Edit + Delete
+  cover the intent), leaving Start / Mark done / Edit / Delete /
+  Subscribe-toggle.
+
 #### FR-CR-04-31 — Telegram card privacy: DM author / owner / admins, never the group
 
 The Telegram bot used to post the task card under the source
@@ -1702,5 +1783,6 @@ pure unit tests for internal helpers.
 | FR-CR-04-29  | `test_telegram_conversations.py` (PendingRegistry register / take / TTL eviction / no-match guards; `prompt_done` + `apply_done_artifact_reply` for /skip / URL / text; `prompt_edit` includes current values; `parse_edit_payload` filters unknown keys + handles empty values; `apply_edit_reply` flips fields, clears on empty value, silently ignores invalid priority, drops `owner_assumed`, blocks stranger; `admin_user_ids` env parsing; admin can edit, non-admin/non-owner blocked); `test_telegram_notifications.py` (numeric-uid filter, owner ids list, morning digest content + idempotency + skip-empty, evening plan persists items, morning plan needs seeded items, deadline reminder per-day dedup, thread reminders post to source chat with reply_to, admin watch-list DMs each admin, no-admins is a no-op) |
 | FR-CR-04-30  | `test_telegram_ingest.py::test_process_one_uses_user_name_as_fallback_owner_display_name`, `::test_process_one_keeps_llm_display_name_when_present` |
 | FR-CR-04-31  | `test_telegram_cards.py` (TG-uid filter; recipient set order author → owner → admins, dedup when author == owner, Slack uids dropped; `post_initial_card` sends one DM per recipient, persists `extra["telegram_cards"]` + back-compat `card_channel`/`card_ts`, no `reply_to_message_id` forwarded, no-op when no recipients or task is Slack-sourced; `refresh_card` iterates every stored card; legacy single-pair fallback; `render_tombstone` updates every card with empty keyboard) |
+| FR-CR-04-32  | `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` (group → ActionDraft state=proposed, `_widgets` + `_pending` stashed in payload; no Task yet), `::test_listener_confirm_button_finalises_draft_into_task` (Accept finalises, draft.state=confirmed, widget chat/message edited in place — guards against the popped-`_widgets` regression), `::test_listener_reject_button_marks_draft_ignored`; `test_telegram_bot.py` (HTML-mode card text renders underscored usernames literally, escapes `<`/`>`/`&`, status with space); `test_telegram_conversations.py::test_parse_edit_with_llm_*` (kv shortcut skips LLM, free-form replies hit backend, no-backend falls back to kv parser, `apply_edit_reply` honours `llm_backend`); `test_telegram_ingest.py::test_process_one_uses_user_name_as_fallback_owner_display_name` also asserts `owner_user_id` is set from `message.user_id` so the keyboard's `is_owner` check matches |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

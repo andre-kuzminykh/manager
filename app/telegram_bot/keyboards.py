@@ -73,11 +73,14 @@ def task_card_keyboard(
     if primary:
         rows.append(primary)
 
+    # Edit + Delete share the second row (per UX request: two
+    # buttons side-by-side instead of stacked). Cancel removed —
+    # Edit + Delete cover the intent.
     secondary: list[dict[str, Any]] = []
     if status != "done" and (is_owner or is_admin):
         secondary.append(_btn("✏ Edit", ACTION_EDIT, task_id))
-    # Cancel removed per UX feedback — Edit + Delete cover the
-    # same intent without the extra button.
+    if is_owner or is_admin:
+        secondary.append(_btn("🗑 Delete", ACTION_DELETE, task_id))
     if secondary:
         rows.append(secondary)
 
@@ -89,9 +92,6 @@ def task_card_keyboard(
             sub_row.append(_btn("🔔 Subscribe", ACTION_SUBSCRIBE, task_id))
     if sub_row:
         rows.append(sub_row)
-
-    if is_owner or is_admin:
-        rows.append([_btn("🗑 Delete", ACTION_DELETE, task_id)])
 
     return {"inline_keyboard": rows}
 

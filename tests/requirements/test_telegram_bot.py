@@ -74,6 +74,44 @@ def test_task_card_keyboard_subscribe_toggles_to_unsubscribe():
     assert ACTION_SUBSCRIBE not in flat
 
 
+def test_task_card_keyboard_edit_and_delete_share_a_row():
+    """UX choice: ✏ Edit and 🗑 Delete must live on the same row
+    (two side-by-side buttons), not stacked on separate rows."""
+    kb = task_card_keyboard(
+        task_id=1, status="todo", is_owner=True, is_admin=False, subscribed=False
+    )
+    rows = kb["inline_keyboard"]
+    edit_delete_row = [
+        row for row in rows
+        if {b["callback_data"].split(":", 1)[0] for b in row} == {ACTION_EDIT, ACTION_DELETE}
+    ]
+    assert len(edit_delete_row) == 1, (
+        f"expected exactly one row with both Edit and Delete; rows={rows}"
+    )
+    assert len(edit_delete_row[0]) == 2
+
+
+def test_task_card_keyboard_does_not_show_cancel_anywhere():
+    """⤺ Cancel was removed from the UI — it must not appear on
+    any status / role combination."""
+    from app.telegram_bot.keyboards import ACTION_CANCEL
+
+    for status in ("backlog", "todo", "in_progress", "done"):
+        for is_owner in (True, False):
+            for is_admin in (True, False):
+                kb = task_card_keyboard(
+                    task_id=1,
+                    status=status,
+                    is_owner=is_owner,
+                    is_admin=is_admin,
+                    subscribed=False,
+                )
+                flat = _flat_callback_actions(kb)
+                assert ACTION_CANCEL not in flat, (
+                    f"unexpected Cancel for status={status} owner={is_owner} admin={is_admin}"
+                )
+
+
 def test_task_card_keyboard_done_status_collapses_to_delete_only():
     kb = task_card_keyboard(
         task_id=1, status="done", is_owner=True, is_admin=False, subscribed=False

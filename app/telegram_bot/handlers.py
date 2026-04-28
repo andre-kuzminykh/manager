@@ -160,9 +160,9 @@ def prompt_done(
         raise NotAuthorised("Task not found or already deleted.")
     _ensure_can_edit(task, actor)
     text = (
-        f"🎉 <b>Завершаем задачу #{task.id}</b>\n"
-        f"📎 Можешь приложить ссылку или короткую заметку о результате.\n"
-        f"Или ответь <code>/skip</code> — закрою без артефакта."
+        f"🎉 <b>Marking task #{task.id} as done</b>\n"
+        f"📎 Optionally reply with a link or a short note about the result.\n"
+        f"Or reply <code>/skip</code> to complete without an artifact."
     )
     return task, text
 
@@ -361,13 +361,13 @@ def prompt_edit(
 
     parts: list[str] = [f"✏ <b>Edit task #{task.id}</b>"]
     if filled:
-        parts.append("Здесь уже есть:\n" + "\n".join(filled))
+        parts.append("Here's what's set:\n" + "\n".join(filled))
     if missing:
-        parts.append("Не хватает: " + ", ".join(missing))
+        parts.append("Missing: " + ", ".join(missing))
     parts.append(
-        "Просто ответь, что хочешь поменять — в свободной форме, я разберусь.\n"
-        "Например: <i>«сдвинь срок на пятницу, приоритет высокий, "
-        "категория маркетинг»</i>."
+        "Just reply with what you want to change — plain text works fine.\n"
+        "For example: <i>«push the deadline to Friday, priority high, "
+        "category marketing»</i>."
     )
     text = "\n\n".join(parts)
     return task, text

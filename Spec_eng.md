@@ -520,7 +520,10 @@ indistinguishable in the DB once written.
 > group doesn't see noise from every captured task.
 
 **Flow:**
-1. The listener captures a message and creates a task (see 12.3).
+1. The listener captures a message; for *private chat* with the
+   bot it creates a task immediately (see 12.3); for a *group /
+   supergroup / channel* it goes through the confirm-first widget
+   first (see 12.7), and only on *Accept* the task is created.
 2. The bot **DMs** the card to a small recipient set:
    - the message author;
    - the assignee, if the LLM resolved a different owner;
@@ -531,18 +534,17 @@ indistinguishable in the DB once written.
    only privacy-preserving option is to skip the group post
    entirely.
 3. Each recipient sees a keyboard rendered from THEIR perspective:
-   - the author always sees Edit / Cancel / Subscribe;
-   - the owner sees Start / Mark done / Edit / Cancel / Delete;
-   - admins see Edit / Cancel / Delete on every task.
+   - the author always sees Edit / Subscribe;
+   - the owner sees Start / Mark done / Edit / Delete;
+   - admins see Edit / Delete on every task.
 4. Tapping a button drives the task — the change applies once,
    and the bot edits **every delivered DM** so author / owner /
    admin all see the same state without re-fetching anything:
    - **Start** flips backlog/todo → in_progress.
    - **Mark done** opens the optional-artifact reply (see 12.5).
-   - **Cancel** routes back to todo (this week) or backlog (later).
    - **Subscribe / Unsubscribe** toggles for bystanders.
    - **Delete** soft-deletes; every card flips to a tombstone line.
-   - **Edit** opens the key=value reply conversation (see 12.5).
+   - **Edit** opens the natural-language reply conversation (see 12.5).
 5. The same Google Sheet row updates after every change.
 
 **Important for the operator**: Telegram's Bot API can DM only
@@ -577,15 +579,19 @@ bystanders can subscribe.
 
 **Edit flow:**
 1. Owner / admin taps *Edit*.
-2. Bot replies with the current values formatted as `key=value`
-   pairs and a list of allowed keys: `title`, `description`,
-   `priority`, `due`, `due_time`, `start`, `start_time`,
-   `category`, `owner`.
-3. User replies with one or more `key=value` lines for the fields
-   they want to change. Empty value clears the field. Invalid
-   values (e.g. `priority=critical`) are silently ignored.
-4. Bot applies the changes, refreshes the card, drops the
-   `owner_assumed` flag, updates the sheet.
+2. Bot replies with a compact "what's filled / what's missing"
+   summary — each known field with its emoji (📌 title, 📝
+   description, priority, 📅 due, ⏰ due_time, 🚦 start, 🏷
+   category, 👤 owner), followed by a one-liner inviting a free-
+   form reply ("e.g. *push the deadline to Friday, priority high,
+   category marketing*").
+3. User replies in plain language. The bot's intent backend
+   (the same OpenAI / Anthropic tool-call that drives the
+   classifier) extracts structured field updates. Pure
+   `key=value` replies short-circuit the LLM call. Relative dates
+   ("tomorrow", "next Friday") are resolved against today.
+4. Bot applies the changes, refreshes every delivered card,
+   drops the `owner_assumed` flag, updates the sheet.
 
 The matching between bot prompts and user replies uses Telegram's
 `reply_to_message_id` field and a 10-minute in-memory TTL —
@@ -631,6 +637,66 @@ just doubled with a Telegram call per slot:
 every 6h python -m ops.telegram_digest --type deadlines
 09:00  python -m ops.telegram_digest --type admin-watchlist
 ```
+
+#### 12.7 — Confirm-first widget for tasks captured in groups
+
+> **As a contributor**, when the bot detects a task in a group
+> chat, I don't want a task to appear in the system silently. I
+> want the bot to ask me *"Create this task?"* in DM first, with
+> a forward of the original message and three buttons:
+> ✅ Accept / ✏ Edit / ✖ Reject. **So that** the team's task
+> table only contains things someone consciously confirmed.
+
+**Routing:**
+- *Private chat* with the bot → the user is talking to us
+  directly, so consent is implicit and we keep the immediate-
+  create flow (12.3 + 12.4).
+- *Group / supergroup / channel* → the bot creates an
+  `ActionDraft` (state = `proposed`) instead of a Task, then DMs
+  the confirm widget to the same recipient set as a regular task
+  card (author + admins; FR-CR-04-31 set).
+
+**Widget contents** (each recipient gets one):
+1. The original message **forwarded** from the group, so the
+   recipient sees who said what and where.
+2. A compact preview in HTML: title, owner, priority, due —
+   each with its own emoji.
+3. Three inline buttons: **✅ Accept**, **✏ Edit**, **✖ Reject**.
+
+The per-recipient `(chat_id, message_id)` pairs are stored on the
+draft's `payload["_widgets"]` so any later action edits every
+delivered copy in place. The source / context-snapshot /
+fallback-author values are stashed under `payload["_pending"]`
+for the Accept handler to consume.
+
+**Click outcomes:**
+- **Accept** → draft becomes a Task via the same
+  `create_task_from_draft` helper used by the immediate-create
+  path. Every widget DM is edited into the regular task card
+  (12.4 keyboard). Idempotent — a second Accept on a confirmed
+  draft just re-renders the existing card.
+- **Reject** → draft state flips to `ignored`; every widget is
+  edited into a `❌ Draft #N — title — rejected` tombstone with
+  an empty keyboard. No Task is created.
+- **Edit** on the widget is currently a friendly stub ("Accept
+  first, then ✏ Edit on the task card"). Full draft-edit with
+  LLM parsing is a follow-up.
+
+**Permalinks:** the `https://t.me/c/<id>/<msg>` URL form only
+works for **supergroups and channels** (chat ids carrying the
+`-100` prefix, so absolute value > 10¹²). For *basic groups*
+the bot now skips the link entirely — generating it would
+produce a *"no access"* error in Telegram even for the group's
+own admins.
+
+**Rendering & copy:** all Telegram messages now use HTML parse
+mode (no Markdown italic-trigger problems with usernames like
+`@andre_andreevich`). Status `in_progress` displays as
+`in progress`. Telegram usernames are stored with the leading
+`@`. The Edit prompt is conversational — bullet list of filled
+fields, one-line *"missing: …"* note, single-line hint to reply
+in plain English. Cancel was removed from the task-card
+keyboard — Edit + Delete cover the same intent.
 
 
 ---

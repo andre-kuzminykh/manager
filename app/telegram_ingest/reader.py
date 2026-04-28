@@ -129,8 +129,17 @@ class TelegramSourceReader:
         if engine is not None:
             self._engine = engine
         elif database_url:
+            # SQLAlchemy defaults `postgresql://` to the legacy
+            # psycopg2 driver — we ship psycopg3 only, so normalise
+            # the scheme to `postgresql+psycopg://` (no-op if the
+            # caller already did it).
+            url = database_url
+            if url.startswith("postgresql://"):
+                url = "postgresql+psycopg://" + url[len("postgresql://"):]
+            elif url.startswith("postgres://"):
+                url = "postgresql+psycopg://" + url[len("postgres://"):]
             self._engine = create_engine(
-                database_url,
+                url,
                 pool_pre_ping=True,
                 # Read-only role; setting `default_transaction_read_only`
                 # via connect_args defends against accidental writes.

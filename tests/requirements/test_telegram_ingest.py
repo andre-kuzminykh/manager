@@ -106,6 +106,37 @@ def test_reader_unconfigured_yields_nothing():
     assert list(reader.page()) == []
 
 
+def test_reader_rewrites_postgresql_scheme_to_psycopg3(monkeypatch):
+    """The image ships psycopg3 only — SQLAlchemy's default driver
+    for the bare `postgresql://` scheme is psycopg2, which would
+    crash with `ModuleNotFoundError`. The reader normalises both
+    `postgresql://` and `postgres://` to `postgresql+psycopg://`.
+    """
+    captured: dict[str, str] = {}
+
+    def fake_create_engine(url, *args, **kwargs):  # noqa: ANN001
+        captured["url"] = url
+        return object()  # we don't actually use it
+
+    monkeypatch.setattr("app.telegram_ingest.reader.create_engine", fake_create_engine)
+
+    TelegramSourceReader(
+        database_url="postgresql://u:p@host:5432/db", view_name="v"
+    )
+    assert captured["url"].startswith("postgresql+psycopg://")
+
+    captured.clear()
+    TelegramSourceReader(database_url="postgres://u:p@host:5432/db", view_name="v")
+    assert captured["url"].startswith("postgresql+psycopg://")
+
+    captured.clear()
+    TelegramSourceReader(
+        database_url="postgresql+psycopg://u:p@host:5432/db", view_name="v"
+    )
+    # Already normalised — left alone.
+    assert captured["url"].startswith("postgresql+psycopg://")
+
+
 # --------------------------------------------------------------------------- #
 # permalink
 # --------------------------------------------------------------------------- #

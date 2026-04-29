@@ -723,6 +723,47 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-27 — Auto-add new chat users + non-destructive `--push`
+
+Two operator-friendly registry tweaks after losing a round of
+manual Sheet edits to an over-eager `--push`.
+
+**1. Listener auto-creates `team_members` rows for new users.**
+FR-CR-05-21's `_enrich_team_member_row` previously bailed out
+when the matching team_members row didn't exist; new teammates
+appearing in chats stayed invisible until the operator
+manually added them. Now: when a user observed by the listener
+has no team-row yet, INSERT one with whatever fields the
+observation provides. Likely-bot rows (`bot` / `_bot` /
+`office1` / `notif` heuristic) start `active=False` so they
+don't pollute the LLM's owner-candidate list.
+
+**2. `TeamSheetSync.push` is non-destructive.** The previous
+`clear + rewrite` push lost any operator edit that hadn't been
+`--pull`-ed beforehand. The new `push`:
+
+  - Reads the current sheet contents.
+  - Appends only DB rows that aren't on the sheet yet (matched
+    by `id`, `telegram_user_id`, or `slack_user_id`).
+  - Never touches existing rows — operator edits are safe.
+
+Trade-off: deletions in the DB no longer propagate to the sheet
+on push. The sheet is the operator's source of truth; deletions
+flow Sheet → DB via `--pull` instead.
+
+First-time bootstrap (sheet completely empty) still writes the
+full DB table so the operator has a starting point.
+
+Recommended workflow now:
+
+  1. Operator edits the Sheet (`real_name`, `role`, `email`, …).
+  2. `python -m ops.sync_team --pull` brings edits into the DB.
+  3. New users appearing in chats land in DB automatically (via
+     the listener).
+  4. `python -m ops.sync_team --push` appends those new users
+     to the Sheet without touching existing operator edits.
+  5. Operator polishes the new rows on the Sheet, GOTO step 1.
+
 #### FR-CR-05-26 — Owner display: real_name first, link only on `@username`
 
 Operator-driven simplification of the owner-rendering rules
@@ -2780,6 +2821,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared). The original `test_task_row_includes_dialogue_from_extra` / `_dialogue_empty_when_no_extra` tests were rolled back by FR-CR-05-15. |
 | FR-CR-05-15  | `test_telegram_cards.py::test_draft_widget_text_includes_source_permalink_when_available` (🔗 line carries `t.me/c/<chat>/<msg>` when `_pending["permalink"]` is set); `::test_draft_widget_text_omits_link_line_when_no_permalink` (no empty 🔗 line for private DMs / basic groups); `test_sheets_pull.py::test_task_row_does_not_include_dialogue_column` (22-column header restored, last column is `completion_artifact`); `test_telegram_ingest.py::test_recent_in_chat_filters_by_chat_id_only` (adaptive context window is per-chat — SQL `WHERE chat_id = :chat_id` pinned so a future refactor can't widen the query) |
 | FR-CR-05-23  | `test_team_members.py::test_backfill_fills_blank_team_members_from_chat_members` (sparse rows enriched from listener observations; operator edits preserved); `::test_backfill_no_op_when_chat_members_empty` (no observations ⇒ no rows changed) |
+| FR-CR-05-27  | `test_telegram_members.py::test_upsert_member_creates_team_row_for_new_user` (brand-new user observed ⇒ team_members row auto-created with all available fields, `active=True`); `::test_upsert_member_creates_inactive_team_row_for_bot_account` (auto-bot detection ⇒ `active=False` on creation); `test_team_members.py::test_team_sheet_push_appends_only_new_rows` (existing operator edits preserved; only DB rows missing from the sheet get appended); `::test_team_sheet_push_writes_full_table_when_sheet_empty` (first-time bootstrap writes header + body) |
 | FR-CR-05-26  | `test_telegram_bot.py::test_build_task_card_text_renders_underscore_username_as_plain_html` (`@handle` display ⇒ visible label is the bare handle, hyperlinked); `::test_build_task_card_text_renders_plain_text_when_no_username_no_session` (no session + no `@` ⇒ plain text, no `tg://user?id=` fallback); `::test_build_task_card_text_links_owner_via_at_handle_when_no_numeric_id` (Slack uid + `@handle` ⇒ `https://t.me/<handle>`); `::test_build_task_card_text_renders_plain_text_when_no_username_anywhere` (registry has real_name but no username ⇒ plain real-name); `::test_build_task_card_text_renders_telegram_user_id_when_no_real_name` (no real_name anywhere ⇒ visible label is numeric uid, still no link); `test_telegram_cards.py::test_draft_widget_text_renders_plain_text_when_no_username_anywhere` + `::test_draft_widget_text_renders_owner_as_tme_link_when_username_in_registry` (same rules on the confirm widget; registry's real_name wins over LLM's short form) |
 | FR-CR-05-25  | `test_telegram_ingest.py::test_map_row_extracts_dedicated_username_column` (`sender_username` ⇒ `TelegramSourceMessage.username`, leading @ stripped); `::test_map_row_extracts_message_link_as_permalink` (`message_link` column ⇒ `TelegramSourceMessage.permalink`); `::test_telegram_permalink_prefers_view_supplied_link` (`_telegram_permalink` returns the view's URL when set, even for chat shapes where reconstruction would return None); `test_team_members.py::test_seed_from_telegram_source_pulls_distinct_users` (modern view shape — both real_name and username populated cleanly; legacy heuristic still works for views without the column) |
 | FR-CR-05-24  | `test_team_members.py::test_enrich_from_bot_api_populates_blank_fields` (Bot API getChat result populates blank username / real_name; rows already populated are skipped without calls); `::test_enrich_from_bot_api_silently_skips_unknown_users` (getChat returns `{}` ⇒ row stays sparse, no crash); `::test_enrich_from_bot_api_noop_when_sender_disabled` (no token / sender ⇒ early-return) |

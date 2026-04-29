@@ -566,6 +566,117 @@ def test_upsert_from_sheet_rows_matches_by_telegram_id_when_no_id(session):
     assert refreshed.real_name == "NewName"
 
 
+def test_team_sheet_push_appends_only_new_rows(session):
+    """FR-CR-05-27 — `push` is non-destructive: appends only DB
+    rows that aren't on the sheet yet (matched by id /
+    telegram_user_id / slack_user_id). Operator-edited cells on
+    existing sheet rows are NEVER touched."""
+    from app.sync.team_sheet import TeamSheetSync
+
+    # Two rows in DB.
+    session.add_all(
+        [
+            TeamMember(
+                real_name="Existing Row",
+                telegram_user_id=42,
+                telegram_username="petya",
+                active=True,
+            ),
+            TeamMember(
+                real_name="Brand New",
+                telegram_user_id=99,
+                active=True,
+            ),
+        ]
+    )
+    session.flush()
+
+    # Sheet already has the existing row (by tg_user_id) but with
+    # the operator's custom edits. The new row (uid 99) is missing.
+    existing_sheet = [
+        ["id", "real_name", "telegram_user_id", "telegram_username",
+         "slack_user_id", "role", "email", "active", "notes"],
+        ["1", "Operator's Custom Name", "42", "custom_handle",
+         "", "Founder", "petya@x.com", "true", "do not touch"],
+    ]
+    appended_rows: list[list[str]] = []
+    cleared = {"called": False}
+    written: list[list[list[str]]] = []
+
+    class _StubSync(TeamSheetSync):
+        def __init__(self):  # bypass googleapiclient build
+            self._service = None
+            self._spreadsheet_id = "stub"
+            self._sheet_name = "Team"
+
+        def _read_all(self):  # type: ignore[override]
+            return existing_sheet
+
+        def _append(self, rows):  # type: ignore[override]
+            appended_rows.extend(rows)
+
+        def _clear(self):  # type: ignore[override]
+            cleared["called"] = True
+
+        def _write(self, values):  # type: ignore[override]
+            written.append(values)
+
+    sync = _StubSync()
+    pushed = sync.push(session)
+
+    # Operator's row was NOT cleared / overwritten.
+    assert cleared["called"] is False
+    assert written == []
+    # Only the brand-new row got appended.
+    assert pushed == 1
+    assert len(appended_rows) == 1
+    appended = appended_rows[0]
+    # Body row layout: id / real_name / tg_id / tg_username / slack_id / …
+    assert appended[1] == "Brand New"
+    assert appended[2] == "99"
+
+
+def test_team_sheet_push_writes_full_table_when_sheet_empty(session):
+    """First-time bootstrap: sheet has no rows yet → push writes
+    the full DB state (header + body) so the operator has a
+    starting point."""
+    from app.sync.team_sheet import TeamSheetSync
+
+    session.add(
+        TeamMember(
+            real_name="First Member",
+            telegram_user_id=42,
+            telegram_username="petya",
+            active=True,
+        )
+    )
+    session.flush()
+
+    written_payloads: list[list[list[str]]] = []
+    appended_payloads: list[list[list[str]]] = []
+
+    class _Empty(TeamSheetSync):
+        def __init__(self):
+            self._service = None
+            self._spreadsheet_id = "stub"
+            self._sheet_name = "Team"
+
+        def _read_all(self):  # type: ignore[override]
+            return []
+
+        def _write(self, values):  # type: ignore[override]
+            written_payloads.append(values)
+
+        def _append(self, rows):  # type: ignore[override]
+            appended_payloads.extend(rows)
+
+    pushed = _Empty().push(session)
+    assert pushed == 1
+    assert written_payloads, "first-time push should call _write with the full table"
+    body = written_payloads[0][1:]
+    assert body[0][1] == "First Member"
+
+
 def test_upsert_from_sheet_rows_normalises_active_to_bool(session):
     """The sheet round-trips `true` / `false` strings, but operators
     type all sorts of variants (`да`, `1`, `yes`). All truthy

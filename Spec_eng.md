@@ -1407,6 +1407,37 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.28 — Auto-add new chat users + non-destructive `--push`
+
+Two operator-friendly registry tweaks after losing a round of
+manual Sheet edits to an over-eager `--push`.
+
+**Listener auto-creates `team_members` rows.** When the live
+listener observes a brand-new user (no existing team-row), it
+INSERTs a row with whatever fields the observation provides.
+Likely-bot rows start `active=False`. New teammates show up in
+the registry automatically — operator polishes on the Sheet
+later.
+
+**Non-destructive `--push`.** The new push reads the current
+sheet contents, then appends ONLY DB rows that aren't on the
+sheet yet (matched by id / telegram_user_id / slack_user_id).
+Existing operator edits are NEVER touched. Trade-off: deletions
+in the DB don't propagate; the sheet is the operator's source
+of truth, deletions flow Sheet → DB via `--pull`.
+
+Recommended workflow:
+
+  1. Operator edits the Sheet (`real_name`, `role`, `email`).
+  2. `python -m ops.sync_team --pull` brings edits to the DB.
+  3. New users appearing in chats land in the DB automatically.
+  4. `python -m ops.sync_team --push` appends those new rows to
+     the Sheet without touching existing edits.
+  5. Operator polishes the new rows; GOTO 1.
+
+
+---
+
 #### 13.27 — Owner display: `real_name` first, link only on `@username`
 
 Operator-driven simplification of the owner-rendering rules

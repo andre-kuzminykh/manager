@@ -47,34 +47,60 @@ def _enrich_team_member_row(
     first_name: str | None,
     last_name: str | None,
 ) -> None:
-    """FR-CR-05-21 — opportunistic backfill on the cross-channel
-    `team_members` row for ``user_id``. Only fills BLANK fields —
-    operator-edited values on the Sheet are never overwritten.
+    """FR-CR-05-21 / FR-CR-05-27 — opportunistic upsert on the
+    cross-channel `team_members` row for ``user_id``.
+
+    Two paths:
+
+      - Existing row: fill ONLY blank fields. Operator-edited
+        values on the Sheet are never overwritten.
+      - No row yet: INSERT a new row with whatever fields the
+        observation provides. Likely-bot rows (heuristic match
+        on `bot` / `_bot` / `office1` / `notif` / etc.) start
+        ``active=False`` so they don't pollute the LLM's owner-
+        candidate list. New teammates appearing in any chat the
+        bot is in show up in the Team registry automatically —
+        operator polishes on the Sheet later.
 
     Wrapped in try/except so a missing migration in a stale test
     fixture doesn't break the listener tick.
     """
     try:
+        from datetime import datetime as _dt, timezone as _tz
+
         from app.models import TeamMember as _TM
+        from app.services.team_members import _looks_like_bot
 
         row = (
             session.query(_TM)
             .filter(_TM.telegram_user_id == int(user_id))
             .first()
         )
+        full_name = " ".join(
+            p for p in (first_name, last_name) if p
+        ).strip() or None
         if row is None:
+            # FR-CR-05-27 — auto-create when a new user surfaces.
+            is_bot = _looks_like_bot(full_name, username)
+            session.add(
+                _TM(
+                    telegram_user_id=int(user_id),
+                    telegram_username=username or None,
+                    real_name=full_name,
+                    active=not is_bot,
+                    notes="auto: looks like bot account" if is_bot else None,
+                    last_synced_at=_dt.now(_tz.utc),
+                )
+            )
+            session.flush()
             return
         changed = False
         if (not row.telegram_username) and username:
             row.telegram_username = username
             changed = True
-        if not row.real_name:
-            full = " ".join(
-                p for p in (first_name, last_name) if p
-            ).strip() or None
-            if full:
-                row.real_name = full
-                changed = True
+        if not row.real_name and full_name:
+            row.real_name = full_name
+            changed = True
         if changed:
             session.flush()
     except Exception as e:  # noqa: BLE001

@@ -88,18 +88,21 @@ def test_upsert_member_does_not_overwrite_operator_edits(session):
     assert row.real_name == "Артем Соколов - CEO"
 
 
-def test_upsert_member_no_team_row_is_a_noop(session):
-    """A user with no `team_members` row (never seeded) gets
-    written to `telegram_chat_members` only — `upsert_member`
-    must NOT create a phantom team row."""
+def test_upsert_member_creates_team_row_for_new_user(session):
+    """FR-CR-05-27 — when the listener observes a brand-new user
+    (no existing team_members row), `upsert_member` AUTO-CREATES
+    one with whatever fields the observation provides. New
+    teammates appearing in any chat the bot is in show up in the
+    Team registry without manual seeding."""
     from app.models import TeamMember
 
     upsert_member(
         session,
         chat_id=-100,
         user_id=99999999,
-        username="nobody",
-        first_name="Nobody",
+        username="brand_new",
+        first_name="Newbie",
+        last_name="Smith",
     )
     session.flush()
     rows = (
@@ -107,7 +110,33 @@ def test_upsert_member_no_team_row_is_a_noop(session):
         .filter(TeamMember.telegram_user_id == 99999999)
         .all()
     )
-    assert rows == []
+    assert len(rows) == 1
+    assert rows[0].telegram_username == "brand_new"
+    assert rows[0].real_name == "Newbie Smith"
+    assert rows[0].active is True
+
+
+def test_upsert_member_creates_inactive_team_row_for_bot_account(session):
+    """FR-CR-05-27 — auto-created rows for obvious bot accounts
+    start `active=False` so they don't pollute the LLM's owner
+    candidates. Operator can flip on the sheet if needed."""
+    from app.models import TeamMember
+
+    upsert_member(
+        session,
+        chat_id=-100,
+        user_id=8675309,
+        username="ops1_notif",
+        first_name="Ops Notif Bot",
+    )
+    session.flush()
+    row = (
+        session.query(TeamMember)
+        .filter(TeamMember.telegram_user_id == 8675309)
+        .first()
+    )
+    assert row is not None
+    assert row.active is False
 
 
 def test_upsert_member_inserts_new_row(session):

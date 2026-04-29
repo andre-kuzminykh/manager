@@ -125,18 +125,90 @@ class TeamSheetSync:
             body={"values": values},
         ).execute()
 
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+        retry=retry_if_exception_type(HttpError),
+    )
+    def _append(self, rows: list[list[str]]) -> None:
+        """Append ``rows`` after the last filled row in the tab.
+        Used by the non-destructive `push` (FR-CR-05-27) to add
+        new DB rows without touching operator-edited cells.
+        """
+        if not rows:
+            return
+        end_col = chr(ord("A") + len(SHEET_HEADERS) - 1)
+        rng = f"{self._sheet_name}!A:{end_col}"
+        self._service.spreadsheets().values().append(
+            spreadsheetId=self._spreadsheet_id,
+            range=rng,
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": rows},
+        ).execute()
+
     def push(self, session: Session) -> int:
-        """Materialise the DB into the sheet. Returns the row count
-        written (excluding the header)."""
-        values = to_sheet_rows(session)
-        # Clear first so deletions in the DB are reflected. Cheap on
-        # a sub-1000-row registry.
-        try:
-            self._clear()
-        except HttpError as e:
-            log.warning("team_sheet_clear_failed", error=str(e))
-        self._write(values)
-        return max(0, len(values) - 1)
+        """FR-CR-05-27 — NON-DESTRUCTIVE push: appends only DB
+        rows that aren't on the sheet yet (matched by `id`,
+        `telegram_user_id`, or `slack_user_id`). Operator-edited
+        cells are never touched.
+
+        Trade-off vs. the old «clear + rewrite» behaviour:
+        deletions in the DB do NOT propagate to the sheet (the
+        sheet is the operator's source of truth). To remove a
+        row, the operator deletes it on the sheet, runs `--pull`,
+        and the DB row vanishes too. Anything else risks losing
+        operator edits — that bit us hard once already.
+
+        Returns the row count actually appended.
+        """
+        # Read current sheet contents to figure out which DB rows
+        # are missing.
+        existing_rows = self._read_all()
+        if existing_rows and existing_rows[0] and existing_rows[0][0].strip().lower() == "id":
+            existing_rows = existing_rows[1:]
+        sheet_ids: set[str] = set()
+        sheet_tg_ids: set[str] = set()
+        sheet_slack_ids: set[str] = set()
+        for r in existing_rows:
+            cells = list(r) + [""] * (len(SHEET_HEADERS) - len(r))
+            id_cell = (cells[0] or "").strip()
+            if id_cell:
+                sheet_ids.add(id_cell)
+            tg_id = (cells[2] or "").strip()
+            if tg_id:
+                sheet_tg_ids.add(tg_id)
+            slack_id = (cells[4] or "").strip()
+            if slack_id:
+                sheet_slack_ids.add(slack_id)
+
+        all_rows = to_sheet_rows(session)  # header + body
+        if not all_rows:
+            return 0
+        body = all_rows[1:]
+        new_rows: list[list[str]] = []
+        for row in body:
+            row_id = (row[0] or "").strip()
+            tg_id = (row[2] or "").strip()
+            slack_id = (row[4] or "").strip()
+            already_on_sheet = (
+                (row_id and row_id in sheet_ids)
+                or (tg_id and tg_id in sheet_tg_ids)
+                or (slack_id and slack_id in sheet_slack_ids)
+            )
+            if not already_on_sheet:
+                new_rows.append(row)
+
+        # If the sheet is empty (no header row at all), write the
+        # full table including the header — first-time bootstrap.
+        if not existing_rows and not any(c.strip() for r in (existing_rows or [[]]) for c in r):
+            self._write(all_rows)
+            return len(body)
+
+        if new_rows:
+            self._append(new_rows)
+        return len(new_rows)
 
 
 __all__ = ["TeamSheetSync"]

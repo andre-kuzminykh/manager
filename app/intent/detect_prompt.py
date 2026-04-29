@@ -48,7 +48,19 @@ Return ``is_task=false`` for:
   Note: an UNFINISHED report of someone else's outstanding ask
   («Артем сказал отправить, я пока не успел») still COUNTS AS A
   TASK — the action is owed.
-- Questions that don't ask for work ("как дела?", "что думаешь?").
+- *Bare questions without an imperative*. A question is no_action
+  when no one has to *do* anything to answer it:
+  «как дела?», «что думаешь?», «это была задача?»,
+  «ок?», «is this a task?», «есть встреча по демо?».
+  A polite-ask imperative («can you send the deck?», «отправите
+  отчёт?») IS a task — distinguish by whether the answer
+  requires WORK or just YES / NO.
+- *Pure quoted artefacts* — when the message is essentially a
+  template / blurb / email body / screenshot transcript without
+  an imperative wrapper («Блерб для отправки Abundance: Hi
+  [Name]…», «На изображении письмо с темой …»). The artefact
+  ITSELF isn't a task. If the author explicitly says «отправь»,
+  the imperative is the task and the artefact is the description.
 - Pure information ("доска в Figma: <link>").
 
 Scope: tasks only. Meetings and calendar events are OUT of scope

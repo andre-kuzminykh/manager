@@ -15,11 +15,27 @@ summary, nothing else.
 
 Produce three fields:
 - title:        short imperative summary of the work to do. Keep it
-                tight (<= 80 chars). Strip wrappers like "надо",
-                "please", "мне нужно". Strip any date / deadline
-                phrasing — dates belong in a separate field. Use the
-                imperative form ("подготовить питчдек", "prepare
-                pitch-deck").
+                tight (<= 80 chars; ideally 4-7 words). Strip
+                wrappers like "надо", "please", "мне нужно". Strip
+                any date / deadline phrasing — dates belong in a
+                separate field. Use the imperative form
+                ("подготовить питчдек", "prepare pitch-deck").
+
+                NEVER quote large fragments — no email bodies,
+                screenshot transcripts ("На изображении письмо…"),
+                templates ("Hi [Name], reaching out as a fellow…"),
+                URLs, or multi-paragraph dumps. If the source is
+                that kind of artefact, the title MUST summarise it
+                in <= 80 chars («отправить blurb для Abundance»,
+                «обработать скриншот письма»). When the message is
+                purely a quoted artefact with no clear action verb,
+                it's NOT a task — return `is_task=false` upstream
+                instead of stuffing the quote into the title here.
+                Same for messages that are themselves questions
+                without an imperative («это была задача?») —
+                upstream classifier should mark them no_action;
+                if you somehow get one anyway, give it the title
+                «уточнить статус задачи».
 - description:  any supplementary detail present in the source
                 message — references, numbers, sub-items, rationale.
                 Also use it for the leading project / context tag

@@ -145,7 +145,7 @@ def check_duplicate(
     *,
     candidate: dict[str, Any],
     llm_backend: Any | None,
-    lookback: int = 20,
+    lookback: int = 10,
 ) -> DedupResult:
     """Return a :class:`DedupResult` for ``candidate``.
 

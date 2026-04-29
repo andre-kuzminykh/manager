@@ -187,10 +187,22 @@ class TelegramIngestService:
         }
 
         out: list[Task] = []
+        seen_titles_pa: set[str] = set()
         for td in classification.tasks:
-            # Dedup against the last 20 open tasks. Skip the candidate
-            # silently when the LLM says it duplicates an existing one
-            # — the source-message bookmark below ensures we don't
+            # Intra-message dedup — drop exact-title repeats inside
+            # one message before paying for the cross-DB LLM check.
+            t_lower = (td.title or "").strip().lower()
+            if t_lower and t_lower in seen_titles_pa:
+                log.info(
+                    "telegram_ingest_skipped_intra_message_duplicate",
+                    title=td.title,
+                )
+                continue
+            seen_titles_pa.add(t_lower)
+
+            # Cross-DB dedup against the last open tasks. Skip the
+            # candidate silently when the LLM says it duplicates one —
+            # the source-message bookmark below ensures we don't
             # re-classify it on the next pass.
             from app.services.task_dedup import check_duplicate
 
@@ -347,7 +359,22 @@ class TelegramIngestService:
             message_id=message.message_id,
             task_count=len(classification.tasks),
         )
+        # Intra-message dedup: a multi-task LLM split occasionally
+        # emits the same title twice for one source message
+        # («Блерб для отправки Abundance» × 2). Filter exact-title
+        # duplicates here so the operator's DM doesn't get two
+        # identical widgets for the same input.
+        seen_titles: set[str] = set()
         for td in classification.tasks:
+            t_lower = (td.title or "").strip().lower()
+            if t_lower and t_lower in seen_titles:
+                log.info(
+                    "telegram_prepare_drafts_skipped_intra_message_duplicate",
+                    title=td.title,
+                )
+                continue
+            seen_titles.add(t_lower)
+
             # Same dedup gate as `process_all`: skip the draft +
             # widget when the LLM thinks the candidate duplicates an
             # already-existing open Task. Source-message bookmark

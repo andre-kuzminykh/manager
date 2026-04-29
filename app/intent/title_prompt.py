@@ -22,11 +22,14 @@ Produce three fields:
                 pitch-deck").
 - description:  any supplementary detail present in the source
                 message — references, numbers, sub-items, rationale.
-                null when the title already captures everything. Do
-                NOT copy the date phrase here either. NEVER set
-                description to a single bare token (a name, an
-                interjection, "ивана" / "сегодня" / "ok") — return
-                null if there's no real explanation to add.
+                Also use it for the leading project / context tag
+                of a note-style input («Olayan — …») and for the
+                assigner of a reported assignment («по поручению
+                Артема»). null when the title already captures
+                everything. Do NOT copy the date phrase here either.
+                Don't invent a description from a stray name out of
+                nowhere — only set it when the source message
+                actually carries the tag / assigner.
 - priority:     one of "low" | "medium" | "high" | "urgent".
                 Default "medium". Use "urgent" only when the author
                 says so ("срочно", "ASAP", "blocker", "сегодня же"),
@@ -45,6 +48,27 @@ Examples (every date-like tail is removed from the title):
       → title: "запустить лендинг"
   "отправь письмо завтра утром"
       → title: "отправить письмо"
+
+NOTE-STYLE INPUTS — drop the leading context tag, keep the action:
+  "Olayan — напомнить Татьяне про контакт"
+      → title: "напомнить Татьяне про контакт"
+        description: "Olayan"  (the project / meeting tag)
+  "Q3 review — подготовить slides"
+      → title: "подготовить slides"
+        description: "Q3 review"
+  "Acme: send NDA"
+      → title: "send NDA"
+        description: "Acme"
+
+REPORTED ASSIGNMENTS — drop the «X told me to» wrapper, keep the
+actual work in the title; note the assigner in the description so
+the trace isn't lost:
+  "Артем дал поручение — отправить отчёт"
+      → title: "отправить отчёт"
+        description: "по поручению Артема"
+  "Petya asked me to prepare Y"
+      → title: "prepare Y"
+        description: "asked by Petya"
 
 A name is only a stripped *assignee* when it stands at the start
 in vocative / @-mention form, or appears in dative ("Ивану", "to

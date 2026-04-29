@@ -10,34 +10,56 @@ from __future__ import annotations
 from typing import Any
 
 DETECT_SYSTEM_PROMPT = """\
-You are a binary classifier for Slack messages. You answer two
-questions in one shot:
+You are a binary classifier for Slack/Telegram messages. You answer
+two questions in one shot:
 
 1. Is the author asking someone to do a piece of work?
 2. If yes — does the message describe ONE task or SEVERAL?
 
-Return is_task=true when the message is an imperative or delegation
-phrased as:
+Return ``is_task=true`` for ALL of the following shapes:
+
+- *Direct imperative / delegation:*
   "надо ...", "нужно ...", "сделай ...", "подготовь ...",
-  "собери ...", "подготов...", "отправь ...", "напиши ...",
+  "собери ...", "отправь ...", "напиши ...",
   "please do X", "can you send Y?", "prepare Z by Friday",
   "assign to <Name>".
 
-Return is_task=false for:
-  - Chat, greetings, reactions, jokes.
-  - Observations / status ("отправил", "готово", "в процессе").
-  - Questions that don't ask for work ("как дела?", "что думаешь?").
-  - Pure information ("доска в Figma: <link>").
+- *Bare infinitive describing work* (very common in note-style
+  todo dumps):
+  "напомнить Татьяне про контакт", "подготовить отчёт",
+  "позвонить Васе сегодня", "отправить договор",
+  "send the deck", "follow up with Petya".
 
-Scope: tasks only. Meetings and calendar events are OUT of scope here
-— they go through a separate pipeline.
+- *Note-list entries shaped `<context> — <action>`* — the dash /
+  hyphen / colon separates a project-or-meeting tag from the work:
+  "Olayan — напомнить Татьяне про контакт",
+  "Q3 review — подготовить slides",
+  "Acme: send NDA".
 
-Produce a confidence in [0, 1] that reflects how explicit the task
-signal is:
-  0.90+  explicit imperative ("надо подготовить отчёт до пятницы")
-  0.70-0.89  likely task but ambiguous wording
+- *Reported assignments still owed* — someone delegated to the
+  author and the work isn't done yet:
+  "Артем дал поручение — отправить X",
+  "Petya asked me to prepare Y",
+  "получил задачу подготовить Z от Маши".
+
+Return ``is_task=false`` for:
+- Chat, greetings, reactions, jokes.
+- *Completed* status reports ("отправил", "готово", "сделал X").
+  Note: an UNFINISHED report of someone else's outstanding ask
+  («Артем сказал отправить, я пока не успел») still COUNTS AS A
+  TASK — the action is owed.
+- Questions that don't ask for work ("как дела?", "что думаешь?").
+- Pure information ("доска в Figma: <link>").
+
+Scope: tasks only. Meetings and calendar events are OUT of scope
+here — they go through a separate pipeline.
+
+Confidence in [0, 1]:
+  0.90+   explicit imperative ("надо подготовить отчёт до пятницы")
+  0.70-0.89  likely task — bare infinitive, note-list entry, or
+             reported assignment
   0.40-0.69  might be a task, tone unclear
-  <0.40  probably chat
+  <0.40   probably chat
 
 MULTI-TASK SPLITTING (FR-CR-05-05):
 A single message can describe several tasks. Split when each chunk

@@ -1261,39 +1261,26 @@ class TelegramListener:
                 )
                 return
             _drop_prompt()
-            refresh_card(
-                sender=self._sender,
-                session=session,
-                task=task,
-                viewer=actor,
-            )
-            # FR-CR-05-38 — instead of a small «✓ Готово / owner →
-            # 222968032» receipt, post the FULL updated card as a
-            # new DM message right under the operator's reply.
-            # That way the operator sees the whole new state in
-            # context (no scrolling up to find the in-place edit
-            # of the original card) and the receipt always shows
-            # human-friendly labels via build_task_card_text.
+            # FR-CR-05-47 — replace the editor's stale card with a
+            # fresh one posted under their reply. Other recipients'
+            # cards are refreshed in place inside the helper (they
+            # didn't trigger the edit, but still need accurate state).
             try:
-                from app.telegram_bot.cards import _keyboard_for
-                from app.services import SubscriptionService
+                from app.telegram_bot.cards import replace_card_for_viewer
 
-                is_subscribed = (
-                    SubscriptionService().is_subscribed(
-                        session, task=task, slack_user_id=actor
-                    )
-                    if task.owner_user_id
-                    else False
-                )
-                kb = _keyboard_for(task, actor, subscribed=is_subscribed)
-                self._sender.send_message(
-                    chat_id=msg.chat_id,
-                    text=build_task_card_text(task, session=session),
-                    reply_markup=kb,
+                replace_card_for_viewer(
+                    sender=self._sender,
+                    session=session,
+                    task=task,
+                    viewer_chat_id=msg.chat_id,
                     reply_to_message_id=msg.message_id,
                 )
             except Exception as e:  # noqa: BLE001
-                log.info("telegram_edit_receipt_failed", error=str(e))
+                log.warning(
+                    "telegram_edit_replace_card_failed",
+                    task_id=task.id,
+                    error=str(e),
+                )
             # Optional clarification nudge for vague-owner edits
             # (operator typed «другого оунера» but no resolution).
             if "owner" not in applied:

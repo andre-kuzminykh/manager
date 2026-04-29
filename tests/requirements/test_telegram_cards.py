@@ -561,3 +561,158 @@ def test_post_draft_confirmation_sends_only_widget_no_forward_no_quote(
             assert "reply_markup" in s
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-47 — replace_card_for_viewer
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class _RecordingSenderWithDelete(_RecordingSender):
+    deleted: list[dict] = field(default_factory=list)
+
+    def delete_message(self, **kwargs):
+        self.deleted.append(kwargs)
+        return {}
+
+
+def test_replace_card_for_viewer_deletes_old_and_posts_new(session):
+    """When the editor sends an Edit reply, their stale card is
+    DELETED (not edited in place); a fresh card is posted under
+    their reply. `task.card_ts` advances to the new message_id;
+    `task.extra["telegram_cards"]` now contains the new pair, not
+    the old one."""
+    from app.telegram_bot.cards import replace_card_for_viewer
+
+    t = _mk_task(session)
+    t.extra = {"telegram_cards": [{"chat_id": 222, "message_id": 100}]}
+    t.card_channel = "222"
+    t.card_ts = "100"
+    session.flush()
+
+    sender = _RecordingSenderWithDelete(next_message_id=500)
+    replace_card_for_viewer(
+        sender=sender,
+        session=session,
+        task=t,
+        viewer_chat_id=222,
+        reply_to_message_id=42,
+    )
+
+    # Old card was deleted.
+    assert sender.deleted == [{"chat_id": 222, "message_id": 100}]
+    # New card was posted under the reply.
+    assert len(sender.sent) == 1
+    new = sender.sent[0]
+    assert new["chat_id"] == 222
+    assert new["reply_to_message_id"] == 42
+    # Stored card list points to the NEW message id, not the old one.
+    assert t.card_ts == "500"
+    cards = (t.extra or {}).get("telegram_cards") or []
+    assert cards == [{"chat_id": 222, "message_id": 500}]
+
+
+def test_replace_card_for_viewer_refreshes_other_recipients_in_place(session):
+    """Other admins / owner had their own cards. They didn't trigger
+    the edit, but their cards must show the new state — so they get
+    an in-place edit (`update_message`), not delete-and-repost."""
+    from app.telegram_bot.cards import replace_card_for_viewer
+
+    t = _mk_task(session)
+    t.extra = {
+        "telegram_cards": [
+            {"chat_id": 222, "message_id": 100},  # editor
+            {"chat_id": 333, "message_id": 200},  # other admin
+            {"chat_id": 444, "message_id": 300},  # another admin
+        ],
+    }
+    session.flush()
+
+    sender = _RecordingSenderWithDelete(next_message_id=500)
+    replace_card_for_viewer(
+        sender=sender, session=session, task=t,
+        viewer_chat_id=222,
+        reply_to_message_id=None,
+    )
+
+    # Other two cards were edited in place.
+    updated_chats = sorted(u["chat_id"] for u in sender.updated)
+    assert updated_chats == [333, 444]
+    # Editor's card was deleted.
+    assert sender.deleted == [{"chat_id": 222, "message_id": 100}]
+    # New card landed for editor only.
+    assert len(sender.sent) == 1
+    assert sender.sent[0]["chat_id"] == 222
+    # The stored list now has 3 cards: 333 + 444 in place, 222 with
+    # the freshly-assigned message_id.
+    cards = sorted(
+        (t.extra or {}).get("telegram_cards") or [],
+        key=lambda c: c["chat_id"],
+    )
+    assert cards == [
+        {"chat_id": 222, "message_id": 500},
+        {"chat_id": 333, "message_id": 200},
+        {"chat_id": 444, "message_id": 300},
+    ]
+
+
+def test_replace_card_for_viewer_no_card_for_viewer_just_posts(session):
+    """Edge case — the viewer had no stored card (e.g. they
+    /start-ed the bot AFTER the task was created). Nothing to
+    delete; just post a new card and add it to the stored list."""
+    from app.telegram_bot.cards import replace_card_for_viewer
+
+    t = _mk_task(session)
+    t.extra = {"telegram_cards": [{"chat_id": 333, "message_id": 200}]}
+    session.flush()
+
+    sender = _RecordingSenderWithDelete(next_message_id=600)
+    replace_card_for_viewer(
+        sender=sender, session=session, task=t,
+        viewer_chat_id=222,
+        reply_to_message_id=None,
+    )
+    # Nothing to delete (viewer had no card).
+    assert sender.deleted == []
+    # Existing card refreshed in place.
+    assert len(sender.updated) == 1
+    assert sender.updated[0]["chat_id"] == 333
+    # Viewer got the freshly posted card.
+    assert len(sender.sent) == 1
+    assert sender.sent[0]["chat_id"] == 222
+    # extra now has both cards.
+    cards = sorted(
+        (t.extra or {}).get("telegram_cards") or [],
+        key=lambda c: c["chat_id"],
+    )
+    assert cards == [
+        {"chat_id": 222, "message_id": 600},
+        {"chat_id": 333, "message_id": 200},
+    ]
+
+
+def test_replace_card_for_viewer_swallows_delete_failures(session):
+    """If Telegram returned an error on `delete_message` (e.g. the
+    message is too old to delete), the helper logs and continues —
+    a stale card hanging in chat is uglier than the bot crashing,
+    but neither blocks task state from being updated."""
+    from app.telegram_bot.cards import replace_card_for_viewer
+
+    t = _mk_task(session)
+    t.extra = {"telegram_cards": [{"chat_id": 222, "message_id": 100}]}
+    session.flush()
+
+    class _FailingDeleteSender(_RecordingSenderWithDelete):
+        def delete_message(self, **kwargs):
+            raise RuntimeError("message too old")
+
+    sender = _FailingDeleteSender(next_message_id=500)
+    # Doesn't raise.
+    replace_card_for_viewer(
+        sender=sender, session=session, task=t,
+        viewer_chat_id=222, reply_to_message_id=None,
+    )
+    # New card still posted, stored list still updated.
+    assert sender.sent and sender.sent[0]["chat_id"] == 222
+    assert t.card_ts == "500"

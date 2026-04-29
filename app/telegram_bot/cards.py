@@ -228,6 +228,124 @@ def refresh_card(
             )
 
 
+def replace_card_for_viewer(
+    *,
+    sender: TelegramSender,
+    session: Session,
+    task: Task,
+    viewer_chat_id: int,
+    reply_to_message_id: int | None = None,
+) -> None:
+    """FR-CR-05-47 — used by the Edit-reply flow. Deletes the
+    editor's stale card and posts a fresh one under their reply
+    so the chat stays clean: «когда редактируешь — старая
+    удаляется, только новая есть».
+
+    Other recipients (other admins, owner if different) still get
+    their card updated in place — they didn't trigger the edit and
+    don't need the «replace» UX, but they DO need to see the new
+    state, so they're refreshed via the same in-place mechanism
+    `refresh_card` uses.
+    """
+    if task.source_kind != TaskSourceKind.telegram or not sender.enabled:
+        return
+    cards = _stored_cards(task)
+    text = build_task_card_text(task, session=session)
+    other_cards: list[dict[str, int]] = []
+    viewer_old_cards: list[dict[str, int]] = []
+    for c in cards:
+        if int(c["chat_id"]) == int(viewer_chat_id):
+            viewer_old_cards.append(c)
+        else:
+            other_cards.append(c)
+
+    # 1. Refresh OTHER recipients' cards in place.
+    for c in other_cards:
+        recipient = str(c["chat_id"])
+        is_subscribed = (
+            SubscriptionService().is_subscribed(
+                session, task=task, slack_user_id=recipient
+            )
+            if task.owner_user_id
+            else False
+        )
+        kb = _keyboard_for(task, recipient, subscribed=is_subscribed)
+        try:
+            sender.update_message(
+                chat_id=c["chat_id"],
+                message_id=c["message_id"],
+                text=text,
+                reply_markup=kb,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "telegram_replace_card_refresh_other_failed",
+                task_id=task.id,
+                chat_id=c["chat_id"],
+                error=str(e),
+            )
+
+    # 2. Delete the viewer's stale card(s). There's normally one,
+    # but a second one can exist if the viewer was on multiple
+    # admin lists at create time — clean them all.
+    for c in viewer_old_cards:
+        try:
+            sender.delete_message(
+                chat_id=c["chat_id"], message_id=c["message_id"]
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "telegram_replace_card_delete_failed",
+                task_id=task.id,
+                chat_id=c["chat_id"],
+                message_id=c["message_id"],
+                error=str(e),
+            )
+
+    # 3. Post the fresh card to the viewer under their reply.
+    is_subscribed = (
+        SubscriptionService().is_subscribed(
+            session, task=task, slack_user_id=str(viewer_chat_id)
+        )
+        if task.owner_user_id
+        else False
+    )
+    kb = _keyboard_for(task, str(viewer_chat_id), subscribed=is_subscribed)
+    try:
+        resp = sender.send_message(
+            chat_id=int(viewer_chat_id),
+            text=text,
+            reply_markup=kb,
+            reply_to_message_id=reply_to_message_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "telegram_replace_card_post_failed",
+            task_id=task.id,
+            chat_id=viewer_chat_id,
+            error=str(e),
+        )
+        resp = {}
+
+    new_msg_id = (resp or {}).get("message_id")
+    new_cards = list(other_cards)
+    if new_msg_id:
+        new_cards.append(
+            {"chat_id": int(viewer_chat_id), "message_id": int(new_msg_id)}
+        )
+
+    # 4. Persist updated card list. `card_channel`/`card_ts` keep
+    # pointing at the viewer's NEW card so single-card legacy
+    # readers see the up-to-date pair.
+    extra = dict(task.extra or {})
+    extra["telegram_cards"] = new_cards
+    task.extra = extra
+    if new_msg_id:
+        task.card_channel = str(viewer_chat_id)
+        task.card_ts = str(new_msg_id)
+    session.flush()
+
+
 def _resolve_actor_label(
     session: Session | None, actor_uid: str | None
 ) -> str | None:

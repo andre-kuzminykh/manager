@@ -723,6 +723,139 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-47 — Edit-reply replaces editor's card (delete + repost)
+
+Operator wanted: «когда редактируешь карточку с задачей —
+старая удаляется, только новая есть».
+
+Pre-FR-CR-05-47 the Edit reply flow:
+  - `refresh_card` edited every delivered card in place (good
+    for other recipients but the editor still saw their stale
+    card unmoved up the chat).
+  - Plus a SECOND DM with the full re-rendered card body was
+    posted under the user's reply (FR-CR-05-38). Net effect:
+    two cards in the editor's chat — one stale-but-edited
+    near the top of history, one fresh near the bottom.
+
+New flow uses `replace_card_for_viewer(sender, session,
+task, viewer_chat_id, reply_to_message_id)` in
+`app/telegram_bot/cards.py`:
+
+  1. Refresh OTHER recipients' cards in place
+     (`update_message`) — they didn't trigger the edit but
+     still need accurate state. Same UX as before for them.
+  2. DELETE the editor's stale card via `delete_message`.
+     Failures (message too old, Telegram error) are logged
+     and swallowed — a hanging stale card is uglier than a
+     crash but doesn't block task state.
+  3. POST a fresh card to the editor's chat under their
+     reply. Same body + keyboard as the live cards.
+  4. Persist the updated `(chat_id, message_id)` list onto
+     `task.extra["telegram_cards"]` and update
+     `task.card_channel/card_ts` to the new pair so legacy
+     single-card readers stay consistent.
+
+The FR-CR-05-38 «full re-rendered card under reply» is now
+the same message that replaces the deleted card — no more
+double-card layout.
+
+#### FR-CR-05-46 — Multi-task extraction in prompt + tool schema
+
+Operator: «надиктовал "мне нужно разработать бота а ещё мне
+нужно сделать дашборд" — это две задачи, он как одну взял».
+
+`IntentClassification.tasks: list[TaskDraft]` had been wired
+in code since FR-CR-05-05, but the LLM tool schema only
+exposed a singular `task` field — so the LLM physically
+couldn't emit a `tasks` array. The model crammed two verbs
+into a single title.
+
+Fix is two-part:
+
+  - `INTENT_TOOL_PARAMETERS` (`app/intent/llm_backends.py`)
+    now carries a `tasks` array — each item the same shape
+    as the legacy `task`. The LLM is told this is the
+    canonical field; legacy `task` stays for back-compat
+    and is normalised to `tasks=[task]` by the
+    `IntentClassification` validator.
+  - `SYSTEM_PROMPT` rule #3 rewritten with explicit
+    splitting signals (conjunctions «а ещё», enumerations,
+    two-verb sentences, two distinct objects) and a
+    worked example pinned in the prompt
+    («разработать бота» + «сделать дашборд» → two tasks).
+
+Tests pin both the prompt content (split signals + worked
+example) and the tool-schema shape (`tasks` array with the
+full TaskDraft fields).
+
+#### FR-CR-05-45 — `/start` welcome widget
+
+`/start` and `/help` in any private DM with the bot now
+return a single onboarding message:
+
+```
+👋 Привет! Я веду список задач.
+📝 Напиши задачу текстом или продиктуй голосом — я разберу.
+Можно списком: «первая задача …, вторая задача …» — раскидаю
+в виде отдельных карточек.
+🚦 На каждой карточке кнопки: Start, Edit, Mark done, Subscribe.
+📊 Каждый вечер пришлю краткий статус по всем задачам.
+☀ Каждое утро — карточки на сегодня.
+```
+
+The `tick()` loop intercepts the slash-command BEFORE the
+ingest pipeline so the classifier isn't called and no Task
+row lands. Group chats fall through to normal capture
+(groups don't need onboarding).
+
+Multi-task voice/text dictation, raised by the same
+operator instruction, is delivered by the existing
+FR-CR-05-05 `process_all` flow — no new code needed there
+once FR-CR-05-44 made voice top-level captures work and
+FR-CR-05-46 unlocked multi-task extraction.
+
+#### FR-CR-05-44 — Top-level voice / audio capture in DM
+
+A voice message in a private DM that's NOT a reply to a
+prompt used to fall through with `msg.text == ""` and hit
+the ingest pipeline as silent no_action — operator
+complaint: «я отправил аудио в бота и все сломалось».
+
+The `tick()` loop now transcribes via Whisper (same helper
+used by FR-CR-05-14 in Edit/Done replies) right after the
+pending-reply check and rebuilds the message dataclass with
+`text=transcript`. If transcription returns empty in a
+private DM, the user gets an explicit nudge: «🎙 Не разобрал
+голос. Попробуй ещё раз или напиши текстом.». Group chats
+fall through silently.
+
+#### FR-CR-05-43 — Edit-fanout DM silenced
+
+The cross-channel subscriber dispatch (FR-CR-05-02) used
+to DM every non-owner subscriber a one-line «✏ #N title —
+description=…, priority=high by 222968032» on every edit.
+Format was technical (`field=value`) and showed raw uid as
+actor. Operator: «такие сообщения после редактирования
+писать не надо».
+
+Removed the `dispatch_edit` call from
+`apply_edit_reply_ex`. The helper itself stays in
+`subscriber_updates` for any future reuse, but no caller
+fires it now. Status-change fanout
+(`dispatch_status_change`, «started» / «done» events) is
+unaffected — high-signal transitions still fan out.
+
+#### FR-CR-05-42 — `team_members.notes` column → TEXT
+
+Production logs showed every Sheet → DB pull failing with
+`StringDataRightTruncation` because the operator pasted
+multi-paragraph notes (>512 chars) into the Team sheet.
+Migration `0019_team_members_notes_text` issues
+`ALTER COLUMN ... TYPE TEXT` on PostgreSQL; SQLite
+(tests) is a no-op since VARCHAR maps to TEXT internally.
+The 200-char cap on the owner-prompt block (FR-CR-05-31)
+keeps prompts reasonable even with very long DB values.
+
 #### FR-CR-05-41 — Morning task cards (one interactive card per task)
 
 The legacy `plan-morning` posted a single bullet-list DM

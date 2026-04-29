@@ -273,28 +273,72 @@ def test_evening_status_works_without_llm(
 # --------------------------------------------------------------------------- #
 
 
-def test_evening_status_renders_title_as_hyperlink(
+def test_evening_status_renders_title_as_hyperlink_to_bot_card(
     patched_session_scope, SessionFactory
 ):
-    """When `source_permalink` is set, the title is wrapped in
-    `<a href="..."><b>title</b></a>`."""
+    """FR-CR-05-48 — title hyperlink points at the BOT'S task
+    card (`tg://openmessage?...` deep link to the recipient's
+    DM with the bot), NOT the source-message permalink the
+    operator dislikes («ссылка именно на карточку с
+    сообщением с задачей в боте, а не с сообщением в чате»)."""
     today = date(2026, 4, 29)
     with SessionFactory() as s:
-        _mk_task(
+        t = _mk_task(
             s,
             title="follow-up call",
+            owner_user_id="111",
             source_permalink="https://t.me/c/123/456",
         )
+        # Recipient 111's card lives in their DM — message id 9001.
+        t.extra = {"telegram_cards": [{"chat_id": 111, "message_id": 9001}]}
         s.commit()
         sender = _RecordingTGSender()
+        # The sender's `_token` is what the renderer reads to derive
+        # the bot user_id for the deep link.
+        sender._token = "8675374199:fake-secret"
         send_evening_status_report(
             s, sender=sender, llm=_StubLLM(reply="ok"),
             today=today, include_admin_overview=False,
         )
         s.commit()
     body = sender.sent[0]["text"]
-    assert '<a href="https://t.me/c/123/456">' in body
+    # Hyperlink points at the bot's DM card, not the chat permalink.
+    # The `&` in the URL is HTML-escaped to `&amp;` (which Telegram
+    # parses back into a working link client-side).
+    assert "tg://openmessage?user_id=8675374199&amp;message_id=9001" in body
     assert "<b>follow-up call</b>" in body
+    # Source permalink does NOT leak into the rendered title.
+    assert "t.me/c/123/456" not in body
+
+
+def test_evening_status_title_no_hyperlink_when_card_url_unknown(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-48 — when the recipient has no stored card (and
+    the task isn't in a -100 supergroup), the title renders
+    plain. We deliberately stop falling back to source_permalink
+    so the operator never sees a chat-message link in the
+    evening report."""
+    today = date(2026, 4, 29)
+    with SessionFactory() as s:
+        _mk_task(
+            s,
+            title="no card",
+            owner_user_id="111",
+            source_permalink="https://t.me/c/999/777",
+        )
+        s.commit()
+        sender = _RecordingTGSender()
+        sender._token = "8675374199:secret"
+        send_evening_status_report(
+            s, sender=sender, llm=_StubLLM(reply="ok"),
+            today=today, include_admin_overview=False,
+        )
+        s.commit()
+    body = sender.sent[0]["text"]
+    # Plain title, no <a> tag at all.
+    assert "<b>no card</b>" in body
+    assert "<a href=" not in body
 
 
 # --------------------------------------------------------------------------- #

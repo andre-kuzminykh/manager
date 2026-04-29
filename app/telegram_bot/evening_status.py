@@ -335,32 +335,90 @@ def _truncate_one_line(text: str, *, limit: int) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _bot_user_id_from_token(token: str | None) -> str | None:
+    """Telegram bot tokens are `<bot_user_id>:<secret>` — pull the
+    leading numeric chunk so we can build `tg://openmessage`
+    deep-links pointing at the bot's DM."""
+    if not token:
+        return None
+    head = token.split(":", 1)[0]
+    return head if head.isdigit() else None
+
+
+def _task_card_url(
+    task: Task, *, recipient_chat_id: int | None, bot_user_id: str | None
+) -> str | None:
+    """FR-CR-05-48 — return a clickable URL to the BOT'S task
+    card in the recipient's chat, NOT the source-message
+    permalink the operator dislikes («ссылка именно на карточку
+    с сообщением с задачей в боте, а не с сообщением в чате»).
+
+    Resolution order:
+
+      1. The recipient's own card in `task.extra
+         ["telegram_cards"]`. Mobile clients honour
+         `tg://openmessage?user_id=<bot_id>&message_id=<msg_id>`
+         and jump straight to that message in the DM.
+      2. A supergroup-hosted card (chat_id starting with -100):
+         `https://t.me/c/<stripped>/<msg_id>` — public URL the
+         operator can open from any client.
+      3. Else None — the title renders without a hyperlink.
+         Falling back to `source_permalink` would re-introduce
+         the very behaviour FR-CR-05-48 set out to remove.
+    """
+    cards = ((task.extra or {}).get("telegram_cards") or [])
+    if recipient_chat_id is not None and bot_user_id:
+        for c in cards:
+            try:
+                cid = int(c.get("chat_id"))
+                mid = int(c.get("message_id"))
+            except (TypeError, ValueError):
+                continue
+            if cid == int(recipient_chat_id):
+                return f"tg://openmessage?user_id={bot_user_id}&message_id={mid}"
+
+    if task.card_channel and task.card_ts:
+        ch = str(task.card_channel)
+        if ch.startswith("-100"):
+            return f"https://t.me/c/{ch[4:]}/{task.card_ts}"
+    return None
+
+
 def _render_task_line(
     *,
     session: Session | None,
     task: Task,
     narrative: str,
     show_owner: bool,
+    recipient_chat_id: int | None = None,
+    bot_user_id: str | None = None,
 ) -> str:
     """Render one task line as Telegram HTML.
 
     Format:
-        <bullet> <a href="permalink"><b>title</b></a>
+        <bullet> <a href="<bot-card-url>"><b>title</b></a>
             <narrative>
             (👤 owner-link · 📅 due)  ← only when show_owner=True
 
-    The optional owner line is suppressed when the report is
-    being rendered for the owner themselves (no need to tell
-    Andrey his task is owned by Andrey).
+    Title hyperlink prefers the BOT'S task-card location
+    (FR-CR-05-48), falling back to plain text when no clickable
+    URL form is available — Telegram doesn't expose public links
+    for DM messages, so a desktop reader may end up with a
+    plain title even on an active DM card.
     """
     if task.status == TaskStatus.done:
         bullet = "✅"
     else:
         bullet = PRIORITY_EMOJI.get(task.priority.value, "🟡")
     safe_title = _escape_html(task.title or "")
-    if task.source_permalink:
+    card_url = _task_card_url(
+        task,
+        recipient_chat_id=recipient_chat_id,
+        bot_user_id=bot_user_id,
+    )
+    if card_url:
         title_html = (
-            f'<a href="{_escape_html(task.source_permalink)}">'
+            f'<a href="{_escape_html(card_url)}">'
             f"<b>{safe_title}</b></a>"
         )
     else:
@@ -399,6 +457,7 @@ def _build_groups(
     user_id: str,
     today: date,
     is_admin_view: bool,
+    bot_user_id: str | None = None,
 ) -> tuple[list[_TaskGroup], int]:
     """Returns the rendered groups + total tasks described (so the
     caller can update its counter)."""
@@ -418,6 +477,13 @@ def _build_groups(
 
     groups: list[_TaskGroup] = []
     described = 0
+    # Pass the recipient's chat_id (= their numeric Telegram uid)
+    # into the renderer so per-task `tg://openmessage` deep links
+    # resolve to that user's DM card.
+    try:
+        recipient_chat_id = int(user_id)
+    except (TypeError, ValueError):
+        recipient_chat_id = None
 
     def _section(emoji_title: str, tasks: list[Task], show_owner: bool) -> None:
         nonlocal described
@@ -435,6 +501,8 @@ def _build_groups(
                     task=t,
                     narrative=narrative,
                     show_owner=show_owner,
+                    recipient_chat_id=recipient_chat_id,
+                    bot_user_id=bot_user_id,
                 )
             )
         groups.append(g)
@@ -552,6 +620,11 @@ def send_evening_status_report(
     (user, date)."""
     today = today or date.today()
     report = EveningStatusReport()
+    # Bot's numeric user_id — extracted from the bot token. Needed
+    # by `_render_task_line` to build per-recipient
+    # `tg://openmessage` deep links pointing at the BOT'S card,
+    # not the source-message permalink (FR-CR-05-48).
+    bot_user_id = _bot_user_id_from_token(getattr(sender, "_token", None))
 
     # Per-owner reports — owners get their own tasks + subscriptions.
     owners = _telegram_owner_ids(session)
@@ -569,6 +642,7 @@ def send_evening_status_report(
             user_id=uid,
             today=today,
             is_admin_view=False,
+            bot_user_id=bot_user_id,
         )
         if not groups:
             report.skipped_no_tasks += 1
@@ -630,6 +704,7 @@ def send_evening_status_report(
                 user_id=admin_uid,
                 today=today,
                 is_admin_view=True,
+                bot_user_id=bot_user_id,
             )
             if not groups:
                 report.skipped_no_tasks += 1

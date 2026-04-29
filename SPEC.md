@@ -723,6 +723,44 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-48 — Evening report links to the bot's task card
+
+Operator: «когда задача в статусе по вечерам — то в
+гиперссылке ссылка именно на карточку с сообщением с
+задачей в боте, а не с сообщением в чате».
+
+The evening status report (`_render_task_line`) used to
+hyperlink each title to `task.source_permalink` — i.e.
+the original chat message that triggered the capture. The
+operator wants the title to navigate to the BOT'S CARD in
+their DM instead, so they can act on it (Edit / Mark done /
+Subscribe) without scrolling the chat.
+
+New helper `_task_card_url(task, recipient_chat_id,
+bot_user_id)` resolves a clickable URL with this priority:
+
+  1. The recipient's own card in
+     `task.extra["telegram_cards"]` — emit
+     `tg://openmessage?user_id=<bot_user_id>&message_id=<msg_id>`.
+     Mobile Telegram clients honour this and jump straight
+     to the message inside the recipient's DM.
+  2. A supergroup-hosted card (chat_id starting with
+     `-100`) — emit `https://t.me/c/<stripped>/<msg_id>`.
+     Public URL form, works in any client.
+  3. None — title renders plain. We deliberately stop
+     falling back to `source_permalink` so chat-message
+     links never re-enter the report.
+
+`bot_user_id` is extracted from the bot token
+(`<bot_user_id>:<secret>` → leading numeric chunk) inside
+`send_evening_status_report` and threaded through
+`_build_groups` → `_render_task_line`.
+
+Limitation noted in code: Telegram has no public per-message
+URL for DMs, so desktop / web readers may end up with a
+plain title even when the recipient has an active DM card.
+Mobile readers (the dominant case) get the deep link.
+
 #### FR-CR-05-47 — Edit-reply replaces editor's card (delete + repost)
 
 Operator wanted: «когда редактируешь карточку с задачей —

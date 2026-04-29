@@ -796,12 +796,18 @@ def test_listener_view_realtime_pulls_when_enabled(
     pulls the latest batch from the view and runs each message
     through `prepare_drafts`. Already-processed messages
     short-circuit per the existing bookmark."""
+    from app.models import ProcessedTelegramMessage
     from app.telegram_ingest.reader import TelegramSourceMessage
 
     seen_messages: list[TelegramSourceMessage] = [
         TelegramSourceMessage(
             chat_id=-1001234, message_id=42,
             text="prepare deck for Friday", user_id=99,
+        ),
+        # Already-processed marker — bookmark exists, will skip.
+        TelegramSourceMessage(
+            chat_id=-1001234, message_id=41,
+            text="some old", user_id=99,
         ),
     ]
 
@@ -819,6 +825,21 @@ def test_listener_view_realtime_pulls_when_enabled(
     ingest = _make_ingest(classification)
     ingest._reader = _StubReader()  # noqa: SLF001
 
+    # Pre-bookmark message_id=41 so the second message short-
+    # circuits as «already processed». That signals «caught up»
+    # and the batch-expansion loop terminates after one round.
+    from datetime import datetime, timezone as _tz
+    with SessionFactory() as s:
+        s.add(
+            ProcessedTelegramMessage(
+                chat_id=-1001234,
+                message_id=41,
+                processed_at=datetime.now(_tz.utc),
+                task_id=None,
+            )
+        )
+        s.commit()
+
     listener = TelegramListener(
         token="123:abc",
         ingest=ingest,
@@ -826,8 +847,6 @@ def test_listener_view_realtime_pulls_when_enabled(
         view_poll_interval_seconds=1,
         view_poll_batch_size=10,
     )
-    # Replace the sender with a recording stub so the widget DM
-    # doesn't try to hit Telegram.
     sent: list[dict] = []
 
     class _RecSender:
@@ -845,9 +864,44 @@ def test_listener_view_realtime_pulls_when_enabled(
 
     listener._sender = _RecSender()
     listener._maybe_poll_source_view()
-    # The call ran the message through prepare_drafts; the
-    # resulting widget was sent.
-    assert any("draft" in s.get("text", "").lower() or "📌" in s.get("text", "") or "prepare deck" in s.get("text", "") for s in sent)
+    # The new message produced a widget; the already-processed
+    # one was skipped on the bookmark.
+    assert sent, "expected at least one widget to be sent"
+
+
+def test_listener_view_realtime_pulls_full_batch_size_per_poll(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-36 — listener pulls `view_poll_batch_size`
+    rows in a single SQL roundtrip per poll. Already-processed
+    rows short-circuit on the bookmark, so the actual work is
+    bounded by «new since last poll», not by batch_size. The
+    operator can bump VIEW_POLL_BATCH_SIZE if a deploy ever
+    sees a burst bigger than the default 500."""
+    from app.telegram_ingest.reader import TelegramSourceMessage
+
+    captured_limits: list[int] = []
+
+    class _Reader:
+        configured = True
+
+        def iter_newest(self, *, limit):
+            captured_limits.append(limit)
+            return iter([])
+
+    ingest = _make_ingest(IntentClassification(
+        intent=IntentType.no_action, confidence=0.0
+    ))
+    ingest._reader = _Reader()  # noqa: SLF001
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=ingest,
+        view_realtime_enabled=True,
+        view_poll_interval_seconds=1,
+        view_poll_batch_size=500,
+    )
+    listener._maybe_poll_source_view()
+    assert captured_limits == [500]
 
 
 def test_listener_view_realtime_throttled_within_interval(

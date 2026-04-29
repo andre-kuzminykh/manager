@@ -723,6 +723,23 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-36 — Pull every new message per poll (large default batch)
+
+The FR-CR-05-35 listener-side view poll initially capped at 50
+rows per tick, which would skip messages on a busy deploy.
+Operator wanted «every new message every 30 sec».
+
+Default batch bumped to 500 (`VIEW_POLL_BATCH_SIZE=500`). One
+SQL roundtrip per poll covers any realistic burst; the
+FR-CR-04-26 per-message bookmark short-circuits already-
+processed rows, so the actual work is bounded by «what's new
+since last poll», not by `batch_size`.
+
+If a deploy ever sees more than 500 new messages in 30 sec, the
+operator bumps `VIEW_POLL_BATCH_SIZE` further or runs
+`ops.migrate_telegram_history --newest --limit N` to catch up
+manually.
+
 #### FR-CR-05-35 — Real-time poll of the Supabase TG view
 
 The cron-driven `ops.telegram_ingest` pulls messages from the
@@ -3020,6 +3037,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-33  | `test_telegram_cards.py::test_render_tombstone_resolves_actor_uid_to_team_name` (session + matching team_members row ⇒ tombstone shows real_name, no raw uid); `::test_render_tombstone_falls_back_to_uid_without_session` (legacy callers without a session keep the raw uid behaviour) |
 | FR-CR-05-34  | `test_telegram_bot.py::test_confirm_keyboard_has_three_buttons_in_order` (order pinned as `[ignore, edit, confirm]`); manual verification that `_looks_like_confirm_widget` now accepts either order so widgets in flight from before the upgrade still route Edit clicks correctly |
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
+| FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-29  | `test_team_members.py::test_upsert_from_sheet_rows_merges_duplicates_by_unique_column` (operator edits one row to carry BOTH `telegram_user_id` AND `slack_user_id` ⇒ orphan row that previously owned one of those ids gets deleted; pull lands cleanly without `UniqueViolation`) |
 | FR-CR-05-28  | `test_telegram_listener.py::test_listener_runs_sheet_pulls_when_interval_elapsed` (first call after construction fires both pulls); `::test_listener_throttles_sheet_pulls_within_interval` (repeated calls inside the window are no-ops); `::test_listener_skips_sheet_pulls_when_interval_zero` (`SHEET_POLL_INTERVAL_SECONDS=0` disables the in-listener poll); `::test_listener_swallows_sheet_pull_errors` (transient HTTP errors don't break the listener) |
 | FR-CR-05-27  | `test_telegram_members.py::test_upsert_member_creates_team_row_for_new_user` (brand-new user observed ⇒ team_members row auto-created with all available fields, `active=True`); `::test_upsert_member_creates_inactive_team_row_for_bot_account` (auto-bot detection ⇒ `active=False` on creation); `test_team_members.py::test_team_sheet_push_appends_only_new_rows` (existing operator edits preserved; only DB rows missing from the sheet get appended); `::test_team_sheet_push_writes_full_table_when_sheet_empty` (first-time bootstrap writes header + body) |

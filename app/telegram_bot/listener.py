@@ -410,13 +410,22 @@ class TelegramListener:
     # ---- one tick ---------------------------------------------------------
 
     def _maybe_poll_source_view(self) -> None:
-        """FR-CR-05-35 — periodically pull the freshest messages
-        from the Supabase TG view and run them through
-        `prepare_drafts` + `post_draft_confirmation`. When the
-        bookmark in `processed_telegram_messages` already covers
-        a message, the call short-circuits per the FR-CR-04-26
-        idempotency check, so a 50-row re-pull every 30 s is
-        cheap on a quiet day.
+        """FR-CR-05-35 / FR-CR-05-36 — periodically pull the
+        freshest messages from the Supabase TG view and run them
+        through `prepare_drafts` + `post_draft_confirmation`.
+
+        Strategy: pull `view_poll_batch_size` newest rows in one
+        SQL roundtrip (default 500 — large enough to cover
+        bursts), iterate from newest to oldest, short-circuit on
+        the FR-CR-04-26 per-message bookmark for already-processed
+        rows. New rows produce widgets via
+        `post_draft_confirmation` exactly as the historical
+        migrator does.
+
+        Doesn't try to be clever about pagination: if a deploy
+        ever sees more than `batch_size` new messages in the
+        poll interval, bump `VIEW_POLL_BATCH_SIZE` or run
+        `ops.migrate_telegram_history` to catch up.
 
         Disabled unless ``VIEW_REALTIME_ENABLED=true`` is set in
         the environment. When the listener has no reader (no
@@ -446,7 +455,6 @@ class TelegramListener:
                 "listener_view_poll_iter_failed", error=str(e)
             )
             return
-
         for msg in messages:
             try:
                 with session_scope() as session:

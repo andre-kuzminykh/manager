@@ -101,8 +101,14 @@ class Settings(BaseSettings):
     view_poll_interval_seconds: int = Field(
         default=30, alias="VIEW_POLL_INTERVAL_SECONDS"
     )
+    # FR-CR-05-36 — large batch by default so a single 30-second
+    # poll covers any realistic burst of new messages without
+    # needing pagination logic. The view itself caps at the
+    # batch size; already-processed messages short-circuit on
+    # the bookmark so the work is bounded by «new since last
+    # poll», not by `batch_size`.
     view_poll_batch_size: int = Field(
-        default=50, alias="VIEW_POLL_BATCH_SIZE"
+        default=500, alias="VIEW_POLL_BATCH_SIZE"
     )
 
     # Intent policy

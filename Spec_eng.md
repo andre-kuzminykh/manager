@@ -1407,6 +1407,17 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.36 — Pull every new message per poll
+
+13.35's view poll capped at 50 rows per tick; busy deploys
+would skip messages. Default batch bumped to 500 so a single
+SQL roundtrip covers any realistic burst. The per-message
+bookmark short-circuits already-processed rows, so the actual
+work is bounded by «new since last poll».
+
+If a deploy sees more than 500 new messages per 30s window,
+bump `VIEW_POLL_BATCH_SIZE` or run the migrator manually.
+
 #### 13.35 — Real-time poll of the Supabase TG view
 
 The cron-driven `ops.telegram_ingest` pulled new messages from

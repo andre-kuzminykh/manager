@@ -432,9 +432,9 @@ class FirefliesPipeline:
                         task_id=task.id,
                         from_status=None,
                         to_status=task_status,
-                        actor_slack_user_id=admin_uid,
+                        changed_by_slack_user_id=admin_uid,
                         reason="fireflies_extracted",
-                        changed_at=datetime.now(timezone.utc),
+                        at=datetime.now(timezone.utc),
                     )
                 )
                 created += 1

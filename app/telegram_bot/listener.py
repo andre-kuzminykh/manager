@@ -928,7 +928,9 @@ class TelegramListener:
                 )
                 return
             _drop_prompt()
-            refresh_draft_widgets(sender=self._sender, draft=draft)
+            refresh_draft_widgets(
+                sender=self._sender, draft=draft, session=session
+            )
         else:
             log.info("telegram_unknown_pending_action", action=pending.action)
 

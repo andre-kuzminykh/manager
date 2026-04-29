@@ -138,7 +138,7 @@ def post_initial_card(
         log.info("telegram_post_initial_card_no_recipients", task_id=task.id)
         return
 
-    text = build_task_card_text(task, header="✨ New task from this message")
+    text = build_task_card_text(task, header="✨ New task from this message", session=session)
     cards: list[dict[str, int]] = []
     for uid in recipients:
         try:
@@ -201,7 +201,7 @@ def refresh_card(
     cards = _stored_cards(task)
     if not cards:
         return
-    text = build_task_card_text(task)
+    text = build_task_card_text(task, session=session)
     for c in cards:
         recipient = str(c["chat_id"])
         is_subscribed = (
@@ -273,20 +273,23 @@ def render_tombstone(
 # Only on Accept does the draft get finalised into a Task.
 
 
-def _build_draft_widget_text(draft: ActionDraft) -> str:
-    """FR-CR-05-13 / FR-CR-05-16 / FR-CR-05-18 — compact HTML
-    preview that matches the live task-card layout.
+def _build_draft_widget_text(
+    draft: ActionDraft, *, session: Session | None = None
+) -> str:
+    """FR-CR-05-13 / FR-CR-05-16 / FR-CR-05-18 / FR-CR-05-19 —
+    compact HTML preview that matches the live task-card layout.
 
         {bullet} <a href="permalink"><b>title</b></a>
         📝 <description>
         👤 <owner-deeplink> · 📅 <due>
 
-    Title is wrapped in the source-message link when one is
-    available (supergroup chats); private DMs / basic groups
-    fall through to plain bold. Owner gets the same hyperlink
-    rules as `build_task_card_text`.
+    Owner deeplink uses the registry-resolved tg_user_id /
+    tg_handle when ``session`` is provided (FR-CR-05-19), so a
+    teammate whose row carries only a `@username` (no numeric
+    user_id stored on the task) still hyperlinks to a real
+    profile.
     """
-    from app.telegram_bot.sender import _owner_html_link
+    from app.telegram_bot.sender import _owner_html_link, _resolve_owner_link_target
 
     payload = draft.payload or {}
     title = payload.get("title") or ""
@@ -314,8 +317,13 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
         lines.append(f"📝 {_escape_md(str(description))}")
     meta: list[str] = []
     if owner_disp:
+        tg_id, tg_handle = _resolve_owner_link_target(
+            session,
+            str(owner_user_id) if owner_user_id else None,
+            str(owner_disp),
+        )
         meta.append(
-            f"👤 {_owner_html_link(str(owner_user_id) if owner_user_id else None, str(owner_disp))}"
+            f"👤 {_owner_html_link(str(owner_user_id) if owner_user_id else None, str(owner_disp), tg_user_id=tg_id, tg_handle=tg_handle)}"
         )
     if due:
         meta.append(f"📅 {due}")
@@ -373,7 +381,7 @@ def post_draft_confirmation(
         log.info("telegram_draft_no_recipients", draft_id=draft.id)
         return
 
-    text = _build_draft_widget_text(draft)
+    text = _build_draft_widget_text(draft, session=session)
     keyboard = confirm_keyboard(draft_id=draft.id)
     widgets: list[dict[str, int]] = []
     for uid in out:
@@ -426,7 +434,7 @@ def replace_widgets_with_task_card(
     widgets = _draft_widgets(draft)
     if not widgets:
         return
-    text = build_task_card_text(task)
+    text = build_task_card_text(task, session=session)
     cards: list[dict[str, int]] = []
     for w in widgets:
         recipient = str(w["chat_id"])
@@ -469,16 +477,19 @@ def refresh_draft_widgets(
     *,
     sender: TelegramSender,
     draft: ActionDraft,
+    session: Session | None = None,
 ) -> None:
     """Re-render every delivered confirm widget from the current
     `draft.payload`. Used after Edit-on-draft to reflect the LLM's
-    field updates without re-sending the widget."""
+    field updates without re-sending the widget. ``session`` is
+    threaded through to the renderer so the owner deeplink can
+    look up the registry (FR-CR-05-19)."""
     if not sender.enabled:
         return
     widgets = _draft_widgets(draft)
     if not widgets:
         return
-    text = _build_draft_widget_text(draft)
+    text = _build_draft_widget_text(draft, session=session)
     keyboard = confirm_keyboard(draft_id=draft.id)
     for w in widgets:
         try:

@@ -723,6 +723,40 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-19 — Owner deeplink via team-registry lookup
+
+The FR-CR-05-18 owner-link helper hyperlinked numeric TG ids and
+display strings that already had the `@handle` form. Real
+displays like «Юля - аналитик» / «Алина Колпакова» (plain Russian
+real-names) rendered as plain text — operators couldn't tap to
+DM them.
+
+New `_resolve_owner_link_target(session, owner_user_id,
+owner_display_name)` looks up the `team_members` row matching
+either `owner_user_id` (numeric → `telegram_user_id`; otherwise
+→ `slack_user_id`) or, when that misses, the display name
+matched against `telegram_username` / `real_name`
+(case-insensitive). Returns the registry row's
+``(telegram_user_id, telegram_username)`` tuple — either or both
+may be ``None`` for a half-populated row.
+
+`_owner_html_link` now takes optional ``tg_user_id`` /
+``tg_handle`` kwargs and prefers them when the local ones don't
+hyperlink. Resolution chain:
+
+  1. Registry-resolved numeric TG id → `tg://user?id=<uid>`
+  2. Numeric `owner_user_id` → `tg://user?id=<uid>`
+  3. Registry-resolved `tg_handle` → `https://t.me/<handle>`
+  4. `display` matches `@<handle>` form → `https://t.me/<handle>`
+  5. Otherwise → plain text
+
+`build_task_card_text` and `_build_draft_widget_text` now accept
+an optional ``session`` and feed it to the resolver. Every call
+site in `app/telegram_bot/cards.py` already had a session
+available; threaded through. Renderers without a session (test
+paths, future callers) keep the FR-CR-05-18 behaviour
+unchanged — no regression.
+
 #### FR-CR-05-18 — Title-as-link, owner @handle deeplink fallback
 
 Visual cleanup follow-up to FR-CR-05-17.
@@ -2525,6 +2559,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-10  | `test_team_members.py` (read paths, prefer-telegram id selection, find-by helpers; `seed_from_chat_members` / `seed_from_slack_employees` idempotent + bot-skip; sheet round-trip headers, insert-then-update-by-id, match-by-tg-id-when-no-id, active-bool normalisation incl. `да` / `yes` / `1` and empty→true default); `test_telegram_ingest.py::test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin` (the «CEO Rosecliff» killer — unresolvable display_name dropped, owner = admin, display = admin's registry label); `::test_resolve_owner_keeps_real_team_member` (LLM-picked `owner_user_id` matching a registry row stays, display_name backfilled); `::test_resolve_owner_resolves_display_name_via_registry` (name-only LLM hint → registry lookup → numeric id); `::test_prepare_drafts_fills_in_fallback_description_when_llm_silent` («обсуждалось в <chat> · <YYYY-MM-DD HH:MM>» when LLM produced no description); `::test_prepare_drafts_keeps_llm_description_when_present` (real LLM description not clobbered); `test_telegram_cards.py::test_post_draft_confirmation_sends_only_widget_no_forward_no_quote` (FR-CR-05-09 inline-quote DM removed — widget itself carries context via description); `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` updated for «no forward» |
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared). The original `test_task_row_includes_dialogue_from_extra` / `_dialogue_empty_when_no_extra` tests were rolled back by FR-CR-05-15. |
 | FR-CR-05-15  | `test_telegram_cards.py::test_draft_widget_text_includes_source_permalink_when_available` (🔗 line carries `t.me/c/<chat>/<msg>` when `_pending["permalink"]` is set); `::test_draft_widget_text_omits_link_line_when_no_permalink` (no empty 🔗 line for private DMs / basic groups); `test_sheets_pull.py::test_task_row_does_not_include_dialogue_column` (22-column header restored, last column is `completion_artifact`); `test_telegram_ingest.py::test_recent_in_chat_filters_by_chat_id_only` (adaptive context window is per-chat — SQL `WHERE chat_id = :chat_id` pinned so a future refactor can't widen the query) |
+| FR-CR-05-19  | `test_telegram_bot.py::test_build_task_card_text_resolves_owner_link_via_team_registry` (real-name display + Slack uid + registry row with `telegram_user_id` ⇒ `tg://user?id=…` deeplink); `::test_build_task_card_text_falls_back_to_handle_when_registry_has_only_username` (registry row with only `telegram_username` ⇒ `https://t.me/<handle>` link) |
 | FR-CR-05-18  | `test_telegram_bot.py::test_build_task_card_text_wraps_title_in_source_link` (title becomes `<a href=permalink><b>title</b></a>`); `::test_build_task_card_text_falls_back_to_plain_bold_without_permalink` (no permalink ⇒ plain `<b>title</b>`, no broken `<a href="">`); `::test_build_task_card_text_links_owner_via_at_handle_when_no_numeric_id` (Slack uid + `@handle` display ⇒ `https://t.me/<handle>` link); `test_telegram_cards.py::test_draft_widget_text_wraps_title_in_source_permalink` (same on the confirm widget); `::test_draft_widget_text_falls_back_to_plain_bold_without_permalink` (private DM / basic group fallback) |
 | FR-CR-05-17  | `test_telegram_ingest.py::test_telegram_permalink_for_supergroup_with_api_prefix` (`-100` Bot API form ⇒ stripped); `::test_telegram_permalink_for_supergroup_without_prefix` (`-2061886148` Supabase form ⇒ used as-is); `::test_telegram_permalink_returns_none_for_basic_group` (small negative id ⇒ no URL); `::test_telegram_permalink_returns_none_for_private_chat` (positive chat_id ⇒ no URL) |
 | FR-CR-05-16  | `test_telegram_bot.py::test_build_task_card_text_uses_minimal_layout_no_id_no_status_no_priority_word` (live task card matches the widget — no `#id`, no status word, no priority word); `::test_build_task_card_text_marks_done_with_check_emoji` (✅ replaces the priority circle on `done`); `::test_build_task_card_text_renders_owner_as_tg_user_link` + `::test_build_task_card_text_skips_link_for_slack_uid` (numeric TG uid → `tg://user?id=` hyperlink; Slack `Uxxx` falls through to plain text); `::test_build_task_card_text_includes_source_link_when_set` (🔗 deeplink on the live task card too, not just the draft widget); `test_telegram_cards.py::test_draft_widget_text_renders_owner_as_tg_user_link` (same hyperlink helper used in the confirm widget); `test_telegram_conversations.py::test_apply_edit_keeps_typed_name_when_registry_row_is_sparse` (operator types «ответственный Андрей Кузьминых» + sparse registry row ⇒ `owner_display_name` keeps «Андрей Кузьминых», not the raw uid) |

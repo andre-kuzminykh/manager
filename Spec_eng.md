@@ -1332,6 +1332,31 @@ covers three paths in priority order: numeric uid →
 `tg://user?id=…`; `@handle` → `t.me/<handle>`; otherwise plain
 text.
 
+#### 13.21 — Owner deeplink via team-registry lookup
+
+> **As an operator** «Юля - аналитик» / «Алина Колпакова» (plain
+> real-names, no `@handle`) should still hyperlink to a real
+> Telegram chat — not stare back as plain text.
+
+13.20 only hyperlinked `@handle`-shaped displays. New
+`_resolve_owner_link_target(session, owner_user_id, display)`
+looks up the `team_members` row by either id or name and feeds
+its `(telegram_user_id, telegram_username)` to
+`_owner_html_link`. The resolution chain becomes:
+
+  1. Registry-resolved numeric TG id → `tg://user?id=<uid>`
+  2. Numeric `owner_user_id` → `tg://user?id=<uid>`
+  3. Registry-resolved `@handle` → `https://t.me/<handle>`
+  4. Display matches `@<handle>` → `https://t.me/<handle>`
+  5. Otherwise → plain text
+
+`build_task_card_text` and `_build_draft_widget_text` accept an
+optional `session` and thread it through. Every cards.py / sheets
+call site already had one available, so the registry lookup
+runs everywhere a card is rendered for the operator. Plain real-
+name owners now hyperlink as long as their team_members row
+carries any TG identity.
+
 
 ---
 

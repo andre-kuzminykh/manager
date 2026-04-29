@@ -320,6 +320,77 @@ def test_build_task_card_text_links_owner_via_at_handle_when_no_numeric_id():
     assert "tg://user?id=" not in text
 
 
+def test_build_task_card_text_resolves_owner_link_via_team_registry(session):
+    """FR-CR-05-19 — display is a plain real-name like «Алина
+    Колпакова» (no `@handle` form). When a session is passed and
+    the team registry has a row with a numeric `telegram_user_id`,
+    the owner label hyperlinks to `tg://user?id=…` via the
+    registry lookup. Without the lookup the label was rendering
+    as plain text — operators couldn't tap to chat."""
+    from app.models import TeamMember
+    from datetime import datetime, timezone as _tz
+
+    session.add(
+        TeamMember(
+            real_name="Алина Колпакова",
+            telegram_user_id=412243973,
+            telegram_username="alina_k",
+            slack_user_id="U09ALINA",
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="U09ALINA",  # Slack uid; no TG numeric
+        owner_display_name="Алина Колпакова",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t, session=session)
+    # Registry lookup found a TG numeric id → tg://user?id= deeplink.
+    assert '<a href="tg://user?id=412243973">' in text
+    assert "Алина Колпакова" in text
+
+
+def test_build_task_card_text_falls_back_to_handle_when_registry_has_only_username(
+    session,
+):
+    """Registry row with `telegram_username` but no
+    `telegram_user_id` ⇒ owner link uses `https://t.me/<handle>`."""
+    from app.models import TeamMember
+    from datetime import datetime, timezone as _tz
+
+    session.add(
+        TeamMember(
+            real_name="Юля Аналитик",
+            telegram_user_id=None,
+            telegram_username="yulia_a",
+            slack_user_id="U09YULIA",
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="U09YULIA",
+        owner_display_name="Юля Аналитик",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t, session=session)
+    assert '<a href="https://t.me/yulia_a">' in text
+    assert "tg://user?id=" not in text  # no numeric uid
+
+
 def test_build_task_card_text_wraps_title_in_source_link():
     """FR-CR-05-18 — the title itself is the source-message
     hyperlink. No separate 🔗 line — single-tap behaviour, less

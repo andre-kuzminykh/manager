@@ -96,32 +96,111 @@ def _format_owner(task: Task) -> str | None:
 _USERNAME_HANDLE_RE = __import__("re").compile(r"^@([A-Za-z][A-Za-z0-9_]{4,31})$")
 
 
-def _owner_html_link(owner_user_id: str | None, display: str) -> str:
-    """FR-CR-05-16 / FR-CR-05-18 — wrap `display` in a deeplink so
-    a tap on the owner label opens a chat with them.
+def _resolve_owner_link_target(
+    session,
+    owner_user_id: str | None,
+    owner_display_name: str | None,
+) -> tuple[str | None, str | None]:
+    """FR-CR-05-19 — find the (`telegram_user_id`,
+    `telegram_username`) pair to hyperlink the owner against.
 
-    Three resolution paths in priority order:
+    Looks up the team registry by, in priority order:
 
-      1. Numeric ``owner_user_id`` (Telegram user_id) →
-         ``tg://user?id=<uid>``. Preferred — opens the private
-         chat directly inside Telegram.
-      2. ``display`` is an ``@handle`` form
-         (`@andre_andreevich`, ASCII alnum + underscore,
-         5–32 chars, starts with a letter) →
-         ``https://t.me/<handle>``. Used when the LLM resolved
-         owner against a registry row that only has a
-         Slack uid or no id at all but does carry the TG
-         username on `display_name`.
-      3. Otherwise → plain text. Slack uids that don't translate
-         to Telegram identities, or unresolved typed-name labels.
+      1. ``owner_user_id`` matched against
+         `team_members.telegram_user_id` (when the id is numeric)
+         or `team_members.slack_user_id` (Slack uid form).
+      2. ``owner_display_name`` matched against
+         `team_members.telegram_username` or
+         `team_members.real_name`, case-insensitive.
 
-    Display text is HTML-escaped; the wrapper element is the only
-    raw HTML in the result.
+    Returns the first hit's ids — either or both may be ``None``
+    when the row has only one identity populated. Returns
+    ``(None, None)`` when no session is available, no registry
+    row matches, or the lookup blew up (missing migration in the
+    test fixture).
+    """
+    if session is None:
+        return None, None
+    if not (owner_user_id or owner_display_name):
+        return None, None
+    try:
+        from sqlalchemy import func, or_
+        from app.models import TeamMember
+
+        row = None
+        if owner_user_id:
+            s = str(owner_user_id).strip()
+            if s.isdigit():
+                row = (
+                    session.query(TeamMember)
+                    .filter(TeamMember.telegram_user_id == int(s))
+                    .first()
+                )
+            if row is None and s:
+                row = (
+                    session.query(TeamMember)
+                    .filter(TeamMember.slack_user_id == s)
+                    .first()
+                )
+        if row is None and owner_display_name:
+            d = owner_display_name.strip().lstrip("@")
+            if d:
+                row = (
+                    session.query(TeamMember)
+                    .filter(
+                        or_(
+                            func.lower(TeamMember.telegram_username) == d.lower(),
+                            func.lower(TeamMember.real_name) == d.lower(),
+                        )
+                    )
+                    .first()
+                )
+        if row is None:
+            return None, None
+        tg_id = str(row.telegram_user_id) if row.telegram_user_id else None
+        return tg_id, row.telegram_username or None
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
+def _owner_html_link(
+    owner_user_id: str | None,
+    display: str,
+    *,
+    tg_user_id: str | None = None,
+    tg_handle: str | None = None,
+) -> str:
+    """FR-CR-05-16 / FR-CR-05-18 / FR-CR-05-19 — wrap `display` in
+    a deeplink so a tap on the owner label opens a chat with them.
+
+    Resolution chain (first match wins):
+
+      1. ``tg_user_id`` (registry-resolved numeric TG id) →
+         ``tg://user?id=<uid>``.
+      2. Numeric ``owner_user_id`` → ``tg://user?id=<uid>``.
+      3. ``tg_handle`` (registry-resolved TG username) →
+         ``https://t.me/<handle>``.
+      4. ``display`` matches ``@<handle>`` form →
+         ``https://t.me/<handle>``.
+      5. Otherwise → plain text.
+
+    Callers that have a DB session should pass `tg_user_id` /
+    `tg_handle` from `_resolve_owner_link_target`; callers
+    without a session fall back to whatever can be inferred from
+    `owner_user_id` / `display` directly. Display text is
+    HTML-escaped; the wrapper element is the only raw HTML in
+    the result.
     """
     safe = _escape_html(display)
+    if tg_user_id and str(tg_user_id).isdigit():
+        return f'<a href="tg://user?id={tg_user_id}">{safe}</a>'
     s = str(owner_user_id) if owner_user_id else ""
     if s.isdigit():
         return f'<a href="tg://user?id={s}">{safe}</a>'
+    if tg_handle:
+        clean = str(tg_handle).strip().lstrip("@")
+        if clean:
+            return f'<a href="https://t.me/{clean}">{safe}</a>'
     m = _USERNAME_HANDLE_RE.match((display or "").strip())
     if m is not None:
         handle = m.group(1)
@@ -129,20 +208,28 @@ def _owner_html_link(owner_user_id: str | None, display: str) -> str:
     return safe
 
 
-def build_task_card_text(task: Task, *, header: str | None = None) -> str:
-    """FR-CR-05-16 / FR-CR-05-18 — minimal card layout, the title
-    itself is the source-message hyperlink.
+def build_task_card_text(
+    task: Task,
+    *,
+    header: str | None = None,
+    session=None,
+) -> str:
+    """FR-CR-05-16 / FR-CR-05-18 / FR-CR-05-19 — minimal card
+    layout, the title itself is the source-message hyperlink.
 
         {bullet} <a href="permalink"><b>title</b></a>
         📝 description
         👤 <owner-deeplink> · 📅 due-date
 
     `bullet` is the priority emoji (🟢/🟡/🟠/🔴) for open tasks,
-    ✅ for done. Owner gets a `tg://user?id=` deeplink when the
-    id is numeric, else `https://t.me/<handle>` when the display
-    is an ``@username`` form, else plain text. The separate 🔗
-    line was rolled into the title — single-tap behaviour, less
-    visual noise.
+    ✅ for done. Owner gets the strongest deeplink the registry
+    can supply: numeric `tg://user?id=<uid>` is preferred, then
+    `https://t.me/<handle>` (FR-CR-05-19 — looks up the
+    `team_members` row when ``session`` is provided so registry-
+    only handles still hyperlink), then `@handle`-in-display
+    detection, otherwise plain text. The separate 🔗 line was
+    rolled into the title — single-tap behaviour, less visual
+    noise.
 
     No #id, no status word, no priority word — the colour /
     completion glyph carry the signal.
@@ -171,7 +258,12 @@ def build_task_card_text(task: Task, *, header: str | None = None) -> str:
     meta: list[str] = []
     owner = _format_owner(task)
     if owner:
-        meta.append(f"👤 {_owner_html_link(task.owner_user_id, owner)}")
+        tg_id, tg_handle = _resolve_owner_link_target(
+            session, task.owner_user_id, task.owner_display_name or owner
+        )
+        meta.append(
+            f"👤 {_owner_html_link(task.owner_user_id, owner, tg_user_id=tg_id, tg_handle=tg_handle)}"
+        )
     if task.due_date:
         meta.append(f"📅 {task.due_date.isoformat()}")
     if meta:

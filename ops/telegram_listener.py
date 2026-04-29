@@ -56,6 +56,35 @@ def main() -> int:
         token=settings.telegram_bot_token,
         ingest=ingest,
     )
+
+    # FR-CR-05-02 — register the cross-channel subscriber dispatcher
+    # so transitions / edits triggered from Telegram buttons fan out
+    # DMs to both Slack subscribers (via a fresh WebClient — only
+    # outbound chat_postMessage, no socket mode needed) and Telegram
+    # subscribers (via the listener's existing TelegramSender).
+    try:
+        from app.services.subscriber_updates import (
+            SubscriberDispatcher,
+            set_active_dispatcher,
+        )
+
+        slack_poster = None
+        if settings.slack_bot_token:
+            try:
+                from slack_sdk import WebClient
+
+                slack_poster = WebClient(token=settings.slack_bot_token)
+            except Exception as e:  # noqa: BLE001
+                log.warning("slack_webclient_setup_failed", error=str(e))
+        set_active_dispatcher(
+            SubscriberDispatcher(
+                slack_poster=slack_poster,
+                telegram_sender=listener._sender,  # noqa: SLF001 — same process
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("subscriber_dispatcher_setup_failed", error=str(e))
+
     try:
         listener.run_forever()
     except KeyboardInterrupt:

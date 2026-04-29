@@ -635,6 +635,17 @@ def apply_edit_reply_ex(
 
     session.flush()
     _sync_task_to_sheets(task_id)
+
+    # FR-CR-05-02 — fan out an edit DM to every non-owner subscriber.
+    if payload:
+        from app.services.subscriber_updates import dispatch_edit
+
+        dispatch_edit(
+            session,
+            task=task,
+            applied_payload=payload,
+            actor_user_id=actor,
+        )
     return task, payload
 
 

@@ -96,6 +96,29 @@ def run() -> None:
 
     app = build_app(settings=settings, classifier=classifier, finalizer=finalizer)
 
+    # FR-CR-05-02 — register the cross-channel subscriber dispatcher
+    # so every TransitionService.apply / apply_edit_reply fans out
+    # DMs to non-owner subscribers regardless of which trigger
+    # produced the change. The Slack process knows about both
+    # channels: it has the bolt client (Slack DMs) and a freshly-
+    # constructed TelegramSender (TG DMs over plain HTTP).
+    try:
+        from app.services.subscriber_updates import (
+            SubscriberDispatcher,
+            set_active_dispatcher,
+        )
+        from app.telegram_bot.sender import TelegramSender
+
+        tg_sender = TelegramSender(token=settings.telegram_bot_token or "")
+        set_active_dispatcher(
+            SubscriberDispatcher(
+                slack_poster=app.client,
+                telegram_sender=tg_sender if tg_sender.enabled else None,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("subscriber_dispatcher_setup_failed", error=str(e))
+
     # One-shot workspace-wide employees sync. Best-effort: a Slack
     # outage here must not block startup.
     try:

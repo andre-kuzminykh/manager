@@ -64,4 +64,11 @@ class TransitionService:
         )
         session.add(history)
         session.flush()
+
+        # FR-CR-05-02 — fan out a one-line DM to every non-owner
+        # subscriber. Best-effort: never raises into the caller, no-
+        # op when no dispatcher is registered (tests / cron jobs).
+        from app.services.subscriber_updates import dispatch_status_change
+
+        dispatch_status_change(session, task=task, history=history)
         return history

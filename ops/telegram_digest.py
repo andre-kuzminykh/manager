@@ -29,6 +29,7 @@ from app.db import session_scope
 from app.logging_setup import get_logger, setup_logging
 from app.telegram_bot import notifications as tg_notifications
 from app.telegram_bot.evening_status import send_evening_status_report
+from app.telegram_bot.morning_cards import send_morning_task_cards
 from app.telegram_bot.sender import TelegramSender
 
 log = get_logger(__name__)
@@ -46,6 +47,9 @@ _TYPES = {
     # FR-CR-05-40 — evening status report (LLM narrative per task,
     # admin overview + per-user DMs).
     "evening-status-report": send_evening_status_report,
+    # FR-CR-05-41 — morning interactive-card digest (one full
+    # task card per due-today task, in priority order).
+    "morning-task-cards": send_morning_task_cards,
 }
 
 

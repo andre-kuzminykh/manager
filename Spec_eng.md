@@ -1407,6 +1407,29 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.24 — No placeholder pronouns, no 1st-person-plural in descriptions
+
+Description-quality bugs from the live test:
+
+- «найти выходы на **указанных людей**» — vague placeholder
+  pronoun where the context already named the actual targets.
+- «**Будем рады**, если сможешь соединить» — first-person-plural
+  copy-paste from the source message; the description should be
+  third person about a task assigned to ONE specific owner.
+
+Title prompt extended:
+
+**CONCRETE OVER VAGUE** — forbids placeholder phrases like
+«указанных», «правильной», «нужного», «the right people»,
+«as discussed». When context names them, USE the names. When
+it doesn't, write «(уточнить)» — the operator should never have
+to guess what the placeholder pronoun refers to.
+
+**THIRD PERSON** — forbids «нам» / «будем рады» / «we'd love to».
+The description is a brief about a task assigned to one owner;
+1st-person-plural has no place there. When the source uses «we»,
+the description rewrites in 3rd person naming the actual party.
+
 
 ---
 

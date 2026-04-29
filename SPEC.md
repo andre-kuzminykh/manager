@@ -723,6 +723,31 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-22 — Title prompt: no placeholder pronouns, no 1st-person-plural
+
+Two more description-quality bugs from the live test:
+
+- «найти выходы на **указанных людей**» — vague placeholder
+  pronoun where the context already named the actual targets.
+- «**Будем рады**, если сможешь соединить» — first-person-plural
+  copy-paste from the source message; descriptions are about a
+  task assigned to ONE specific owner, «we» / «нам» / «будем»
+  have no place there.
+
+Title prompt extended with two pinned blocks:
+
+**CONCRETE OVER VAGUE.** Forbids placeholder phrases like
+«указанных людей», «правильной командой», «нужного человека»,
+«as discussed», «the right people» when the context block names
+the real entities. When context truly doesn't name them, write
+«(кого именно — уточнить)» / «(детали — уточнить)» — the
+operator should never have to guess what «указанных» refers to.
+
+**THIRD PERSON.** Forbids 1st-person plural — «нам надо», «будем
+рады», «we need to», «we'd love to». When the source uses «we»
+/ «нам», the description rewrites in third person naming the
+actual party (the chat / team / specific person from context).
+
 #### FR-CR-05-21 — Registry-canonical display, listener auto-enriches team_members
 
 Two more iterations after the live test:
@@ -2622,6 +2647,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-10  | `test_team_members.py` (read paths, prefer-telegram id selection, find-by helpers; `seed_from_chat_members` / `seed_from_slack_employees` idempotent + bot-skip; sheet round-trip headers, insert-then-update-by-id, match-by-tg-id-when-no-id, active-bool normalisation incl. `да` / `yes` / `1` and empty→true default); `test_telegram_ingest.py::test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin` (the «CEO Rosecliff» killer — unresolvable display_name dropped, owner = admin, display = admin's registry label); `::test_resolve_owner_keeps_real_team_member` (LLM-picked `owner_user_id` matching a registry row stays, display_name backfilled); `::test_resolve_owner_resolves_display_name_via_registry` (name-only LLM hint → registry lookup → numeric id); `::test_prepare_drafts_fills_in_fallback_description_when_llm_silent` («обсуждалось в <chat> · <YYYY-MM-DD HH:MM>» when LLM produced no description); `::test_prepare_drafts_keeps_llm_description_when_present` (real LLM description not clobbered); `test_telegram_cards.py::test_post_draft_confirmation_sends_only_widget_no_forward_no_quote` (FR-CR-05-09 inline-quote DM removed — widget itself carries context via description); `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` updated for «no forward» |
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared). The original `test_task_row_includes_dialogue_from_extra` / `_dialogue_empty_when_no_extra` tests were rolled back by FR-CR-05-15. |
 | FR-CR-05-15  | `test_telegram_cards.py::test_draft_widget_text_includes_source_permalink_when_available` (🔗 line carries `t.me/c/<chat>/<msg>` when `_pending["permalink"]` is set); `::test_draft_widget_text_omits_link_line_when_no_permalink` (no empty 🔗 line for private DMs / basic groups); `test_sheets_pull.py::test_task_row_does_not_include_dialogue_column` (22-column header restored, last column is `completion_artifact`); `test_telegram_ingest.py::test_recent_in_chat_filters_by_chat_id_only` (adaptive context window is per-chat — SQL `WHERE chat_id = :chat_id` pinned so a future refactor can't widen the query) |
+| FR-CR-05-22  | `test_intent_pipeline.py::test_title_prompt_forbids_vague_placeholder_phrases_in_description` (CONCRETE OVER VAGUE block + concrete examples «указанных людей» / «правильной командой» / «the right people» pinned; «(уточнить)» fallback when context lacks names); `::test_title_prompt_forbids_first_person_plural_in_description` (THIRD PERSON block + «нам» / «будем рады» / «we'd love» pinned) |
 | FR-CR-05-21  | `test_telegram_ingest.py::test_resolve_owner_registry_display_wins_over_llm_short_form` (LLM extracted «Артем», registry has «Артем Соколов» ⇒ registry wins); `test_telegram_members.py::test_upsert_member_enriches_sparse_team_members_row` (listener observation populates blank `telegram_username` / `real_name` on the matching `team_members` row); `::test_upsert_member_does_not_overwrite_operator_edits` (operator-edited fields are preserved); `::test_upsert_member_no_team_row_is_a_noop` (users without a team row stay only in chat_members) |
 | FR-CR-05-20  | `test_telegram_bot.py::test_build_task_card_text_resolves_owner_link_via_team_registry` (registry has both numeric id + handle ⇒ public `t.me/<handle>` wins over `tg://user?id=`); `::test_build_task_card_text_falls_back_to_chat_members_for_username` (team_members row has only the numeric id but `telegram_chat_members` has the `@handle` ⇒ adopt the chat-members username); `::test_build_task_card_text_falls_back_to_tg_user_id_when_no_handle_anywhere` (no handle in either table ⇒ last-ditch `tg://user?id=` link) |
 | FR-CR-05-19  | `test_telegram_bot.py::test_build_task_card_text_resolves_owner_link_via_team_registry` (real-name display + Slack uid + registry row with `telegram_user_id` ⇒ `tg://user?id=…` deeplink); `::test_build_task_card_text_falls_back_to_handle_when_registry_has_only_username` (registry row with only `telegram_username` ⇒ `https://t.me/<handle>` link) |

@@ -54,6 +54,44 @@ Produce three fields:
                     worse than a shorter description.
                   - No bullet lists, no markdown.
 
+                CONCRETE OVER VAGUE — fill in real names /
+                numbers / projects from context, never use empty
+                placeholder phrases:
+                  - FORBIDDEN: «указанных людей», «правильной
+                    командой», «нужного человека», «нужных
+                    деталей», «соответствующих контактов»,
+                    «нужный документ», «relevant team», «the
+                    right people», «as discussed», «as agreed»
+                    when the context tells you WHO / WHAT.
+                  - When context names them, USE the names:
+                      WRONG → «найти выходы на указанных людей»
+                      RIGHT → «найти выходы на Andreessen
+                              Horowitz и Sequoia»  (when context
+                              named those funds)
+                      WRONG → «соединить с правильной командой»
+                      RIGHT → «соединить с инвестиционной
+                              командой Mistral»  (when context
+                              mentioned Mistral's investors)
+                  - When context DOESN'T name them, write «(кого
+                    именно — уточнить)» or «(детали — уточнить)»
+                    instead of using a placeholder pronoun. The
+                    operator should never have to guess what
+                    «указанных» refers to.
+
+                THIRD PERSON, no «we» / «нам» / «будем»:
+                  - FORBIDDEN: «нам надо», «будем рады», «мы
+                    хотим», «we'd love to», «we need to». The
+                    description is a brief about a task assigned
+                    to one specific owner — first-person plural
+                    has no place in it.
+                  - WRONG → «Будем рады, если сможешь соединить»
+                    RIGHT → «Просьба от Иры — соединить Татьяну
+                            с командой X»
+                  - When the source uses «нам» / «we», rewrite
+                    in third person naming the actual party
+                    (the chat / team / specific person from
+                    context).
+
                 Use the prior `context` messages to enrich the
                 description: who's involved, what was discussed
                 that led to this ask, references / numbers /

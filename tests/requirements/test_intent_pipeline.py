@@ -112,6 +112,34 @@ def test_title_prompt_teaches_imperative_rewrite_from_context():
     assert "context" in blob.lower()
 
 
+def test_title_prompt_forbids_vague_placeholder_phrases_in_description():
+    """FR-CR-05-22 — descriptions must use concrete names /
+    numbers / projects from the context, never placeholder
+    pronouns like «указанных» / «правильной» / «нужных» when the
+    context tells the model who or what is meant."""
+    blob = TITLE_SYSTEM_PROMPT
+    assert "CONCRETE OVER VAGUE" in blob or "concrete over vague" in blob.lower()
+    # Pin the specific anti-patterns we hit in production. Note
+    # the prompt may wrap long phrases across lines, so we
+    # collapse whitespace before checking.
+    flat = " ".join(blob.split())
+    for word in ("указанных людей", "правильной командой", "the right people"):
+        assert word in flat, f"placeholder example {word!r} should be pinned"
+    # And the «when context doesn't name them, write (уточнить)» rule.
+    assert "уточнить" in blob
+
+
+def test_title_prompt_forbids_first_person_plural_in_description():
+    """FR-CR-05-22 — «нам надо» / «будем рады» / «we'd love to»
+    are first-person-plural source artefacts. The description is
+    a brief about a task assigned to ONE specific owner — third
+    person only."""
+    blob = TITLE_SYSTEM_PROMPT
+    assert "THIRD PERSON" in blob or "third person" in blob.lower()
+    for fragment in ("нам", "будем рады", "we'd love"):
+        assert fragment in blob, f"first-person-plural example {fragment!r} should be pinned"
+
+
 def test_title_prompt_forbids_third_party_status_promises():
     """FR-CR-05-13 — «Нет Алина сама отправит» (a third-party
     promise sentence about another teammate's commitment) must NOT

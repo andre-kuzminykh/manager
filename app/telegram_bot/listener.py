@@ -100,6 +100,7 @@ class ListenerReport:
     drafts_proposed: int = 0
     no_action: int = 0
     skipped_non_message: int = 0
+    skipped_pre_startup: int = 0  # FR-CR-05-51
     callbacks_handled: int = 0
     pending_replies_handled: int = 0
     errors: int = 0
@@ -323,6 +324,11 @@ class TelegramListener:
         # captures are still available via
         # `ops.migrate_telegram_history` when actually needed.
         self._view_realtime_started_at: datetime | None = None
+        # Same cutoff for the Bot API getUpdates path — Telegram
+        # holds up to 24h of undelivered updates after a cold
+        # start, and we don't want those ancient messages
+        # spawning fresh task cards either.
+        self._bot_api_started_at: datetime | None = None
         # FR-CR-05-39 — periodic poll of the Fireflies API. Same
         # toggle pattern as the TG view poll above.
         self._fireflies_pipeline = None  # set via wire_fireflies()
@@ -661,6 +667,14 @@ class TelegramListener:
         # FR-CR-05-39 — Fireflies poll on the same tick.
         self._maybe_poll_fireflies()
 
+        # FR-CR-05-51 — pin a «process from now» cutoff on first
+        # tick. Bot API getUpdates can replay up to 24h of
+        # undelivered updates after a cold start (or when the
+        # listener bookmark was wiped); we don't want those
+        # ancient messages spawning fresh task cards.
+        if self._bot_api_started_at is None:
+            self._bot_api_started_at = datetime.now(timezone.utc)
+
         with session_scope() as session:
             offset = _get_offset(session)
 
@@ -696,6 +710,21 @@ class TelegramListener:
                 if msg is None:
                     report.skipped_non_message += 1
                     continue
+
+                # FR-CR-05-51 — drop pre-startup messages so a
+                # cold start with a fresh DB doesn't spawn cards
+                # for the last 24h of group chatter Telegram is
+                # holding for us. Naive `sent_at` coerced to UTC.
+                if (
+                    self._bot_api_started_at is not None
+                    and msg.sent_at is not None
+                ):
+                    msg_at = msg.sent_at
+                    if msg_at.tzinfo is None:
+                        msg_at = msg_at.replace(tzinfo=timezone.utc)
+                    if msg_at < self._bot_api_started_at:
+                        report.skipped_pre_startup += 1
+                        continue
 
                 # FR-CR-05-07 — upsert the sender into the
                 # `telegram_chat_members` registry so the classifier

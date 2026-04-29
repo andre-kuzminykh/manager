@@ -157,10 +157,20 @@ def _make_listener(
     updates_per_call: list[list[dict]],
 ) -> TelegramListener:
     """Builds a listener whose `_fetch_updates` returns the next list
-    from `updates_per_call` on each call (then `[]` forever)."""
+    from `updates_per_call` on each call (then `[]` forever).
+
+    Test fixtures use synthetic `"date": 0` (1970-01-01) so we
+    pre-set `_bot_api_started_at` to the epoch — otherwise the
+    FR-CR-05-51 «process from now» filter would correctly drop
+    every test message as ancient. Production-side, the cutoff
+    is set to `datetime.now(timezone.utc)` on first tick.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+
     listener = TelegramListener(
         token="123:abc", ingest=_make_ingest(classification)
     )
+    listener._bot_api_started_at = _dt(1970, 1, 1, tzinfo=_tz.utc)
     state = {"calls": 0}
 
     def fake_fetch(*, offset: int) -> list[dict]:
@@ -1252,3 +1262,66 @@ def test_listener_tick_start_in_group_chat_falls_through_to_ingest(
     listener.tick()
     # No welcome widget would have been posted to a group.
     assert not any("Привет" in m.get("text", "") for m in sent)
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-51 — Bot API «process from now» cutoff
+# --------------------------------------------------------------------------- #
+
+
+def test_listener_drops_pre_startup_bot_api_messages(
+    patched_session_scope, SessionFactory
+):
+    """Telegram holds up to 24h of undelivered updates after a
+    cold start. The listener pins a `_bot_api_started_at`
+    cutoff on first tick and skips anything older — so a fresh
+    deploy doesn't spawn task cards from yesterday's group
+    chatter."""
+    from datetime import datetime, timezone, timedelta
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="x"),
+        reasoning="r",
+    )
+    listener = _make_listener(
+        classification,
+        updates_per_call=[[]],  # one empty fetch — we'll inject manually
+    )
+    # Override the test's epoch cutoff with one set just now,
+    # then feed a message dated 1h before that cutoff.
+    cutoff = datetime(2026, 4, 30, 12, 0, tzinfo=timezone.utc)
+    listener._bot_api_started_at = cutoff
+    old_ts = int((cutoff - timedelta(hours=1)).timestamp())
+    fresh_ts = int((cutoff + timedelta(minutes=5)).timestamp())
+    listener._fetch_updates = lambda *, offset: [  # type: ignore[method-assign]
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "chat": {"id": 7, "type": "private"},
+                "from": {"id": 1},
+                "text": "old task — was sent yesterday",
+                "date": old_ts,
+            },
+        },
+        {
+            "update_id": 2,
+            "message": {
+                "message_id": 2,
+                "chat": {"id": 7, "type": "private"},
+                "from": {"id": 1},
+                "text": "fresh task — sent now",
+                "date": fresh_ts,
+            },
+        },
+    ]
+    report = listener.tick()
+    assert report.skipped_pre_startup == 1
+    assert report.tasks_created == 1
+    with SessionFactory() as s:
+        titles = [t.title for t in s.query(Task).all()]
+        # Only the fresh-task title was processed; the old one
+        # never reached the classifier.
+        assert any("fresh" in t for t in titles) or len(titles) == 1

@@ -322,11 +322,11 @@ def test_build_task_card_text_links_owner_via_at_handle_when_no_numeric_id():
 
 def test_build_task_card_text_resolves_owner_link_via_team_registry(session):
     """FR-CR-05-19 — display is a plain real-name like «Алина
-    Колпакова» (no `@handle` form). When a session is passed and
-    the team registry has a row with a numeric `telegram_user_id`,
-    the owner label hyperlinks to `tg://user?id=…` via the
-    registry lookup. Without the lookup the label was rendering
-    as plain text — operators couldn't tap to chat."""
+    Колпакова» (no `@handle` form). When the registry has both
+    `telegram_user_id` AND `telegram_username`, the public
+    `https://t.me/<handle>` form wins (FR-CR-05-20: it works
+    cross-chat, while `tg://user?id=` only renders for users
+    who are members of the current chat)."""
     from app.models import TeamMember
     from datetime import datetime, timezone as _tz
 
@@ -345,16 +345,96 @@ def test_build_task_card_text_resolves_owner_link_via_team_registry(session):
     t = Task(
         id=1,
         title="x",
-        owner_user_id="U09ALINA",  # Slack uid; no TG numeric
+        owner_user_id="U09ALINA",  # Slack uid; no TG numeric on task
         owner_display_name="Алина Колпакова",
         priority=TaskPriority.medium,
         status=TaskStatus.todo,
         source_kind=TaskSourceKind.telegram,
     )
     text = build_task_card_text(t, session=session)
-    # Registry lookup found a TG numeric id → tg://user?id= deeplink.
-    assert '<a href="tg://user?id=412243973">' in text
+    # Registry hit on telegram_username → public t.me deeplink.
+    assert '<a href="https://t.me/alina_k">' in text
     assert "Алина Колпакова" in text
+
+
+def test_build_task_card_text_falls_back_to_chat_members_for_username(
+    session,
+):
+    """FR-CR-05-20 — registry row carries only `telegram_user_id`
+    (auto-seed populated this from the source view but the view
+    didn't have a username for that user). The listener's
+    `telegram_chat_members` table has captured the username on a
+    later observed message. The render path joins the two — uses
+    the chat-members username for the `t.me/<handle>` link."""
+    from app.models import TeamMember, TelegramChatMember
+    from datetime import datetime, timezone as _tz
+
+    session.add(
+        TeamMember(
+            real_name="Юля - аналитик",
+            telegram_user_id=402006206,
+            telegram_username=None,
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.add(
+        TelegramChatMember(
+            chat_id=-1001234,
+            user_id=402006206,
+            username="yulia_analyst",
+            last_seen_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="402006206",
+        owner_display_name="Юля - аналитик",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t, session=session)
+    assert '<a href="https://t.me/yulia_analyst">' in text
+
+
+def test_build_task_card_text_falls_back_to_tg_user_id_when_no_handle_anywhere(
+    session,
+):
+    """When neither the team registry nor the chat-members table
+    has a username for this user, the link is the last-ditch
+    `tg://user?id=<uid>` form — clickable in some Telegram
+    clients, plain text in others."""
+    from app.models import TeamMember
+    from datetime import datetime, timezone as _tz
+
+    session.add(
+        TeamMember(
+            real_name="Лиля - HR",
+            telegram_user_id=712250586,
+            telegram_username=None,
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="712250586",
+        owner_display_name="Лиля - HR",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t, session=session)
+    assert '<a href="tg://user?id=712250586">' in text
+    # No t.me link — no handle anywhere.
+    assert "https://t.me/" not in text or 't.me/c/' in text  # only source link OK
 
 
 def test_build_task_card_text_falls_back_to_handle_when_registry_has_only_username(

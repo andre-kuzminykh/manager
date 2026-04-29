@@ -101,31 +101,35 @@ def _resolve_owner_link_target(
     owner_user_id: str | None,
     owner_display_name: str | None,
 ) -> tuple[str | None, str | None]:
-    """FR-CR-05-19 — find the (`telegram_user_id`,
+    """FR-CR-05-19 / FR-CR-05-20 — find the (`telegram_user_id`,
     `telegram_username`) pair to hyperlink the owner against.
 
-    Looks up the team registry by, in priority order:
+    Two-table lookup:
 
-      1. ``owner_user_id`` matched against
-         `team_members.telegram_user_id` (when the id is numeric)
-         or `team_members.slack_user_id` (Slack uid form).
-      2. ``owner_display_name`` matched against
-         `team_members.telegram_username` or
-         `team_members.real_name`, case-insensitive.
+      1. ``team_members`` by `owner_user_id` (numeric →
+         `telegram_user_id`; otherwise → `slack_user_id`) or by
+         display matched (case-insensitive) against
+         `telegram_username` / `real_name`.
+      2. ``telegram_chat_members`` (FR-CR-05-20) — when the team
+         row is missing a `telegram_username` but we have a
+         numeric TG id, the live listener has been observing this
+         user across chats and likely captured their @-handle.
+         Fall back to the most recent `username` for that
+         `user_id`. Without this fallback half the registry only
+         has numeric ids (auto-seed wrote sparse rows) and the
+         widget can't emit a `t.me/<handle>` URL — `tg://user?id=`
+         is silent for users who aren't in the bot's DM.
 
-    Returns the first hit's ids — either or both may be ``None``
-    when the row has only one identity populated. Returns
-    ``(None, None)`` when no session is available, no registry
-    row matches, or the lookup blew up (missing migration in the
-    test fixture).
-    """
+    Either or both fields may be ``None`` when neither source has
+    that identity. Wrapped in try/except so a missing migration
+    in the test fixture quietly degrades to «no extra info»."""
     if session is None:
         return None, None
     if not (owner_user_id or owner_display_name):
         return None, None
     try:
         from sqlalchemy import func, or_
-        from app.models import TeamMember
+        from app.models import TeamMember, TelegramChatMember
 
         row = None
         if owner_user_id:
@@ -155,10 +159,28 @@ def _resolve_owner_link_target(
                     )
                     .first()
                 )
-        if row is None:
-            return None, None
-        tg_id = str(row.telegram_user_id) if row.telegram_user_id else None
-        return tg_id, row.telegram_username or None
+        tg_id: str | None = None
+        tg_handle: str | None = None
+        if row is not None:
+            tg_id = str(row.telegram_user_id) if row.telegram_user_id else None
+            tg_handle = row.telegram_username or None
+        # If we have a numeric id but no @handle, look up
+        # telegram_chat_members — the listener writes usernames
+        # there on every observed message.
+        if tg_id and not tg_handle:
+            try:
+                chat_row = (
+                    session.query(TelegramChatMember)
+                    .filter(TelegramChatMember.user_id == int(tg_id))
+                    .filter(TelegramChatMember.username.isnot(None))
+                    .order_by(TelegramChatMember.last_seen_at.desc())
+                    .first()
+                )
+                if chat_row and chat_row.username:
+                    tg_handle = chat_row.username
+            except Exception:  # noqa: BLE001
+                pass
+        return tg_id, tg_handle
     except Exception:  # noqa: BLE001
         return None, None
 
@@ -170,18 +192,25 @@ def _owner_html_link(
     tg_user_id: str | None = None,
     tg_handle: str | None = None,
 ) -> str:
-    """FR-CR-05-16 / FR-CR-05-18 / FR-CR-05-19 — wrap `display` in
-    a deeplink so a tap on the owner label opens a chat with them.
+    """FR-CR-05-16 / FR-CR-05-18 / FR-CR-05-19 / FR-CR-05-20 —
+    wrap `display` in a deeplink so a tap on the owner label
+    opens a chat with them.
 
-    Resolution chain (first match wins):
+    Resolution chain (first match wins). PUBLIC `t.me/<handle>`
+    URLs come first because `tg://user?id=<uid>` only renders as
+    a clickable mention in clients where the tagged user is a
+    member of the current chat — and the bot's DM with the
+    operator obviously isn't shared with the owner. The public
+    URL form works regardless of chat membership.
 
-      1. ``tg_user_id`` (registry-resolved numeric TG id) →
-         ``tg://user?id=<uid>``.
-      2. Numeric ``owner_user_id`` → ``tg://user?id=<uid>``.
-      3. ``tg_handle`` (registry-resolved TG username) →
+      1. ``tg_handle`` (registry / chat-members) →
          ``https://t.me/<handle>``.
-      4. ``display`` matches ``@<handle>`` form →
+      2. ``display`` matches ``@<handle>`` form →
          ``https://t.me/<handle>``.
+      3. ``tg_user_id`` (registry-resolved numeric TG id) →
+         ``tg://user?id=<uid>``. Last-ditch — works in some
+         clients but not all when the user isn't in the chat.
+      4. Numeric ``owner_user_id`` → ``tg://user?id=<uid>``.
       5. Otherwise → plain text.
 
     Callers that have a DB session should pass `tg_user_id` /
@@ -192,19 +221,18 @@ def _owner_html_link(
     the result.
     """
     safe = _escape_html(display)
-    if tg_user_id and str(tg_user_id).isdigit():
-        return f'<a href="tg://user?id={tg_user_id}">{safe}</a>'
-    s = str(owner_user_id) if owner_user_id else ""
-    if s.isdigit():
-        return f'<a href="tg://user?id={s}">{safe}</a>'
     if tg_handle:
         clean = str(tg_handle).strip().lstrip("@")
         if clean:
             return f'<a href="https://t.me/{clean}">{safe}</a>'
     m = _USERNAME_HANDLE_RE.match((display or "").strip())
     if m is not None:
-        handle = m.group(1)
-        return f'<a href="https://t.me/{handle}">{safe}</a>'
+        return f'<a href="https://t.me/{m.group(1)}">{safe}</a>'
+    if tg_user_id and str(tg_user_id).isdigit():
+        return f'<a href="tg://user?id={tg_user_id}">{safe}</a>'
+    s = str(owner_user_id) if owner_user_id else ""
+    if s.isdigit():
+        return f'<a href="tg://user?id={s}">{safe}</a>'
     return safe
 
 

@@ -1357,6 +1357,32 @@ runs everywhere a card is rendered for the operator. Plain real-
 name owners now hyperlink as long as their team_members row
 carries any TG identity.
 
+#### 13.22 — Owner deeplink prefers public `t.me/<handle>`
+
+13.21 was producing `<a href="tg://user?id=402006206">…</a>` for
+owners with only a numeric TG id, but Telegram's client rendered
+it as plain text — the `tg://user?id=` mention only renders as
+clickable when the tagged user is a member of the current chat,
+and the bot's DM with the operator obviously isn't shared with
+the owner.
+
+Two changes:
+
+**Priority reorder.** `_owner_html_link` now prefers public
+`https://t.me/<handle>` URLs over `tg://user?id=<uid>` —
+`t.me/<handle>` works regardless of chat membership.
+
+**Chat-members username fallback.** `_resolve_owner_link_target`
+now joins `telegram_chat_members` when the `team_members` row
+has a numeric id but no `telegram_username`. The live listener
+writes usernames into chat-members on every observed message,
+so most teammates' @-handles are there even when auto-seed left
+the `team_members.telegram_username` field empty.
+
+Result: every owner whose @-handle has been observed at least
+once — anywhere in either table — renders as a clickable
+`t.me/<handle>` link.
+
 
 ---
 

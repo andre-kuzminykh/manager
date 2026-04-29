@@ -236,16 +236,82 @@ def _candidate_tasks_for(session: Session, user_id: str, plan_date: date) -> lis
     )
 
 
+def _done_today_for_owner(session: Session, owner_uid: str, today: date) -> list[Task]:
+    """Tasks that the owner closed at any point today.
+
+    A task counts as «done today» if its latest history transition
+    landed on `done` and that transition's timestamp is on the local
+    `today`. We approximate «local» with naive UTC midnight here —
+    good enough for the daily DM granularity.
+    """
+    from app.models import TaskStatusHistory
+
+    start_of_day = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+    end_of_day = start_of_day + timedelta(days=1)
+    rows = (
+        session.query(Task)
+        .join(TaskStatusHistory, TaskStatusHistory.task_id == Task.id)
+        .filter(
+            Task.owner_user_id == owner_uid,
+            Task.deleted_at.is_(None),
+            TaskStatusHistory.to_status == TaskStatus.done,
+            TaskStatusHistory.at >= start_of_day,
+            TaskStatusHistory.at < end_of_day,
+        )
+        .order_by(Task.id)
+        .distinct()
+        .all()
+    )
+    return rows
+
+
+def _subscribed_open_for_recipient(session: Session, recipient_uid: str) -> list[Task]:
+    """Open Tasks the recipient is subscribed to but doesn't own.
+
+    Used for the «Subscriptions update» section of the evening DM
+    so the user sees where the work they're tracking stands.
+    """
+    rows = (
+        session.query(Task)
+        .join(TaskSubscription, TaskSubscription.task_id == Task.id)
+        .filter(
+            TaskSubscription.slack_user_id == recipient_uid,
+            Task.deleted_at.is_(None),
+            Task.status.in_(_OPEN),
+            (Task.owner_user_id != recipient_uid) | (Task.owner_user_id.is_(None)),
+        )
+        .order_by(Task.due_date.is_(None), Task.due_date, Task.id)
+        .distinct()
+        .all()
+    )
+    return rows
+
+
 def send_evening_plan(
     session: Session,
     *,
     sender: TelegramSender,
     plan_date: date,
 ) -> TelegramDigestReport:
-    """The Telegram analogue of the Slack evening-plan DM. We
-    don't expose Skip/Approve buttons here for MVP — we just send
-    tomorrow's plan as a heads-up. The morning execution path
-    runs as-is regardless of approve clicks (FR-CR-04-25)."""
+    """FR-CR-05-04 — evening 18:00 DM packs three sections in one
+    message:
+
+    1. **Done today** — owner's tasks that flipped to ``done`` at any
+       point during today (history-driven so a task closed and re-
+       opened still counts).
+    2. **Subscriptions update** — every open Task the recipient is
+       subscribed to but doesn't own, with its current status.
+    3. **Tomorrow's plan** — the auto-curated list the previous
+       evening-plan message used to carry. Still seeds
+       ``daily_plan_items`` so the morning execution (FR-CR-04-25)
+       runs against the same list whether or not the user approved
+       it explicitly.
+
+    The previous «evening plan» behaviour (just the plan + a no-
+    button heads-up) is preserved as the third section — this is a
+    superset, not a breaking change.
+    """
+    today = plan_date - timedelta(days=1)  # «Today» from the user's POV
     report = TelegramDigestReport()
     for uid in _telegram_owner_ids(session):
         if _already_sent(
@@ -277,7 +343,10 @@ def send_evening_plan(
                 )
         session.flush()
 
-        if not candidates:
+        done_today = _done_today_for_owner(session, uid, today)
+        sub_open = _subscribed_open_for_recipient(session, uid)
+
+        if not candidates and not done_today and not sub_open:
             report.skipped_no_tasks += 1
             _mark_sent(
                 session,
@@ -288,11 +357,37 @@ def send_evening_plan(
             )
             continue
 
-        body = (
-            f"*📅 Plan for {plan_date.isoformat()}*\n\n"
-            + "\n".join(_fmt_task_line(t) for t in candidates)
-            + "\n\n_We'll run this as-is in the morning._"
-        )
+        sections: list[str] = []
+
+        # Section 1 — Done today.
+        if done_today:
+            sections.append(
+                f"<b>✅ Done today — {today.isoformat()}</b>\n"
+                + "\n".join(_fmt_task_line(t) for t in done_today)
+            )
+        else:
+            sections.append(
+                f"<b>✅ Done today — {today.isoformat()}</b>\n"
+                "<i>(nothing closed today — see you tomorrow)</i>"
+            )
+
+        # Section 2 — Subscriptions update.
+        if sub_open:
+            sections.append(
+                "<b>👀 Subscriptions update</b>\n"
+                + "\n".join(_fmt_task_line(t) for t in sub_open)
+            )
+
+        # Section 3 — Tomorrow's plan.
+        if candidates:
+            sections.append(
+                f"<b>📅 Plan for {plan_date.isoformat()}</b>\n"
+                + "\n".join(_fmt_task_line(t) for t in candidates)
+                + "\n<i>We'll run this as-is in the morning unless you "
+                "reply with edits.</i>"
+            )
+
+        body = "\n\n".join(sections)
         try:
             sender.send_message(chat_id=int(uid), text=body)
         except Exception as e:  # noqa: BLE001

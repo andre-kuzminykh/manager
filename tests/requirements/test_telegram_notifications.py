@@ -246,6 +246,68 @@ def test_evening_plan_persists_items_and_dms_owner(
         assert items[0].plan_date == plan_date
 
 
+def test_evening_plan_includes_three_sections(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-04 — evening DM packs Done today + Subscriptions
+    update + Tomorrow's plan in one message."""
+    from app.models import (
+        TaskStatusHistory,
+        TaskSubscription,
+    )
+
+    plan_date = date(2026, 5, 2)
+    today = plan_date - timedelta(days=1)
+    sender = _RecordingSender()
+    with SessionFactory() as s:
+        # Owner = "555" (TG numeric id). They closed «closed_today»
+        # earlier today, are subscribed to «watching» (owned by
+        # someone else), and have «for_tomorrow» due tomorrow.
+        from datetime import datetime, timezone
+
+        closed_today = _mk(
+            s,
+            owner_user_id="555",
+            title="closed_today",
+            status=TaskStatus.done,
+            due_date=today,
+        )
+        s.add(
+            TaskStatusHistory(
+                task_id=closed_today,
+                from_status=TaskStatus.in_progress,
+                to_status=TaskStatus.done,
+                at=datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+                + timedelta(hours=10),
+            )
+        )
+        watching = _mk(
+            s,
+            owner_user_id="U999",  # someone else, Slack-shaped so they
+            # don't show up as a TG-owner recipient themselves
+            title="watching",
+            status=TaskStatus.in_progress,
+        )
+        s.add(TaskSubscription(task_id=watching, slack_user_id="555"))
+        _mk(
+            s,
+            owner_user_id="555",
+            title="for_tomorrow",
+            status=TaskStatus.todo,
+            due_date=plan_date,
+        )
+        s.commit()
+    with SessionFactory() as s:
+        report = tn.send_evening_plan(s, sender=sender, plan_date=plan_date)
+        s.commit()
+    assert report.recipients == 1
+    body = sender.sent[0]["text"]
+    # All three section headers + their content.
+    assert "Done today" in body and "closed_today" in body
+    assert "Subscriptions update" in body and "watching" in body
+    assert f"Plan for {plan_date.isoformat()}" in body and "for_tomorrow" in body
+
+
 def test_morning_plan_only_runs_when_evening_seeded_items(
     patched_session_scope, SessionFactory
 ):

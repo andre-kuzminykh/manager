@@ -188,8 +188,10 @@ def test_parse_callback_data_rejects_garbage():
 
 
 def test_build_task_card_text_renders_underscore_username_as_plain_html():
-    """HTML parse mode renders ``andre_andreevich`` as-is — no
-    Markdown italic-trigger problems, no backslash escapes."""
+    """FR-CR-05-26: when a task's display is just `@handle` and
+    there's no registry row, the card renders the handle as
+    plain text with a `t.me/<handle>` link wrapping it (no
+    `@` shown in the visible label)."""
     t = Task(
         id=42,
         title="prep deck",
@@ -199,8 +201,11 @@ def test_build_task_card_text_renders_underscore_username_as_plain_html():
         source_kind=TaskSourceKind.telegram,
     )
     text = build_task_card_text(t)
-    # Underscore stays literal; @ stays literal. No backslash escapes.
-    assert "@andre_andreevich" in text
+    # Visible label is the bare handle, no @-prefix.
+    assert ">andre_andreevich</a>" in text or "andre_andreevich" in text
+    # Hyperlink to the public profile.
+    assert "https://t.me/andre_andreevich" in text
+    # No backslash escapes (HTML mode handles underscores fine).
     assert "\\_" not in text
 
 
@@ -264,10 +269,11 @@ def test_build_task_card_text_marks_done_with_check_emoji():
     assert "🟠" not in text  # priority circle suppressed for done
 
 
-def test_build_task_card_text_renders_owner_as_tg_user_link():
-    """FR-CR-05-16 — numeric Telegram uid → owner label is wrapped
-    in a `tg://user?id=<uid>` deeplink so a tap opens a private
-    chat with that person."""
+def test_build_task_card_text_renders_plain_text_when_no_username_no_session():
+    """FR-CR-05-26 — without a session and without an `@handle`
+    in the display, no link is emitted. The label renders as
+    plain text — better than a deadlink that doesn't render
+    clickably in cross-chat DMs anyway."""
     t = Task(
         id=1,
         title="x",
@@ -278,7 +284,9 @@ def test_build_task_card_text_renders_owner_as_tg_user_link():
         source_kind=TaskSourceKind.telegram,
     )
     text = build_task_card_text(t)
-    assert '<a href="tg://user?id=222968032">' in text
+    # No tg://user?id= fallback any more.
+    assert "tg://user?id=" not in text
+    # Real-name display.
     assert "Андрей Кузьминых" in text
 
 
@@ -299,11 +307,9 @@ def test_build_task_card_text_skips_link_for_slack_uid():
 
 
 def test_build_task_card_text_links_owner_via_at_handle_when_no_numeric_id():
-    """FR-CR-05-18 — when the owner's display is `@handle` form
-    but the stored owner_user_id is non-numeric (Slack-only
-    teammate or unresolved row), fall back to a
-    `https://t.me/<handle>` link so the operator can still tap
-    through to the user's Telegram profile."""
+    """FR-CR-05-18 / FR-CR-05-26 — when the owner's display is
+    `@handle` form, the visible label is the bare handle (no
+    `@`) and it's wrapped in a `https://t.me/<handle>` link."""
     t = Task(
         id=1,
         title="x",
@@ -315,7 +321,7 @@ def test_build_task_card_text_links_owner_via_at_handle_when_no_numeric_id():
     )
     text = build_task_card_text(t)
     assert '<a href="https://t.me/andre_andreevich">' in text
-    assert "@andre_andreevich" in text
+    assert ">andre_andreevich</a>" in text
     # No tg://user?id= since we don't have a numeric uid.
     assert "tg://user?id=" not in text
 
@@ -401,13 +407,14 @@ def test_build_task_card_text_falls_back_to_chat_members_for_username(
     assert '<a href="https://t.me/yulia_analyst">' in text
 
 
-def test_build_task_card_text_falls_back_to_tg_user_id_when_no_handle_anywhere(
+def test_build_task_card_text_renders_plain_text_when_no_username_anywhere(
     session,
 ):
-    """When neither the team registry nor the chat-members table
-    has a username for this user, the link is the last-ditch
-    `tg://user?id=<uid>` form — clickable in some Telegram
-    clients, plain text in others."""
+    """FR-CR-05-26 — when neither the team registry nor
+    chat-members has a `telegram_username` for this user, the
+    owner renders as PLAIN TEXT (no link). User-facing rule:
+    «если username нет, то ссылку не выводи». A non-rendering
+    `tg://user?id=` fallback would just confuse the operator."""
     from app.models import TeamMember
     from datetime import datetime, timezone as _tz
 
@@ -426,15 +433,52 @@ def test_build_task_card_text_falls_back_to_tg_user_id_when_no_handle_anywhere(
         id=1,
         title="x",
         owner_user_id="712250586",
-        owner_display_name="Лиля - HR",
+        owner_display_name="ignored — registry wins",
         priority=TaskPriority.medium,
         status=TaskStatus.todo,
         source_kind=TaskSourceKind.telegram,
     )
     text = build_task_card_text(t, session=session)
-    assert '<a href="tg://user?id=712250586">' in text
-    # No t.me link — no handle anywhere.
-    assert "https://t.me/" not in text or 't.me/c/' in text  # only source link OK
+    # Registry's real_name is the visible label.
+    assert "Лиля - HR" in text
+    # No link of any form for the owner.
+    assert "tg://user?id=" not in text
+    # The only `t.me/` link in the text would be a chat permalink,
+    # not on the owner. Confirm none on this card.
+    assert "<a href=\"https://t.me/" not in text
+
+
+def test_build_task_card_text_renders_telegram_user_id_when_no_real_name(session):
+    """FR-CR-05-26 — when neither the registry nor chat-members
+    has a `real_name`, fall back to the numeric `telegram_user_id`
+    as the visible label. Still no link without a username."""
+    from app.models import TeamMember
+    from datetime import datetime, timezone as _tz
+
+    session.add(
+        TeamMember(
+            real_name=None,
+            telegram_user_id=712250586,
+            telegram_username=None,
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="712250586",
+        owner_display_name=None,
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t, session=session)
+    assert "712250586" in text
+    assert "tg://user?id=" not in text
+    assert '<a href="https://t.me/' not in text
 
 
 def test_build_task_card_text_falls_back_to_handle_when_registry_has_only_username(

@@ -1407,6 +1407,31 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.27 — Owner display: `real_name` first, link only on `@username`
+
+Operator-driven simplification of the owner-rendering rules
+(replaces the multi-tiered chain from 13.21/22):
+
+- **Display label priority:** `team_members.real_name` (or
+  `chat_members` fallback) → `task.owner_display_name` with
+  leading `@` stripped → numeric `task.owner_user_id` raw.
+  Visible label NEVER includes the `@` — that's reserved for
+  the link href.
+- **Link priority:** `team_members.telegram_username` (or
+  `chat_members` fallback) → `@handle` parsed off the original
+  display → otherwise plain text.
+
+No more `tg://user?id=<uid>` fallback — that link form rendered
+silently in cross-chat DMs and looked broken («ссылку не выводи
+если username нет»).
+
+After this change the owner cell reads as one of:
+
+  - `<a href="https://t.me/handle">Real Name</a>` (best case)
+  - `<a href="https://t.me/handle">handle</a>` (no real_name)
+  - `Real Name` (no handle, plain text)
+  - `<numeric TG id>` (nothing else available)
+
 #### 13.26 — Use `sender_username` + `message_link` from the source view
 
 Inspecting the actual Supabase view's schema turned up two

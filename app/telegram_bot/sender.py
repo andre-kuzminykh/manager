@@ -96,13 +96,27 @@ def _format_owner(task: Task) -> str | None:
 _USERNAME_HANDLE_RE = __import__("re").compile(r"^@([A-Za-z][A-Za-z0-9_]{4,31})$")
 
 
+def _handle_from_display(display: str | None) -> str | None:
+    """Pull the bare handle out of a `@username` display label.
+    Returns ``None`` for empty / non-handle inputs. Used as a
+    last-resort fallback when the registry didn't supply a
+    `tg_handle` but the operator stored an @-form on the task."""
+    if not display:
+        return None
+    m = _USERNAME_HANDLE_RE.match(display.strip())
+    if m is None:
+        return None
+    return m.group(1)
+
+
 def _resolve_owner_link_target(
     session,
     owner_user_id: str | None,
     owner_display_name: str | None,
-) -> tuple[str | None, str | None]:
-    """FR-CR-05-19 / FR-CR-05-20 — find the (`telegram_user_id`,
-    `telegram_username`) pair to hyperlink the owner against.
+) -> tuple[str | None, str | None, str | None]:
+    """FR-CR-05-19 / FR-CR-05-20 / FR-CR-05-26 — find the
+    (`telegram_user_id`, `telegram_username`, `real_name`)
+    triple to render the owner with.
 
     Two-table lookup:
 
@@ -115,18 +129,16 @@ def _resolve_owner_link_target(
          numeric TG id, the live listener has been observing this
          user across chats and likely captured their @-handle.
          Fall back to the most recent `username` for that
-         `user_id`. Without this fallback half the registry only
-         has numeric ids (auto-seed wrote sparse rows) and the
-         widget can't emit a `t.me/<handle>` URL — `tg://user?id=`
-         is silent for users who aren't in the bot's DM.
+         `user_id`. Same fallback applies to `real_name`
+         (`first_name` + `last_name`).
 
-    Either or both fields may be ``None`` when neither source has
-    that identity. Wrapped in try/except so a missing migration
-    in the test fixture quietly degrades to «no extra info»."""
+    Any field may be ``None`` when neither source has that
+    identity. Wrapped in try/except so a missing migration in
+    the test fixture quietly degrades to «no extra info»."""
     if session is None:
-        return None, None
+        return None, None, None
     if not (owner_user_id or owner_display_name):
-        return None, None
+        return None, None, None
     try:
         from sqlalchemy import func, or_
         from app.models import TeamMember, TelegramChatMember
@@ -161,28 +173,36 @@ def _resolve_owner_link_target(
                 )
         tg_id: str | None = None
         tg_handle: str | None = None
+        real_name: str | None = None
         if row is not None:
             tg_id = str(row.telegram_user_id) if row.telegram_user_id else None
             tg_handle = row.telegram_username or None
-        # If we have a numeric id but no @handle, look up
-        # telegram_chat_members — the listener writes usernames
-        # there on every observed message.
-        if tg_id and not tg_handle:
+            real_name = row.real_name or None
+        # If we have a numeric id but blank handle / name, look
+        # up telegram_chat_members — listener writes them on every
+        # observed message.
+        if tg_id and (not tg_handle or not real_name):
             try:
                 chat_row = (
                     session.query(TelegramChatMember)
                     .filter(TelegramChatMember.user_id == int(tg_id))
-                    .filter(TelegramChatMember.username.isnot(None))
                     .order_by(TelegramChatMember.last_seen_at.desc())
                     .first()
                 )
-                if chat_row and chat_row.username:
-                    tg_handle = chat_row.username
+                if chat_row is not None:
+                    if not tg_handle and chat_row.username:
+                        tg_handle = chat_row.username
+                    if not real_name:
+                        full = " ".join(
+                            p for p in (chat_row.first_name, chat_row.last_name) if p
+                        ).strip() or None
+                        if full:
+                            real_name = full
             except Exception:  # noqa: BLE001
                 pass
-        return tg_id, tg_handle
+        return tg_id, tg_handle, real_name
     except Exception:  # noqa: BLE001
-        return None, None
+        return None, None, None
 
 
 def _owner_html_link(
@@ -192,34 +212,18 @@ def _owner_html_link(
     tg_user_id: str | None = None,
     tg_handle: str | None = None,
 ) -> str:
-    """FR-CR-05-16 / FR-CR-05-18 / FR-CR-05-19 / FR-CR-05-20 —
-    wrap `display` in a deeplink so a tap on the owner label
-    opens a chat with them.
+    """FR-CR-05-26 — minimal hyperlink rules:
 
-    Resolution chain (first match wins). PUBLIC `t.me/<handle>`
-    URLs come first because `tg://user?id=<uid>` only renders as
-    a clickable mention in clients where the tagged user is a
-    member of the current chat — and the bot's DM with the
-    operator obviously isn't shared with the owner. The public
-    URL form works regardless of chat membership.
+      - When ``tg_handle`` is available (registry / chat-members
+        / `@<handle>` parsed off the display), wrap the display in
+        ``<a href="https://t.me/<handle>">…</a>``.
+      - Otherwise → plain text. No `tg://user?id=` fallback any
+        more — that link form often renders silently in cross-chat
+        DMs and looked broken to operators. Better to show a
+        readable plain-text label than a deadlink.
 
-      1. ``tg_handle`` (registry / chat-members) →
-         ``https://t.me/<handle>``.
-      2. ``display`` matches ``@<handle>`` form →
-         ``https://t.me/<handle>``.
-      3. ``tg_user_id`` (registry-resolved numeric TG id) →
-         ``tg://user?id=<uid>``. Last-ditch — works in some
-         clients but not all when the user isn't in the chat.
-      4. Numeric ``owner_user_id`` → ``tg://user?id=<uid>``.
-      5. Otherwise → plain text.
-
-    Callers that have a DB session should pass `tg_user_id` /
-    `tg_handle` from `_resolve_owner_link_target`; callers
-    without a session fall back to whatever can be inferred from
-    `owner_user_id` / `display` directly. Display text is
-    HTML-escaped; the wrapper element is the only raw HTML in
-    the result.
-    """
+    Display text is HTML-escaped; the wrapper element is the only
+    raw HTML in the result."""
     safe = _escape_html(display)
     if tg_handle:
         clean = str(tg_handle).strip().lstrip("@")
@@ -228,12 +232,43 @@ def _owner_html_link(
     m = _USERNAME_HANDLE_RE.match((display or "").strip())
     if m is not None:
         return f'<a href="https://t.me/{m.group(1)}">{safe}</a>'
-    if tg_user_id and str(tg_user_id).isdigit():
-        return f'<a href="tg://user?id={tg_user_id}">{safe}</a>'
-    s = str(owner_user_id) if owner_user_id else ""
-    if s.isdigit():
-        return f'<a href="tg://user?id={s}">{safe}</a>'
     return safe
+
+
+def _resolve_owner_display(
+    task: Task,
+    *,
+    real_name: str | None,
+) -> str | None:
+    """FR-CR-05-26 — pick the operator-friendly label to render.
+
+    Priority:
+      1. Registry-resolved ``real_name`` from `team_members` /
+         `telegram_chat_members`. Single source of truth — same
+         teammate renders identically across cards.
+      2. ``task.owner_display_name``, with a leading ``<@…>``
+         Slack mention stripped to a bare uid.
+      3. ``task.owner_user_id`` raw (numeric TG id or Slack uid).
+
+    NEVER returns the bare ``@handle`` — that's reserved for the
+    hyperlink href. The display text itself uses the human name.
+    """
+    if real_name:
+        return real_name
+    raw = task.owner_display_name or task.owner_user_id
+    if not raw:
+        return None
+    s = str(raw).strip()
+    # Strip a leading `<@Uxxxx>` Slack mention.
+    import re
+
+    mention = re.match(r"^<@([UW][A-Z0-9]+)>$", s)
+    if mention:
+        return mention.group(1)
+    # Strip a leading `@` so the display reads as plain text.
+    if s.startswith("@") and len(s) > 1:
+        return s[1:]
+    return s
 
 
 def build_task_card_text(
@@ -284,13 +319,20 @@ def build_task_card_text(
         lines.append(f"📝 {_escape_html(task.description)}")
 
     meta: list[str] = []
-    owner = _format_owner(task)
-    if owner:
-        tg_id, tg_handle = _resolve_owner_link_target(
-            session, task.owner_user_id, task.owner_display_name or owner
-        )
+    tg_id, tg_handle, real_name = _resolve_owner_link_target(
+        session, task.owner_user_id, task.owner_display_name
+    )
+    owner_label = _resolve_owner_display(task, real_name=real_name)
+    # FR-CR-05-26 — extract the handle from a `@…` display when
+    # the registry didn't return one (no team_members row, or
+    # row had only the numeric id). This keeps the link working
+    # for @-form displays even without a session lookup.
+    effective_handle = tg_handle or _handle_from_display(
+        task.owner_display_name
+    )
+    if owner_label:
         meta.append(
-            f"👤 {_owner_html_link(task.owner_user_id, owner, tg_user_id=tg_id, tg_handle=tg_handle)}"
+            f"👤 {_owner_html_link(task.owner_user_id, owner_label, tg_user_id=tg_id, tg_handle=effective_handle)}"
         )
     if task.due_date:
         meta.append(f"📅 {task.due_date.isoformat()}")

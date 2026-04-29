@@ -405,10 +405,11 @@ def test_draft_widget_text_falls_back_to_plain_bold_without_permalink(session):
     assert "<b>x</b>" in text
 
 
-def test_draft_widget_text_renders_owner_as_tg_user_link(session):
-    """FR-CR-05-16 — numeric TG uid on the draft → owner label
-    wrapped in a `tg://user?id=<uid>` deeplink so a tap on the
-    owner opens a private chat with them."""
+def test_draft_widget_text_renders_plain_text_when_no_username_anywhere(session):
+    """FR-CR-05-26 — when the registry has no `telegram_username`
+    for this user, the widget owner renders as plain text. No
+    `tg://user?id=` fallback any more (operator-facing rule:
+    «если username нет, то ссылку не выводи»)."""
     from app.telegram_bot.cards import _build_draft_widget_text
 
     draft = _mk_proposed_draft(
@@ -420,8 +421,44 @@ def test_draft_widget_text_renders_owner_as_tg_user_link(session):
         },
     )
     text = _build_draft_widget_text(draft)
-    assert '<a href="tg://user?id=222968032">' in text
     assert "Андрей Кузьминых" in text
+    assert "tg://user?id=" not in text
+
+
+def test_draft_widget_text_renders_owner_as_tme_link_when_username_in_registry(
+    session,
+):
+    """FR-CR-05-26 — when the registry has a `telegram_username`,
+    the visible label is the registry's `real_name` and it's
+    wrapped in a `https://t.me/<handle>` link."""
+    from app.models import TeamMember
+    from app.telegram_bot.cards import _build_draft_widget_text
+    from datetime import datetime, timezone as _tz
+
+    session.add(
+        TeamMember(
+            real_name="Артем Соколов",
+            telegram_user_id=97239970,
+            telegram_username="artem_sokolov",
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+
+    draft = _mk_proposed_draft(
+        session,
+        payload={
+            "title": "x",
+            "owner_user_id": "97239970",
+            "owner_display_name": "Артем",  # short form — registry wins
+        },
+    )
+    text = _build_draft_widget_text(draft, session=session)
+    assert '<a href="https://t.me/artem_sokolov">' in text
+    assert "Артем Соколов" in text
+    # Short form ignored — registry's full name wins.
+    assert ">Артем</a>" not in text
 
 
 def test_post_draft_confirmation_sends_only_widget_no_forward_no_quote(

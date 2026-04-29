@@ -294,7 +294,7 @@ def _build_draft_widget_text(
     payload = draft.payload or {}
     title = payload.get("title") or ""
     owner_user_id = payload.get("owner_user_id") or ""
-    owner_disp = payload.get("owner_display_name") or owner_user_id or ""
+    payload_disp = payload.get("owner_display_name") or ""
     priority = payload.get("priority") or "medium"
     due = payload.get("due_date") or ""
     description = payload.get("description") or ""
@@ -316,14 +316,30 @@ def _build_draft_widget_text(
     if description:
         lines.append(f"📝 {_escape_md(str(description))}")
     meta: list[str] = []
-    if owner_disp:
-        tg_id, tg_handle = _resolve_owner_link_target(
-            session,
-            str(owner_user_id) if owner_user_id else None,
-            str(owner_disp),
-        )
+    # FR-CR-05-26 — registry's `real_name` wins as the display
+    # label; payload display is a fallback; numeric id is the
+    # last resort. `@handle` is reserved for the link href.
+    tg_id, tg_handle, registry_real = _resolve_owner_link_target(
+        session,
+        str(owner_user_id) if owner_user_id else None,
+        str(payload_disp) if payload_disp else None,
+    )
+    owner_label: str | None = None
+    if registry_real:
+        owner_label = registry_real
+    else:
+        candidate = (payload_disp or owner_user_id or "").strip()
+        if candidate.startswith("@") and len(candidate) > 1:
+            candidate = candidate[1:]
+        owner_label = candidate or None
+    # FR-CR-05-26 — extract handle from `@…` display as a
+    # last-resort link source.
+    from app.telegram_bot.sender import _handle_from_display
+
+    effective_handle = tg_handle or _handle_from_display(str(payload_disp))
+    if owner_label:
         meta.append(
-            f"👤 {_owner_html_link(str(owner_user_id) if owner_user_id else None, str(owner_disp), tg_user_id=tg_id, tg_handle=tg_handle)}"
+            f"👤 {_owner_html_link(str(owner_user_id) if owner_user_id else None, owner_label, tg_user_id=tg_id, tg_handle=effective_handle)}"
         )
     if due:
         meta.append(f"📅 {due}")

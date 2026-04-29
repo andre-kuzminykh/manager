@@ -723,6 +723,46 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-26 — Owner display: real_name first, link only on `@username`
+
+Operator-driven simplification of the owner-rendering rules
+(replaces the multi-tiered chain from FR-CR-05-19/20):
+
+**Display priority** (visible label):
+
+  1. ``team_members.real_name`` (or `chat_members` fallback) —
+     same teammate renders identically across every card.
+  2. ``task.owner_display_name`` (with leading `@` /
+     `<@Uxxx>` stripped — the visible label is always the
+     plain name, never the handle).
+  3. ``task.owner_user_id`` raw — last resort (numeric TG id
+     or Slack uid as plain text).
+
+**Link priority** (hyperlink wrapping the label):
+
+  1. ``team_members.telegram_username`` (or `chat_members`
+     fallback) → `https://t.me/<handle>`.
+  2. ``@handle`` parsed off the original `task.owner_display_name`
+     when the registry has nothing → `https://t.me/<handle>`.
+  3. **Otherwise → plain text.** No `tg://user?id=` fallback any
+     more — that link form often rendered silently in cross-chat
+     DMs and looked broken to operators («ссылку не выводи если
+     username нет»).
+
+`_resolve_owner_link_target` returns a 3-tuple now:
+``(telegram_user_id, telegram_username, real_name)``. New
+`_resolve_owner_display(task, real_name=...)` picks the display
+label per the rules above. New `_handle_from_display` extracts
+the bare handle from a `@…` display so an `@`-only display still
+hyperlinks even without a registry hit.
+
+After this change, the owner cell on a card reads as one of:
+
+  - `<a href="https://t.me/<handle>">Real Name</a>` (best case)
+  - `<a href="https://t.me/<handle>">handle</a>` (no real_name)
+  - `Real Name` (no handle, plain text)
+  - `<numeric TG id>` (nothing else available, plain text)
+
 #### FR-CR-05-25 — Read `sender_username` + `message_link` from the source view
 
 The colleague's Supabase view turned out to ship two columns
@@ -2740,6 +2780,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared). The original `test_task_row_includes_dialogue_from_extra` / `_dialogue_empty_when_no_extra` tests were rolled back by FR-CR-05-15. |
 | FR-CR-05-15  | `test_telegram_cards.py::test_draft_widget_text_includes_source_permalink_when_available` (🔗 line carries `t.me/c/<chat>/<msg>` when `_pending["permalink"]` is set); `::test_draft_widget_text_omits_link_line_when_no_permalink` (no empty 🔗 line for private DMs / basic groups); `test_sheets_pull.py::test_task_row_does_not_include_dialogue_column` (22-column header restored, last column is `completion_artifact`); `test_telegram_ingest.py::test_recent_in_chat_filters_by_chat_id_only` (adaptive context window is per-chat — SQL `WHERE chat_id = :chat_id` pinned so a future refactor can't widen the query) |
 | FR-CR-05-23  | `test_team_members.py::test_backfill_fills_blank_team_members_from_chat_members` (sparse rows enriched from listener observations; operator edits preserved); `::test_backfill_no_op_when_chat_members_empty` (no observations ⇒ no rows changed) |
+| FR-CR-05-26  | `test_telegram_bot.py::test_build_task_card_text_renders_underscore_username_as_plain_html` (`@handle` display ⇒ visible label is the bare handle, hyperlinked); `::test_build_task_card_text_renders_plain_text_when_no_username_no_session` (no session + no `@` ⇒ plain text, no `tg://user?id=` fallback); `::test_build_task_card_text_links_owner_via_at_handle_when_no_numeric_id` (Slack uid + `@handle` ⇒ `https://t.me/<handle>`); `::test_build_task_card_text_renders_plain_text_when_no_username_anywhere` (registry has real_name but no username ⇒ plain real-name); `::test_build_task_card_text_renders_telegram_user_id_when_no_real_name` (no real_name anywhere ⇒ visible label is numeric uid, still no link); `test_telegram_cards.py::test_draft_widget_text_renders_plain_text_when_no_username_anywhere` + `::test_draft_widget_text_renders_owner_as_tme_link_when_username_in_registry` (same rules on the confirm widget; registry's real_name wins over LLM's short form) |
 | FR-CR-05-25  | `test_telegram_ingest.py::test_map_row_extracts_dedicated_username_column` (`sender_username` ⇒ `TelegramSourceMessage.username`, leading @ stripped); `::test_map_row_extracts_message_link_as_permalink` (`message_link` column ⇒ `TelegramSourceMessage.permalink`); `::test_telegram_permalink_prefers_view_supplied_link` (`_telegram_permalink` returns the view's URL when set, even for chat shapes where reconstruction would return None); `test_team_members.py::test_seed_from_telegram_source_pulls_distinct_users` (modern view shape — both real_name and username populated cleanly; legacy heuristic still works for views without the column) |
 | FR-CR-05-24  | `test_team_members.py::test_enrich_from_bot_api_populates_blank_fields` (Bot API getChat result populates blank username / real_name; rows already populated are skipped without calls); `::test_enrich_from_bot_api_silently_skips_unknown_users` (getChat returns `{}` ⇒ row stays sparse, no crash); `::test_enrich_from_bot_api_noop_when_sender_disabled` (no token / sender ⇒ early-return) |
 | FR-CR-05-22  | `test_intent_pipeline.py::test_title_prompt_forbids_vague_placeholder_phrases_in_description` (CONCRETE OVER VAGUE block + concrete examples «указанных людей» / «правильной командой» / «the right people» pinned; «(уточнить)» fallback when context lacks names); `::test_title_prompt_forbids_first_person_plural_in_description` (THIRD PERSON block + «нам» / «будем рады» / «we'd love» pinned) |

@@ -704,10 +704,31 @@ class TelegramListener:
     ) -> None:
         """Apply the user's reply to a prompt. ``pending.action``
         decides whether to complete the task with an artifact or
-        apply an edit payload."""
+        apply an edit payload.
+
+        On any path that materially changed state we delete the
+        prompt message itself (best-effort) so the DM stays tidy —
+        the user shouldn't have to scroll past stale «Edit draft #N»
+        prompts to read the refreshed card. The user's own reply
+        message stays (the bot can't delete user messages in DMs).
+        """
         actor = str(msg.user_id) if msg.user_id else None
         if not actor:
             return
+
+        def _drop_prompt() -> None:
+            try:
+                self._sender.delete_message(
+                    chat_id=pending.chat_id,
+                    message_id=pending.prompt_message_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "telegram_prompt_delete_failed",
+                    chat_id=pending.chat_id,
+                    message_id=pending.prompt_message_id,
+                    error=str(e),
+                )
 
         if pending.action == "artifact":
             task = tg_handlers.apply_done_artifact_reply(
@@ -717,6 +738,7 @@ class TelegramListener:
                 reply_text=msg.text,
             )
             if task is not None:
+                _drop_prompt()
                 refresh_card(
                     sender=self._sender,
                     session=session,
@@ -751,6 +773,7 @@ class TelegramListener:
                     reply_to_message_id=msg.message_id,
                 )
                 return
+            _drop_prompt()
             refresh_card(
                 sender=self._sender,
                 session=session,
@@ -783,6 +806,7 @@ class TelegramListener:
                     reply_to_message_id=msg.message_id,
                 )
                 return
+            _drop_prompt()
             refresh_draft_widgets(sender=self._sender, draft=draft)
         else:
             log.info("telegram_unknown_pending_action", action=pending.action)

@@ -459,6 +459,38 @@ def test_apply_edit_draft_reply_updates_payload(session):
     assert draft.payload["_widgets"] == [{"chat_id": 11, "message_id": 99}]
 
 
+def test_apply_edit_draft_reply_resets_display_when_owner_changes(session):
+    """Regression: changing owner must update BOTH `owner_user_id`
+    and `owner_display_name` — otherwise the widget renderer (which
+    prefers display_name) keeps the old name on screen and Telegram
+    rejects the editMessageText with «message is not modified»."""
+    from app.models import ActionDraft
+
+    did = _mk_draft(session, title="t", owner_user_id="11")
+    # Seed an explicit display_name on the draft so the regression
+    # condition is reproduced — the renderer would prefer this.
+    d = session.get(ActionDraft, did)
+    payload = dict(d.payload or {})
+    payload["owner_display_name"] = "@andre_andreevich"
+    d.payload = payload
+    session.flush()
+
+    backend = _FakeBackend(payload={"owner": "pr_chu"})
+    draft, applied = h.apply_edit_draft_reply(
+        session,
+        draft_id=did,
+        actor="11",
+        reply_text="@pr_chu ответственный",
+        llm_backend=backend,
+    )
+    assert draft is not None
+    assert applied == {"owner": "pr_chu"}
+    assert draft.payload["owner_user_id"] == "pr_chu"
+    # display_name is reset so the widget actually renders the new
+    # owner instead of the stale «@andre_andreevich».
+    assert draft.payload["owner_display_name"] == "pr_chu"
+
+
 def test_apply_edit_draft_reply_returns_empty_when_llm_silent(session):
     did = _mk_draft(session)
     backend = _FakeBackend(payload={})

@@ -627,7 +627,13 @@ def apply_edit_reply_ex(
     if "category" in payload:
         task.category = payload["category"] or None
     if "owner" in payload:
-        task.owner_user_id = payload["owner"] or None
+        new_owner = (payload["owner"] or "").strip() or None
+        task.owner_user_id = new_owner
+        # Reset display so the card reflects the new owner — the
+        # renderer prefers `owner_display_name` over `owner_user_id`
+        # and an unchanged display would cause a silent
+        # «message is not modified» on every refresh.
+        task.owner_display_name = new_owner
 
     # Drop the "owner_assumed" flag — once a human has explicitly
     # edited the task, we no longer hedge the owner label.
@@ -893,7 +899,14 @@ def apply_edit_draft_reply(
     if "category" in parsed:
         payload["category"] = parsed["category"] or None
     if "owner" in parsed:
-        payload["owner_user_id"] = parsed["owner"] or None
+        new_owner = (parsed["owner"] or "").strip() or None
+        payload["owner_user_id"] = new_owner
+        # Reset the display name too — without this the widget would
+        # keep rendering the previous owner's `owner_display_name`
+        # (it takes priority over `owner_user_id` in the renderer),
+        # so an owner change visually produces zero diff and Telegram
+        # rejects the editMessageText with «message is not modified».
+        payload["owner_display_name"] = new_owner
 
     draft.payload = payload
     session.flush()

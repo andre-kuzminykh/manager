@@ -80,6 +80,21 @@ def test_detect_prompt_lists_status_reports_and_parroted_phrases_as_no_action():
     assert "OCR" in blob or "transcription" in blob.lower()
 
 
+def test_detect_prompt_rejects_passive_past_tense_status_reports():
+    """FR-CR-05-12 — «письма в Abundance отправлены» (passive past
+    tense) must be no_action, same as active past («отправил»).
+    The prompt now lists passive forms explicitly so the LLM
+    doesn't read them as imperatives."""
+    blob = DETECT_SYSTEM_PROMPT
+    # Passive forms that previously slipped through.
+    for word in ("отправлены", "подписан", "оплачен", "утверждён", "sent", "approved"):
+        assert word in blob, (
+            f"detect prompt should mention passive-past form {word!r}"
+        )
+    # Concrete example anchoring the rule.
+    assert "письма в Abundance отправлены" in blob
+
+
 def test_title_prompt_teaches_imperative_rewrite_from_context():
     """FR-CR-05-09 — the title prompt is taught to use the
     `context` block to rewrite parroted one-liners into a proper
@@ -95,6 +110,65 @@ def test_title_prompt_teaches_imperative_rewrite_from_context():
     # The instruction MUST mention the context block, since the
     # rewrite depends on it.
     assert "context" in blob.lower()
+
+
+def test_title_prompt_forbids_trailing_clauses_in_descriptions():
+    """FR-CR-05-12 — the title prompt now caps the description at
+    1-3 short sentences and explicitly forbids trailing-clause
+    truncations like «так как осталось открытым с» (mid-sentence
+    cut)."""
+    blob = TITLE_SYSTEM_PROMPT
+    # Length / completeness rule must be present.
+    assert "LENGTH RULE" in blob or "length rule" in blob.lower()
+    assert "complete sentence" in blob.lower() or "finish every sentence" in blob.lower()
+    assert "trail off" in blob.lower() or "trailing" in blob.lower()
+
+
+def test_owner_prompt_renders_role_and_notes_columns():
+    """FR-CR-05-12 — the owner prompt receives `role` and `notes`
+    per known_employee row to disambiguate same-first-name
+    teammates («Алина — founder» vs «Алина — project manager»).
+    The user-side prompt must surface those columns."""
+    from app.intent.owner_prompt import build_owner_user_prompt
+
+    prompt = build_owner_user_prompt(
+        source_text="подать заявку на StartUp Qatar",
+        context_messages=[],
+        author_user_id="U1",
+        known_employees=[
+            {
+                "slack_user_id": "111",
+                "display_name": "Alina",
+                "real_name": "Alina Founder",
+                "role": "founder",
+                "notes": "deals with international expansion",
+            },
+            {
+                "slack_user_id": "222",
+                "display_name": "Alina",
+                "real_name": "Alina Manager",
+                "role": "project manager / аналитик",
+                "notes": "",
+            },
+        ],
+    )
+    # Both role strings must appear so the LLM can tell them apart.
+    assert "founder" in prompt
+    assert "project manager" in prompt.lower()
+    # Header advertises the new columns.
+    assert "role" in prompt
+    assert "notes" in prompt
+
+
+def test_owner_prompt_disambiguation_section_lists_role_first():
+    """The system prompt must teach the LLM to USE role / notes
+    when several rows share a first name. If we don't pin this
+    in the prompt, the model picks alphabetically and we get the
+    wrong Alina."""
+    blob = OWNER_SYSTEM_PROMPT
+    assert "DISAMBIGUATION" in blob or "disambiguat" in blob.lower()
+    assert "role" in blob.lower()
+    assert "notes" in blob.lower()
 
 
 def test_owner_prompt_sees_conversation_context_placeholder():

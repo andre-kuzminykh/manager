@@ -72,7 +72,9 @@ def as_known_employees(
 
         {"slack_user_id": "<numeric TG id or Slack uid>",
          "display_name":  "@handle | Real Name",
-         "real_name":     "Real Name"}
+         "real_name":     "Real Name",
+         "role":          "Project Manager / аналитик" or "",
+         "notes":         "free-form context" or ""}
 
     The field is named `slack_user_id` for legacy reasons — the
     classifier treats it as opaque «id the LLM should round-trip
@@ -81,6 +83,12 @@ def as_known_employees(
     user_id so the post-classification handler can DM the assignee.
     On Slack ingest the caller flips the flag and we feed
     slack_user_id instead.
+
+    Role + notes are surfaced because they help the LLM
+    disambiguate when several team members share a first name
+    («Алина» vs «Валентина» both match a partial cue) — the role
+    text often carries enough signal («Project Manager / аналитик»
+    vs «founder») to pick the right one.
 
     Inactive members are excluded (they're kept in the table for
     historical task assignments but shouldn't appear as new owner
@@ -108,6 +116,8 @@ def as_known_employees(
                 "slack_user_id": primary_id,
                 "display_name": _display_for(m),
                 "real_name": m.real_name or _display_for(m),
+                "role": (m.role or ""),
+                "notes": (m.notes or ""),
             }
         )
     return out

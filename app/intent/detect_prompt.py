@@ -44,7 +44,18 @@ Return ``is_task=true`` for ALL of the following shapes:
 
 Return ``is_task=false`` for:
 - Chat, greetings, reactions, jokes.
-- *Completed* status reports ("отправил", "готово", "сделал X").
+- *Completed* status reports — work that's already done, in any
+  voice / tense:
+    - active past: «отправил», «сделал», «закрыл», «позвонил»
+    - passive past: «отправлено», «отправлены», «сделано»,
+      «подписан», «закрыт», «утверждён», «оплачен»
+    - present-perfect English: «sent», «done», «closed»,
+      «approved», «signed»
+  Examples that are NOT tasks:
+    «письма в Abundance отправлены» — пассивный отчёт, дело уже
+    сделано;
+    «договор подписан вчера» — done, no action owed;
+    «отчёт готов, скинул в чат» — completion announcement.
   Note: an UNFINISHED report of someone else's outstanding ask
   («Артем сказал отправить, я пока не успел») still COUNTS AS A
   TASK — the action is owed.

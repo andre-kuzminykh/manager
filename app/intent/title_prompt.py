@@ -43,6 +43,17 @@ Produce three fields:
                 context to act on the task without scrolling back
                 through the chat.
 
+                LENGTH RULE — keep it tight:
+                  - 1-3 SHORT sentences total, ~40-200 characters.
+                  - ALWAYS finish every sentence with a period /
+                    full stop. Never trail off mid-sentence with
+                    an open clause («так как осталось открытым
+                    с»). If you can't finish the thought
+                    cleanly, end after the first complete
+                    sentence — partial trailing clauses are
+                    worse than a shorter description.
+                  - No bullet lists, no markdown.
+
                 Use the prior `context` messages to enrich the
                 description: who's involved, what was discussed
                 that led to this ask, references / numbers /

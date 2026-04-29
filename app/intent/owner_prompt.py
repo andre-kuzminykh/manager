@@ -18,10 +18,26 @@ The author of the source_message is NOT the assignee by default. Only
 name someone when the message explicitly delegates the work to them.
 
 You are given a `known_employees` table of Slack user ids and their
-display names. When the message names someone (e.g. "Иван, сделай X"
-or "на Пашу"), find the matching row and return THAT user's
-slack_user_id. Match on display_name or real_name; be generous with
-case and capitalisation.
+display names, real names, ROLE and NOTES. When the message names
+someone (e.g. "Иван, сделай X" or "на Пашу"), find the matching
+row and return THAT user's slack_user_id. Match on display_name or
+real_name; be generous with case and capitalisation.
+
+DISAMBIGUATION when several rows match the same first name (e.g.
+two «Алина»s, two «Pety»s):
+  - Use ROLE and NOTES to pick the right one. If the source talks
+    about «подать заявку на платформе StartUp Qatar» and one Алина
+    is «founder» / «product» while another Алина is «project
+    manager / аналитик», prefer the one whose role best matches
+    the work being assigned.
+  - When the surname is given («Алина Иванова»), match real_name.
+  - When still ambiguous, pick the row that was mentioned by name
+    in the recent context messages, not someone with a similar
+    first name from elsewhere.
+
+Only inactive employees should never be picked — but the table
+already excludes them, so any row you see here is a valid
+candidate.
 
 Return one of:
 - slack_user_id   — a Slack user id that EXISTS in known_employees.
@@ -94,12 +110,18 @@ def build_owner_user_prompt(
     if known_employees:
         lines.append("")
         lines.append("known_employees (pick a slack_user_id from this table):")
-        lines.append("  slack_user_id          | display_name        | real_name")
+        lines.append(
+            "  slack_user_id          | display_name        | real_name                      | role                       | notes"
+        )
         for e in known_employees:
             sid = (e.get("slack_user_id") or "")[:22]
             dn = (e.get("display_name") or "")[:25]
             rn = (e.get("real_name") or "")[:30]
-            lines.append(f"  {sid:<22} | {dn:<19} | {rn}")
+            role = (e.get("role") or "")[:26]
+            notes = (e.get("notes") or "")[:60]
+            lines.append(
+                f"  {sid:<22} | {dn:<19} | {rn:<30} | {role:<26} | {notes}"
+            )
     if context_messages:
         lines.append("")
         lines.append("context (oldest first):")

@@ -84,6 +84,36 @@ def test_as_known_employees_falls_back_when_preferred_id_missing(session):
     assert out[0]["slack_user_id"] == "USLACK999"
 
 
+def test_as_known_employees_carries_role_and_notes(session):
+    """FR-CR-05-12 — role + notes propagate so the owner LLM can
+    disambiguate same-first-name teammates."""
+    session.add_all(
+        [
+            TeamMember(
+                real_name="Alina Founder",
+                telegram_user_id=1,
+                role="founder",
+                notes="deals with international expansion",
+                active=True,
+            ),
+            TeamMember(
+                real_name="Alina Manager",
+                telegram_user_id=2,
+                role="project manager / аналитик",
+                notes="",
+                active=True,
+            ),
+        ]
+    )
+    session.flush()
+    out = sorted(as_known_employees(session), key=lambda e: e["slack_user_id"])
+    assert len(out) == 2
+    assert out[0]["role"] == "founder"
+    assert out[0]["notes"] == "deals with international expansion"
+    assert out[1]["role"] == "project manager / аналитик"
+    assert out[1]["notes"] == ""
+
+
 def test_as_known_employees_skips_inactive(session):
     session.add_all(
         [

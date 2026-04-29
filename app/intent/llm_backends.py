@@ -211,6 +211,33 @@ class OpenAIBackend:
             tool_parameters=INTENT_TOOL_PARAMETERS,
         )
 
+    def complete_text(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+        temperature: float = 0.2,
+    ) -> str:
+        """FR-CR-05-39 — plain-text completion for the Fireflies
+        summariser. Returns the model's text response, or empty
+        string on failure."""
+        try:
+            resp = self._client.chat.completions.create(
+                model=model or self._model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+            )
+        except Exception:  # noqa: BLE001
+            return ""
+        try:
+            return resp.choices[0].message.content or ""
+        except (AttributeError, IndexError):
+            return ""
+
 
 def _extract_openai_tool_input(response: Any) -> dict[str, Any] | None:
     try:

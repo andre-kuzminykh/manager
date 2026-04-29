@@ -320,3 +320,55 @@ class TelegramSourceReader:
             if yielded < batch_size:
                 # Shorter-than-asked-for page → end of view.
                 break
+
+    def iter_newest(
+        self, *, limit: int
+    ) -> Iterable[TelegramSourceMessage]:
+        """Yield the ``limit`` most recently-sent messages (newest-
+        first by ``sent_at``). Used by ``migrate_telegram_history
+        --newest`` to grab «latest 50 messages, regardless of which
+        chat they came from».
+
+        The view's date column varies (`date` / `sent_at` / `created_at`
+        / `timestamp`); we try them in that priority order via
+        `COALESCE` so the same query works against every shape we've
+        seen so far. Falls back to ordering by `(chat_id DESC,
+        message_id DESC)` when no date column is present — close
+        enough for «most recent within each chat».
+        """
+        if self._engine is None:
+            return iter(())
+
+        sent_at_cols = _FIELD_MAP["sent_at"]
+        coalesce_expr = "COALESCE(" + ", ".join(sent_at_cols) + ")"
+        sql = text(
+            f"""
+            SELECT * FROM {self._view}
+            ORDER BY {coalesce_expr} DESC NULLS LAST,
+                     chat_id DESC, message_id DESC
+            LIMIT :lim
+            """
+        )
+        with self._engine.connect() as conn:
+            try:
+                result = conn.execute(sql, {"lim": limit})
+            except Exception as e:  # noqa: BLE001
+                # The view doesn't carry any of the canonical date
+                # columns — fall back to chat_id / message_id DESC.
+                log.warning(
+                    "telegram_iter_newest_no_date_column",
+                    error=str(e),
+                    tried_columns=list(sent_at_cols),
+                )
+                fb = text(
+                    f"""
+                    SELECT * FROM {self._view}
+                    ORDER BY chat_id DESC, message_id DESC
+                    LIMIT :lim
+                    """
+                )
+                result = conn.execute(fb, {"lim": limit})
+            for row in result.mappings():
+                msg = _map_row(dict(row))
+                if msg is not None:
+                    yield msg

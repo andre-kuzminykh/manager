@@ -114,7 +114,21 @@ def _parse_args() -> argparse.Namespace:
             "you want to see WHY each candidate was rejected."
         ),
     )
+    p.add_argument(
+        "--newest",
+        action="store_true",
+        help=(
+            "Pull the ``--limit`` MOST RECENT messages instead of the "
+            "earliest ``--limit`` messages by (chat_id, message_id). "
+            "Useful for spot-checking «what's been said in the last "
+            "hour / day across the team» — combined with `--limit 50` "
+            "you process the latest 50 messages in the entire view. "
+            "Mutually exclusive with --since / --since-days."
+        ),
+    )
     args = p.parse_args()
+    if args.newest and (args.since or args.since_days is not None):
+        p.error("--newest cannot be combined with --since / --since-days.")
     if args.since and args.since_days is not None:
         p.error("Pass either --since or --since-days, not both.")
     return args
@@ -342,7 +356,17 @@ def main() -> int:
     skipped_too_old: list = []
     skipped_too_old_total = 0
     processed = 0
-    for msg in reader.iter_all(batch_size=args.batch_size):
+    if args.newest:
+        if args.limit <= 0:
+            log.error(
+                "telegram_history_newest_needs_limit",
+                hint="--newest must be paired with --limit N (newest N messages).",
+            )
+            return 2
+        msg_iter = reader.iter_newest(limit=args.limit)
+    else:
+        msg_iter = reader.iter_all(batch_size=args.batch_size)
+    for msg in msg_iter:
         # Date cutoff: messages older than `since_date` get a
         # «skipped» bookmark and never touch the LLM. We keep them
         # off the main batch so the LLM budget goes only to the

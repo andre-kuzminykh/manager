@@ -574,9 +574,23 @@ def upsert_from_sheet_rows(
             session.add(TeamMember(**new_values))
             inserted += 1
         else:
+            # FR-CR-05-30 — only count + write when an actual data
+            # field changed. Without this guard the listener's
+            # 60-second poll wrote `last_synced_at=now` to all 54
+            # rows on every tick and reported `updated=53` even
+            # when the operator didn't touch anything. Compare
+            # field-by-field; bump `last_synced_at` only when at
+            # least one real field actually moved.
+            real_diff = False
             for k, v in new_values.items():
-                setattr(target, k, v)
-            updated += 1
+                if k == "last_synced_at":
+                    continue
+                if getattr(target, k) != v:
+                    setattr(target, k, v)
+                    real_diff = True
+            if real_diff:
+                target.last_synced_at = now
+                updated += 1
     if inserted or updated:
         session.flush()
     return updated, inserted

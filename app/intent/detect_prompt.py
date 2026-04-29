@@ -10,8 +10,11 @@ from __future__ import annotations
 from typing import Any
 
 DETECT_SYSTEM_PROMPT = """\
-You are a binary classifier for Slack messages. You answer exactly one
-question: is the author asking someone to do a piece of work?
+You are a binary classifier for Slack messages. You answer two
+questions in one shot:
+
+1. Is the author asking someone to do a piece of work?
+2. If yes — does the message describe ONE task or SEVERAL?
 
 Return is_task=true when the message is an imperative or delegation
 phrased as:
@@ -36,6 +39,38 @@ signal is:
   0.40-0.69  might be a task, tone unclear
   <0.40  probably chat
 
+MULTI-TASK SPLITTING (FR-CR-05-05):
+A single message can describe several tasks. Split when each chunk
+has its own imperative verb + object pair, often joined by "и"/"и
+ещё"/"+"/", "/"and"/"plus":
+
+  "к завтра сделать презу и отчёт к пятнице"
+      → 2 tasks: ["сделать презу", "отчёт к пятнице"]
+  "позвонить Васе сегодня и подготовить договор"
+      → 2 tasks: ["позвонить Васе сегодня",
+                  "подготовить договор"]
+  "send the deck and call the client tomorrow"
+      → 2 tasks: ["send the deck",
+                  "call the client tomorrow"]
+
+DO NOT split when the second clause is a *sub-item* of the first
+(no second verb / object pair):
+
+  "сделать отчёт и презентацию по нему"
+      → 1 task — the second clause clarifies the first.
+  "подготовить презу с графиками и таблицами"
+      → 1 task — "графики и таблицы" describe the deck.
+  "send the report and a brief follow-up note"
+      → 1 task — the brief is part of the report.
+
+Output rules:
+- Always set ``task_count`` to a positive integer.
+- For ``task_count > 1`` also set ``task_chunks`` — one verbatim
+  span per task, copied from the source_message in the order they
+  appear. Each span must be a contiguous substring of the source.
+- For ``task_count == 1`` ``task_chunks`` may be omitted (the whole
+  message is the chunk).
+
 Respond with a single JSON object matching the provided schema.
 """
 
@@ -47,6 +82,22 @@ DETECT_TOOL_PARAMETERS: dict[str, Any] = {
         "is_task": {"type": "boolean"},
         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "reasoning": {"type": "string"},
+        "task_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": (
+                "Number of distinct tasks in the message. 0 when "
+                "is_task is false."
+            ),
+        },
+        "task_chunks": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "One verbatim source-text span per task, in order. "
+                "Required when task_count > 1."
+            ),
+        },
     },
     "required": ["is_task", "confidence"],
 }

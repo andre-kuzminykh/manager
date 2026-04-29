@@ -28,12 +28,18 @@ from app.schemas.intent import IntentType
 
 
 def test_detect_prompt_asks_single_yes_no_question():
-    # The detection prompt knows nothing about extraction. Its schema has
-    # exactly is_task + confidence + reasoning.
+    # The detection schema covers the binary verdict + the
+    # FR-CR-05-05 multi-task-split signal (task_count + task_chunks).
     from app.intent.detect_prompt import DETECT_TOOL_PARAMETERS
 
     props = DETECT_TOOL_PARAMETERS["properties"]
-    assert set(props.keys()) == {"is_task", "confidence", "reasoning"}
+    assert set(props.keys()) == {
+        "is_task",
+        "confidence",
+        "reasoning",
+        "task_count",
+        "task_chunks",
+    }
     assert DETECT_TOOL_PARAMETERS["required"] == ["is_task", "confidence"]
     assert "is_task" in DETECT_SYSTEM_PROMPT.lower() or "is the author" in DETECT_SYSTEM_PROMPT.lower()
 

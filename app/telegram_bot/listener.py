@@ -383,61 +383,62 @@ class TelegramListener:
                     if msg.is_private or has_explicit_mention:
                         # 1:1 DM with the bot — or an explicit @
                         # mention in a group — the user is asking
-                        # us directly, so create the task immediately
-                        # and DM the live card back. (FR-CR-04-29 /
+                        # us directly, so create EVERY task in the
+                        # message immediately (FR-CR-05-05) and DM
+                        # one live card per task. (FR-CR-04-29 /
                         # FR-CR-04-32 ext.)
-                        task = self._ingest.process_one(session, msg)
+                        tasks = self._ingest.process_all(session, msg)
                         report.messages_processed += 1
-                        if task is None:
+                        if not tasks:
                             report.no_action += 1
                         else:
-                            report.tasks_created += 1
-                            try:
-                                post_initial_card(
-                                    sender=self._sender,
-                                    session=session,
-                                    task=task,
-                                    chat_id=msg.chat_id,
-                                    reply_to_message_id=msg.message_id,
-                                    author_user_id=str(msg.user_id) if msg.user_id else None,
-                                )
-                            except Exception as e:  # noqa: BLE001
-                                log.warning(
-                                    "telegram_post_initial_card_failed",
-                                    task_id=task.id,
-                                    error=str(e),
-                                )
+                            report.tasks_created += len(tasks)
+                            for task in tasks:
+                                try:
+                                    post_initial_card(
+                                        sender=self._sender,
+                                        session=session,
+                                        task=task,
+                                        chat_id=msg.chat_id,
+                                        reply_to_message_id=msg.message_id,
+                                        author_user_id=str(msg.user_id) if msg.user_id else None,
+                                    )
+                                except Exception as e:  # noqa: BLE001
+                                    log.warning(
+                                        "telegram_post_initial_card_failed",
+                                        task_id=task.id,
+                                        error=str(e),
+                                    )
                     else:
                         # Group / supergroup / channel — defer task
-                        # creation. Persist a draft and DM each
-                        # recipient (author + admins) the source
-                        # forward + a "Create this task?" widget.
-                        # (FR-CR-04-32.)
-                        draft = self._ingest.prepare_draft(session, msg)
+                        # creation. One ActionDraft + widget per task
+                        # in the message (FR-CR-04-32 + FR-CR-05-05).
+                        drafts = self._ingest.prepare_drafts(session, msg)
                         report.messages_processed += 1
-                        if draft is None:
+                        if not drafts:
                             report.no_action += 1
                         else:
-                            report.drafts_proposed += 1
-                            try:
-                                payload = draft.payload or {}
-                                post_draft_confirmation(
-                                    sender=self._sender,
-                                    session=session,
-                                    draft=draft,
-                                    source_chat_id=msg.chat_id,
-                                    source_message_id=msg.message_id,
-                                    author_user_id=(
-                                        str(msg.user_id) if msg.user_id else None
-                                    ),
-                                    owner_user_id=payload.get("owner_user_id"),
-                                )
-                            except Exception as e:  # noqa: BLE001
-                                log.warning(
-                                    "telegram_post_draft_confirmation_failed",
-                                    draft_id=draft.id,
-                                    error=str(e),
-                                )
+                            report.drafts_proposed += len(drafts)
+                            for draft in drafts:
+                                try:
+                                    payload = draft.payload or {}
+                                    post_draft_confirmation(
+                                        sender=self._sender,
+                                        session=session,
+                                        draft=draft,
+                                        source_chat_id=msg.chat_id,
+                                        source_message_id=msg.message_id,
+                                        author_user_id=(
+                                            str(msg.user_id) if msg.user_id else None
+                                        ),
+                                        owner_user_id=payload.get("owner_user_id"),
+                                    )
+                                except Exception as e:  # noqa: BLE001
+                                    log.warning(
+                                        "telegram_post_draft_confirmation_failed",
+                                        draft_id=draft.id,
+                                        error=str(e),
+                                    )
                 except Exception as e:  # noqa: BLE001
                     report.errors += 1
                     log.warning(

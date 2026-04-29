@@ -284,6 +284,81 @@ def test_process_one_keeps_llm_display_name_when_present(
         assert task.owner_display_name == "From LLM"
 
 
+def test_process_all_creates_one_task_per_chunk(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-05: a classification carrying ``tasks=[a, b]`` lands
+    as TWO Task rows from a single message. Both share the same
+    source bookmark; the bookmark's `task_id` points at the first."""
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        tasks=[
+            TaskDraft(title="prepare deck"),
+            TaskDraft(title="write report"),
+        ],
+        reasoning="two-tasks message",
+    )
+    service = _make_service(classification)
+    msg = TelegramSourceMessage(
+        chat_id=-100,
+        message_id=42,
+        text="prepare deck and write report",
+        user_id=222968032,
+        user_name="Andre",
+    )
+    with SessionFactory() as s:
+        out = service.process_all(s, msg)
+        s.commit()
+        assert len(out) == 2
+        assert {t.title for t in out} == {"prepare deck", "write report"}
+        # Bookmark singular per message — points at the first task.
+        bookmark = s.get(ProcessedTelegramMessage, (-100, 42))
+        assert bookmark is not None
+        assert bookmark.task_id == out[0].id
+
+
+def test_prepare_drafts_creates_one_draft_per_chunk(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-05 + FR-CR-04-32: a multi-task message in a group
+    creates one ``ActionDraft`` per detected task; each draft carries
+    its own ``_pending`` block so the listener can DM a separate
+    confirm widget per task."""
+    from app.models import ActionDraft, ActionDraftState
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        tasks=[
+            TaskDraft(title="prepare deck"),
+            TaskDraft(title="write report"),
+        ],
+    )
+    service = _make_service(classification)
+    msg = TelegramSourceMessage(
+        chat_id=-2002,
+        message_id=11,
+        text="prep deck and report",
+        user_id=42,
+        user_name="Andre",
+    )
+    with SessionFactory() as s:
+        drafts = service.prepare_drafts(s, msg)
+        s.commit()
+        assert len(drafts) == 2
+        assert {d.payload.get("title") for d in drafts} == {
+            "prepare deck",
+            "write report",
+        }
+        for d in drafts:
+            assert d.state == ActionDraftState.proposed
+            pending = (d.payload or {}).get("_pending")
+            assert pending is not None
+            assert pending["source_chat_id"] == -2002
+            assert pending["source_message_id"] == 11
+
+
 def test_process_one_creates_task_with_telegram_source_kind(
     patched_session_scope, SessionFactory
 ):

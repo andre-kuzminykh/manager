@@ -79,8 +79,13 @@ class IntentState(TypedDict, total=False):
     is_task: bool
     detect_confidence: float
     detect_reasoning: Optional[str]
+    # FR-CR-05-05 — list of source-text spans, one per detected task.
+    # When the message is a single-task one, this stays empty and the
+    # downstream stages run on `source_text` as-is.
+    task_chunks: list[str]
 
-    # Stage 2 outputs.
+    # Stage 2 outputs (single-task path — kept for back-compat with
+    # callers and test fixtures that operate on the legacy shape).
     title: Optional[str]
     description: Optional[str]
     priority: str
@@ -143,11 +148,22 @@ def node_detect(state: IntentState) -> dict[str, Any]:
             "is_task": False,
             "detect_confidence": 0.0,
             "detect_reasoning": None,
+            "task_chunks": [],
         }
+    chunks_raw = data.get("task_chunks") or []
+    if not isinstance(chunks_raw, list):
+        chunks_raw = []
+    chunks = [c.strip() for c in chunks_raw if isinstance(c, str) and c.strip()]
+    # If the LLM said ``task_count > 1`` but didn't actually emit
+    # multiple chunks, fall back to single-task — better that than
+    # truncate the message.
+    if len(chunks) < 2:
+        chunks = []
     return {
         "is_task": bool(data.get("is_task")),
         "detect_confidence": float(data.get("confidence", 0.0)),
         "detect_reasoning": data.get("reasoning"),
+        "task_chunks": chunks,
     }
 
 
@@ -364,6 +380,129 @@ def _date_is_acceptable(d: _date, source_text: str, today: _date) -> bool:
     return False
 
 
+def _extract_one_task(
+    *,
+    backend,
+    chunk_text: str,
+    context_messages: list[dict],
+    author_user_id: str | None,
+    today: _date,
+    date_model: str | None,
+    known_employees: list[dict],
+) -> TaskDraft:
+    """Run the 2a / 2b / 2c stages on a single chunk and assemble a
+    ``TaskDraft``. Used both by ``node_assemble`` (per chunk for the
+    multi-task path) and reused for the single-task path."""
+    # Title / description / priority.
+    data_t = _safe_call_tool(
+        backend,
+        system_prompt=TITLE_SYSTEM_PROMPT,
+        user_prompt=build_title_user_prompt(
+            source_text=chunk_text,
+            context_messages=context_messages,
+        ),
+        tool_name=TITLE_TOOL_NAME,
+        tool_description=TITLE_TOOL_DESCRIPTION,
+        tool_parameters=TITLE_TOOL_PARAMETERS,
+    ) or {}
+    raw_title = (data_t.get("title") or chunk_text[:120]).strip()
+    title = strip_date_phrase(raw_title) or "(untitled)"
+    raw_desc = data_t.get("description")
+    description = (
+        strip_date_phrase(raw_desc.strip()) if isinstance(raw_desc, str) and raw_desc.strip() else None
+    )
+    priority = data_t.get("priority") or "medium"
+
+    # Owner.
+    data_o = _safe_call_tool(
+        backend,
+        system_prompt=OWNER_SYSTEM_PROMPT,
+        user_prompt=build_owner_user_prompt(
+            source_text=chunk_text,
+            context_messages=context_messages,
+            author_user_id=author_user_id,
+            known_employees=known_employees,
+        ),
+        tool_name=OWNER_TOOL_NAME,
+        tool_description=OWNER_TOOL_DESCRIPTION,
+        tool_parameters=OWNER_TOOL_PARAMETERS,
+    ) or {}
+    slack_user_id = data_o.get("slack_user_id") or None
+    display_name = data_o.get("display_name") or None
+    if known_employees and slack_user_id:
+        valid_ids = {e.get("slack_user_id") for e in known_employees}
+        if slack_user_id not in valid_ids:
+            slack_user_id = None
+    if not slack_user_id and display_name and known_employees:
+        from app.services.owners import resolve_owner_hint
+
+        candidates: list[dict[str, str]] = []
+        for e in known_employees:
+            sid = e.get("slack_user_id")
+            if not sid:
+                continue
+            primary = e.get("display_name") or sid
+            candidates.append({"slack_user_id": sid, "display_name": primary})
+            real = e.get("real_name")
+            if real and real != primary:
+                candidates.append({"slack_user_id": sid, "display_name": real})
+        match = resolve_owner_hint(hint_text=display_name, allowed_owners=candidates)
+        if match is not None:
+            slack_user_id = match["slack_user_id"]
+            for e in known_employees:
+                if e.get("slack_user_id") == slack_user_id:
+                    display_name = e.get("display_name") or e.get("real_name") or slack_user_id
+                    break
+    if (
+        not slack_user_id
+        and display_name
+        and author_user_id
+        and known_employees
+    ):
+        author_in_table = any(
+            e.get("slack_user_id") == author_user_id for e in known_employees
+        )
+        if author_in_table and not _name_present(
+            display_name, source_text=chunk_text, context_messages=context_messages
+        ):
+            display_name = None
+
+    # Date.
+    data_d = _safe_call_tool(
+        backend,
+        system_prompt=DATE_SYSTEM_PROMPT,
+        user_prompt=build_date_user_prompt(
+            source_text=chunk_text,
+            current_date=today.isoformat(),
+            current_weekday=today.strftime("%A"),
+        ),
+        tool_name=DATE_TOOL_NAME,
+        tool_description=DATE_TOOL_DESCRIPTION,
+        tool_parameters=DATE_TOOL_PARAMETERS,
+        model=date_model,
+    ) or {}
+    llm_iso = data_d.get("due_date")
+    picked: _date | None = None
+    if isinstance(llm_iso, str) and llm_iso:
+        try:
+            parsed = _date.fromisoformat(llm_iso)
+        except ValueError:
+            parsed = None
+        if parsed is not None and _date_is_acceptable(parsed, chunk_text, today):
+            picked = parsed
+    if picked is None:
+        picked = resolve_due_date(chunk_text, today)
+
+    return TaskDraft(
+        title=title,
+        description=description,
+        priority=priority,
+        owner_user_id=slack_user_id,
+        owner_display_name=display_name,
+        due_date=picked,
+    )
+
+
 def node_assemble(state: IntentState) -> dict[str, Any]:
     if not state.get("is_task"):
         return {
@@ -373,20 +512,54 @@ def node_assemble(state: IntentState) -> dict[str, Any]:
                 reasoning=state.get("detect_reasoning"),
             )
         }
-    title = state.get("title") or state["source_text"][:120] or "(untitled)"
+    chunks: list[str] = state.get("task_chunks") or []
+    confidence = float(state.get("detect_confidence", 0.75))
+    reasoning = state.get("detect_reasoning")
+
+    if not chunks:
+        # Single-task path: re-use the per-stage outputs already
+        # produced by `describe` / `owner` / `date` nodes.
+        title = state.get("title") or state["source_text"][:120] or "(untitled)"
+        return {
+            "classification": IntentClassification(
+                intent=IntentType.create_task,
+                confidence=confidence,
+                reasoning=reasoning,
+                task=TaskDraft(
+                    title=title,
+                    description=state.get("description"),
+                    priority=state.get("priority") or "medium",
+                    owner_user_id=state.get("owner_user_id"),
+                    owner_display_name=state.get("owner_display_name"),
+                    due_date=state.get("due_date"),
+                ),
+            )
+        }
+
+    # Multi-task path (FR-CR-05-05): re-run 2a / 2b / 2c per chunk.
+    # The fan-out single-task stages already ran, but their output
+    # was based on the whole message — discard and recompute per
+    # chunk. This costs a few extra LLM calls (Nx for N chunks) but
+    # keeps each task's owner / date crisp.
+    tasks: list[TaskDraft] = []
+    for chunk in chunks:
+        tasks.append(
+            _extract_one_task(
+                backend=state["backend"],
+                chunk_text=chunk,
+                context_messages=state.get("context_messages") or [],
+                author_user_id=state.get("author_user_id"),
+                today=state["today"],
+                date_model=state.get("date_model"),
+                known_employees=state.get("known_employees") or [],
+            )
+        )
     return {
         "classification": IntentClassification(
             intent=IntentType.create_task,
-            confidence=float(state.get("detect_confidence", 0.75)),
-            reasoning=state.get("detect_reasoning"),
-            task=TaskDraft(
-                title=title,
-                description=state.get("description"),
-                priority=state.get("priority") or "medium",
-                owner_user_id=state.get("owner_user_id"),
-                owner_display_name=state.get("owner_display_name"),
-                due_date=state.get("due_date"),
-            ),
+            confidence=confidence,
+            reasoning=reasoning,
+            tasks=tasks,
         )
     }
 

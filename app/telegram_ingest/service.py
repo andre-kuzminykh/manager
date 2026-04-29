@@ -102,18 +102,31 @@ class TelegramIngestService:
         session: Session,
         message: TelegramSourceMessage,
     ) -> Task | None:
-        """Process a single Telegram message inside an existing
-        transaction. Returns the created Task, or None if the message
-        was skipped or yielded no action.
+        """Back-compat wrapper around :meth:`process_all`. Returns the
+        FIRST created Task or ``None`` when nothing was created. Most
+        callers should switch to :meth:`process_all` to support
+        multi-task messages (FR-CR-05-05)."""
+        tasks = self.process_all(session, message)
+        return tasks[0] if tasks else None
 
-        Idempotent: if the (chat_id, message_id) is already in
-        ``processed_telegram_messages``, we do nothing.
+    def process_all(
+        self,
+        session: Session,
+        message: TelegramSourceMessage,
+    ) -> list[Task]:
+        """FR-CR-05-05: process a Telegram message and return EVERY
+        Task it produced. A single message can carry multiple tasks
+        («сделать презу к завтра и отчёт к пятнице» → 2 tasks). Each
+        ``classification.tasks`` entry becomes its own Task row;
+        they share the same ``processed_telegram_messages`` bookmark
+        (pointed at the first Task — back-compat with single-task
+        callers and the FR-CR-04-26 schema).
         """
         existing = session.get(
             ProcessedTelegramMessage, (message.chat_id, message.message_id)
         )
         if existing is not None:
-            return None
+            return []
         if not message.is_textual:
             session.add(
                 ProcessedTelegramMessage(
@@ -123,7 +136,7 @@ class TelegramIngestService:
                     task_id=None,
                 )
             )
-            return None
+            return []
 
         window = _build_window(message)
         classification = self._classifier.classify(
@@ -132,7 +145,7 @@ class TelegramIngestService:
             known_employees=None,
         )
 
-        if classification.intent != IntentType.create_task or classification.task is None:
+        if classification.intent != IntentType.create_task or not classification.tasks:
             session.add(
                 ProcessedTelegramMessage(
                     chat_id=message.chat_id,
@@ -141,64 +154,73 @@ class TelegramIngestService:
                     task_id=None,
                 )
             )
-            return None
+            return []
 
-        # FR-CR-04-30: when the LLM didn't extract an owner (the
-        # common case for TG ingest where we run with no employees
-        # table), fall back to the sender's identity so the card /
-        # Sheet show "Andre" instead of the raw user id, AND so the
-        # task gets a real `owner_user_id` (without it the card
-        # renders only the bystander Subscribe button — `is_owner`
-        # never matches a None owner).
-        if not classification.task.owner_user_id and message.user_id:
-            classification.task.owner_user_id = str(message.user_id)
-        if not classification.task.owner_display_name and message.user_name:
-            classification.task.owner_display_name = message.user_name
+        # FR-CR-04-30 — fill the owner from the sender on each draft
+        # when the LLM didn't extract one. Same rule applies to every
+        # task in a multi-task message.
+        for td in classification.tasks:
+            if not td.owner_user_id and message.user_id:
+                td.owner_user_id = str(message.user_id)
+            if not td.owner_display_name and message.user_name:
+                td.owner_display_name = message.user_name
 
-        # Persist context + inference + draft, then immediately
-        # finalise into a Task. This mirrors the @mention path: high
-        # confidence → create now, ask for follow-up later if fields
-        # are missing.
         snapshot = self._orchestrator.persist_context_snapshot(
             session, window.to_snapshot_dict()
         )
-        inference = self._orchestrator.persist_inference(
-            session,
-            context_snapshot=snapshot,
-            classification=classification,
-            invocation_type=InvocationType.passive,
-        )
         author_id = window.source_message["user"]
-        draft = self._orchestrator.create_draft(
-            session,
-            inference=inference,
-            classification=classification,
-            created_by_slack_user_id=str(author_id) if author_id else None,
-            slack_message_ts=str(message.message_id),
-        )
-        task = create_task_from_draft(
-            session,
-            draft=draft,
-            source={
-                "kind": TaskSourceKind.telegram.value,
-                "conversation_id": str(message.chat_id),
-                "message_ts": str(message.message_id),
-                "thread_ts": str(message.reply_to) if message.reply_to else None,
-                "permalink": _telegram_permalink(message),
-            },
-            context_snapshot_id=snapshot.id,
-            fallback_author_slack_id=str(author_id) if author_id else None,
-        )
+        author_str = str(author_id) if author_id else None
+        source = {
+            "kind": TaskSourceKind.telegram.value,
+            "conversation_id": str(message.chat_id),
+            "message_ts": str(message.message_id),
+            "thread_ts": str(message.reply_to) if message.reply_to else None,
+            "permalink": _telegram_permalink(message),
+        }
+
+        out: list[Task] = []
+        for td in classification.tasks:
+            # Each per-chunk inference + draft is its own row. The
+            # IntentInference table doesn't carry the task draft body
+            # so we just persist N copies — cheap, and keeps the
+            # one-inference-per-Task invariant.
+            single = type(classification)(
+                intent=classification.intent,
+                confidence=classification.confidence,
+                reasoning=classification.reasoning,
+                task=td,
+            )
+            inference = self._orchestrator.persist_inference(
+                session,
+                context_snapshot=snapshot,
+                classification=single,
+                invocation_type=InvocationType.passive,
+            )
+            draft = self._orchestrator.create_draft(
+                session,
+                inference=inference,
+                classification=single,
+                created_by_slack_user_id=author_str,
+                slack_message_ts=str(message.message_id),
+            )
+            task = create_task_from_draft(
+                session,
+                draft=draft,
+                source=source,
+                context_snapshot_id=snapshot.id,
+                fallback_author_slack_id=author_str,
+            )
+            out.append(task)
 
         session.add(
             ProcessedTelegramMessage(
                 chat_id=message.chat_id,
                 message_id=message.message_id,
                 processed_at=datetime.now(timezone.utc),
-                task_id=task.id,
+                task_id=out[0].id if out else None,
             )
         )
-        return task
+        return out
 
     def prepare_draft(
         self,
@@ -221,11 +243,25 @@ class TelegramIngestService:
         returns ``None`` (the bookmark in
         ``processed_telegram_messages`` short-circuits us).
         """
+        drafts = self.prepare_drafts(session, message)
+        return drafts[0] if drafts else None
+
+    def prepare_drafts(
+        self,
+        session: Session,
+        message: TelegramSourceMessage,
+    ) -> list:
+        """FR-CR-05-05 + FR-CR-04-32: confirm-first variant of
+        :meth:`process_all`. One ``ActionDraft`` per detected task,
+        each carrying its own ``_pending`` block so the Accept
+        handler can finalise it independently. The listener posts
+        one widget per draft.
+        """
         existing = session.get(
             ProcessedTelegramMessage, (message.chat_id, message.message_id)
         )
         if existing is not None:
-            return None
+            return []
         if not message.is_textual:
             session.add(
                 ProcessedTelegramMessage(
@@ -235,7 +271,7 @@ class TelegramIngestService:
                     task_id=None,
                 )
             )
-            return None
+            return []
 
         window = _build_window(message)
         classification = self._classifier.classify(
@@ -244,7 +280,7 @@ class TelegramIngestService:
             known_employees=None,
         )
 
-        if classification.intent != IntentType.create_task or classification.task is None:
+        if classification.intent != IntentType.create_task or not classification.tasks:
             session.add(
                 ProcessedTelegramMessage(
                     chat_id=message.chat_id,
@@ -253,56 +289,57 @@ class TelegramIngestService:
                     task_id=None,
                 )
             )
-            return None
+            return []
 
-        # Same author/owner fallbacks as the immediate-create path so
-        # the confirm widget shows a meaningful preview (Andre vs.
-        # raw numeric id).
-        if not classification.task.owner_user_id and message.user_id:
-            classification.task.owner_user_id = str(message.user_id)
-        if not classification.task.owner_display_name and message.user_name:
-            classification.task.owner_display_name = message.user_name
+        for td in classification.tasks:
+            if not td.owner_user_id and message.user_id:
+                td.owner_user_id = str(message.user_id)
+            if not td.owner_display_name and message.user_name:
+                td.owner_display_name = message.user_name
 
         snapshot = self._orchestrator.persist_context_snapshot(
             session, window.to_snapshot_dict()
         )
-        inference = self._orchestrator.persist_inference(
-            session,
-            context_snapshot=snapshot,
-            classification=classification,
-            invocation_type=InvocationType.passive,
-        )
         author_id = window.source_message["user"]
-        draft = self._orchestrator.create_draft(
-            session,
-            inference=inference,
-            classification=classification,
-            created_by_slack_user_id=str(author_id) if author_id else None,
-            slack_message_ts=str(message.message_id),
-        )
+        author_str = str(author_id) if author_id else None
 
-        # Stash the bits `create_task_from_draft` will need on Accept.
-        # Stored under a single underscore-prefixed key so they're
-        # easy to pop before persisting the Task.
-        payload = dict(draft.payload or {})
-        payload["_pending"] = {
-            "source_kind": "telegram",
-            "conversation_id": str(message.chat_id),
-            "message_ts": str(message.message_id),
-            "thread_ts": str(message.reply_to) if message.reply_to else None,
-            "permalink": _telegram_permalink(message),
-            "fallback_author": str(author_id) if author_id else None,
-            "context_snapshot_id": snapshot.id,
-            "source_chat_id": message.chat_id,
-            "source_message_id": message.message_id,
-        }
-        draft.payload = payload
+        out: list = []
+        for td in classification.tasks:
+            single = type(classification)(
+                intent=classification.intent,
+                confidence=classification.confidence,
+                reasoning=classification.reasoning,
+                task=td,
+            )
+            inference = self._orchestrator.persist_inference(
+                session,
+                context_snapshot=snapshot,
+                classification=single,
+                invocation_type=InvocationType.passive,
+            )
+            draft = self._orchestrator.create_draft(
+                session,
+                inference=inference,
+                classification=single,
+                created_by_slack_user_id=author_str,
+                slack_message_ts=str(message.message_id),
+            )
+            payload = dict(draft.payload or {})
+            payload["_pending"] = {
+                "source_kind": "telegram",
+                "conversation_id": str(message.chat_id),
+                "message_ts": str(message.message_id),
+                "thread_ts": str(message.reply_to) if message.reply_to else None,
+                "permalink": _telegram_permalink(message),
+                "fallback_author": author_str,
+                "context_snapshot_id": snapshot.id,
+                "source_chat_id": message.chat_id,
+                "source_message_id": message.message_id,
+            }
+            draft.payload = payload
+            out.append(draft)
+
         session.flush()
-
-        # Bookmark the source message so it doesn't get re-classified
-        # on the next ingest pass. We attach `task_id=None` for now —
-        # if the user Accepts, the confirm handler updates this row
-        # to point at the new Task.
         session.add(
             ProcessedTelegramMessage(
                 chat_id=message.chat_id,
@@ -311,7 +348,7 @@ class TelegramIngestService:
                 task_id=None,
             )
         )
-        return draft
+        return out
 
     def process_batch(
         self,

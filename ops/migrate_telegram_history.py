@@ -200,11 +200,13 @@ def _confirm_first_chunk(
     errors = 0
     for m in messages:
         try:
+            cached = None  # pre-computed classification when --debug is on
             if debug:
-                # Repeat the classify call so we can log what the
-                # LLM actually said. This is the same pipeline the
-                # service uses internally; the result here is
-                # discarded — `prepare_drafts` re-classifies.
+                # Classify once for the log; pass the SAME result into
+                # prepare_drafts below so we don't re-classify (and risk
+                # the LLM giving a different verdict on the second
+                # call — e.g. flipping create_task → no_action when it
+                # was on the edge).
                 from app.context.retriever import ContextWindow
                 from app.schemas.intent import InvocationType
 
@@ -221,7 +223,7 @@ def _confirm_first_chunk(
                         "subtype": None,
                     },
                 )
-                classification = service._classifier.classify(  # noqa: SLF001
+                cached = service._classifier.classify(  # noqa: SLF001
                     context=window,
                     invocation_type=InvocationType.passive,
                     known_employees=None,
@@ -231,13 +233,15 @@ def _confirm_first_chunk(
                     chat_id=m.chat_id,
                     message_id=m.message_id,
                     text_preview=(m.text or "")[:200].replace("\n", " "),
-                    intent=classification.intent.value,
-                    confidence=round(classification.confidence, 2),
-                    reasoning=(classification.reasoning or "")[:200],
-                    tasks=[t.title[:80] for t in classification.tasks],
+                    intent=cached.intent.value,
+                    confidence=round(cached.confidence, 2),
+                    reasoning=(cached.reasoning or "")[:200],
+                    tasks=[t.title[:80] for t in cached.tasks],
                 )
             with session_scope() as session:
-                drafts = service.prepare_drafts(session, m)
+                drafts = service.prepare_drafts(
+                    session, m, classification=cached
+                )
                 if not drafts:
                     nothing += 1
                     continue

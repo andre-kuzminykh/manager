@@ -113,6 +113,8 @@ class TelegramIngestService:
         self,
         session: Session,
         message: TelegramSourceMessage,
+        *,
+        classification=None,
     ) -> list[Task]:
         """FR-CR-05-05: process a Telegram message and return EVERY
         Task it produced. A single message can carry multiple tasks
@@ -121,6 +123,11 @@ class TelegramIngestService:
         they share the same ``processed_telegram_messages`` bookmark
         (pointed at the first Task — back-compat with single-task
         callers and the FR-CR-04-26 schema).
+
+        ``classification`` is an optional pre-computed
+        :class:`IntentClassification`. When provided, skip the
+        internal classify call. See :meth:`prepare_drafts` for the
+        same pattern.
         """
         existing = session.get(
             ProcessedTelegramMessage, (message.chat_id, message.message_id)
@@ -139,11 +146,12 @@ class TelegramIngestService:
             return []
 
         window = _build_window(message)
-        classification = self._classifier.classify(
-            context=window,
-            invocation_type=InvocationType.passive,
-            known_employees=None,
-        )
+        if classification is None:
+            classification = self._classifier.classify(
+                context=window,
+                invocation_type=InvocationType.passive,
+                known_employees=None,
+            )
 
         if classification.intent != IntentType.create_task or not classification.tasks:
             session.add(
@@ -270,12 +278,21 @@ class TelegramIngestService:
         self,
         session: Session,
         message: TelegramSourceMessage,
+        *,
+        classification=None,
     ) -> list:
         """FR-CR-05-05 + FR-CR-04-32: confirm-first variant of
         :meth:`process_all`. One ``ActionDraft`` per detected task,
         each carrying its own ``_pending`` block so the Accept
         handler can finalise it independently. The listener posts
         one widget per draft.
+
+        ``classification`` is an optional pre-computed
+        :class:`IntentClassification`. When provided, skip the
+        internal classify call and reuse it — avoids paying for a
+        second classify pass in the migration's ``--debug`` mode and
+        keeps the verdict deterministic across the «log» and the
+        «persist» half of the same call.
         """
         existing = session.get(
             ProcessedTelegramMessage, (message.chat_id, message.message_id)
@@ -294,11 +311,12 @@ class TelegramIngestService:
             return []
 
         window = _build_window(message)
-        classification = self._classifier.classify(
-            context=window,
-            invocation_type=InvocationType.passive,
-            known_employees=None,
-        )
+        if classification is None:
+            classification = self._classifier.classify(
+                context=window,
+                invocation_type=InvocationType.passive,
+                known_employees=None,
+            )
 
         if classification.intent != IntentType.create_task or not classification.tasks:
             session.add(

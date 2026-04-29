@@ -1310,6 +1310,28 @@ strip `-100` when present, use the abs value as-is otherwise,
 and only return `None` for basic groups (≤ 8-digit id) and
 private chats.
 
+#### 13.20 — Title-as-link + owner @handle deeplink
+
+> **As an operator** I'd rather tap the title to jump to the
+> source message than read a separate URL line. And owners with
+> only a Slack id but a known `@username` should still be
+> hyperlinked.
+
+Two visual cleanup items:
+
+**Title is the source-message hyperlink.** The standalone `🔗`
+line is gone; the bold title is wrapped in
+`<a href="https://t.me/c/<chat>/<msg>">…</a>`. Tap anywhere on
+the title = open the original chat message. Private DMs and
+basic groups (no shareable URL) fall back to plain `<b>title</b>`.
+
+**Owner `@handle` deeplink fallback.** When `owner_user_id`
+isn't numeric but `owner_display_name` is `@username`, render a
+`https://t.me/<handle>` link. Same `_owner_html_link` helper now
+covers three paths in priority order: numeric uid →
+`tg://user?id=…`; `@handle` → `t.me/<handle>`; otherwise plain
+text.
+
 
 ---
 

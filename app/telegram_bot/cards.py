@@ -274,17 +274,17 @@ def render_tombstone(
 
 
 def _build_draft_widget_text(draft: ActionDraft) -> str:
-    """FR-CR-05-13 / FR-CR-05-16 — compact HTML preview that
-    matches the live task-card layout.
+    """FR-CR-05-13 / FR-CR-05-16 / FR-CR-05-18 — compact HTML
+    preview that matches the live task-card layout.
 
-        <priority-emoji> <b>title</b>
+        {bullet} <a href="permalink"><b>title</b></a>
         📝 <description>
-        👤 <a href="tg://user?id=…">owner</a> · 📅 <due>
-        🔗 <source link>
+        👤 <owner-deeplink> · 📅 <due>
 
-    Owner gets the same `tg://user?id=` hyperlink as
-    `build_task_card_text`, so a tap on the operator's name in
-    either kind of message opens a chat with them.
+    Title is wrapped in the source-message link when one is
+    available (supergroup chats); private DMs / basic groups
+    fall through to plain bold. Owner gets the same hyperlink
+    rules as `build_task_card_text`.
     """
     from app.telegram_bot.sender import _owner_html_link
 
@@ -301,7 +301,15 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
         "low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴",
     }.get(priority, "🟡")
 
-    lines = [f"{priority_em} <b>{_escape_md(str(title))}</b>"]
+    safe_title = _escape_md(str(title))
+    if permalink:
+        title_html = (
+            f'<a href="{_escape_md(str(permalink))}">'
+            f"<b>{safe_title}</b></a>"
+        )
+    else:
+        title_html = f"<b>{safe_title}</b>"
+    lines = [f"{priority_em} {title_html}"]
     if description:
         lines.append(f"📝 {_escape_md(str(description))}")
     meta: list[str] = []
@@ -313,8 +321,6 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
         meta.append(f"📅 {due}")
     if meta:
         lines.append(" · ".join(meta))
-    if permalink:
-        lines.append(f"🔗 {_escape_md(str(permalink))}")
     return "\n".join(lines)
 
 

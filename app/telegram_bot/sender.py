@@ -93,56 +93,77 @@ def _format_owner(task: Task) -> str | None:
     return s
 
 
+_USERNAME_HANDLE_RE = __import__("re").compile(r"^@([A-Za-z][A-Za-z0-9_]{4,31})$")
+
+
 def _owner_html_link(owner_user_id: str | None, display: str) -> str:
-    """FR-CR-05-16 — wrap `display` in a `tg://user?id=<uid>`
-    deeplink so a tap on the owner label opens a private chat with
-    them. Only works for numeric Telegram user_ids; Slack `Uxxx`
-    uids fall through to plain text since Telegram doesn't know
-    them. Display text is HTML-escaped; the wrapper element is the
-    only raw HTML in the result."""
+    """FR-CR-05-16 / FR-CR-05-18 — wrap `display` in a deeplink so
+    a tap on the owner label opens a chat with them.
+
+    Three resolution paths in priority order:
+
+      1. Numeric ``owner_user_id`` (Telegram user_id) →
+         ``tg://user?id=<uid>``. Preferred — opens the private
+         chat directly inside Telegram.
+      2. ``display`` is an ``@handle`` form
+         (`@andre_andreevich`, ASCII alnum + underscore,
+         5–32 chars, starts with a letter) →
+         ``https://t.me/<handle>``. Used when the LLM resolved
+         owner against a registry row that only has a
+         Slack uid or no id at all but does carry the TG
+         username on `display_name`.
+      3. Otherwise → plain text. Slack uids that don't translate
+         to Telegram identities, or unresolved typed-name labels.
+
+    Display text is HTML-escaped; the wrapper element is the only
+    raw HTML in the result.
+    """
     safe = _escape_html(display)
-    if not owner_user_id:
-        return safe
-    s = str(owner_user_id)
-    # Numeric (with optional leading minus for super-groups, but
-    # real users are always positive) → hyperlink. Otherwise plain.
+    s = str(owner_user_id) if owner_user_id else ""
     if s.isdigit():
         return f'<a href="tg://user?id={s}">{safe}</a>'
+    m = _USERNAME_HANDLE_RE.match((display or "").strip())
+    if m is not None:
+        handle = m.group(1)
+        return f'<a href="https://t.me/{handle}">{safe}</a>'
     return safe
 
 
 def build_task_card_text(task: Task, *, header: str | None = None) -> str:
-    """FR-CR-05-16 — render a Task in the same minimal layout the
-    confirm widget uses. Same structure as
-    ``cards._build_draft_widget_text`` so an Accept-on-draft
-    transition produces a card that visually matches the widget
-    the operator just clicked on:
+    """FR-CR-05-16 / FR-CR-05-18 — minimal card layout, the title
+    itself is the source-message hyperlink.
 
-        {priority-emoji} <b>title</b>
+        {bullet} <a href="permalink"><b>title</b></a>
         📝 description
-        👤 <a href="tg://user?id=…">owner</a> · 📅 due-date
-        🔗 source-link
+        👤 <owner-deeplink> · 📅 due-date
 
-    Done state shows a ✅ before the title instead of the priority
-    circle so a finished task is visually distinct.
+    `bullet` is the priority emoji (🟢/🟡/🟠/🔴) for open tasks,
+    ✅ for done. Owner gets a `tg://user?id=` deeplink when the
+    id is numeric, else `https://t.me/<handle>` when the display
+    is an ``@username`` form, else plain text. The separate 🔗
+    line was rolled into the title — single-tap behaviour, less
+    visual noise.
 
     No #id, no status word, no priority word — the colour /
-    completion glyph carry the signal. The 🔗 line is a
-    `t.me/c/<chat>/<msg>` deeplink to the original chat message.
-    Owner is wrapped in a `tg://user?id=<uid>` hyperlink when the
-    id is a numeric Telegram user_id; Slack uids fall through to
-    plain text.
+    completion glyph carry the signal.
     """
     lines: list[str] = []
     if header:
         lines.append(f"<b>{_escape_html(header)}</b>")
 
-    # First line — bullet + title.
     if task.status.value == "done":
         bullet = "✅"
     else:
         bullet = PRIORITY_EMOJI.get(task.priority.value, "🟡")
-    lines.append(f"{bullet} <b>{_escape_html(task.title)}</b>")
+    safe_title = _escape_html(task.title or "")
+    if task.source_permalink:
+        title_html = (
+            f'<a href="{_escape_html(task.source_permalink)}">'
+            f"<b>{safe_title}</b></a>"
+        )
+    else:
+        title_html = f"<b>{safe_title}</b>"
+    lines.append(f"{bullet} {title_html}")
 
     if task.description:
         lines.append(f"📝 {_escape_html(task.description)}")
@@ -155,9 +176,6 @@ def build_task_card_text(task: Task, *, header: str | None = None) -> str:
         meta.append(f"📅 {task.due_date.isoformat()}")
     if meta:
         lines.append(" · ".join(meta))
-
-    if task.source_permalink:
-        lines.append(f"🔗 {_escape_html(task.source_permalink)}")
     return "\n".join(lines)
 
 

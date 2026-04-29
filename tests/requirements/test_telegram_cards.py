@@ -362,10 +362,9 @@ def test_draft_widget_text_drops_create_header_and_uses_emoji_only_priority(
     assert "2026-05-10" in text
 
 
-def test_draft_widget_text_includes_source_permalink_when_available(session):
-    """FR-CR-05-15 — widget shows a 🔗 line with the
-    `t.me/c/<chat>/<msg>` deeplink so the operator can jump back
-    to the original message."""
+def test_draft_widget_text_wraps_title_in_source_permalink(session):
+    """FR-CR-05-18 — the title is the deeplink. Tap on the bold
+    title in the widget = open the original chat message."""
     from app.telegram_bot.cards import _build_draft_widget_text
 
     draft = _mk_proposed_draft(
@@ -380,13 +379,18 @@ def test_draft_widget_text_includes_source_permalink_when_available(session):
         },
     )
     text = _build_draft_widget_text(draft)
-    assert "🔗" in text
-    assert "https://t.me/c/2061886148/2981" in text
+    assert (
+        '<a href="https://t.me/c/2061886148/2981">'
+        "<b>написать Андрею</b></a>" in text
+    )
+    # No separate 🔗 line.
+    assert "🔗" not in text
 
 
-def test_draft_widget_text_omits_link_line_when_no_permalink(session):
-    """Private DMs and basic groups have no shareable URL — the
-    widget must NOT emit an empty `🔗 ` line in that case."""
+def test_draft_widget_text_falls_back_to_plain_bold_without_permalink(session):
+    """Private DMs and basic groups have no shareable URL — title
+    renders as plain `<b>title</b>` without a broken `<a href="">`
+    wrapper."""
     from app.telegram_bot.cards import _build_draft_widget_text
 
     draft = _mk_proposed_draft(
@@ -397,7 +401,8 @@ def test_draft_widget_text_omits_link_line_when_no_permalink(session):
         },
     )
     text = _build_draft_widget_text(draft)
-    assert "🔗" not in text
+    assert "<a href=" not in text.split("\n")[0]
+    assert "<b>x</b>" in text
 
 
 def test_draft_widget_text_renders_owner_as_tg_user_link(session):

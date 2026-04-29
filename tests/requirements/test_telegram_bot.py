@@ -298,10 +298,32 @@ def test_build_task_card_text_skips_link_for_slack_uid():
     assert "Slack User" in text
 
 
-def test_build_task_card_text_includes_source_link_when_set():
-    """The 🔗 line is the same `t.me/c/<chat>/<msg>` deeplink the
-    confirm widget shows — operator can jump back to the original
-    message from the live card too."""
+def test_build_task_card_text_links_owner_via_at_handle_when_no_numeric_id():
+    """FR-CR-05-18 — when the owner's display is `@handle` form
+    but the stored owner_user_id is non-numeric (Slack-only
+    teammate or unresolved row), fall back to a
+    `https://t.me/<handle>` link so the operator can still tap
+    through to the user's Telegram profile."""
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="U09SLACK",
+        owner_display_name="@andre_andreevich",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t)
+    assert '<a href="https://t.me/andre_andreevich">' in text
+    assert "@andre_andreevich" in text
+    # No tg://user?id= since we don't have a numeric uid.
+    assert "tg://user?id=" not in text
+
+
+def test_build_task_card_text_wraps_title_in_source_link():
+    """FR-CR-05-18 — the title itself is the source-message
+    hyperlink. No separate 🔗 line — single-tap behaviour, less
+    visual noise."""
     t = Task(
         id=1,
         title="x",
@@ -312,7 +334,28 @@ def test_build_task_card_text_includes_source_link_when_set():
         source_permalink="https://t.me/c/2061886148/2981",
     )
     text = build_task_card_text(t)
-    assert "🔗 https://t.me/c/2061886148/2981" in text
+    assert (
+        '<a href="https://t.me/c/2061886148/2981"><b>x</b></a>' in text
+    )
+    # Separate 🔗 line is gone — the link is on the title.
+    assert "🔗" not in text
+
+
+def test_build_task_card_text_falls_back_to_plain_bold_without_permalink():
+    """When the source has no shareable URL (private DM, basic
+    group), the title renders as plain `<b>title</b>` — no broken
+    `<a href="">` element."""
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="111",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_permalink=None,
+    )
+    text = build_task_card_text(t)
+    assert "<a href=" not in text.split("\n")[0]
+    assert "<b>x</b>" in text
 
 
 # --------------------------------------------------------------------------- #

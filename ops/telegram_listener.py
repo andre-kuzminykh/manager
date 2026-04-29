@@ -57,6 +57,28 @@ def main() -> int:
         ingest=ingest,
     )
 
+    # FR-CR-04-23 / FR-CR-04-26 — register the active TaskSyncer so
+    # every persistence call from the Telegram process (initial
+    # `create_task_from_draft` sync, button-driven `sync_task` calls
+    # in the handlers) actually pushes the row to Google Sheets and
+    # Tasks. Without this the syncer holder stays None and `sync_task`
+    # silently no-ops — TG-created tasks were missing from the sheet.
+    try:
+        from app.sync.factories import (
+            build_google_tasks_factory,
+            build_sheets_factory,
+        )
+        from app.sync.task_sync import TaskSyncer, set_active_syncer
+
+        set_active_syncer(
+            TaskSyncer(
+                sheets_factory=build_sheets_factory(settings),
+                google_tasks_factory=build_google_tasks_factory(settings),
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("tg_listener_syncer_setup_failed", error=str(e))
+
     # FR-CR-05-02 — register the cross-channel subscriber dispatcher
     # so transitions / edits triggered from Telegram buttons fan out
     # DMs to both Slack subscribers (via a fresh WebClient — only

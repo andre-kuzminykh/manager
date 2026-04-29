@@ -103,6 +103,26 @@ def main() -> int:
         classifier=classifier, orchestrator=orchestrator
     )
 
+    # FR-CR-04-23 / FR-CR-04-26 — register the active TaskSyncer so
+    # `create_task_from_draft`'s initial-sync hook can push the new
+    # row to Google Sheets. Without this the sync silently no-ops
+    # and TG-ingested tasks were missing from the spreadsheet.
+    try:
+        from app.sync.factories import (
+            build_google_tasks_factory,
+            build_sheets_factory,
+        )
+        from app.sync.task_sync import TaskSyncer, set_active_syncer
+
+        set_active_syncer(
+            TaskSyncer(
+                sheets_factory=build_sheets_factory(settings),
+                google_tasks_factory=build_google_tasks_factory(settings),
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("tg_ingest_syncer_setup_failed", error=str(e))
+
     after_chat, after_msg = _resume_watermark()
     log.info(
         "telegram_ingest_starting",

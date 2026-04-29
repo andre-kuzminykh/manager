@@ -92,6 +92,25 @@ def main() -> int:
         classifier=classifier, orchestrator=orchestrator
     )
 
+    # Same syncer wiring as `ops.telegram_listener` / `ops.telegram_
+    # ingest`: register the active TaskSyncer so the historical
+    # backfill also lands rows in Google Sheets, not just the DB.
+    try:
+        from app.sync.factories import (
+            build_google_tasks_factory,
+            build_sheets_factory,
+        )
+        from app.sync.task_sync import TaskSyncer, set_active_syncer
+
+        set_active_syncer(
+            TaskSyncer(
+                sheets_factory=build_sheets_factory(settings),
+                google_tasks_factory=build_google_tasks_factory(settings),
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("tg_history_syncer_setup_failed", error=str(e))
+
     overall = IngestReport()
     batch: list = []
     processed = 0

@@ -151,6 +151,40 @@ def parse_update(update: dict[str, Any]) -> TelegramSourceMessage | None:
     )
 
 
+def _upsert_member_from_update(session: Session, update: dict[str, Any]) -> None:
+    """Pull `(chat_id, from)` out of any message-shaped update and
+    upsert the row in `telegram_chat_members`. Skipped silently if
+    the update doesn't carry a sender (service updates,
+    callback_query, etc.)."""
+    msg = (
+        update.get("message")
+        or update.get("edited_message")
+        or update.get("channel_post")
+        or update.get("edited_channel_post")
+    )
+    if not isinstance(msg, dict):
+        return
+    chat = msg.get("chat") or {}
+    sender = msg.get("from") or {}
+    chat_id = chat.get("id")
+    user_id = sender.get("id")
+    if chat_id is None or user_id is None:
+        return
+    from app.services.telegram_members import upsert_member
+
+    upsert_member(
+        session,
+        chat_id=int(chat_id),
+        user_id=int(user_id),
+        username=sender.get("username") or None,
+        first_name=sender.get("first_name") or None,
+        last_name=sender.get("last_name") or None,
+        # Private-chat traffic proves the user /started the bot —
+        # mark them as DM-able for downstream consumers.
+        has_started_bot=(chat.get("type") == "private"),
+    )
+
+
 
 _AT_MENTION_RE = __import__("re").compile(r"@[A-Za-z][A-Za-z0-9_]{4,31}\b")
 
@@ -342,6 +376,19 @@ class TelegramListener:
                 if msg is None:
                     report.skipped_non_message += 1
                     continue
+
+                # FR-CR-05-07 — upsert the sender into the
+                # `telegram_chat_members` registry so the classifier
+                # can resolve mentions like «Валя сделай X» against
+                # real numeric user_ids on subsequent messages. The
+                # `has_started_bot=True` flag is set here whenever
+                # the chat is a private DM with the bot — that's
+                # the only kind of message that proves the user has
+                # /started us.
+                try:
+                    _upsert_member_from_update(session, upd)
+                except Exception as e:  # noqa: BLE001
+                    log.info("telegram_member_upsert_failed", error=str(e))
 
                 # FR-CR-04-29: a reply-to-bot message may be an
                 # answer to a previously-posted prompt (artifact

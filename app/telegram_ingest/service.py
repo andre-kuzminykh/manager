@@ -78,6 +78,20 @@ def _telegram_permalink(msg: TelegramSourceMessage) -> str | None:
     return f"https://t.me/c/{public}/{msg.message_id}"
 
 
+def _known_members_for(session: Session, *, chat_id: int) -> list[dict[str, str]]:
+    """Wrap the FR-CR-05-07 members service in a try/except so a
+    schema-not-yet-migrated environment (e.g. a stale test fixture
+    or a brand-new VM) doesn't crash the ingest. Failure → empty
+    list, classifier falls through to no-known-employees mode."""
+    try:
+        from app.services.telegram_members import members_as_known_employees
+
+        return members_as_known_employees(session, chat_id=chat_id)
+    except Exception as e:  # noqa: BLE001
+        log.info("telegram_known_members_unavailable", error=str(e))
+        return []
+
+
 class TelegramIngestService:
     """Pulls a batch of Telegram messages through the intent pipeline
     and writes confirmed tasks into the local DB.
@@ -150,7 +164,9 @@ class TelegramIngestService:
             classification = self._classifier.classify(
                 context=window,
                 invocation_type=InvocationType.passive,
-                known_employees=None,
+                known_employees=_known_members_for(
+                    session, chat_id=message.chat_id
+                ),
             )
 
         if classification.intent != IntentType.create_task or not classification.tasks:
@@ -327,7 +343,9 @@ class TelegramIngestService:
             classification = self._classifier.classify(
                 context=window,
                 invocation_type=InvocationType.passive,
-                known_employees=None,
+                known_employees=_known_members_for(
+                    session, chat_id=message.chat_id
+                ),
             )
 
         if classification.intent != IntentType.create_task or not classification.tasks:

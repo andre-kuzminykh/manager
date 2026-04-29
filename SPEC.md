@@ -723,6 +723,70 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-08 — Task-card keyboard permission tightening
+
+Per UX feedback the per-task buttons follow a strict role-based
+visibility model:
+
+- **▶ Start** — only the OWNER (assignee). Admins and bystanders
+  see no Start button. An unowned task no longer surfaces Start to
+  bystanders either; once an owner is set, that user gets the
+  Start row, nobody else does.
+- **✔ Mark done / ✏ Edit / 🗑 Delete** — OWNER or ADMIN.
+- **🔔 Subscribe / 🔕 Unsubscribe** — anyone EXCEPT the OWNER.
+  The owner is auto-subscribed at creation, so a Subscribe toggle
+  for them would be a confusing no-op.
+
+Layout: row 1 carries the primary action (Start / Mark done) when
+visible, row 2 has Edit + Delete side-by-side, row 3 carries the
+Subscribe toggle.
+
+Pinned by `test_telegram_bot.py::test_task_card_keyboard_start_is_
+owner_only` (covers owner / admin / bystander matrices for status
+= todo).
+
+#### FR-CR-05-07 — Telegram chat-members registry
+
+The classifier was getting `known_employees=None` for every
+Telegram message, which meant the LLM owner stage had nothing to
+validate names against — natural mentions like «Валя сделай X»
+landed as raw display strings, owners couldn't be DM'd directly,
+and the FR-CR-04-22 hallucination guard had nothing to compare.
+
+New table `telegram_chat_members` (migration `0016`) keyed by
+`(chat_id, user_id)` records every user the listener has ever
+seen speak in a given chat. Columns: `username` (nullable, the
+@-handle), `first_name`, `last_name`, `has_started_bot`
+(sticky-True flag set whenever we observe traffic in that user's
+private chat with the bot — the only signal we have that
+proves they're DM-able), and audit timestamps.
+
+Pipeline:
+- *Listener writes.* `TelegramListener.tick` calls
+  `_upsert_member_from_update` after every parsed update. Service
+  updates / callback queries with no `from` field are skipped.
+- *Ingest reads.* `TelegramIngestService.process_all` /
+  `prepare_drafts` build `known_employees` by calling
+  `app.services.telegram_members.members_as_known_employees(
+  chat_id)`. The shape mirrors what the Slack pipeline expects
+  (`{slack_user_id, display_name, real_name}`); the field is
+  named for legacy reasons but the classifier doesn't care about
+  the prefix shape — for TG members we feed numeric user_ids.
+- *Self-population.* The registry has no separate discovery RPC.
+  Bot API admin enumeration only returns chat admins anyway, so
+  we let real traffic populate the table — every user who has
+  spoken in a chat the bot can see lands in the registry.
+
+The new tests (`test_telegram_members.py`) pin: idempotent upsert
+(same key → single row, profile fields don't blank out on a None);
+`has_started_bot` sticky semantics; the `members_as_known_employees`
+shape and per-chat isolation.
+
+When dependent code is unavailable (a brand-new VM, a stale test
+fixture without the migration), `_known_members_for` swallows the
+import / query error and returns `[]` — the classifier just falls
+through to no-known-employees mode, same as before.
+
 #### FR-CR-05-06 — Dedup gate before widget + 10 000-char field cap
 
 Two correctness gates added to the ingest pipeline so the user

@@ -1,13 +1,13 @@
-"""Telegram-channel bookkeeping (FR-CR-04-26 / FR-CR-04-27)."""
+"""Telegram-channel bookkeeping (FR-CR-04-26 / FR-CR-04-27 / FR-CR-05-07)."""
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base
+from app.models.base import Base, TimestampMixin
 
 
 class ProcessedTelegramMessage(Base):
@@ -58,4 +58,36 @@ class TelegramListenerState(Base):
     )
 
 
-__all__ = ["ProcessedTelegramMessage", "TelegramListenerState"]
+class TelegramChatMember(Base, TimestampMixin):
+    """FR-CR-05-07 — per-chat membership we observe on the live
+    listener.
+
+    Whenever a message arrives from a Telegram chat we upsert a row
+    keyed by ``(chat_id, user_id)`` with whatever profile fields the
+    update carries — `username`, `first_name`, `last_name`. The
+    classifier pulls the per-chat list as `known_employees` so the
+    LLM owner stage can map «Валя сделай X» to the real numeric
+    user_id, and the bot can DM the assignee directly when they've
+    `/started` the bot at least once (`has_started_bot=True`).
+    """
+
+    __tablename__ = "telegram_chat_members"
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    has_started_bot: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=datetime.utcnow
+    )
+
+
+__all__ = [
+    "ProcessedTelegramMessage",
+    "TelegramListenerState",
+    "TelegramChatMember",
+]

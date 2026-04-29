@@ -23,6 +23,7 @@ from app.models.task import (
 )
 from app.models.telegram import (
     ProcessedTelegramMessage,
+    TelegramChatMember,
     TelegramListenerState,
 )
 
@@ -38,6 +39,7 @@ __all__ = [
     "ContextSnapshot",
     "ProcessedSlackEvent",
     "ProcessedTelegramMessage",
+    "TelegramChatMember",
     "TelegramListenerState",
     "SlackConversation",
     "SlackEventArchive",

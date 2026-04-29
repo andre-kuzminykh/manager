@@ -57,25 +57,34 @@ def confirm_keyboard(*, draft_id: int) -> dict[str, Any]:
 def task_card_keyboard(
     *, task_id: int, status: str, is_owner: bool, is_admin: bool, subscribed: bool
 ) -> dict[str, Any]:
-    """Inline keyboard for a confirmed task card. Layout mirrors the
-    Slack card: Start (when not started), Mark done (when in progress),
-    Edit / Cancel / Delete for owner+admin, Subscribe toggle for
-    bystanders.
+    """Inline keyboard for a confirmed task card.
+
+    Permission model:
+    - **▶ Start** — only the OWNER can start their own task (admins
+      and bystanders see no Start button).
+    - **✔ Mark done / ✏ Edit / 🗑 Delete** — owner OR admin.
+    - **🔔 Subscribe / 🔕 Unsubscribe** — anyone EXCEPT the owner;
+      the owner is auto-subscribed at creation, the toggle is a
+      no-op for them, so we hide it.
+
+    Layout: row 1 — primary action (Start / Mark done) when
+    available; row 2 — Edit + Delete side-by-side; row 3 —
+    Subscribe / Unsubscribe.
     """
     rows: list[list[dict[str, Any]]] = []
     primary: list[dict[str, Any]] = []
 
-    if status in ("backlog", "todo"):
-        if is_owner or status == "backlog":
-            primary.append(_btn("▶ Start", ACTION_START, task_id))
-    elif status == "in_progress":
+    # ▶ Start — owner only. Even an unowned task no longer surfaces
+    # a Start button to bystanders / admins; if no owner is set the
+    # task simply has no Start row until someone is assigned.
+    if status in ("backlog", "todo") and is_owner:
+        primary.append(_btn("▶ Start", ACTION_START, task_id))
+    elif status == "in_progress" and (is_owner or is_admin):
         primary.append(_btn("✔ Mark done", ACTION_DONE, task_id))
     if primary:
         rows.append(primary)
 
-    # Edit + Delete share the second row (per UX request: two
-    # buttons side-by-side instead of stacked). Cancel removed —
-    # Edit + Delete cover the intent.
+    # Edit + Delete share the second row.
     secondary: list[dict[str, Any]] = []
     if status != "done" and (is_owner or is_admin):
         secondary.append(_btn("✏ Edit", ACTION_EDIT, task_id))

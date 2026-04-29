@@ -91,6 +91,48 @@ def test_task_card_keyboard_edit_and_delete_share_a_row():
     assert len(edit_delete_row[0]) == 2
 
 
+def test_task_card_keyboard_start_is_owner_only():
+    """FR-CR-05-08 — Start is reserved for the assignee. Even an
+    admin sees Edit/Delete but not Start; bystanders see only the
+    Subscribe toggle."""
+    from app.telegram_bot.keyboards import (
+        ACTION_DELETE,
+        ACTION_EDIT,
+        ACTION_START,
+        ACTION_SUBSCRIBE,
+    )
+
+    # Owner sees Start.
+    kb = task_card_keyboard(
+        task_id=1, status="todo", is_owner=True, is_admin=False, subscribed=False
+    )
+    flat = _flat_callback_actions(kb)
+    assert ACTION_START in flat
+    assert ACTION_EDIT in flat
+    assert ACTION_DELETE in flat
+    assert ACTION_SUBSCRIBE not in flat
+
+    # Admin sees Edit/Delete + Subscribe but NO Start.
+    kb = task_card_keyboard(
+        task_id=1, status="todo", is_owner=False, is_admin=True, subscribed=False
+    )
+    flat = _flat_callback_actions(kb)
+    assert ACTION_START not in flat
+    assert ACTION_EDIT in flat
+    assert ACTION_DELETE in flat
+    assert ACTION_SUBSCRIBE in flat
+
+    # Bystander sees only the Subscribe toggle.
+    kb = task_card_keyboard(
+        task_id=1, status="todo", is_owner=False, is_admin=False, subscribed=False
+    )
+    flat = _flat_callback_actions(kb)
+    assert ACTION_START not in flat
+    assert ACTION_EDIT not in flat
+    assert ACTION_DELETE not in flat
+    assert ACTION_SUBSCRIBE in flat
+
+
 def test_task_card_keyboard_does_not_show_cancel_anywhere():
     """⤺ Cancel was removed from the UI — it must not appear on
     any status / role combination."""

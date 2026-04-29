@@ -465,6 +465,78 @@ def send_weekly_plan(
 # --------------------------------------------------------------------------- #
 
 
+def send_starts_now(
+    session: Session,
+    *,
+    sender: TelegramSender,
+    today: date | None = None,
+) -> TelegramDigestReport:
+    """FR-CR-05-03 — DM Telegram task owners when a Task's
+    ``start_time`` reaches now (±5 min). Mirrors the Slack
+    `_starts_now` selection. No `start_time` ⇒ defaults to 09:00."""
+    from datetime import datetime, time as _time
+
+    today = today or date.today()
+    now = datetime.now()
+    window_start = now - timedelta(minutes=5)
+    report = TelegramDigestReport()
+
+    candidates = (
+        session.query(Task)
+        .filter(
+            Task.status.in_(_OPEN),
+            Task.deleted_at.is_(None),
+            Task.start_date == today,
+        )
+        .all()
+    )
+    for t in candidates:
+        if not _is_telegram_user_id(t.owner_user_id):
+            continue
+        start_t = t.start_time or _time(9, 0)
+        start_dt = datetime.combine(today, start_t)
+        if not (window_start <= start_dt <= now):
+            continue
+        action_key = (
+            f"start:{t.id}:{today.isoformat()}:{start_t.strftime('%H%M')}"
+        )
+        already = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.category == "telegram_digest",
+                AuditLog.action == action_key,
+            )
+            .first()
+        )
+        if already is not None:
+            report.skipped_idempotent += 1
+            continue
+        try:
+            sender.send_message(
+                chat_id=int(t.owner_user_id),
+                text=(
+                    f"🚀 <b>Starting now</b> — <b>#{t.id} {t.title}</b> "
+                    f"(scheduled {start_t.strftime('%H:%M')})"
+                ),
+            )
+        except Exception as e:  # noqa: BLE001
+            report.failures += 1
+            log.warning("telegram_starts_now_send_failed", task_id=t.id, error=str(e))
+            continue
+        session.add(
+            AuditLog(
+                category="telegram_digest",
+                action=action_key,
+                entity_type="task",
+                entity_id=str(t.id),
+                actor=t.owner_user_id,
+                payload={"start_time": start_t.strftime("%H:%M")},
+            )
+        )
+        report.recipients += 1
+    return report
+
+
 def send_deadline_reminders(
     session: Session,
     *,

@@ -39,6 +39,7 @@ _TYPES = {
     "plan-morning": tg_notifications.send_morning_plan,
     "weekly": tg_notifications.send_weekly_plan,
     "deadlines": tg_notifications.send_deadline_reminders,
+    "starts-now": tg_notifications.send_starts_now,  # FR-CR-05-03
     "thread-reminders": tg_notifications.send_thread_reminders,
     "admin-watchlist": tg_notifications.send_admin_watchlist,
 }

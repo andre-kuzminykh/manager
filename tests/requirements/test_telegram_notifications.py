@@ -126,6 +126,72 @@ def test_morning_digest_today_only(
     assert "late" not in body
 
 
+def test_starts_now_dms_owner_when_start_time_is_now(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-03 — a Task with start_date=today and start_time
+    within the [now-5m, now] window triggers a `🚀 Starting now` DM
+    to the owner. Outside the window: no DM."""
+    from datetime import datetime, time as _time
+
+    today = date.today()
+    now = datetime.now()
+    sender = _RecordingSender()
+    with SessionFactory() as s:
+        # Inside the window — start_time is "now-2m".
+        inside = (now - timedelta(minutes=2)).time().replace(microsecond=0)
+        _mk(
+            s,
+            owner_user_id="555",
+            title="due_now",
+            start_date=today,
+            start_time=inside,
+        )
+        # Outside the window — scheduled hours from now.
+        outside = (now + timedelta(hours=2)).time().replace(microsecond=0)
+        _mk(
+            s,
+            owner_user_id="555",
+            title="later",
+            start_date=today,
+            start_time=outside,
+        )
+        s.commit()
+    with SessionFactory() as s:
+        report = tn.send_starts_now(s, sender=sender, today=today)
+        s.commit()
+    assert report.recipients == 1
+    assert len(sender.sent) == 1
+    body = sender.sent[0]["text"]
+    assert "Starting now" in body
+    assert "due_now" in body
+    assert "later" not in body
+
+
+def test_starts_now_idempotent(patched_session_scope, SessionFactory):
+    """A second call within the same window is a no-op."""
+    from datetime import datetime
+
+    today = date.today()
+    inside = (datetime.now() - timedelta(minutes=1)).time().replace(microsecond=0)
+    sender = _RecordingSender()
+    with SessionFactory() as s:
+        _mk(
+            s,
+            owner_user_id="555",
+            start_date=today,
+            start_time=inside,
+        )
+        s.commit()
+    with SessionFactory() as s:
+        tn.send_starts_now(s, sender=sender, today=today)
+        s.commit()
+    with SessionFactory() as s:
+        report = tn.send_starts_now(s, sender=sender, today=today)
+        s.commit()
+    assert report.skipped_idempotent == 1
+
+
 def test_morning_digest_idempotent(patched_session_scope, SessionFactory):
     today = date(2026, 5, 1)
     sender = _RecordingSender()

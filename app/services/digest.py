@@ -29,6 +29,7 @@ class DigestKind(str, enum.Enum):
     daily = "daily"
     weekly = "weekly"
     deadlines = "deadlines"
+    starts_now = "starts_now"
 
 
 @dataclass
@@ -143,6 +144,8 @@ class DigestService:
             return self._daily(session, today)
         if kind == DigestKind.weekly:
             return self._weekly(session, today)
+        if kind == DigestKind.starts_now:
+            return self._starts_now(session, today)
         return self._deadlines(session, today)
 
     # ---- daily -----------------------------------------------------------
@@ -217,6 +220,65 @@ class DigestService:
         return report
 
     # ---- deadlines -------------------------------------------------------
+
+    def _starts_now(self, session: Session, today: date) -> DigestReport:
+        """FR-CR-05-03 — DM the owner (and one-line nudge each
+        non-owner subscriber) when a Task's `start_time` reaches now,
+        ±5 min granularity. Selection window is closed-open
+        ``[now - 5m, now]``. Tasks without a `start_time` fall back to
+        09:00 local on `start_date`."""
+        from datetime import datetime, time as _time
+
+        report = DigestReport()
+        now = datetime.now()
+        window_start = now - timedelta(minutes=5)
+        candidates = (
+            session.query(Task)
+            .filter(
+                Task.status.in_(_OPEN),
+                Task.deleted_at.is_(None),
+                Task.start_date == today,
+            )
+            .all()
+        )
+        for t in candidates:
+            if not t.owner_user_id:
+                continue
+            start_t = t.start_time or _time(9, 0)
+            start_dt = datetime.combine(today, start_t)
+            if not (window_start <= start_dt <= now):
+                continue
+            action = (
+                f"start:{t.id}:{today.isoformat()}:{start_t.strftime('%H%M')}"
+            )
+            if _already_sent(session, action=action):
+                report.skipped_idempotent += 1
+                continue
+            self._sender.post_message(
+                channel=t.owner_user_id,
+                text=f":rocket: Starting now — task #{t.id}: {t.title}",
+                blocks=[
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                f":rocket: *Starting now* — *#{t.id} "
+                                f"{t.title}* (scheduled {start_t.strftime('%H:%M')})"
+                            ),
+                        },
+                    }
+                ],
+            )
+            _mark_sent(
+                session,
+                action=action,
+                user_id=t.owner_user_id,
+                payload={"task_id": t.id, "start_time": start_t.strftime("%H:%M")},
+            )
+            report.recipients += 1
+            report.tasks_included += 1
+        return report
 
     def _deadlines(self, session: Session, today: date) -> DigestReport:
         report = DigestReport()

@@ -339,6 +339,69 @@ class TelegramSourceReader:
         self._columns_cache = cols
         return cols
 
+    def distinct_users(self) -> list[dict]:
+        """FR-CR-05-10 — pull every distinct sender from the source
+        view. Used by the team-registry seed (`ops.sync_team --seed`)
+        so the operator doesn't have to wait for the live listener
+        to observe every teammate before they show up in the
+        registry.
+
+        The view's user-name column varies (`from_user_name` /
+        `user_name` / `username` / …); we probe the schema first
+        and project only the columns that exist. Returns a list of
+        ``{user_id, user_name}`` dicts; consumers may further parse
+        `user_name` into first/last when it carries spaces.
+        """
+        if self._engine is None:
+            return []
+        present = self._detect_columns()
+        user_id_col = next(
+            (c for c in _FIELD_MAP["user_id"] if c in present), None
+        )
+        if not user_id_col:
+            log.warning(
+                "telegram_distinct_users_no_user_id_column",
+                view=self._view,
+                tried=list(_FIELD_MAP["user_id"]),
+            )
+            return []
+        user_name_col = next(
+            (c for c in _FIELD_MAP["user_name"] if c in present), None
+        )
+
+        select_cols = [user_id_col]
+        if user_name_col:
+            select_cols.append(user_name_col)
+        sql = text(
+            f"""
+            SELECT DISTINCT {", ".join(select_cols)}
+            FROM {self._view}
+            WHERE {user_id_col} IS NOT NULL
+            """
+        )
+        out: list[dict] = []
+        seen: set[int] = set()
+        with self._engine.connect() as conn:
+            for row in conn.execute(sql).mappings():
+                raw_uid = row.get(user_id_col)
+                try:
+                    uid = int(raw_uid)
+                except (TypeError, ValueError):
+                    continue
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                name = (
+                    row.get(user_name_col) if user_name_col else None
+                )
+                out.append(
+                    {
+                        "user_id": uid,
+                        "user_name": (str(name) if name else None),
+                    }
+                )
+        return out
+
     def recent_in_chat(
         self,
         *,

@@ -184,6 +184,62 @@ def seed_from_chat_members(session: Session) -> int:
     return added
 
 
+def seed_from_telegram_source(session: Session, reader) -> int:
+    """FR-CR-05-10 — pull every distinct sender out of the Supabase
+    `humanoid_tg_chats_readonly` view (via the same reader the
+    ingest uses) and insert a `team_members` row when one doesn't
+    exist for that telegram_user_id.
+
+    Differs from `seed_from_chat_members` in that it doesn't depend
+    on the live listener having observed the user — works against
+    the colleague's pre-existing message archive directly. Useful
+    on first deploy when chat_members is empty but you want every
+    historical sender bootstrapped into the registry.
+
+    The view typically only has a combined `user_name` field (no
+    first/last split). We store it as `real_name` so the operator
+    sees something readable on the sheet. They'll likely polish
+    the names by hand after the seed.
+    """
+    if reader is None or not getattr(reader, "configured", False):
+        return 0
+    try:
+        users = reader.distinct_users()
+    except Exception as e:  # noqa: BLE001
+        log.warning("seed_from_telegram_source_failed", error=str(e))
+        return 0
+    added = 0
+    for u in users:
+        uid = u.get("user_id")
+        if uid is None:
+            continue
+        if find_by_telegram_user_id(session, int(uid)) is not None:
+            continue
+        name = (u.get("user_name") or "").strip() or None
+        # Telegram's `from_user_name` field on the view often holds
+        # the @username (no leading «@»). Detect and split: looks
+        # like a handle if it's all-ASCII alnum + underscore and
+        # has no spaces, otherwise treat as the real name.
+        username: str | None = None
+        real_name: str | None = name
+        if name and " " not in name and name.replace("_", "").isalnum() and not name.isdigit():
+            username = name
+            real_name = None
+        session.add(
+            TeamMember(
+                telegram_user_id=int(uid),
+                telegram_username=username,
+                real_name=real_name,
+                active=True,
+                last_synced_at=datetime.now(timezone.utc),
+            )
+        )
+        added += 1
+    if added:
+        session.flush()
+    return added
+
+
 def seed_from_slack_employees(session: Session) -> int:
     """Same idea for Slack — pull every Employee row, create a
     team_members entry when there isn't one yet."""

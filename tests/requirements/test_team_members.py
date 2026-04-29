@@ -160,6 +160,71 @@ def test_seed_from_chat_members_is_idempotent(session):
     assert second == 0
 
 
+def test_seed_from_telegram_source_pulls_distinct_users(session):
+    """FR-CR-05-10 — seeding from the Supabase view inserts one
+    `team_members` row per distinct user_id we've ever seen send a
+    message, even when the live listener hasn't observed them yet.
+
+    Reader is faked here — the unit test pins the parsing /
+    dedup logic that lives in `seed_from_telegram_source`."""
+    from app.services.team_members import seed_from_telegram_source
+
+    class _FakeReader:
+        configured = True
+
+        def distinct_users(self):
+            return [
+                {"user_id": 42, "user_name": "petya"},
+                {"user_id": 99, "user_name": "Andre Kuzminykh"},
+                {"user_id": 700, "user_name": None},
+            ]
+
+    added = seed_from_telegram_source(session, _FakeReader())
+    assert added == 3
+
+    out = {m.telegram_user_id: m for m in list_active(session)}
+    assert set(out.keys()) == {42, 99, 700}
+    # «petya» — single ASCII token → username, real_name=None.
+    assert out[42].telegram_username == "petya"
+    assert out[42].real_name is None
+    # «Andre Kuzminykh» has a space → real_name, username=None.
+    assert out[99].real_name == "Andre Kuzminykh"
+    assert out[99].telegram_username is None
+    # No name at all — both null but row still inserted (gives the
+    # operator a starting line with the numeric id).
+    assert out[700].telegram_username is None
+    assert out[700].real_name is None
+
+
+def test_seed_from_telegram_source_is_idempotent(session):
+    """Re-running seed against a reader that returns the same users
+    must NOT create duplicates."""
+    from app.services.team_members import seed_from_telegram_source
+
+    class _FakeReader:
+        configured = True
+
+        def distinct_users(self):
+            return [{"user_id": 42, "user_name": "petya"}]
+
+    first = seed_from_telegram_source(session, _FakeReader())
+    second = seed_from_telegram_source(session, _FakeReader())
+    assert (first, second) == (1, 0)
+
+
+def test_seed_from_telegram_source_no_op_when_reader_unconfigured(session):
+    from app.services.team_members import seed_from_telegram_source
+
+    class _NoReader:
+        configured = False
+
+        def distinct_users(self):  # pragma: no cover
+            raise AssertionError("must not be called")
+
+    assert seed_from_telegram_source(session, _NoReader()) == 0
+    assert seed_from_telegram_source(session, None) == 0
+
+
 def test_seed_from_slack_employees_creates_rows_and_skips_bots(session):
     session.add_all(
         [

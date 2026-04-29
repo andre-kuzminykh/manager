@@ -101,9 +101,34 @@ Rules:
    downstream layer will fall back to the source-message author and
    label the task as "предположительно ты" in the UI so the human can
    reassign.
-7. If the source message contains supplementary text beyond the title
-   (context, goals, references, numbers), copy the meaningful parts into
-   description (for tasks) or notes (for meetings). Do not invent text.
+7. Description must carry CONCRETE CONTEXT. The title is the
+   imperative one-liner; the description is where the human
+   reading the card later figures out what the task actually
+   is about WITHOUT going back to the source chat. Required
+   contents (when the source carries any of these — never
+   invent):
+     - The specific subject (which report? which list? which
+       client? which doc?). Example BAD title+desc:
+         title: «добавить в задачи»
+         desc:  «необходимо добавить текущие задачи в список»
+       — recipient sees both lines and still doesn't know
+       WHICH list or which tasks. Required GOOD form:
+         title: «добавить в общий план задачи по Mayfield»
+         desc:  «По итогам обсуждения с Артёмом — две задачи
+                по Mayfield (контрольный звонок 5 мая, deck
+                на этой неделе) надо завести в общий план,
+                чтобы их видел Сот».
+     - Names of people / projects / clients that were
+       mentioned IN the source.
+     - Numerical / factual constraints (dates, amounts,
+       counts, references) — copy them verbatim.
+     - Why this needs to be done — only when the source
+       message says it; don't speculate.
+   Aim for 1-3 sentences. A bare «нужно сделать X» mirroring
+   the title is NOT a valid description — if you can't say
+   anything beyond the title, leave description null and let
+   the deterministic fallback («обсуждалось в …») fill it.
+   Same rule applies to meetings → notes.
 8. Respond with a single JSON object matching the provided schema.
 """
 

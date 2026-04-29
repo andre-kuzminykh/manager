@@ -316,6 +316,13 @@ class TelegramListener:
         self._view_poll_interval = max(0, int(view_poll_interval_seconds))
         self._view_poll_batch = max(1, int(view_poll_batch_size))
         self._last_view_poll_at = 0.0
+        # FR-CR-05-51 — «получай данные с сейчас, в старое не
+        # ходи». Set on the first poll; messages with `sent_at`
+        # strictly before this timestamp are skipped so the
+        # listener never backfills history on startup. Old
+        # captures are still available via
+        # `ops.migrate_telegram_history` when actually needed.
+        self._view_realtime_started_at: datetime | None = None
         # FR-CR-05-39 — periodic poll of the Fireflies API. Same
         # toggle pattern as the TG view poll above.
         self._fireflies_pipeline = None  # set via wire_fireflies()
@@ -323,6 +330,13 @@ class TelegramListener:
         self._fireflies_poll_interval = 30
         self._fireflies_poll_batch = 20
         self._last_fireflies_poll_at = 0.0
+        # FR-CR-05-51 — same «from-now» cutoff as the TG view
+        # poll. Recordings whose `meeting_date` is before listener
+        # startup are skipped so we don't backfill stale meetings
+        # with a fresh deploy. Old meetings are still ingestible
+        # via `ops.migrate_fireflies --newest --limit N` when
+        # actually needed.
+        self._fireflies_started_at: datetime | None = None
 
     def wire_fireflies(
         self,
@@ -466,6 +480,8 @@ class TelegramListener:
             return
         self._last_fireflies_poll_at = now
 
+        if self._fireflies_started_at is None:
+            self._fireflies_started_at = datetime.now(timezone.utc)
         try:
             transcripts = self._fireflies_pipeline._client.list_transcripts(
                 limit=self._fireflies_poll_batch
@@ -479,9 +495,21 @@ class TelegramListener:
             return
         processed = 0
         skipped = 0
+        skipped_old = 0
         errors = 0
         tasks_total = 0
+        cutoff = self._fireflies_started_at
         for t in transcripts:
+            # FR-CR-05-51 — drop recordings finished before
+            # listener startup. tz-aware compare; treat naive as
+            # UTC.
+            mt = getattr(t, "meeting_date", None)
+            if mt is not None:
+                if mt.tzinfo is None:
+                    mt = mt.replace(tzinfo=timezone.utc)
+                if cutoff is not None and mt < cutoff:
+                    skipped_old += 1
+                    continue
             try:
                 with session_scope() as session:
                     report = self._fireflies_pipeline.process_one(session, t)
@@ -540,10 +568,15 @@ class TelegramListener:
         if now - self._last_view_poll_at < self._view_poll_interval:
             return
         self._last_view_poll_at = now
+        # FR-CR-05-51 — first poll seeds the «process from now»
+        # cutoff. Messages older than this are silently skipped
+        # so the listener doesn't backfill history.
+        if self._view_realtime_started_at is None:
+            self._view_realtime_started_at = datetime.now(timezone.utc)
 
         from app.telegram_bot.cards import post_draft_confirmation
 
-        proposed = nothing = errors = 0
+        proposed = nothing = errors = skipped_old = 0
         try:
             messages = list(
                 reader.iter_newest(limit=self._view_poll_batch)
@@ -553,7 +586,18 @@ class TelegramListener:
                 "listener_view_poll_iter_failed", error=str(e)
             )
             return
+        cutoff = self._view_realtime_started_at
         for msg in messages:
+            # FR-CR-05-51 — drop everything strictly older than
+            # listener startup. `sent_at` may be naive; coerce to
+            # tz-aware UTC for the comparison.
+            if msg.sent_at is not None:
+                msg_at = msg.sent_at
+                if msg_at.tzinfo is None:
+                    msg_at = msg_at.replace(tzinfo=timezone.utc)
+                if cutoff is not None and msg_at < cutoff:
+                    skipped_old += 1
+                    continue
             try:
                 with session_scope() as session:
                     drafts = self._ingest.prepare_drafts(session, msg)
@@ -589,12 +633,13 @@ class TelegramListener:
                     message_id=msg.message_id,
                     error=str(e),
                 )
-        if proposed or errors:
+        if proposed or errors or skipped_old:
             log.info(
                 "listener_view_poll_done",
                 seen=len(messages),
                 drafts_proposed=proposed,
                 no_action_or_dedup=nothing,
+                skipped_pre_startup=skipped_old,
                 errors=errors,
             )
 

@@ -1407,6 +1407,18 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.33 — Tombstone / reject lines render actor name
+
+«🗑 Task #155 — написать Крису — deleted by 222968032» showed
+the actor's raw numeric uid. New `_resolve_actor_label` looks
+up the uid in `team_members` / `chat_members` (same path as
+the owner-link resolver) and returns `real_name`, falling back
+to `@handle`, falling back to the raw uid. `render_tombstone`
+and `render_draft_rejected` accept an optional `session` and
+use it for the lookup. The listener's callback dispatch threads
+session through, so the operator now sees «deleted by Андрей
+Кузьминых».
+
 #### 13.32 — Edit-on-task receipt + ambiguous-owner rule
 
 Live testing on the Edit reply flow surfaced two annoyances:

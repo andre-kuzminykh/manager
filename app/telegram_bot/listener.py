@@ -630,7 +630,7 @@ class TelegramListener:
             draft = outcome  # type: ignore[assignment]
             if draft is not None:
                 render_draft_rejected(
-                    sender=self._sender, draft=draft, actor=actor
+                    sender=self._sender, draft=draft, actor=actor, session=session
                 )
             return
 
@@ -639,7 +639,9 @@ class TelegramListener:
         if task is None:
             return
         if action == ACTION_DELETE:
-            render_tombstone(sender=self._sender, task=task, actor=actor)
+            render_tombstone(
+                sender=self._sender, task=task, actor=actor, session=session
+            )
         else:
             refresh_card(
                 sender=self._sender,

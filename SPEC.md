@@ -723,6 +723,26 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-33 — Tombstone / reject lines render actor name, not uid
+
+The Delete and Reject paths produced lines like
+«🗑 Task #155 — написать Крису — deleted by 222968032».
+Operator complained that the bare numeric uid was confusing —
+they wanted to see the human name like everywhere else.
+
+`_resolve_actor_label(session, actor_uid)` reuses the
+FR-CR-05-26 / 05-20 owner-link resolver to find the actor's
+`real_name` (or `@handle` fallback) from `team_members` /
+`telegram_chat_members`. `render_tombstone` and
+`render_draft_rejected` accept an optional `session` argument
+and use it to render «deleted by Андрей Кузьминых» when a
+matching row exists. Without a session (back-compat), the raw
+uid stays — same behaviour callers always had.
+
+The listener's callback dispatch threads `session` through to
+both render helpers, so DM-rendered tombstones now show the
+team name automatically.
+
 #### FR-CR-05-32 — Edit-on-task receipt + ambiguous-owner rule
 
 Two operator-side fixes after live testing the Edit reply
@@ -2951,6 +2971,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-30  | manual visual verification — listener logs `listener_team_sheet_pulled` only when the operator actually changed something on the Sheet (no timestamp-only diffs) |
 | FR-CR-05-31  | `test_intent_pipeline.py::test_owner_prompt_uses_role_notes_for_unnamed_assignments` (system prompt has SOURCE OF TRUTH block + investor-relations example anchored); `::test_owner_user_prompt_keeps_long_notes_intact` (200-char notes cap; previously-clipped «cap-table / встречи с инвесторами» blurbs survive into the prompt) |
 | FR-CR-05-32  | `test_telegram_conversations.py::test_format_edit_receipt_lists_applied_fields` (icon + arrow rendering for each field; empty values skipped); `::test_format_edit_receipt_hints_at_vague_owner_without_match` («другого оунера» without a resolved owner ⇒ clarification nudge appended); `::test_format_edit_receipt_no_vague_hint_when_owner_resolved` (no nudge when the LLM did pick an owner) |
+| FR-CR-05-33  | `test_telegram_cards.py::test_render_tombstone_resolves_actor_uid_to_team_name` (session + matching team_members row ⇒ tombstone shows real_name, no raw uid); `::test_render_tombstone_falls_back_to_uid_without_session` (legacy callers without a session keep the raw uid behaviour) |
 | FR-CR-05-29  | `test_team_members.py::test_upsert_from_sheet_rows_merges_duplicates_by_unique_column` (operator edits one row to carry BOTH `telegram_user_id` AND `slack_user_id` ⇒ orphan row that previously owned one of those ids gets deleted; pull lands cleanly without `UniqueViolation`) |
 | FR-CR-05-28  | `test_telegram_listener.py::test_listener_runs_sheet_pulls_when_interval_elapsed` (first call after construction fires both pulls); `::test_listener_throttles_sheet_pulls_within_interval` (repeated calls inside the window are no-ops); `::test_listener_skips_sheet_pulls_when_interval_zero` (`SHEET_POLL_INTERVAL_SECONDS=0` disables the in-listener poll); `::test_listener_swallows_sheet_pull_errors` (transient HTTP errors don't break the listener) |
 | FR-CR-05-27  | `test_telegram_members.py::test_upsert_member_creates_team_row_for_new_user` (brand-new user observed ⇒ team_members row auto-created with all available fields, `active=True`); `::test_upsert_member_creates_inactive_team_row_for_bot_account` (auto-bot detection ⇒ `active=False` on creation); `test_team_members.py::test_team_sheet_push_appends_only_new_rows` (existing operator edits preserved; only DB rows missing from the sheet get appended); `::test_team_sheet_push_writes_full_table_when_sheet_empty` (first-time bootstrap writes header + body) |

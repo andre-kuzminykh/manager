@@ -228,22 +228,60 @@ def refresh_card(
             )
 
 
+def _resolve_actor_label(
+    session: Session | None, actor_uid: str | None
+) -> str | None:
+    """FR-CR-05-33 — render the actor uid as a friendly label
+    using the same `team_members` / `chat_members` lookup that
+    `_owner_html_link` uses. The tombstone / reject lines
+    previously showed «deleted by 222968032»; now they show
+    «deleted by Андрей Кузьминых» when the registry has a
+    matching row, falling back to `@handle` and finally the raw
+    uid.
+    """
+    if not actor_uid:
+        return None
+    if session is None:
+        return actor_uid
+    try:
+        from app.telegram_bot.sender import _resolve_owner_link_target
+
+        _, handle, real_name = _resolve_owner_link_target(
+            session, actor_uid, None
+        )
+    except Exception:  # noqa: BLE001
+        return actor_uid
+    if real_name:
+        return real_name
+    if handle:
+        return f"@{handle}"
+    return actor_uid
+
+
 def render_tombstone(
     *,
     sender: TelegramSender,
     task: Task,
     actor: str | None,
+    session: Session | None = None,
 ) -> None:
-    """Replace every delivered card with a tombstone line."""
+    """Replace every delivered card with a tombstone line.
+
+    FR-CR-05-33 — when ``session`` is provided, the actor uid is
+    resolved to a human-readable name via the team / chat-members
+    registry; otherwise we fall back to the raw uid the way we
+    always did.
+    """
     if task.source_kind != TaskSourceKind.telegram or not sender.enabled:
         return
     cards = _stored_cards(task)
     if not cards:
         return
 
+    actor_label = _resolve_actor_label(session, actor)
     text = (
         f"🗑 Task #{task.id} — <b>{_escape_md(task.title)}</b> — deleted"
-        + (f" by <code>{_escape_md(actor)}</code>" if actor else "")
+        + (f" by {_escape_md(actor_label)}" if actor_label else "")
     )
     for c in cards:
         try:
@@ -529,17 +567,21 @@ def render_draft_rejected(
     sender: TelegramSender,
     draft: ActionDraft,
     actor: str | None,
+    session: Session | None = None,
 ) -> None:
-    """Replace every draft widget with a "Rejected" tombstone."""
+    """Replace every draft widget with a "Rejected" tombstone.
+
+    FR-CR-05-33 — same actor-label resolution as `render_tombstone`."""
     if not sender.enabled:
         return
     widgets = _draft_widgets(draft)
     if not widgets:
         return
     title = (draft.payload or {}).get("title") or ""
+    actor_label = _resolve_actor_label(session, actor)
     text = (
         f"❌ Draft #{draft.id} — <b>{_escape_md(str(title))}</b> — rejected"
-        + (f" by <code>{_escape_md(actor)}</code>" if actor else "")
+        + (f" by {_escape_md(actor_label)}" if actor_label else "")
     )
     for w in widgets:
         try:

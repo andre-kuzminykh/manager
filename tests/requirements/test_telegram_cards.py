@@ -226,6 +226,57 @@ def test_refresh_card_back_compat_legacy_single_pair(session):
     ]
 
 
+def test_render_tombstone_resolves_actor_uid_to_team_name(session):
+    """FR-CR-05-33 — when a session is passed, the tombstone line
+    shows the actor's friendly name from team_members instead of
+    the raw numeric uid. Operator complained about
+    «deleted by 222968032» — confusing."""
+    from app.models import TeamMember
+
+    session.add(
+        TeamMember(
+            real_name="Андрей Кузьминых",
+            telegram_user_id=222968032,
+            telegram_username="andre_andreevich",
+            active=True,
+        )
+    )
+    session.flush()
+    t = _mk_task(
+        session,
+        title="написать Крису",
+        owner_user_id="222",
+        extra={
+            "telegram_cards": [
+                {"chat_id": 111, "message_id": 1},
+            ]
+        },
+    )
+    sender = _RecordingSender()
+    render_tombstone(sender=sender, task=t, actor="222968032", session=session)
+    assert len(sender.updated) == 1
+    body = sender.updated[0]["text"]
+    # Real name resolved.
+    assert "Андрей Кузьминых" in body
+    # No raw numeric uid.
+    assert "222968032" not in body
+
+
+def test_render_tombstone_falls_back_to_uid_without_session(session):
+    """Back-compat: render_tombstone without a session keeps the
+    raw uid label so the legacy callers don't have to thread
+    session through."""
+    t = _mk_task(
+        session,
+        title="x",
+        extra={"telegram_cards": [{"chat_id": 111, "message_id": 1}]},
+    )
+    sender = _RecordingSender()
+    render_tombstone(sender=sender, task=t, actor="222968032")
+    body = sender.updated[0]["text"]
+    assert "222968032" in body
+
+
 def test_render_tombstone_iterates_all_cards(session):
     t = _mk_task(
         session,

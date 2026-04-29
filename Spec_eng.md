@@ -1407,6 +1407,64 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.41 — Morning task cards (one interactive card per task)
+
+Replaces the bullet-list `plan-morning` with one full
+INTERACTIVE card per due-today task — same body and
+keyboard (Start / Edit / Mark done / Delete / Subscribe) the
+live cards use, so buttons work inline straight from the
+digest.
+
+  - Intro DM: «☀ Доброе утро — задачи на {date}: N».
+  - Selector: owned tasks with `due_date==today` OR
+    `status==in_progress` OR (`is_current_week` AND
+    todo/backlog AND no firm `due_date`). Subscribed tasks
+    follow under «— — —\n👀 Подписки» when the user has
+    owned cards above.
+  - Order: priority desc → due_time asc → start_time asc
+    → id asc.
+
+Idempotent per (user, date). Wired as `--type
+morning-task-cards`; legacy subtypes left in place for
+A/B during rollout.
+
+#### 13.40 — Evening status report (per-task LLM narrative)
+
+Operator wants: every evening, the bot DMs each user a
+status report — done today / in progress / todo / followed
+— with a short LLM-written 1-liner per task explaining
+where it stands. Admin gets a consolidated team overview.
+
+Implementation in `app/telegram_bot/evening_status.py`:
+
+  - For every Telegram user (owner ∪ subscriber): pull
+    Done-today (history-driven), in_progress, todo
+    (current-week-weighted), and subscribed-open tasks.
+  - Per task call `OpenAIBackend.complete_text` with a
+    1-line RU narrative prompt fed title + description +
+    last 3 days of `task_status_history` (max 6
+    transitions). One call per task — different threads of
+    discussion stay separated; batching would smudge the
+    boundaries.
+  - Fail open: LLM error / empty reply → deterministic
+    «срок X, приоритет Y, статус Z» fallback.
+  - Render as Telegram HTML with `<a href=permalink>` on
+    title + owner deeplink (FR-CR-05-19/26 chain).
+  - Auto-split at 3800-char target so a long week stays
+    under the 4096-char cap; continuation messages prefix
+    «(продолжение)».
+  - Admin uids get an additional «Сводка по команде» with
+    every active user's tasks regardless of ownership.
+
+Idempotent per (user, date) via `audit_logs`. Wired as
+`--type evening-status-report`. LLM backend pulled from
+`ops.telegram_ingest._build_llm_backend`; missing key →
+fallback narrative.
+
+Real-time per-task DMs (status change → instant alert) are
+out of scope here; the same `compose_status_narrative`
+helper will drop into that flow when added.
+
 #### 13.39 — Fireflies meeting-recording pipeline (3rd source)
 
 Operator request: hook Fireflies up alongside Slack and

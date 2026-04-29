@@ -723,6 +723,96 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-41 — Morning task cards (one interactive card per task)
+
+The legacy `plan-morning` posted a single bullet-list DM
+that didn't expose the per-task action buttons. Operator
+wanted: «утром карточки с задачами все что на день надо
+сделать друг за другом по порядку — но красиво с эмодзи,
+минималистично, с гиперссылками».
+
+New `app/telegram_bot/morning_cards.py` →
+`send_morning_task_cards`:
+
+  - One intro DM «☀ Доброе утро — задачи на {date}: N».
+  - Then one full interactive task card per task, identical
+    to the live cards (`build_task_card_text` body +
+    `task_card_keyboard` permissions). Title hyperlinks to
+    the source message, owner deeplinks via FR-CR-05-19/26.
+  - Selector: owned tasks with `due_date==today` OR
+    `status==in_progress` OR (`is_current_week` AND status
+    in todo/backlog AND no firm `due_date`). Subscribed
+    tasks (due today / in flight, owned by someone else)
+    follow under a thin «— — —\n👀 Подписки» separator —
+    but only when the user actually has owned cards above.
+  - Order: priority desc → due_time asc → start_time asc →
+    id asc.
+
+Idempotent per (user, date) via
+`audit_logs.category=telegram_morning_cards`. Wired into
+`ops/telegram_digest.py` as `--type morning-task-cards`;
+the legacy `plan-morning` / `morning-digest` subtypes stay
+in place so the operator can swap their cron entry once
+they're satisfied.
+
+#### FR-CR-05-40 — Evening status report (per-task LLM narrative)
+
+Operator wanted: «вечером отправляй список всех задач что
+сейчас в todo/inprogress и done — статус всех задач
+актуальный, для админа и для каждого человека и на которые
+он подписан, может быть в несколько сообщений…
+информационный, потом утром карточки». This is the
+informational digest; FR-CR-05-41 covers the morning
+cards.
+
+New `app/telegram_bot/evening_status.py` →
+`send_evening_status_report`. For every Telegram user
+(owner ∪ subscriber):
+
+  - ✅ Сделано сегодня — history-driven (any
+    `task_status_history` transition to `done` whose `at`
+    falls within today UTC).
+  - 🚀 В процессе — current `in_progress` ownership.
+  - 📋 Todo — open backlog/todo, weighted to current week,
+    sorted due_date asc nulls-last.
+  - 👀 Подписки — open tasks the user follows but doesn't
+    own.
+
+For each task `compose_status_narrative` calls
+`OpenAIBackend.complete_text` with a 1-line RU narrative
+prompt fed the title + description + recent
+`task_status_history` (last 3 days, max 6 transitions). One
+LLM call per task (operator's instruction: «по одному той
+же логикой обрабатывать» — different threads of discussion
+stay separated). Fails open: an LLM error or empty response
+falls back to a deterministic «срок X, приоритет Y, статус
+Z» line so the digest still ships when OpenAI is down.
+
+Each line renders as Telegram HTML — title wrapped in `<a
+href=permalink>`, owner in `_owner_html_link` (numeric
+deeplink → `t.me/<handle>` → plain text). Long reports
+auto-split at line boundaries: target 3800 chars to keep
+under the Telegram 4096-char hard cap with 10% headroom.
+Continuation messages start with `(продолжение)` so the
+operator knows it's the same report.
+
+Admin uids additionally get a consolidated «Сводка по
+команде» with EVERY active user's tasks regardless of
+ownership; emitted under a separate `action=admin` audit key
+so the per-user and admin DMs don't shadow each other.
+
+Idempotent per (user, date) via
+`audit_logs.category=telegram_evening_status`. Wired into
+`ops/telegram_digest.py` as `--type evening-status-report`;
+the LLM backend is built via `ops.telegram_ingest._build_
+llm_backend` and passed through (None when no key is set →
+deterministic fallback).
+
+Real-time per-task status DMs (status change → instant DM
+to subscribers) are out of scope here — same
+`compose_status_narrative` helper will drop straight into
+that flow when added.
+
 #### FR-CR-05-39 — Fireflies meeting-recording pipeline (3rd source)
 
 Operator request: «мне надо подключить ещё один источник
@@ -3139,6 +3229,8 @@ pure unit tests for internal helpers.
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
 | FR-CR-05-38  | manual visual verification — after an Edit reply the listener posts a fresh DM with the full rendered task card / widget body in context; the original card / widget is also edited in place by `refresh_card` / `refresh_draft_widgets` |
+| FR-CR-05-40  | `test_evening_status.py::test_evening_status_groups_done_in_progress_todo` (3 tasks → 3 sections + 1 LLM call each); `::test_evening_status_subscriber_only_user_still_gets_dm` (no owned tasks but subscribed → 👀 Подписки section); `::test_evening_status_skips_user_with_no_tasks` (no tasks → 0 recipients); `::test_compose_narrative_falls_back_when_llm_raises` + `::test_compose_narrative_falls_back_when_llm_returns_empty` (fail-open to deterministic fallback); `::test_compose_narrative_truncates_long_response` (LLM > 240 chars → trimmed + `…`); `::test_evening_status_works_without_llm` (`llm=None` still ships fallback); `::test_evening_status_renders_title_as_hyperlink` (`<a href=permalink><b>title</b></a>`); `::test_evening_status_idempotent_per_user_per_day` (re-run = no new DMs); `::test_evening_status_admin_gets_team_overview` (admin uid → «Сводка по команде» with ALL tasks); `::test_split_groups_packs_into_multiple_messages_under_cap` + `::test_split_groups_single_message_when_short` (helper unit tests); `::test_evening_status_splits_long_report_into_multiple_messages` (80 tasks + verbose narrative → ≥2 DMs, each ≤4096 chars) |
+| FR-CR-05-41  | `test_morning_cards.py::test_morning_cards_picks_due_today_in_progress_and_current_week_no_due` (selector: 3 categories qualify; far-away + done excluded); `::test_morning_cards_orders_by_priority_then_due_time` (urgent → high-early → med-late → low); `::test_morning_cards_subscriber_gets_separator_only_when_owned_above` (📋 / 👀 boundary marker only when there's something above it); `::test_morning_cards_attaches_full_task_keyboard` (Mark done + Edit buttons present on the in_progress card); `::test_morning_cards_intro_lists_day_count` (intro DM has «Доброе утро» + N); `::test_morning_cards_idempotent_per_user_per_day` (re-run = no-op); `::test_morning_cards_owner_with_no_due_today_marked_skipped` (no qualifying tasks → skipped_no_tasks=1) |
 | FR-CR-05-39  | `test_fireflies.py::test_client_disabled_when_token_empty` (empty `FIREFLIES_API_TOKEN` ⇒ client.enabled=False, list_transcripts=[]); `::test_client_parses_graphql_transcripts_payload` (GraphQL response → `FirefliesTranscript`, unix-millis date, attendee shapes, Bearer auth header); `::test_client_handles_empty_response` (empty GraphQL body degrades to []); `::test_pipeline_process_one_runs_every_step` (every step lands an artefact + flips its flag, audio file lands on disk, tasks created with `source_kind=fireflies` + `due_date=date.today()` + admin attribution); `::test_pipeline_idempotent_when_already_processed` (re-run returns `skipped_reason='already_processed'` and creates no new tasks); `::test_pipeline_admin_fallback_for_unresolved_owner` (LLM null/hallucinated owner ⇒ admin uid wins via FR-CR-05-09 fallback); `::test_truncate_caps_at_limit` + `::test_truncate_passthrough_when_short` (2000-char hard cap on short summary); `test_task_source_kind.py::test_source_kind_enum_values` (enum carries `slack`, `telegram`, `fireflies`) |
 | FR-CR-05-29  | `test_team_members.py::test_upsert_from_sheet_rows_merges_duplicates_by_unique_column` (operator edits one row to carry BOTH `telegram_user_id` AND `slack_user_id` ⇒ orphan row that previously owned one of those ids gets deleted; pull lands cleanly without `UniqueViolation`) |
 | FR-CR-05-28  | `test_telegram_listener.py::test_listener_runs_sheet_pulls_when_interval_elapsed` (first call after construction fires both pulls); `::test_listener_throttles_sheet_pulls_within_interval` (repeated calls inside the window are no-ops); `::test_listener_skips_sheet_pulls_when_interval_zero` (`SHEET_POLL_INTERVAL_SECONDS=0` disables the in-listener poll); `::test_listener_swallows_sheet_pull_errors` (transient HTTP errors don't break the listener) |

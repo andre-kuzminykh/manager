@@ -111,6 +111,7 @@ def _owned_due_today(
 
     A task is «for today» if EITHER:
       - `due_date == today`, OR
+      - `due_date < today` — overdue, badge 🚨 (FR-CR-05-49),
       - it's currently `in_progress` (must finish or move it),
         OR
       - it's flagged `is_current_week` AND status in (todo,
@@ -124,6 +125,7 @@ def _owned_due_today(
             Task.status.in_(_OPEN),
             or_(
                 Task.due_date == today,
+                Task.due_date < today,
                 Task.status == TaskStatus.in_progress,
                 (Task.is_current_week.is_(True))
                 & Task.due_date.is_(None)
@@ -132,6 +134,15 @@ def _owned_due_today(
         )
         .all()
     )
+
+
+def _is_overdue(task: Task, *, today: date) -> bool:
+    """FR-CR-05-49 — overdue = due_date strictly before today AND
+    not already closed. Helper mirrors the one in
+    `evening_status` so the badge logic stays in lockstep."""
+    if task.status == TaskStatus.done:
+        return False
+    return bool(task.due_date and task.due_date < today)
 
 
 def _subscribed_due_today(
@@ -162,15 +173,22 @@ def _subscribed_due_today(
     )
 
 
-def _sort_tasks_for_morning(tasks: list[Task]) -> list[Task]:
-    """priority desc → due_time asc → start_time asc → id asc."""
+def _sort_tasks_for_morning(
+    tasks: list[Task], *, today: date | None = None
+) -> list[Task]:
+    """Order: overdue first (FR-CR-05-49), then priority desc →
+    due_time asc → start_time asc → id asc."""
 
     def key(t: Task):
+        # Overdue rank: 0 if overdue today, 1 otherwise — strictly
+        # promotes overdue tasks above same-priority non-overdue
+        # ones.
+        overdue_rank = 0 if (today is not None and _is_overdue(t, today=today)) else 1
         pri_rank = _PRIORITY_RANK.get(t.priority.value, 99)
         # `time` instances sort fine, but None has to go last.
         due_t = t.due_time or time(23, 59, 59)
         start_t = t.start_time or time(23, 59, 59)
-        return (pri_rank, due_t, start_t, t.id)
+        return (overdue_rank, pri_rank, due_t, start_t, t.id)
 
     return sorted(tasks, key=key)
 
@@ -183,9 +201,12 @@ def _sort_tasks_for_morning(tasks: list[Task]) -> list[Task]:
 def _build_intro_text(*, today: date, tasks: list[Task]) -> str:
     if not tasks:
         return f"☀ <b>Доброе утро — на сегодня {today.isoformat()}</b>\nПусто. Хорошего дня."
+    overdue_count = sum(1 for t in tasks if _is_overdue(t, today=today))
     lines = [
         f"☀ <b>Доброе утро — задачи на {today.isoformat()}: {len(tasks)}</b>",
     ]
+    if overdue_count:
+        lines.append(f"🚨 Просрочено: {overdue_count}")
     return "\n".join(lines)
 
 
@@ -224,10 +245,12 @@ def send_morning_task_cards(
             report.skipped_idempotent += 1
             continue
         owned = _sort_tasks_for_morning(
-            _owned_due_today(session, owner_uid=uid, today=today)
+            _owned_due_today(session, owner_uid=uid, today=today),
+            today=today,
         )
         subs = _sort_tasks_for_morning(
-            _subscribed_due_today(session, recipient_uid=uid, today=today)
+            _subscribed_due_today(session, recipient_uid=uid, today=today),
+            today=today,
         )
         all_tasks = owned + subs
         if not all_tasks:
@@ -258,6 +281,7 @@ def send_morning_task_cards(
                 task=t,
                 is_owner=True,
                 is_admin=is_admin,
+                today=today,
             ):
                 cards += 1
         # Tasks the user follows (separator first if there were
@@ -284,6 +308,7 @@ def send_morning_task_cards(
                 is_owner=(t.owner_user_id == uid),
                 is_admin=is_admin,
                 subscribed=subscribed,
+                today=today,
             ):
                 cards += 1
 
@@ -308,11 +333,20 @@ def _post_one_card(
     is_owner: bool,
     is_admin: bool,
     subscribed: bool = False,
+    today: date | None = None,
 ) -> bool:
     """Render + send one task card with the same keyboard the
     live cards use. Returns True on success. Failures are logged
-    but don't abort the rest of the digest."""
-    text = build_task_card_text(task, session=session)
+    but don't abort the rest of the digest.
+
+    FR-CR-05-49 — overdue tasks (`due_date < today`) get a
+    «🚨 ПРОСРОЧЕНО · was due {date}» header so the operator
+    sees the alarm before the rest of the card body.
+    """
+    header: str | None = None
+    if today is not None and _is_overdue(task, today=today) and task.due_date:
+        header = f"🚨 ПРОСРОЧЕНО · был дедлайн {task.due_date.isoformat()}"
+    text = build_task_card_text(task, session=session, header=header)
     keyboard = task_card_keyboard(
         task_id=task.id,
         status=task.status.value,

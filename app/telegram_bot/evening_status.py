@@ -384,12 +384,22 @@ def _task_card_url(
     return None
 
 
+def _is_overdue(task: Task, *, today: date) -> bool:
+    """FR-CR-05-49 — task is overdue when its `due_date` is in the
+    past AND it isn't already closed. Tasks without a `due_date`
+    can't be overdue (no deadline to miss)."""
+    if task.status == TaskStatus.done:
+        return False
+    return bool(task.due_date and task.due_date < today)
+
+
 def _render_task_line(
     *,
     session: Session | None,
     task: Task,
     narrative: str,
     show_owner: bool,
+    today: date | None = None,
     recipient_chat_id: int | None = None,
     bot_user_id: str | None = None,
 ) -> str:
@@ -405,9 +415,14 @@ def _render_task_line(
     URL form is available — Telegram doesn't expose public links
     for DM messages, so a desktop reader may end up with a
     plain title even on an active DM card.
+
+    FR-CR-05-49 — overdue tasks (due_date in the past, status
+    not done) get a 🚨 bullet that beats the priority colour.
     """
     if task.status == TaskStatus.done:
         bullet = "✅"
+    elif today is not None and _is_overdue(task, today=today):
+        bullet = "🚨"
     else:
         bullet = PRIORITY_EMOJI.get(task.priority.value, "🟡")
     safe_title = _escape_html(task.title or "")
@@ -501,6 +516,7 @@ def _build_groups(
                     task=t,
                     narrative=narrative,
                     show_owner=show_owner,
+                    today=today,
                     recipient_chat_id=recipient_chat_id,
                     bot_user_id=bot_user_id,
                 )

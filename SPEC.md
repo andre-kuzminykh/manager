@@ -723,6 +723,41 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-49 — Overdue tasks badged with 🚨 in morning + evening
+
+Operator: «просроченные задачи тоже выводи с эмодзи аларм
+по утру и вечером в статусах также подсвечивай где дедлайн
+прошёл у каких задач».
+
+A task is "overdue" when its `due_date` is strictly before
+`today` AND its status isn't `done`. Tasks without a
+`due_date` are never overdue.
+
+Evening report (`evening_status._render_task_line`):
+
+  - Bullet logic now reads `done → ✅`, `overdue → 🚨`, else
+    priority colour. The 🚨 alarm beats the priority emoji
+    so it visibly stands out across all three status
+    sections (Done / In progress / Todo / Subscriptions).
+  - `today` threaded through `_build_groups` →
+    `_render_task_line` so the overdue check uses the
+    same effective date the report was generated for.
+
+Morning task cards (`morning_cards`):
+
+  - `_owned_due_today` selector now ALSO admits
+    `due_date < today` — overdue tasks were silently
+    dropped from the digest before this fix.
+  - `_sort_tasks_for_morning` sort key gains an
+    `overdue_rank` (0 if overdue, 1 otherwise) at the
+    head of the tuple, so overdue tasks are pinned above
+    even urgent same-day tasks.
+  - `_post_one_card` passes `header="🚨 ПРОСРОЧЕНО · был
+    дедлайн {iso}"` into `build_task_card_text` for
+    overdue cards — the alarm shows above the title.
+  - `_build_intro_text` adds a «🚨 Просрочено: N» line to
+    the morning intro when N > 0.
+
 #### FR-CR-05-48 — Evening report links to the bot's task card
 
 Operator: «когда задача в статусе по вечерам — то в

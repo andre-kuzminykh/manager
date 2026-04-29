@@ -466,3 +466,56 @@ def test_evening_status_splits_long_report_into_multiple_messages(
     assert len(sender.sent) >= 2
     for m in sender.sent:
         assert len(m["text"]) <= 4096
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-49 — overdue badge
+# --------------------------------------------------------------------------- #
+
+
+def test_evening_status_overdue_task_renders_with_alarm_bullet(
+    patched_session_scope, SessionFactory
+):
+    """Tasks whose `due_date` has passed get a 🚨 bullet that
+    overrides the priority colour. Closed tasks are unaffected
+    (✅ wins). Tasks without a `due_date` are never overdue."""
+    from datetime import timedelta
+
+    today = date(2026, 4, 29)
+    yesterday = today - timedelta(days=1)
+    tomorrow = today + timedelta(days=1)
+    with SessionFactory() as s:
+        _mk_task(s, title="overdue", due_date=yesterday)
+        _mk_task(s, title="future", due_date=tomorrow)
+        _mk_task(s, title="no-due")
+        # Done tasks aren't overdue even if due_date is in the past.
+        _mk_task(
+            s, title="done-yesterday", due_date=yesterday,
+            status=TaskStatus.done,
+        )
+        s.commit()
+        sender = _RecordingTGSender()
+        send_evening_status_report(
+            s, sender=sender, llm=_StubLLM(reply="ok"),
+            today=today, include_admin_overview=False,
+        )
+        s.commit()
+
+    body = sender.sent[0]["text"]
+    # Overdue task carries the alarm bullet.
+    assert "🚨" in body
+    # The line for "overdue" specifically is prefixed with 🚨,
+    # not the priority emoji 🟡.
+    overdue_idx = body.find("overdue")
+    assert overdue_idx > 0
+    assert "🚨" in body[max(0, overdue_idx - 10) : overdue_idx]
+    # Future task and no-due aren't flagged.
+    future_idx = body.find("future")
+    no_due_idx = body.find("no-due")
+    for idx in (future_idx, no_due_idx):
+        if idx > 0:
+            assert "🚨" not in body[max(0, idx - 10) : idx]
+    # Done task uses ✅, NOT 🚨, even though due_date is in the past.
+    done_idx = body.find("done-yesterday")
+    if done_idx > 0:
+        assert "✅" in body[max(0, done_idx - 10) : done_idx]

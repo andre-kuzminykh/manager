@@ -255,3 +255,81 @@ def test_morning_cards_owner_with_no_due_today_marked_skipped(
     assert report.recipients == 0
     assert report.skipped_no_tasks == 1
     assert sender.sent == []
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-49 — overdue badge
+# --------------------------------------------------------------------------- #
+
+
+def test_morning_cards_picks_up_overdue_tasks(
+    patched_session_scope, SessionFactory
+):
+    """A task with `due_date < today` and an open status used to
+    fall through the morning-cards selector. FR-CR-05-49 adds it
+    explicitly so overdue work doesn't go silently missing."""
+    today = date(2026, 4, 29)
+    yesterday = today - timedelta(days=1)
+    with SessionFactory() as s:
+        _mk_task(s, title="overdue", due_date=yesterday, is_current_week=False)
+        s.commit()
+        sender = _RecordingTGSender()
+        report = send_morning_task_cards(s, sender=sender, today=today)
+        s.commit()
+    assert report.recipients == 1
+    # 1 intro + 1 card.
+    assert len(sender.sent) == 2
+    # Card body has the alarm header.
+    assert "ПРОСРОЧЕНО" in sender.sent[1]["text"]
+    assert "🚨" in sender.sent[1]["text"]
+    # Intro mentions the overdue count.
+    assert "🚨 Просрочено: 1" in sender.sent[0]["text"]
+
+
+def test_morning_cards_overdue_sorted_first(
+    patched_session_scope, SessionFactory
+):
+    """Overdue tasks come first, ahead of even high-priority
+    tasks that aren't overdue. Within overdue, the usual
+    priority/time tiebreaker still applies."""
+    today = date(2026, 4, 29)
+    yesterday = today - timedelta(days=1)
+    with SessionFactory() as s:
+        _mk_task(s, title="urgent-today", due_date=today, priority=TaskPriority.urgent)
+        _mk_task(
+            s, title="overdue-low", due_date=yesterday, priority=TaskPriority.low
+        )
+        s.commit()
+        sender = _RecordingTGSender()
+        send_morning_task_cards(s, sender=sender, today=today)
+        s.commit()
+    # Skip intro at index 0; cards start at 1.
+    first_card = sender.sent[1]["text"]
+    second_card = sender.sent[2]["text"]
+    assert "overdue-low" in first_card
+    assert "urgent-today" in second_card
+
+
+def test_morning_cards_no_alarm_for_done_overdue(
+    patched_session_scope, SessionFactory
+):
+    """A task that's already `done` is never overdue regardless
+    of the past `due_date`. The selector excludes done tasks
+    anyway (status filter), so this is a defensive check."""
+    today = date(2026, 4, 29)
+    yesterday = today - timedelta(days=1)
+    with SessionFactory() as s:
+        _mk_task(
+            s, title="done-yesterday", due_date=yesterday,
+            status=TaskStatus.done,
+        )
+        # Add a non-done task too so the user has SOMETHING to see.
+        _mk_task(s, title="real task", due_date=today)
+        s.commit()
+        sender = _RecordingTGSender()
+        send_morning_task_cards(s, sender=sender, today=today)
+        s.commit()
+    bodies = " ".join(m["text"] for m in sender.sent)
+    assert "done-yesterday" not in bodies
+    assert "ПРОСРОЧЕНО" not in bodies
+    assert "real task" in bodies

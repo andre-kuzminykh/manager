@@ -494,6 +494,12 @@ def _build_edit_user_prompt(
         "(the value from the table, NOT the name). Use role / "
         "notes to disambiguate same-first-name rows. When no row "
         "matches, leave `owner` out — DON'T invent a uid.\n"
+        "- AMBIGUOUS owner change: when the user says «другого "
+        "оунера», «другую ответственную», «не X», «кого-то ещё», "
+        "«another owner», without naming a specific person, OMIT "
+        "the `owner` field entirely. The downstream code will ask "
+        "the operator to clarify rather than blindly clearing the "
+        "current owner.\n"
         "- Resolve relative dates ('завтра', 'next Friday', 'через "
         "неделю') against today.\n"
         "- To clear a field, set it to an empty string.\n"
@@ -606,6 +612,65 @@ def _extract_owner_label(reply_text: str | None) -> str | None:
     if not tail or tail.lstrip("-").isdigit():
         return None
     return tail[:80]
+
+
+def format_edit_receipt(
+    applied: dict[str, str],
+    *,
+    raw_reply: str | None = None,
+) -> str:
+    """FR-CR-05-32 — render a short feedback message confirming
+    which fields were applied to the task. Sent as a reply to
+    the user's edit message so they have a visible receipt
+    instead of having to scroll up to find the (now silently
+    edited) card.
+
+    Layout:
+
+      ✓ Готово
+      📅 due → 2026-04-30
+      👤 owner → Андрей Кузьминых
+      🤔 «другого оунера» — уточни кого
+
+    The vague-owner hint at the bottom only fires when the raw
+    reply mentions an owner change but the LLM emitted nothing
+    actionable for it (FR-CR-05-32 ambiguous-owner rule).
+    """
+    icons = {
+        "title": "📌",
+        "description": "📝",
+        "priority": "🚦",
+        "due": "📅",
+        "due_time": "⏰",
+        "start": "🚦",
+        "start_time": "⏰",
+        "category": "🏷",
+        "owner": "👤",
+    }
+    lines: list[str] = ["✓ Готово"]
+    for field, value in applied.items():
+        if not value:
+            continue
+        emoji = icons.get(field, "·")
+        lines.append(f"{emoji} {field} → {value}")
+    if raw_reply and "owner" not in applied:
+        text = raw_reply.lower()
+        vague_markers = (
+            "другого оунер",
+            "другого ответствен",
+            "другую ответствен",
+            "другого овнер",
+            "другому ответствен",
+            "не алину",
+            "не андрея",
+            "another owner",
+        )
+        if any(m in text for m in vague_markers):
+            lines.append(
+                "🤔 ответственного хотел поменять? уточни на кого "
+                "именно (имя или @handle)."
+            )
+    return "\n".join(lines)
 
 
 def _parse_date_or_none(s: str | None) -> date | None:

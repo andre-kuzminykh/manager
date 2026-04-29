@@ -1407,6 +1407,34 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.32 — Edit-on-task receipt + ambiguous-owner rule
+
+Live testing on the Edit reply flow surfaced two annoyances:
+
+- After replying with «завтра / другого оунера», the operator
+  had no visible feedback that the edit landed — the bot
+  silently updated the original card (far up in chat) and
+  deleted the Edit prompt.
+- Vague phrases like «другого оунера» without a specific name
+  used to either clear the owner or pick a random match.
+
+Two fixes:
+
+**Visible receipt.** After a successful edit the bot replies
+under the operator's message with `✓ Готово` and a per-field
+list of what changed. When the user's reply mentioned an
+owner change but the LLM didn't resolve a target, the receipt
+ends with `🤔 ответственного хотел поменять? уточни на кого
+именно`.
+
+**Ambiguous-owner rule.** Edit prompt tells the LLM to OMIT
+the `owner` field on vague phrases like «другого», «не X»,
+«another owner». Existing owner stays put; receipt nudges the
+operator to clarify.
+
+
+---
+
 #### 13.31 — Owner prompt: role + notes are the source of truth
 
 Operator hand-curates `role` / `notes` on the Team Sheet to

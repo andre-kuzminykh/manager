@@ -723,6 +723,38 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-32 — Edit-on-task receipt + ambiguous-owner rule
+
+Two operator-side fixes after live testing the Edit reply
+flow on a task card:
+
+**Visible receipt after the edit lands.** Previously the bot:
+silently updated the original card (often far up in the chat
+history); deleted the «✏ Edit task #N» prompt; left the user's
+own reply in place with no visible feedback. Operator
+complained that «what I wrote disappears, the card looks
+new» — they had to scroll up to find the edited card. New:
+after a successful `apply_edit_reply_ex` the bot replies to
+the operator's edit message with a short receipt:
+
+```
+✓ Готово
+📅 due → 2026-04-30
+👤 owner → Андрей Кузьминых
+```
+
+When the operator's reply also asked to change the owner but
+the LLM didn't resolve a target, the receipt appends a single
+hint line: «🤔 ответственного хотел поменять? уточни на кого
+именно». Same path covers Edit-on-draft.
+
+**Ambiguous-owner rule in the LLM prompt.** «другого оунера»,
+«не Алину», «another owner» without a specific name no longer
+clears or guesses. The Edit prompt explicitly tells the LLM
+to OMIT the `owner` field on vague phrases — better to leave
+the existing owner unchanged and let the receipt nudge the
+operator to clarify.
+
 #### FR-CR-05-31 — Owner prompt: role + notes are the source of truth
 
 The operator hand-curates `team_members.role` /
@@ -2918,6 +2950,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-23  | `test_team_members.py::test_backfill_fills_blank_team_members_from_chat_members` (sparse rows enriched from listener observations; operator edits preserved); `::test_backfill_no_op_when_chat_members_empty` (no observations ⇒ no rows changed) |
 | FR-CR-05-30  | manual visual verification — listener logs `listener_team_sheet_pulled` only when the operator actually changed something on the Sheet (no timestamp-only diffs) |
 | FR-CR-05-31  | `test_intent_pipeline.py::test_owner_prompt_uses_role_notes_for_unnamed_assignments` (system prompt has SOURCE OF TRUTH block + investor-relations example anchored); `::test_owner_user_prompt_keeps_long_notes_intact` (200-char notes cap; previously-clipped «cap-table / встречи с инвесторами» blurbs survive into the prompt) |
+| FR-CR-05-32  | `test_telegram_conversations.py::test_format_edit_receipt_lists_applied_fields` (icon + arrow rendering for each field; empty values skipped); `::test_format_edit_receipt_hints_at_vague_owner_without_match` («другого оунера» without a resolved owner ⇒ clarification nudge appended); `::test_format_edit_receipt_no_vague_hint_when_owner_resolved` (no nudge when the LLM did pick an owner) |
 | FR-CR-05-29  | `test_team_members.py::test_upsert_from_sheet_rows_merges_duplicates_by_unique_column` (operator edits one row to carry BOTH `telegram_user_id` AND `slack_user_id` ⇒ orphan row that previously owned one of those ids gets deleted; pull lands cleanly without `UniqueViolation`) |
 | FR-CR-05-28  | `test_telegram_listener.py::test_listener_runs_sheet_pulls_when_interval_elapsed` (first call after construction fires both pulls); `::test_listener_throttles_sheet_pulls_within_interval` (repeated calls inside the window are no-ops); `::test_listener_skips_sheet_pulls_when_interval_zero` (`SHEET_POLL_INTERVAL_SECONDS=0` disables the in-listener poll); `::test_listener_swallows_sheet_pull_errors` (transient HTTP errors don't break the listener) |
 | FR-CR-05-27  | `test_telegram_members.py::test_upsert_member_creates_team_row_for_new_user` (brand-new user observed ⇒ team_members row auto-created with all available fields, `active=True`); `::test_upsert_member_creates_inactive_team_row_for_bot_account` (auto-bot detection ⇒ `active=False` on creation); `test_team_members.py::test_team_sheet_push_appends_only_new_rows` (existing operator edits preserved; only DB rows missing from the sheet get appended); `::test_team_sheet_push_writes_full_table_when_sheet_empty` (first-time bootstrap writes header + body) |

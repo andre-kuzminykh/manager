@@ -968,6 +968,20 @@ class TelegramListener:
                 task=task,
                 viewer=actor,
             )
+            # FR-CR-05-32 — visible receipt confirming which fields
+            # actually applied. Without this the operator had no
+            # signal that the edit landed (the prompt was deleted
+            # and the original card edited in place far up in chat).
+            try:
+                self._sender.send_message(
+                    chat_id=msg.chat_id,
+                    text=tg_handlers.format_edit_receipt(
+                        applied, raw_reply=reply_text
+                    ),
+                    reply_to_message_id=msg.message_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.info("telegram_edit_receipt_failed", error=str(e))
         elif pending.action == "edit_draft":
             # Edit-on-draft — user tapped ✏ Edit on a confirm widget.
             # Same LLM backend; on success re-render every widget DM
@@ -998,6 +1012,17 @@ class TelegramListener:
             refresh_draft_widgets(
                 sender=self._sender, draft=draft, session=session
             )
+            # FR-CR-05-32 — same receipt for Edit-on-draft.
+            try:
+                self._sender.send_message(
+                    chat_id=msg.chat_id,
+                    text=tg_handlers.format_edit_receipt(
+                        applied, raw_reply=reply_text
+                    ),
+                    reply_to_message_id=msg.message_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.info("telegram_edit_receipt_failed", error=str(e))
         else:
             log.info("telegram_unknown_pending_action", action=pending.action)
 

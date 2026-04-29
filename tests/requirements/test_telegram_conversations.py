@@ -453,6 +453,50 @@ def test_apply_edit_keeps_typed_name_when_registry_row_is_sparse(session):
     assert out.owner_display_name == "Андрей Кузьминых"
 
 
+def test_format_edit_receipt_lists_applied_fields():
+    """FR-CR-05-32 — receipt formatter renders a `✓ Готово`
+    header followed by one line per applied field with an icon.
+    Empty values (clears) are skipped from the listing."""
+    out = h.format_edit_receipt(
+        {
+            "due": "2026-04-30",
+            "owner": "97239970",
+            "priority": "high",
+            "category": "",
+        }
+    )
+    lines = out.splitlines()
+    assert lines[0] == "✓ Готово"
+    body = "\n".join(lines[1:])
+    assert "due → 2026-04-30" in body
+    assert "owner → 97239970" in body
+    assert "priority → high" in body
+    # Empty value skipped.
+    assert "category" not in body
+
+
+def test_format_edit_receipt_hints_at_vague_owner_without_match():
+    """FR-CR-05-32 — when the user's reply mentions «другого
+    оунера» but the LLM emitted no `owner` field (ambiguous-
+    owner rule), the receipt nudges the operator to clarify."""
+    out = h.format_edit_receipt(
+        {"due": "2026-04-30"},
+        raw_reply="завтра / другого оунера",
+    )
+    assert "другого оунер" in out.lower() or "ответственного" in out
+    assert "уточни" in out.lower()
+
+
+def test_format_edit_receipt_no_vague_hint_when_owner_resolved():
+    """No vague-owner hint when the LLM did resolve the owner —
+    the operator already got what they asked for."""
+    out = h.format_edit_receipt(
+        {"due": "2026-04-30", "owner": "Андрей Кузьминых"},
+        raw_reply="завтра / другого ответственного, Андрей Кузьминых",
+    )
+    assert "уточни" not in out.lower()
+
+
 def test_apply_edit_drops_unresolvable_owner_text_to_display_name(session):
     """When the LLM returns a name that doesn't match anyone in the
     registry, the apply step keeps the typed text on display_name

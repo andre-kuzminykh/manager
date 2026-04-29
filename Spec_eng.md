@@ -858,6 +858,70 @@ Approval becomes implicit on Edit — once the user confirms the
 edited plan, the bot stores it and the morning digest will run
 in approved mode the next day.
 
+#### 13.7 — Dedup gate + 10 000-char string cap
+
+> **As a contributor**, when the same instruction repeats across
+> messages («не забудьте про отчёт», «отправь договор»), I want
+> the bot to detect the duplicate and NOT spam my DM with another
+> «Create this task?» widget — **so that** my pending list stays
+> uncluttered.
+
+How it works:
+- The ingest pipeline (`process_all`, `prepare_drafts`) calls
+  `app/services/task_dedup.py:check_duplicate` for every fresh
+  `TaskDraft` before persisting it.
+- The helper looks at the **last 20 open Tasks**, hands them and
+  the candidate to the same LLM backend the classifier uses, and
+  asks: «is this the same work?». «Same wording for the same
+  thing» counts; «same topic, different deliverable» does not.
+- When the verdict is «duplicate», the candidate is silently
+  dropped — no draft, no widget. The source-message bookmark in
+  `processed_telegram_messages` is still written so the same row
+  doesn't get re-classified on the next cron tick.
+- Failure modes are conservative — an empty lookback, missing LLM
+  backend, or any LLM error → «not a duplicate», so the gate
+  falls open and we never silently lose legitimately new work.
+- Done / soft-deleted Tasks are excluded from the lookback —
+  closed work shouldn't suppress the same item being re-scheduled.
+
+> **As an operator**, I want forwarded chat threads or pasted
+> documents to never crash a Sheets sync or balloon an LLM
+> prompt — **so that** the bot stays predictable.
+
+Every user-provided string field on the task draft (`title`,
+`description`, `owner_user_id`, `owner_display_name`) is capped
+at **10 000 characters** by a Pydantic `model_validator`. A
+belt-and-suspenders cap in `create_task_from_draft` truncates
+again at persist time so any path that bypasses the schema (raw
+payload dicts, future ingestors) still gets bounded data. 10 000
+chars is comfortably under Sheets' 50 000-char cell limit and
+generous enough to keep useful context without paying for it
+downstream.
+
+#### 13.8 — Confirm-first ingest from the colleague's view
+
+> **As an operator**, when I run the historical migration or the
+> incremental cron over the colleague's read-only Supabase view,
+> I want every detected task to land in my Telegram DM as a
+> «Create this task?» widget — **so that** I can sanity-check
+> noise before it lands in my Sheet.
+
+Both `ops.migrate_telegram_history` and `ops.telegram_ingest`
+default to **confirm-first** (FR-CR-04-32 parity): each detected
+task becomes an `ActionDraft` in `proposed` state and the bot DMs
+the standard recipient set (author + admins) with the widget.
+Tasks materialise only on ✅ Accept.
+
+The migrator also gained `--since YYYY-MM-DD` and
+`--since-days N` so the operator can scope a backfill to «just
+yesterday». Older messages get a «skipped (too old)» bookmark
+without going anywhere near the LLM, so a re-run with the same
+cutoff is fast.
+
+The legacy «task straight to DB» path lives behind
+`--auto-confirm`, for the rare case where the operator really
+doesn't want to click N buttons.
+
 
 ---
 

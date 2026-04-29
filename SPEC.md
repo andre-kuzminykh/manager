@@ -723,6 +723,57 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-06 — Dedup gate before widget + 10 000-char field cap
+
+Two correctness gates added to the ingest pipeline so the user
+isn't drowned in widgets and the DB / Sheet doesn't choke on
+multi-MB strings.
+
+**1. Dedup-before-draft.** New service
+`app/services/task_dedup.py:check_duplicate(session, candidate,
+llm_backend)` runs an LLM tool-call comparing the fresh
+`TaskDraft` against the most-recent open Tasks (lookback = 20).
+When the model says «duplicate», the candidate is silently dropped
+in `TelegramIngestService.process_all` /
+`prepare_drafts` — the source-message bookmark in
+`processed_telegram_messages` is still written so a re-run of the
+same view doesn't re-classify the dropped candidate.
+
+Failure modes are conservative — empty lookback, no LLM backend,
+or any LLM error → returns «not a duplicate» and the gate falls
+open. The model occasionally hallucinates a task id outside the
+lookback set; the service keeps the boolean verdict but nulls out
+the id so callers don't dereference garbage.
+
+The lookback excludes done / soft-deleted Tasks: closed work
+shouldn't suppress a freshly-needed re-do.
+
+**2. 10 000-char string cap.** Forwarded chat threads / pasted
+documents can in principle blow past Sheets' 50 000-char cell
+limit, inflate downstream LLM prompts, and bloat audit rows.
+Every user-provided string field on `TaskDraft`
+(`title` / `description` / `owner_user_id` / `owner_display_name`)
+is now capped at 10 000 chars by a `model_validator(mode="after")`.
+A belt-and-suspenders cap in `create_task_from_draft` catches any
+raw-payload-dict path that bypasses the schema.
+
+Both gates fire for every channel — Slack orchestrator, Telegram
+immediate-create, the FR-CR-04-32 Accept-on-draft handler, and
+the FR-CR-05-05 multi-task loop — because they live inside the
+service / persistence layer rather than at the keyboard.
+
+The historical migration (`ops.migrate_telegram_history`) and the
+incremental cron (`ops.telegram_ingest`) inherit dedup for free
+and now default to the *confirm-first* widget flow (FR-CR-04-32
+parity): drafts go to the author / admins as «Create this task?»
+DMs and the Task lands in the DB only after the user clicks ✅
+Accept. The legacy «task straight to DB» path lives behind the
+`--auto-confirm` flag for the rare case where you don't want to
+click N buttons. The migrator also gained `--since YYYY-MM-DD` /
+`--since-days N` so the operator can scope a backfill to «just
+yesterday», bookmarking older messages as «skipped (too old)» so
+they don't waste LLM budget on a re-run.
+
 #### FR-CR-05-05 — Multi-task extraction from a single message
 
 A single message often carries more than one task — «к завтра
@@ -1951,10 +2002,11 @@ pure unit tests for internal helpers.
 | FR-CR-04-30  | `test_telegram_ingest.py::test_process_one_uses_user_name_as_fallback_owner_display_name`, `::test_process_one_keeps_llm_display_name_when_present` |
 | FR-CR-04-31  | `test_telegram_cards.py` (TG-uid filter; recipient set order author → owner → admins, dedup when author == owner, Slack uids dropped; `post_initial_card` sends one DM per recipient, persists `extra["telegram_cards"]` + back-compat `card_channel`/`card_ts`, no `reply_to_message_id` forwarded, no-op when no recipients or task is Slack-sourced; `refresh_card` iterates every stored card; legacy single-pair fallback; `render_tombstone` updates every card with empty keyboard) |
 | FR-CR-04-32  | `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` (group → ActionDraft state=proposed, `_widgets` + `_pending` stashed in payload; no Task yet), `::test_listener_confirm_button_finalises_draft_into_task` (Accept finalises, draft.state=confirmed, widget chat/message edited in place — guards against the popped-`_widgets` regression), `::test_listener_reject_button_marks_draft_ignored`, `::test_listener_at_mention_in_group_skips_confirm_widget` (explicit @ → immediate-create); `test_telegram_bot.py` (HTML-mode card text renders underscored usernames literally, escapes `<`/`>`/`&`, status with space, Edit + Delete share a row, Cancel never appears); `test_telegram_conversations.py::test_parse_edit_with_llm_*` + Edit-on-draft suite (`prompt_edit_draft` lists filled / missing fields and blocks strangers; `apply_edit_draft_reply` updates payload; LLM-silent fallback returns empty applied); pending registry lenient match for force-reply ignored; `test_telegram_ingest.py::test_process_one_uses_user_name_as_fallback_owner_display_name` also asserts `owner_user_id` is set from `message.user_id` so the keyboard's `is_owner` check matches |
-| FR-CR-05-01  | *to be added with the implementing commit* — `test_morning_digest_today_only.py` (today-only filter; ordering by status / priority; Refresh button re-renders; Show-subscriptions button toggles second message; uses pre-approved evening plan when present; both Slack and TG paths share `_select_owner_today_tasks`) |
-| FR-CR-05-02  | *to be added* — `test_subscriber_updates.py` (fanout fires on TransitionService apply for every non-owner subscriber; Edit triggers fanout; per-(task, recipient, transition_id) idempotency in `audit_logs`; routing rule numeric→TG / Slack-shape→Slack) |
-| FR-CR-05-03  | *to be added* — `test_starts_now.py` (5-min selection window; owner + subscribers DM'd; per-(task, recipient, kind=start) idempotency; missing start_time falls back to start_date 09:00 local; cron entry + ops/send_digest --type starts-now) |
-| FR-CR-05-04  | *to be added* — `test_evening_report.py` (3 sections: Done today / Subscriptions update / Tomorrow's plan; subscription diff against previous evening snapshot in audit_logs; Approve / Edit buttons reuse plan-edit flow; auto-run by 09:00 FR-CR-04-25; Slack + TG parity) |
-| FR-CR-05-05  | *to be added* — `test_multi_task_extraction.py` (detect stage emits task_count + task_chunks; pipeline runs 2a/2b/2c per chunk; `IntentClassification.tasks` populated; persistence creates one Task per chunk; back-compat: single-task messages still expose `classification.task = tasks[0]`; explicit «не сплитим» examples — «отчёт и презентация по нему» stays one task) |
+| FR-CR-05-01  | `test_cr01_digest.py::test_daily_digest_lists_today_only` (Slack: morning blocks contain today's task only — Approaching/Overdue suppressed); `test_telegram_notifications.py::test_morning_digest_today_only` + `::test_morning_digest_today_renders_optional_fields` (TG: minimal Today renderer — no `#id` / owner / status / per-task date; optional description / category / start / due time surface when present) |
+| FR-CR-05-02  | `test_subscriber_updates.py` (owner is excluded; non-owner Slack + numeric TG subscribers each receive one DM, routed by uid shape; replay of the same transition is idempotent; unknown uid shapes are dropped; `TransitionService.apply` triggers the fanout via the active dispatcher with zero caller boilerplate; `dispatch_status_change` is a no-op when no dispatcher is set; autouse fixture clears the singleton across suites) |
+| FR-CR-05-03  | `test_telegram_notifications.py::test_starts_now_dms_owner_when_start_time_is_now` (5-min `[now-5m, now]` window; tasks scheduled hours later are skipped; per-`(task, recipient, kind=start)` idempotency); `Slack::DigestKind.starts_now` shares the selection logic via `DigestService._starts_now` |
+| FR-CR-05-04  | `test_telegram_notifications.py::test_evening_plan_includes_three_sections` (Done today + Subscriptions update + Tomorrow's plan in one DM; `_done_today_for_owner` uses `task_status_history.changed_at` ≥ today midnight; `_subscribed_open_for_recipient` excludes the recipient's own tasks; auto-run by 09:00 next day inherited from FR-CR-04-25) |
+| FR-CR-05-05  | `test_telegram_ingest.py::test_process_all_creates_one_task_per_chunk` (`tasks=[a, b]` ⇒ 2 Task rows; bookmark points at the first); `::test_prepare_drafts_creates_one_draft_per_chunk` (group multi-task ⇒ 2 ActionDrafts in proposed; each carries its own `_pending`); `test_intent_pipeline.py::test_detect_prompt_asks_single_yes_no_question` updated for the new `task_count` / `task_chunks` schema |
+| FR-CR-05-06  | `test_task_dedup.py` (empty lookback short-circuits; missing backend falls open; LLM «duplicate» propagates with verified id; LLM-invented task id is nulled; LLM error is swallowed; done / soft-deleted tasks excluded from lookback; only open tasks reach the prompt); `test_units_support.py::test_task_draft_truncates_long_strings_to_10k` + `::test_task_draft_short_strings_pass_through` (schema cap); `test_telegram_ingest.py` integration paths exercise the gate via `_make_service` fakes |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

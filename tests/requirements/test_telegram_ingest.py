@@ -515,6 +515,33 @@ def test_process_batch_counts_each_outcome(
     assert report.skipped_empty_text == 1
 
 
+def test_process_batch_re_run_with_same_empty_text_message_doesnt_dup_pk(
+    patched_session_scope, SessionFactory
+):
+    """Regression — running ``process_batch`` twice over the same
+    non-textual message used to crash on
+    ``processed_telegram_messages_pkey``: the first run inserted a
+    bookmark with `task_id=None`, the second run hit the same row
+    again because the empty-text branch wrote without first checking
+    `existing`. Now both runs converge — second pass counts as
+    `skipped_already_processed`."""
+    classification = IntentClassification(
+        intent=IntentType.no_action,
+        confidence=0.0,
+    )
+    service = _make_service(classification)
+    msgs = [TelegramSourceMessage(chat_id=99, message_id=99, text="")]
+    with SessionFactory() as s:
+        first = service.process_batch(s, msgs)
+        s.commit()
+    with SessionFactory() as s:
+        second = service.process_batch(s, msgs)
+        s.commit()
+    assert first.skipped_empty_text == 1
+    assert second.skipped_already_processed == 1
+    assert second.skipped_empty_text == 0
+
+
 # --------------------------------------------------------------------------- #
 # IngestReport merge (used by the migration script)
 # --------------------------------------------------------------------------- #

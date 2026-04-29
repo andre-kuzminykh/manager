@@ -366,6 +366,17 @@ class TelegramIngestService:
         for m in messages:
             report.seen += 1
             try:
+                # Idempotency check goes BEFORE the is_textual branch
+                # so a re-run of the same batch (e.g. after a partial
+                # backfill) doesn't trip on
+                # `processed_telegram_messages_pkey` for messages
+                # whose bookmark was already written by a prior run.
+                existing = session.get(
+                    ProcessedTelegramMessage, (m.chat_id, m.message_id)
+                )
+                if existing is not None:
+                    report.skipped_already_processed += 1
+                    continue
                 if not m.is_textual:
                     report.skipped_empty_text += 1
                     session.add(
@@ -376,12 +387,6 @@ class TelegramIngestService:
                             task_id=None,
                         )
                     )
-                    continue
-                existing = session.get(
-                    ProcessedTelegramMessage, (m.chat_id, m.message_id)
-                )
-                if existing is not None:
-                    report.skipped_already_processed += 1
                     continue
                 task = self.process_one(session, m)
                 if task is None:

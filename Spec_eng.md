@@ -1407,6 +1407,28 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.35 — Real-time poll of the Supabase TG view
+
+The cron-driven `ops.telegram_ingest` pulled new messages from
+the read-only Supabase view but required an external scheduler.
+Default deploy had no cron, so operators ran the migrator
+manually whenever they wanted fresh widgets.
+
+The listener now polls the view itself every
+``VIEW_POLL_INTERVAL_SECONDS`` (default 30) — fresh messages
+flow through `prepare_drafts` + `post_draft_confirmation` and
+land as widget DMs to the operator. Already-processed messages
+short-circuit on the per-message bookmark.
+
+Toggleable via env:
+
+- ``VIEW_REALTIME_ENABLED=true`` — turns the listener-side
+  polling on. Default off — existing deploys keep their cron
+  flow.
+- ``VIEW_POLL_INTERVAL_SECONDS`` (default 30).
+- ``VIEW_POLL_BATCH_SIZE`` (default 50) — how many newest rows
+  to read per poll.
+
 #### 13.34 — Confirm-widget button order: Reject / Edit / Accept
 
 Operator wanted Accept rightmost so it's the deliberate last-tap

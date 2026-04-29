@@ -96,6 +96,11 @@ def main() -> int:
         team_sheet_factory=team_sheet_factory,
         tasks_sheet_pull_factory=tasks_sheet_pull_factory,
         sheet_poll_interval_seconds=settings.sheet_poll_interval_seconds,
+        # FR-CR-05-35 — listener-side polling of the Supabase TG
+        # view. Off by default; flip via VIEW_REALTIME_ENABLED.
+        view_realtime_enabled=settings.view_realtime_enabled,
+        view_poll_interval_seconds=settings.view_poll_interval_seconds,
+        view_poll_batch_size=settings.view_poll_batch_size,
     )
 
     # FR-CR-04-23 / FR-CR-04-26 — register the active TaskSyncer so

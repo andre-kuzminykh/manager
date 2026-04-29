@@ -86,6 +86,24 @@ class Settings(BaseSettings):
     sheet_poll_interval_seconds: int = Field(
         default=60, alias="SHEET_POLL_INTERVAL_SECONDS"
     )
+    # FR-CR-05-35 — real-time poll of the Supabase TG message
+    # view from inside the listener. When enabled, every
+    # ``view_poll_interval_seconds`` the listener pulls the
+    # latest ``view_poll_batch_size`` messages from the
+    # ``humanoid_tg_chats_readonly`` view and runs them through
+    # `prepare_drafts` + `post_draft_confirmation`, same path the
+    # historical migrator uses. Already-processed messages
+    # short-circuit on the per-message bookmark, so re-pulling
+    # the same 50 newest each tick is cheap.
+    view_realtime_enabled: bool = Field(
+        default=False, alias="VIEW_REALTIME_ENABLED"
+    )
+    view_poll_interval_seconds: int = Field(
+        default=30, alias="VIEW_POLL_INTERVAL_SECONDS"
+    )
+    view_poll_batch_size: int = Field(
+        default=50, alias="VIEW_POLL_BATCH_SIZE"
+    )
 
     # Intent policy
     intent_confidence_high: float = Field(default=0.75, alias="INTENT_CONFIDENCE_HIGH")

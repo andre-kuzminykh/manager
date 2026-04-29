@@ -753,6 +753,159 @@ def test_listener_swallows_sheet_pull_errors():
 
 
 # --------------------------------------------------------------------------- #
+# FR-CR-05-35 — periodic Supabase view poll
+# --------------------------------------------------------------------------- #
+
+
+def test_listener_view_realtime_off_by_default(
+    patched_session_scope, SessionFactory
+):
+    """Disabled flag ⇒ poll is a no-op even when reader is
+    configured. Makes sure the realtime feature stays opt-in."""
+    from app.telegram_ingest.reader import TelegramSourceMessage
+
+    iter_calls = {"n": 0}
+
+    class _StubReader:
+        configured = True
+
+        def iter_newest(self, *, limit):
+            iter_calls["n"] += 1
+            return iter([])
+
+    classification = IntentClassification(
+        intent=IntentType.no_action, confidence=0.0
+    )
+    ingest = _make_ingest(classification)
+    ingest._reader = _StubReader()  # noqa: SLF001
+
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=ingest,
+        view_realtime_enabled=False,
+        view_poll_interval_seconds=30,
+    )
+    listener._maybe_poll_source_view()
+    assert iter_calls["n"] == 0
+
+
+def test_listener_view_realtime_pulls_when_enabled(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-35 — flag on + reader configured ⇒ first call
+    pulls the latest batch from the view and runs each message
+    through `prepare_drafts`. Already-processed messages
+    short-circuit per the existing bookmark."""
+    from app.telegram_ingest.reader import TelegramSourceMessage
+
+    seen_messages: list[TelegramSourceMessage] = [
+        TelegramSourceMessage(
+            chat_id=-1001234, message_id=42,
+            text="prepare deck for Friday", user_id=99,
+        ),
+    ]
+
+    class _StubReader:
+        configured = True
+
+        def iter_newest(self, *, limit):
+            return iter(seen_messages)
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="prepare deck"),
+    )
+    ingest = _make_ingest(classification)
+    ingest._reader = _StubReader()  # noqa: SLF001
+
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=ingest,
+        view_realtime_enabled=True,
+        view_poll_interval_seconds=1,
+        view_poll_batch_size=10,
+    )
+    # Replace the sender with a recording stub so the widget DM
+    # doesn't try to hit Telegram.
+    sent: list[dict] = []
+
+    class _RecSender:
+        enabled = True
+
+        def send_message(self, **kw):
+            sent.append(kw)
+            return {"message_id": 1}
+
+        def update_message(self, **kw):
+            return {}
+
+        def forward_message(self, **kw):
+            return {}
+
+    listener._sender = _RecSender()
+    listener._maybe_poll_source_view()
+    # The call ran the message through prepare_drafts; the
+    # resulting widget was sent.
+    assert any("draft" in s.get("text", "").lower() or "📌" in s.get("text", "") or "prepare deck" in s.get("text", "") for s in sent)
+
+
+def test_listener_view_realtime_throttled_within_interval(
+    patched_session_scope, SessionFactory
+):
+    """Repeated calls inside the poll window are no-ops."""
+    from app.telegram_ingest.reader import TelegramSourceMessage
+
+    iter_calls = {"n": 0}
+
+    class _Counter:
+        configured = True
+
+        def iter_newest(self, *, limit):
+            iter_calls["n"] += 1
+            return iter([])
+
+    ingest = _make_ingest(IntentClassification(
+        intent=IntentType.no_action, confidence=0.0
+    ))
+    ingest._reader = _Counter()  # noqa: SLF001
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=ingest,
+        view_realtime_enabled=True,
+        view_poll_interval_seconds=600,
+    )
+    listener._maybe_poll_source_view()
+    listener._maybe_poll_source_view()
+    listener._maybe_poll_source_view()
+    assert iter_calls["n"] == 1
+
+
+def test_listener_view_realtime_no_op_when_reader_unconfigured():
+    """No source DB URL ⇒ reader.configured=False ⇒ poll is a
+    silent no-op even with the flag flipped on."""
+
+    class _NoReader:
+        configured = False
+
+        def iter_newest(self, **kw):  # pragma: no cover
+            raise AssertionError("must not be called")
+
+    ingest = _make_ingest(IntentClassification(
+        intent=IntentType.no_action, confidence=0.0
+    ))
+    ingest._reader = _NoReader()  # noqa: SLF001
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=ingest,
+        view_realtime_enabled=True,
+        view_poll_interval_seconds=1,
+    )
+    # Should not raise.
+    listener._maybe_poll_source_view()
+
+
+# --------------------------------------------------------------------------- #
 # FR-CR-05-14 — voice messages in pending replies
 # --------------------------------------------------------------------------- #
 

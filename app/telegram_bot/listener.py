@@ -270,6 +270,9 @@ class TelegramListener:
         team_sheet_factory=None,
         tasks_sheet_pull_factory=None,
         sheet_poll_interval_seconds: int = 60,
+        view_realtime_enabled: bool = False,
+        view_poll_interval_seconds: int = 30,
+        view_poll_batch_size: int = 50,
     ) -> None:
         self._token = token
         self._ingest = ingest
@@ -289,6 +292,12 @@ class TelegramListener:
         self._tasks_sheet_pull_factory = tasks_sheet_pull_factory
         self._sheet_poll_interval = max(0, int(sheet_poll_interval_seconds))
         self._last_sheet_poll_at = 0.0
+        # FR-CR-05-35 — periodic poll of the Supabase TG message
+        # view. Off by default — flip via VIEW_REALTIME_ENABLED.
+        self._view_realtime_enabled = bool(view_realtime_enabled)
+        self._view_poll_interval = max(0, int(view_poll_interval_seconds))
+        self._view_poll_batch = max(1, int(view_poll_batch_size))
+        self._last_view_poll_at = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -400,6 +409,89 @@ class TelegramListener:
 
     # ---- one tick ---------------------------------------------------------
 
+    def _maybe_poll_source_view(self) -> None:
+        """FR-CR-05-35 — periodically pull the freshest messages
+        from the Supabase TG view and run them through
+        `prepare_drafts` + `post_draft_confirmation`. When the
+        bookmark in `processed_telegram_messages` already covers
+        a message, the call short-circuits per the FR-CR-04-26
+        idempotency check, so a 50-row re-pull every 30 s is
+        cheap on a quiet day.
+
+        Disabled unless ``VIEW_REALTIME_ENABLED=true`` is set in
+        the environment. When the listener has no reader (no
+        Supabase URL configured), the call is a no-op.
+        """
+        if not self._view_realtime_enabled:
+            return
+        if self._view_poll_interval <= 0:
+            return
+        reader = getattr(self._ingest, "_reader", None)
+        if reader is None or not getattr(reader, "configured", False):
+            return
+        now = time.time()
+        if now - self._last_view_poll_at < self._view_poll_interval:
+            return
+        self._last_view_poll_at = now
+
+        from app.telegram_bot.cards import post_draft_confirmation
+
+        proposed = nothing = errors = 0
+        try:
+            messages = list(
+                reader.iter_newest(limit=self._view_poll_batch)
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "listener_view_poll_iter_failed", error=str(e)
+            )
+            return
+
+        for msg in messages:
+            try:
+                with session_scope() as session:
+                    drafts = self._ingest.prepare_drafts(session, msg)
+                    if not drafts:
+                        nothing += 1
+                        continue
+                    for d in drafts:
+                        payload = d.payload or {}
+                        try:
+                            post_draft_confirmation(
+                                sender=self._sender,
+                                session=session,
+                                draft=d,
+                                source_chat_id=msg.chat_id,
+                                source_message_id=msg.message_id,
+                                author_user_id=(
+                                    str(msg.user_id) if msg.user_id else None
+                                ),
+                                owner_user_id=payload.get("owner_user_id"),
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            log.warning(
+                                "listener_view_poll_widget_failed",
+                                draft_id=d.id,
+                                error=str(e),
+                            )
+                        proposed += 1
+            except Exception as e:  # noqa: BLE001
+                errors += 1
+                log.warning(
+                    "listener_view_poll_message_failed",
+                    chat_id=msg.chat_id,
+                    message_id=msg.message_id,
+                    error=str(e),
+                )
+        if proposed or errors:
+            log.info(
+                "listener_view_poll_done",
+                seen=len(messages),
+                drafts_proposed=proposed,
+                no_action_or_dedup=nothing,
+                errors=errors,
+            )
+
     def tick(self) -> ListenerReport:
         """Run one long-poll → process → save offset cycle.
 
@@ -412,6 +504,9 @@ class TelegramListener:
         # every tick but throttled to `sheet_poll_interval_seconds`
         # internally, so the cost is bounded.
         self._maybe_run_sheet_pulls()
+        # FR-CR-05-35 — fire scheduled Supabase view poll, also
+        # throttled internally.
+        self._maybe_poll_source_view()
 
         with session_scope() as session:
             offset = _get_offset(session)

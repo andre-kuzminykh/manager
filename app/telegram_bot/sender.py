@@ -93,34 +93,69 @@ def _format_owner(task: Task) -> str | None:
     return s
 
 
-def build_task_card_text(task: Task, *, header: str | None = None) -> str:
-    """Render a Task as HTML text suitable for ``send_message`` with
-    ``parse_mode='HTML'``.
+def _owner_html_link(owner_user_id: str | None, display: str) -> str:
+    """FR-CR-05-16 — wrap `display` in a `tg://user?id=<uid>`
+    deeplink so a tap on the owner label opens a private chat with
+    them. Only works for numeric Telegram user_ids; Slack `Uxxx`
+    uids fall through to plain text since Telegram doesn't know
+    them. Display text is HTML-escaped; the wrapper element is the
+    only raw HTML in the result."""
+    safe = _escape_html(display)
+    if not owner_user_id:
+        return safe
+    s = str(owner_user_id)
+    # Numeric (with optional leading minus for super-groups, but
+    # real users are always positive) → hyperlink. Otherwise plain.
+    if s.isdigit():
+        return f'<a href="tg://user?id={s}">{safe}</a>'
+    return safe
 
-    Bold via ``<b>…</b>``; every dynamic value (title, description,
-    owner) is escaped via ``_escape_html`` so a stray ``<``, ``>``
-    or ``&`` doesn't break the parser. The status enum's underscore
-    becomes a space (``in_progress`` → ``in progress``) so the card
-    reads naturally.
+
+def build_task_card_text(task: Task, *, header: str | None = None) -> str:
+    """FR-CR-05-16 — render a Task in the same minimal layout the
+    confirm widget uses. Same structure as
+    ``cards._build_draft_widget_text`` so an Accept-on-draft
+    transition produces a card that visually matches the widget
+    the operator just clicked on:
+
+        {priority-emoji} <b>title</b>
+        📝 description
+        👤 <a href="tg://user?id=…">owner</a> · 📅 due-date
+        🔗 source-link
+
+    Done state shows a ✅ before the title instead of the priority
+    circle so a finished task is visually distinct.
+
+    No #id, no status word, no priority word — the colour /
+    completion glyph carry the signal. The 🔗 line is a
+    `t.me/c/<chat>/<msg>` deeplink to the original chat message.
+    Owner is wrapped in a `tg://user?id=<uid>` hyperlink when the
+    id is a numeric Telegram user_id; Slack uids fall through to
+    plain text.
     """
     lines: list[str] = []
     if header:
         lines.append(f"<b>{_escape_html(header)}</b>")
-    lines.append(f"<b>#{task.id}</b> {_escape_html(task.title)}")
+
+    # First line — bullet + title.
+    if task.status.value == "done":
+        bullet = "✅"
+    else:
+        bullet = PRIORITY_EMOJI.get(task.priority.value, "🟡")
+    lines.append(f"{bullet} <b>{_escape_html(task.title)}</b>")
+
     if task.description:
         lines.append(f"📝 {_escape_html(task.description)}")
+
     meta: list[str] = []
-    status_em = STATUS_EMOJI.get(task.status.value, "")
-    meta.append(f"{status_em} {task.status.value.replace('_', ' ')}")
     owner = _format_owner(task)
     if owner:
-        meta.append(f"👤 {_escape_html(owner)}")
-    pri_em = PRIORITY_EMOJI.get(task.priority.value, "")
-    meta.append(f"{pri_em} {task.priority.value}")
+        meta.append(f"👤 {_owner_html_link(task.owner_user_id, owner)}")
     if task.due_date:
         meta.append(f"📅 {task.due_date.isoformat()}")
     if meta:
         lines.append(" · ".join(meta))
+
     if task.source_permalink:
         lines.append(f"🔗 {_escape_html(task.source_permalink)}")
     return "\n".join(lines)

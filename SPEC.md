@@ -723,6 +723,52 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-16 — Unified card layout + owner deeplink
+
+Live testing on the Edit-on-task flow exposed two visual
+inconsistencies and one polish item.
+
+**1. Unified layout (task card == widget).** The post-Accept
+task card was still rendering the legacy verbose layout
+(`#42 prepare deck` / `📥 backlog · 👤 Andre · 🟡 medium`), while
+the FR-CR-05-13 widget had moved to the minimal layout. The
+operator saw two visually different cards for the same task
+across the Accept boundary. `build_task_card_text` now mirrors
+`_build_draft_widget_text`:
+
+```
+{priority-emoji} <b>title</b>
+📝 description
+👤 <a href="tg://user?id=…">owner</a> · 📅 due
+🔗 t.me/c/<chat>/<msg>
+```
+
+No `#id`, no status word, no priority word. Done tasks render
+✅ in lieu of the priority circle so finished work is visually
+distinct.
+
+**2. Owner as a `tg://user?id=` deeplink.** New
+`_owner_html_link(owner_user_id, display)` helper wraps the
+display label in `<a href="tg://user?id=<uid>">…</a>` for
+numeric Telegram user_ids. Tap on the owner = open private
+chat with them. Slack uids fall through to plain text (Telegram
+doesn't know them). Both the live task card and the confirm
+widget use the same helper.
+
+**3. Edit-reply name preservation.** When the operator types
+«ответственный Андрей Кузьминых» and the LLM round-trips the
+matching team_member id, the resolution chain previously fell
+back to the raw uid (`222968032`) when the registry row was
+sparse — auto-seed wrote rows with only `telegram_user_id`,
+leaving `display_name` / `real_name` empty until the operator
+filled them in on the Sheet. New rule: when the matched
+registry row's display fields all equal the id, parse the
+user's typed reply for an owner-hint pattern
+(«ответственн* X», «owner X», «assign to X») and use THAT
+text as `owner_display_name`. Card now renders «Андрей
+Кузьминых» (hyperlinked to the resolved uid) instead of the
+bare numeric id.
+
 #### FR-CR-05-15 — Source permalink on widget, drop dialogue column
 
 Two follow-ups after the 50-message run.
@@ -2421,6 +2467,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-10  | `test_team_members.py` (read paths, prefer-telegram id selection, find-by helpers; `seed_from_chat_members` / `seed_from_slack_employees` idempotent + bot-skip; sheet round-trip headers, insert-then-update-by-id, match-by-tg-id-when-no-id, active-bool normalisation incl. `да` / `yes` / `1` and empty→true default); `test_telegram_ingest.py::test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin` (the «CEO Rosecliff» killer — unresolvable display_name dropped, owner = admin, display = admin's registry label); `::test_resolve_owner_keeps_real_team_member` (LLM-picked `owner_user_id` matching a registry row stays, display_name backfilled); `::test_resolve_owner_resolves_display_name_via_registry` (name-only LLM hint → registry lookup → numeric id); `::test_prepare_drafts_fills_in_fallback_description_when_llm_silent` («обсуждалось в <chat> · <YYYY-MM-DD HH:MM>» when LLM produced no description); `::test_prepare_drafts_keeps_llm_description_when_present` (real LLM description not clobbered); `test_telegram_cards.py::test_post_draft_confirmation_sends_only_widget_no_forward_no_quote` (FR-CR-05-09 inline-quote DM removed — widget itself carries context via description); `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` updated for «no forward» |
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared). The original `test_task_row_includes_dialogue_from_extra` / `_dialogue_empty_when_no_extra` tests were rolled back by FR-CR-05-15. |
 | FR-CR-05-15  | `test_telegram_cards.py::test_draft_widget_text_includes_source_permalink_when_available` (🔗 line carries `t.me/c/<chat>/<msg>` when `_pending["permalink"]` is set); `::test_draft_widget_text_omits_link_line_when_no_permalink` (no empty 🔗 line for private DMs / basic groups); `test_sheets_pull.py::test_task_row_does_not_include_dialogue_column` (22-column header restored, last column is `completion_artifact`); `test_telegram_ingest.py::test_recent_in_chat_filters_by_chat_id_only` (adaptive context window is per-chat — SQL `WHERE chat_id = :chat_id` pinned so a future refactor can't widen the query) |
+| FR-CR-05-16  | `test_telegram_bot.py::test_build_task_card_text_uses_minimal_layout_no_id_no_status_no_priority_word` (live task card matches the widget — no `#id`, no status word, no priority word); `::test_build_task_card_text_marks_done_with_check_emoji` (✅ replaces the priority circle on `done`); `::test_build_task_card_text_renders_owner_as_tg_user_link` + `::test_build_task_card_text_skips_link_for_slack_uid` (numeric TG uid → `tg://user?id=` hyperlink; Slack `Uxxx` falls through to plain text); `::test_build_task_card_text_includes_source_link_when_set` (🔗 deeplink on the live task card too, not just the draft widget); `test_telegram_cards.py::test_draft_widget_text_renders_owner_as_tg_user_link` (same hyperlink helper used in the confirm widget); `test_telegram_conversations.py::test_apply_edit_keeps_typed_name_when_registry_row_is_sparse` (operator types «ответственный Андрей Кузьминых» + sparse registry row ⇒ `owner_display_name` keeps «Андрей Кузьминых», not the raw uid) |
 | FR-CR-05-13  | `test_team_members.py::test_looks_like_bot_heuristics` (`bot` / `_bot` / `office1` / `support_` markers caught; «Bobotov» / «Алина» pass through unflagged); `::test_seed_from_chat_members_marks_bot_accounts_inactive` (auto-seed leaves obvious bot rows `active=False` so they never enter the owner-candidate list); `test_task_dedup.py::test_dedup_lookback_includes_open_action_drafts` (proposed `ActionDraft` rows show up in the lookback with `D#`-prefix; sibling drafts within one batch dedup); `::test_dedup_invented_id_dropped_when_drafts_in_lookback` (hallucination guard validates against the Task ∪ Draft id union); `test_intent_pipeline.py::test_title_prompt_forbids_third_party_status_promises` («Нет Алина сама отправит» pinned as a forbidden title with a context-driven imperative rewrite as the example); `test_telegram_cards.py::test_draft_widget_text_drops_create_header_and_uses_emoji_only_priority` (no «📥 Create this task?» header, first line is `priority-emoji <b>title</b>`, no «high» / «medium» word in the body) |
 | FR-CR-05-12  | `test_intent_pipeline.py::test_detect_prompt_rejects_passive_past_tense_status_reports` (passive forms `отправлены` / `подписан` / `оплачен` / `утверждён` + EN `sent` / `approved` listed; concrete «письма в Abundance отправлены» example pinned); `::test_title_prompt_forbids_trailing_clauses_in_descriptions` (LENGTH RULE block + «complete sentence» / «trail off» language); `::test_owner_prompt_renders_role_and_notes_columns` (role + notes columns rendered in the user-prompt table); `::test_owner_prompt_disambiguation_section_lists_role_first` (system prompt has a DISAMBIGUATION block teaching the LLM to USE role / notes); `test_team_members.py::test_as_known_employees_carries_role_and_notes` (registry rows feed role + notes into the LLM's candidate list) |
 | FR-CR-05-11  | `test_sheets_pull.py::test_pull_applies_editable_fields_only` (title / description / priority / category / start+due dates+times / completion_artifact picked up; read-only columns ignored); `::test_pull_routes_status_change_through_transition_service` (status flip emits a TaskStatusHistory row via TransitionService); `::test_pull_drops_invalid_priority_silently` (`urgent!` ignored, no exception); `::test_pull_drops_invalid_status_transition` (todo→done shortcut without LLM still allowed; nonsense statuses logged + skipped); `::test_pull_resolves_owner_by_uid_handle_and_realname` (bare uid kept, `@handle` resolves via team_members.telegram_username, real-name resolves via team_members.real_name → telegram_user_id); `::test_pull_keeps_unresolvable_owner_text_as_display_name` (operator's typed «John from Acme» preserved on `owner_display_name`); `::test_pull_skips_soft_deleted_and_missing_tasks` (skipped count); `::test_pull_handles_empty_or_header_only_sheet` (no exception on empty data) |

@@ -416,6 +416,43 @@ def test_apply_edit_resolves_owner_name_via_team_registry(session):
     assert applied.get("owner") == "Андрей Кузьминых"
 
 
+def test_apply_edit_keeps_typed_name_when_registry_row_is_sparse(session):
+    """FR-CR-05-16 — when the team_members row resolved by the LLM
+    has only the numeric id (auto-seed wrote a bare row, no
+    real_name / username yet), the user's typed name from the
+    reply is preserved on `owner_display_name` instead of falling
+    back to the raw uid. Otherwise the card would render a bare
+    «222968032» on a successful resolution."""
+    from app.models import TeamMember
+    from datetime import datetime, timezone as _tz
+
+    # Sparse row: id only, no display_name or real_name.
+    session.add(
+        TeamMember(
+            telegram_user_id=222968032,
+            real_name=None,
+            telegram_username=None,
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+    tid = _mk(session, owner_user_id="11", title="x")
+    backend = _FakeBackend(payload={"owner": "222968032"})  # LLM round-trip
+
+    out, _ = h.apply_edit_reply_ex(
+        session,
+        task_id=tid,
+        actor="11",
+        reply_text="ответственный Андрей Кузьминых",
+        llm_backend=backend,
+    )
+    assert out is not None
+    assert out.owner_user_id == "222968032"
+    # Card-friendly label, NOT the bare id.
+    assert out.owner_display_name == "Андрей Кузьминых"
+
+
 def test_apply_edit_drops_unresolvable_owner_text_to_display_name(session):
     """When the LLM returns a name that doesn't match anyone in the
     registry, the apply step keeps the typed text on display_name

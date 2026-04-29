@@ -218,8 +218,11 @@ def test_build_task_card_text_escapes_html_special_chars_in_title():
     assert "task &amp; follow-up" in text
 
 
-def test_build_task_card_text_renders_status_with_space():
-    """Status `in_progress` is shown to users as `in progress`."""
+def test_build_task_card_text_uses_minimal_layout_no_id_no_status_no_priority_word():
+    """FR-CR-05-16 — task card uses the same layout as the confirm
+    widget: priority emoji + bold title, description, owner +
+    due, source link. No `#id`, no `status word`, no `priority
+    word` — colour carries the signal."""
     t = Task(
         id=42,
         title="prepare deck",
@@ -230,13 +233,86 @@ def test_build_task_card_text_renders_status_with_space():
         source_kind=TaskSourceKind.telegram,
     )
     text = build_task_card_text(t)
-    assert "#42" in text
-    assert "prepare deck" in text
-    # Space, not underscore.
-    assert "in progress" in text
-    assert "in_progress" not in text
+    # Title in bold + priority emoji prefix.
+    assert "🟠" in text
+    assert "<b>prepare deck</b>" in text
+    # Owner shows up.
     assert "Andre" in text
-    assert "high" in text
+    # Removed signal: no id / status / priority word.
+    assert "#42" not in text
+    assert "in progress" not in text
+    assert "in_progress" not in text
+    assert "high" not in text
+    assert "medium" not in text
+
+
+def test_build_task_card_text_marks_done_with_check_emoji():
+    """A finished task shows ✅ in lieu of the priority circle so
+    closed work is visually distinct at a glance."""
+    t = Task(
+        id=1,
+        title="prepare deck",
+        owner_user_id="U-andre",
+        owner_display_name="Andre",
+        priority=TaskPriority.high,
+        status=TaskStatus.done,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t)
+    first_line = text.splitlines()[0]
+    assert first_line.startswith("✅")
+    assert "🟠" not in text  # priority circle suppressed for done
+
+
+def test_build_task_card_text_renders_owner_as_tg_user_link():
+    """FR-CR-05-16 — numeric Telegram uid → owner label is wrapped
+    in a `tg://user?id=<uid>` deeplink so a tap opens a private
+    chat with that person."""
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="222968032",
+        owner_display_name="Андрей Кузьминых",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    text = build_task_card_text(t)
+    assert '<a href="tg://user?id=222968032">' in text
+    assert "Андрей Кузьминых" in text
+
+
+def test_build_task_card_text_skips_link_for_slack_uid():
+    """A Slack uid (`U…`) doesn't translate to a Telegram deeplink;
+    label renders as plain text."""
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="U09SLACK",
+        owner_display_name="Slack User",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+    )
+    text = build_task_card_text(t)
+    assert "tg://user?id=" not in text
+    assert "Slack User" in text
+
+
+def test_build_task_card_text_includes_source_link_when_set():
+    """The 🔗 line is the same `t.me/c/<chat>/<msg>` deeplink the
+    confirm widget shows — operator can jump back to the original
+    message from the live card too."""
+    t = Task(
+        id=1,
+        title="x",
+        owner_user_id="111",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+        source_permalink="https://t.me/c/2061886148/2981",
+    )
+    text = build_task_card_text(t)
+    assert "🔗 https://t.me/c/2061886148/2981" in text
 
 
 # --------------------------------------------------------------------------- #

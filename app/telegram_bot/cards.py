@@ -274,26 +274,24 @@ def render_tombstone(
 
 
 def _build_draft_widget_text(draft: ActionDraft) -> str:
-    """FR-CR-05-13 — compact HTML preview.
-
-    Layout (no «Create this task?» header anymore — the inline
-    keyboard already says ✅ / ✏ / ✖, the operator knows what to
-    do):
+    """FR-CR-05-13 / FR-CR-05-16 — compact HTML preview that
+    matches the live task-card layout.
 
         <priority-emoji> <b>title</b>
         📝 <description>
-        👤 <owner> · 📅 <due>
+        👤 <a href="tg://user?id=…">owner</a> · 📅 <due>
         🔗 <source link>
 
-    Priority is rendered as a single emoji next to the title,
-    with no «high» / «medium» word — the colour carries the
-    signal. The 🔗 line (FR-CR-05-15) carries the
-    ``t.me/c/<chat>/<msg>`` deeplink so the operator can jump
-    back to the original message in one tap.
+    Owner gets the same `tg://user?id=` hyperlink as
+    `build_task_card_text`, so a tap on the operator's name in
+    either kind of message opens a chat with them.
     """
+    from app.telegram_bot.sender import _owner_html_link
+
     payload = draft.payload or {}
     title = payload.get("title") or ""
-    owner_disp = payload.get("owner_display_name") or payload.get("owner_user_id") or ""
+    owner_user_id = payload.get("owner_user_id") or ""
+    owner_disp = payload.get("owner_display_name") or owner_user_id or ""
     priority = payload.get("priority") or "medium"
     due = payload.get("due_date") or ""
     description = payload.get("description") or ""
@@ -308,7 +306,9 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
         lines.append(f"📝 {_escape_md(str(description))}")
     meta: list[str] = []
     if owner_disp:
-        meta.append(f"👤 {_escape_md(str(owner_disp))}")
+        meta.append(
+            f"👤 {_owner_html_link(str(owner_user_id) if owner_user_id else None, str(owner_disp))}"
+        )
     if due:
         meta.append(f"📅 {due}")
     if meta:

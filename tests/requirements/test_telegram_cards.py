@@ -400,6 +400,25 @@ def test_draft_widget_text_omits_link_line_when_no_permalink(session):
     assert "🔗" not in text
 
 
+def test_draft_widget_text_renders_owner_as_tg_user_link(session):
+    """FR-CR-05-16 — numeric TG uid on the draft → owner label
+    wrapped in a `tg://user?id=<uid>` deeplink so a tap on the
+    owner opens a private chat with them."""
+    from app.telegram_bot.cards import _build_draft_widget_text
+
+    draft = _mk_proposed_draft(
+        session,
+        payload={
+            "title": "x",
+            "owner_user_id": "222968032",
+            "owner_display_name": "Андрей Кузьминых",
+        },
+    )
+    text = _build_draft_widget_text(draft)
+    assert '<a href="tg://user?id=222968032">' in text
+    assert "Андрей Кузьминых" in text
+
+
 def test_post_draft_confirmation_sends_only_widget_no_forward_no_quote(
     session, monkeypatch
 ):

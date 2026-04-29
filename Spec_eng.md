@@ -1269,6 +1269,36 @@ always filtered by `chat_id = :chat_id`, so the LLM's adaptive
 window can never leak in unrelated chat history. Pinned by a
 test so a future refactor can't accidentally widen the query.
 
+#### 13.18 — Unified card layout + owner deeplink
+
+> **As an operator** the post-Accept task card and the pre-
+> Accept confirm widget should look the same — they're the same
+> task. And tapping the owner's name should open a chat with
+> them, not just stare back as a numeric uid.
+
+**Unified layout.** `build_task_card_text` now mirrors
+`_build_draft_widget_text`: priority emoji + bold title on line
+1, description, owner + due, source link. No `#id`, no status
+word, no priority word — colour carries the signal. Done state
+shows ✅ instead of the priority circle so finished work is
+distinct at a glance.
+
+**Owner as `tg://user?id=` deeplink.**
+`_owner_html_link(owner_user_id, display)` wraps the label in
+`<a href="tg://user?id=<uid>">…</a>` when the id is a numeric
+Telegram user_id. Tap = private chat opens. Slack `Uxxx` uids
+fall through to plain text (Telegram doesn't know them).
+
+**Edit reply: typed name beats sparse registry row.** When the
+operator types «ответственный Андрей Кузьминых» and the LLM
+round-trips the resolved id, the apply step previously fell
+back to the raw uid when the team_members row had no real_name
+/ display_name (auto-seeded sparse). New rule: parse the
+user's typed reply for an owner-hint pattern
+(«ответственн* X», «owner X», «assign to X») and use that
+text as `owner_display_name`. Card renders «Андрей Кузьминых»
+hyperlinked to the resolved uid instead of `222968032`.
+
 
 ---
 

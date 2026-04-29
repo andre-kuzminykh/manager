@@ -577,6 +577,37 @@ def parse_edit_with_llm(
     return out
 
 
+_OWNER_HINT_RE = __import__("re").compile(
+    # Russian: any ответственн* form (ответственный / ответственная /
+    # ответственного / etc.) eats a trailing word-stem; English:
+    # owner / assign to / for. We then capture everything that
+    # follows up to end-of-line.
+    r"(?:ответственн\w*|owner|assign\s+to|assignee|for)\s+(.+?)\s*$",
+    flags=__import__("re").IGNORECASE | __import__("re").UNICODE,
+)
+
+
+def _extract_owner_label(reply_text: str | None) -> str | None:
+    """FR-CR-05-16 — pull a human-readable owner label out of the
+    user's free-form reply when the registry-row's display fields
+    are too sparse to use. Looks for «ответственный X» / «owner X»
+    / «assign to X» patterns at the END of the reply.
+
+    Returns the captured tail, trimmed of trailing punctuation,
+    capped at 80 chars; ``None`` when nothing matches.
+    """
+    if not reply_text:
+        return None
+    text = reply_text.strip()
+    m = _OWNER_HINT_RE.search(text)
+    if m is None:
+        return None
+    tail = (m.group(1) or "").strip().rstrip(".!?,;: ")
+    if not tail or tail.lstrip("-").isdigit():
+        return None
+    return tail[:80]
+
+
 def _parse_date_or_none(s: str | None) -> date | None:
     if not s:
         return None
@@ -692,48 +723,65 @@ def apply_edit_reply_ex(
         task.category = payload["category"] or None
     if "owner" in payload:
         new_owner_raw = (payload["owner"] or "").strip() or None
-        # FR-CR-05-14 — when the LLM resolved the owner against the
-        # registry, the value is already an id from
-        # known_employees. When the user typed a name and the LLM
-        # didn't resolve, the value comes back as the name itself
-        # — try a local registry match by name first; only commit
-        # the raw text if the registry has nothing.
+        # FR-CR-05-14 / 05-16 — owner-resolution chain:
+        #
+        # 1. LLM round-tripped an id from the registry → keep the
+        #    id, backfill display_name from the registry row.
+        # 2. LLM returned a NAME → match locally against display
+        #    / real names, swap to id, take the registry row's
+        #    canonical display.
+        # 3. Either path, when the chosen registry row is sparse
+        #    (display_name and real_name both equal the id), prefer
+        #    the user's TYPED name from the reply text — otherwise
+        #    the card would render a bare numeric uid like
+        #    «222968032» on a successful resolution.
         new_owner = new_owner_raw
         new_display: str | None = new_owner_raw
+        chosen_row: dict | None = None
         if new_owner_raw and known_employees:
             valid_ids = {e.get("slack_user_id") for e in known_employees}
             if new_owner_raw in valid_ids:
-                # LLM round-tripped a real id — backfill display
-                # name from the registry row.
                 for e in known_employees:
                     if e.get("slack_user_id") == new_owner_raw:
-                        new_display = (
-                            e.get("display_name")
-                            or e.get("real_name")
-                            or new_owner_raw
-                        )
+                        chosen_row = e
                         break
             else:
-                # LLM gave a name. Try to resolve locally before
-                # committing. Match against display / real name.
                 needle = new_owner_raw.lstrip("@").lower()
-                resolved = False
                 for e in known_employees:
                     disp = (e.get("display_name") or "").lstrip("@").lower()
                     real = (e.get("real_name") or "").lower()
-                    if needle == disp or needle == real:
+                    if needle and (needle == disp or needle == real):
+                        chosen_row = e
                         new_owner = e.get("slack_user_id")
-                        new_display = (
-                            e.get("display_name") or e.get("real_name") or new_owner
-                        )
-                        resolved = True
                         break
-                if not resolved:
-                    # Keep the typed text on display_name so the
-                    # operator's intent is visible; clear the id
-                    # so we don't end up with a bogus DM target.
-                    new_owner = None
-                    new_display = new_owner_raw
+
+            if chosen_row is not None:
+                row_display = chosen_row.get("display_name")
+                row_real = chosen_row.get("real_name")
+                # Prefer non-id-looking fields. A row whose
+                # «display» is just the numeric id means the
+                # auto-seed wrote a sparse row; fall back to whatever
+                # the user typed.
+                row_id = chosen_row.get("slack_user_id")
+                candidates = [c for c in (row_display, row_real) if c]
+                meaningful = [
+                    c for c in candidates if c and c != row_id
+                ]
+                if meaningful:
+                    new_display = meaningful[0]
+                else:
+                    # Try to extract a name from the user's reply
+                    # text — anything after «ответственный» / «owner»
+                    # / «assign to» is a reasonable label.
+                    typed = _extract_owner_label(reply_text)
+                    new_display = typed or new_owner_raw
+            else:
+                # No registry match at all — keep the typed text on
+                # display_name so the operator's intent is visible;
+                # clear the id so we don't end up with a bogus DM
+                # target.
+                new_owner = None
+                new_display = new_owner_raw
         task.owner_user_id = new_owner
         # Reset display so the card reflects the new owner — the
         # renderer prefers `owner_display_name` over `owner_user_id`

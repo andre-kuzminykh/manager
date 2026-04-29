@@ -131,6 +131,21 @@ def create_task_from_draft(
             subs.subscribe(session, task=task, slack_user_id=uid)
 
     session.flush()
+
+    # FR-CR-04-23 / FR-CR-04-26 — every newly persisted Task gets an
+    # initial Google Sheets row. Slack used to fire this from
+    # `FinalizeService._sync_task` after the orchestrator confirmed
+    # the draft; the Telegram path skipped it (only later transitions
+    # synced), so TG-created tasks were missing from the sheet until
+    # someone clicked Start. Centralise here so any caller — Slack,
+    # Telegram, the FR-CR-05-05 multi-task loop — gets the sync for
+    # free. Best-effort: a sheets outage must not abort task creation.
+    try:
+        from app.sync.task_sync import sync_task
+
+        sync_task(task.id)
+    except Exception:  # noqa: BLE001
+        pass
     return task
 
 

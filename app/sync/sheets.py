@@ -34,6 +34,7 @@ _HEADER_ROW = [
     "recurring_end_time",
     "status",
     "parent_task_id",
+    "source",
     "source_permalink",
     "created_at",
     "updated_at",
@@ -74,6 +75,10 @@ def _task_row(task: Task, *, session: Session | None = None) -> list[str]:
     # "deleted" so the user sees what happened. The `deleted_at`
     # timestamp carries the audit info.
     status_text = "deleted" if task.deleted_at is not None else task.status.value
+    # FR-CR-04-26 / FR-CR-05-* — surface the source channel
+    # (slack / telegram) so a glance at the sheet shows where each
+    # task came from. Falls back to the enum's value as plain text.
+    source_text = task.source_kind.value if task.source_kind else "slack"
     return [
         str(task.id),
         task.title,
@@ -91,6 +96,7 @@ def _task_row(task: Task, *, session: Session | None = None) -> list[str]:
         task.recurring_end_time.strftime("%H:%M") if task.recurring_end_time else "",
         status_text,
         str(task.parent_task_id) if task.parent_task_id else "",
+        source_text,
         task.source_permalink or "",
         task.created_at.isoformat() if task.created_at else "",
         task.updated_at.isoformat() if task.updated_at else "",

@@ -379,15 +379,25 @@ is idempotent (one notification per (user, day), no spam on retry).
 **Flow:**
 1. Operator gives the bot a Google Service Account JSON and shares
    the target spreadsheet with the SA email.
-2. Whenever a task is created, edited, started, completed, cancelled,
-   or deleted, the bot **updates the same row** in the sheet within
-   seconds.
-3. Header row is written automatically on first sync — 21 columns
+2. Whenever a task is **created**, edited, started, completed,
+   cancelled, or deleted, the bot **updates the same row** in the
+   sheet within seconds. The initial sync fires from inside
+   `create_task_from_draft`, so the row appears as soon as the Task
+   row hits the DB — every channel (Slack orchestrator, Telegram
+   immediate-create, Telegram Accept-on-draft, the multi-task
+   loop) gets it for free, and a Sheets outage never aborts task
+   creation (the call is best-effort).
+3. Header row is written automatically on first sync — 22 columns
    in the bot's canonical order: id, title, description, owner,
    priority, category, start date/time, due date/time, recurring
-   schedule, status, parent task id, source link, created/updated/
-   deleted timestamps, completion artifact.
-4. Deleted tasks stay in the sheet with status `deleted` for audit.
+   schedule, status, parent task id, **source** (`slack` /
+   `telegram`), source link, created/updated/deleted timestamps,
+   completion artifact.
+4. The `source` column shows the channel verbatim so a glance at
+   the spreadsheet reveals where each task came from — useful for
+   filtering when both Slack and Telegram capture work into the
+   same table.
+5. Deleted tasks stay in the sheet with status `deleted` for audit.
 
 ---
 

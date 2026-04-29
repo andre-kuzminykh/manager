@@ -388,6 +388,58 @@ class _Sender:
         return {"ok": True}
 
 
+def test_create_task_from_draft_triggers_initial_sheets_sync(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-04-26 + FR-CR-05-* — every newly created Task lands in
+    the sheet right away, regardless of which channel created it
+    (Slack orchestrator, Telegram immediate-create, Telegram
+    Accept-on-draft). Without this hook the TG path was missing
+    rows until a later status change happened to fire a sync."""
+    from app.models import ActionDraft, IntentInference
+    from app.models.intent import IntentType
+    from app.persistence import create_task_from_draft
+    from app.sync.task_sync import TaskSyncer, set_active_syncer
+
+    captured: list[int] = []
+
+    class _SheetsFake:
+        def sync(self, session, task):
+            captured.append(task.id)
+
+    set_active_syncer(
+        TaskSyncer(sheets_factory=lambda: _SheetsFake(), google_tasks_factory=None)
+    )
+    try:
+        with SessionFactory() as s:
+            inference = IntentInference(
+                intent=IntentType.create_task,
+                confidence=0.9,
+                invocation_type="passive",
+            )
+            s.add(inference)
+            s.flush()
+            draft = ActionDraft(
+                inference_id=inference.id,
+                intent=IntentType.create_task,
+                payload={"title": "fresh task", "priority": "medium"},
+                created_by_slack_user_id="U-author",
+            )
+            s.add(draft)
+            s.flush()
+            task = create_task_from_draft(
+                s,
+                draft=draft,
+                source={"kind": "telegram"},
+                context_snapshot_id=None,
+                fallback_author_slack_id="U-author",
+            )
+            s.commit()
+            assert captured == [task.id]
+    finally:
+        set_active_syncer(None)
+
+
 def test_cancel_triggers_active_syncer(
     patched_session_scope, SessionFactory, ack
 ):

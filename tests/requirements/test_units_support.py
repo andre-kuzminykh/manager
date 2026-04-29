@@ -526,7 +526,8 @@ def test_sheets_task_row_has_expected_columns(session):
     # Header order: id, title, description, owner, priority, category,
     # start_date, start_time, due_date, due_time, is_recurring,
     # recurring_weekdays, recurring_start_time, recurring_end_time,
-    # status, parent_task_id, source_permalink, created_at, updated_at.
+    # status, parent_task_id, source, source_permalink, created_at,
+    # updated_at, deleted_at, completion_artifact.
     assert row[1] == "hello"
     assert row[2] == "world"
     assert row[3] == "@a"
@@ -542,7 +543,8 @@ def test_sheets_task_row_has_expected_columns(session):
     assert row[13] == ""          # recurring_end_time
     assert row[14] == "todo"
     assert row[15] == ""          # parent_task_id
-    assert row[16] == "https://p"
+    assert row[16] == "slack"     # FR-CR-04-26 — channel marker
+    assert row[17] == "https://p" # source_permalink
 
 
 def test_sheets_task_row_handles_missing_optional_fields(session):
@@ -563,7 +565,28 @@ def test_sheets_task_row_handles_missing_optional_fields(session):
     assert row[8] == ""   # due_date
     assert row[9] == ""   # due_time
     assert row[10] == ""  # is_recurring
-    assert row[16] == ""  # source_permalink
+    assert row[16] == "slack"  # source defaults to slack when source_kind unset
+    assert row[17] == ""  # source_permalink
+
+
+def test_sheets_task_row_marks_telegram_source(session):
+    """FR-CR-04-26 — TG-sourced tasks land in the sheet with
+    `source = telegram` so a glance at the table shows where the
+    work came from. Reads `task.source_kind`."""
+    from app.models import TaskSourceKind
+    from app.models.task import TaskPriority, TaskStatus
+    from app.sync.sheets import _task_row
+
+    t = __import__("app.models", fromlist=["Task"]).Task(
+        title="from tg",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        source_kind=TaskSourceKind.telegram,
+    )
+    session.add(t)
+    session.flush()
+    row = _task_row(t)
+    assert row[16] == "telegram"
 
 
 # =============================================================================

@@ -1280,6 +1280,35 @@ Persistence:
   `kind='telegram'` → flag is set on the new row, and downstream
   Sheets sync renders the `source_permalink` column with a `t.me/c/`
   URL when the message lives in a public super-group.
+- *Initial Sheets sync.* Every newly persisted Task triggers an
+  `app.sync.task_sync.sync_task(task.id)` call from inside
+  `create_task_from_draft` itself — not from the caller. Slack
+  used to fire this from `FinalizeService._sync_task`, but the
+  Telegram path skipped it (only later transitions synced), so
+  TG-created tasks were missing from the Sheet until someone
+  clicked Start. Centralising in the persistence layer makes
+  every caller — Slack, Telegram immediate-create, the
+  FR-CR-05-05 multi-task loop, the FR-CR-04-32 Accept-on-draft
+  handler — get the sync for free. Best-effort: a Sheets outage
+  must not abort task creation, so the call is wrapped in a
+  bare `try/except` that swallows everything.
+
+Sheet schema (one column per `_HEADER_ROW` entry in
+`app/sync/sheets.py`):
+
+- `task_id` / `title` / `description` / `owner` / `priority` /
+  `category` / `start_date` / `start_time` / `due_date` /
+  `due_time` / `is_recurring` / `recurring_weekdays` /
+  `recurring_start_time` / `recurring_end_time` / `status` /
+  `parent_task_id` / **`source`** ←*new* / `source_permalink` /
+  `created_at` / `updated_at` / `deleted_at` /
+  `completion_artifact`.
+
+The `source` column shows the channel verbatim — `slack` or
+`telegram` — so a glance at the spreadsheet reveals where each
+task came from. Default is `slack` for any row whose
+`tasks.source_kind` is unset (no migration needed; existing
+Slack-only rows already carry the default).
 
 Out of scope for this iteration (deferred):
 

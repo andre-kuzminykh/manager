@@ -49,8 +49,28 @@ def main() -> int:
     backend = _build_llm_backend()
     classifier = IntentClassifier(backend=backend)
     orchestrator = Orchestrator(settings)
+
+    # FR-CR-05-09 — same Supabase view that the historical migrator
+    # reads from is also used by the live listener to pull the
+    # adaptive context window (the last ~10k chars of chat). The bot
+    # API itself doesn't ship history, so we lean on the colleague's
+    # ingestion pipeline for it. Reader is optional — without
+    # `TELEGRAM_SOURCE_DATABASE_URL` the ingest just runs without
+    # adaptive context (same behaviour as before).
+    reader = None
+    if settings.telegram_source_database_url:
+        try:
+            from app.telegram_ingest import TelegramSourceReader
+
+            reader = TelegramSourceReader(
+                database_url=settings.telegram_source_database_url,
+                view_name=settings.telegram_source_view,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("tg_listener_reader_setup_failed", error=str(e))
+
     ingest = TelegramIngestService(
-        classifier=classifier, orchestrator=orchestrator
+        classifier=classifier, orchestrator=orchestrator, reader=reader
     )
     listener = TelegramListener(
         token=settings.telegram_bot_token,

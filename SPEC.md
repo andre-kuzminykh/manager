@@ -723,6 +723,81 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-09 — Adaptive chat context, admin-owner fallback, source forwards
+
+Quality follow-up to the first 100-message historical migration.
+Three changes that together make confirm-first widgets actually
+useful instead of a parade of low-signal drafts.
+
+**1. Adaptive chat context.** Until now the classifier ran with
+*zero* prior chat history for Telegram messages — every detect /
+title / owner / date stage saw only the source line. Vague
+acknowledgements like «хорошо! напишу ему» landed as the title
+verbatim because there was nothing else to look at.
+
+`TelegramSourceReader.recent_in_chat(chat_id, before_message_id,
+max_chars=10_000, step=10, max_messages=50)` pulls prior messages
+from the same chat, ordered newest-first by sent_at. It expands
+in increments of `step` (10 → 20 → 30 …) until either the
+combined `text` length crosses `max_chars` or we hit
+`max_messages`. The list is reversed to chronological (oldest
+first) before being handed to `ContextWindow.history_before`,
+where the existing intent pipeline already consumes it.
+
+The reader is wired through `TelegramIngestService.__init__(...,
+reader=...)` and called from both the historical migration
+(`ops.migrate_telegram_history`), the cron-driven incremental
+ingest (`ops.telegram_ingest`), and the live listener
+(`ops.telegram_listener`) — the listener uses the same Supabase
+view because the Bot API itself doesn't ship history.
+
+The detect prompt now treats parroted one-liners («ок, сделаю»,
+«договорились», «хорошо! напишу ему») as no_action by default;
+they only become tasks when `context` makes the work
+unambiguous. The title prompt is taught to *rewrite* such
+phrases into a proper imperative using the surrounding
+conversation — «хорошо, напишу ему» with a prior «надо ответить
+Андрею по сделке Acme» becomes title `написать Андрею по сделке
+Acme`. Status-list reports («DBS — нет, Jefferies —
+отправила, Stifel — не ответил») and OCR-noise singletons
+(«файндхэзом») are also explicitly rejected upstream.
+
+**2. Admin-owner fallback chain.** The author-fallback used to
+land bot accounts as task owners — a forwarded post from a `bot`
+user has `from.is_bot=true` and the bot's own user_id, so the
+draft inherited that. The new chain is:
+
+1. LLM-resolved owner — wins.
+2. Sender, **only when** they're a registered chat member
+   (FR-CR-05-07). A non-member sender is typically a bot account
+   or a forwarded post; we don't promote them to owner.
+3. First admin from `TELEGRAM_ADMIN_USER_IDS` — same identity the
+   confirm-first widget already DMs by default. The admin's
+   display name is read from the chat-members registry so the
+   card shows «@andre_andreevich» rather than `222968032`.
+
+This kills the «Валя is the owner because she was named in the
+text but isn't in the table» class of bug — when the LLM
+hallucinated an owner name that doesn't resolve to a real
+user_id, the FR-CR-04-22 guard nulls it, and now the admin
+fallback catches the gap instead of the message author bot.
+
+**3. Inline-quote source fallback.** `post_draft_confirmation`
+already tries `forwardMessage` first, but the Bot API only
+forwards messages the bot has **observed via getUpdates**.
+Historical migration drafts come out of the colleague's
+read-only view, so the bot never saw them — every forward call
+returns «message to forward not found» and the operator gets a
+widget with no context. New code path: when forwardMessage
+fails (sender returns `{}` or no `message_id`), the prepare-
+drafts step pre-stashes `source_text` on `draft.payload[
+"_pending"]`, and the card helper emits a
+`<blockquote>`-wrapped HTML quote of the source so the operator
+sees what triggered the widget without leaving the DM. Live
+listener captures still get a real `forwardMessage` because the
+bot did observe them — the fallback only fires when the forward
+genuinely can't work.
+
 #### FR-CR-05-08 — Task-card keyboard permission tightening
 
 Per UX feedback the per-task buttons follow a strict role-based
@@ -2074,5 +2149,6 @@ pure unit tests for internal helpers.
 | FR-CR-05-06  | `test_task_dedup.py` (empty lookback short-circuits; missing backend falls open; LLM «duplicate» propagates with verified id; LLM-invented task id is nulled; LLM error is swallowed; done / soft-deleted tasks excluded from lookback; only open tasks reach the prompt); `test_units_support.py::test_task_draft_truncates_long_strings_to_10k` + `::test_task_draft_short_strings_pass_through` (schema cap); `test_telegram_ingest.py` integration paths exercise the gate via `_make_service` fakes |
 | FR-CR-05-07  | `test_telegram_members.py` (idempotent upsert, profile fields don't blank out on a None, `has_started_bot` stickiness, `members_as_known_employees` shape with @username / first+last / numeric-id fallback, per-chat isolation); migration `0016_telegram_chat_members.py`; listener-side write covered by the existing `test_telegram_listener.py` flows that exercise `_upsert_member_from_update` via `parse_update` (no separate test — the upsert is wrapped in a try/except so a missing migration in fixture mode never breaks ingest) |
 | FR-CR-05-08  | `test_telegram_bot.py::test_task_card_keyboard_start_is_owner_only` (Start visible only to owner; admin sees Edit/Delete + Subscribe but no Start; bystander sees only Subscribe), `::test_task_card_keyboard_for_owner_in_progress_shows_done_edit_cancel_delete`, `::test_task_card_keyboard_for_bystander_shows_subscribe_only`, `::test_task_card_keyboard_subscribe_toggles_to_unsubscribe`, `::test_task_card_keyboard_done_status_collapses_to_delete_only`, `::test_task_card_keyboard_does_not_show_cancel_anywhere`, `::test_task_card_keyboard_edit_and_delete_share_a_row` |
+| FR-CR-05-09  | `test_telegram_ingest.py::test_build_window_carries_history_before` (history_before threads through to the ContextWindow); `::test_process_all_falls_back_to_admin_when_owner_unresolved` (no LLM owner + sender is a non-member ⇒ owner = first admin from `TELEGRAM_ADMIN_USER_IDS`); `::test_process_all_keeps_real_member_sender_as_owner` (sender registered in chat-members ⇒ author fallback wins, no admin promotion); `::test_prepare_drafts_stashes_source_text_for_quote_fallback` (`_pending["source_text"]` populated for the inline-quote fallback); `test_telegram_cards.py::test_post_draft_confirmation_uses_inline_quote_when_forward_fails` (forwardMessage returns `{}` ⇒ a `<blockquote>`-wrapped HTML quote is sent before the widget); `test_intent_pipeline.py::test_detect_prompt_lists_status_reports_and_parroted_phrases_as_no_action` + `::test_title_prompt_teaches_imperative_rewrite_from_context` (prompt content pinned) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

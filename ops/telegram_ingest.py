@@ -100,7 +100,11 @@ def main() -> int:
     classifier = IntentClassifier(backend=backend)
     orchestrator = Orchestrator(settings)
     service = TelegramIngestService(
-        classifier=classifier, orchestrator=orchestrator
+        classifier=classifier,
+        orchestrator=orchestrator,
+        # FR-CR-05-09 — feed the reader through so each classify
+        # call gets the adaptive ~10k-char chat history window.
+        reader=reader,
     )
 
     # FR-CR-04-23 / FR-CR-04-26 — register the active TaskSyncer so

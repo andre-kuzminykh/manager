@@ -339,6 +339,89 @@ class TelegramSourceReader:
         self._columns_cache = cols
         return cols
 
+    def recent_in_chat(
+        self,
+        *,
+        chat_id: int,
+        before_message_id: int,
+        max_chars: int = 10_000,
+        step: int = 10,
+        max_messages: int = 50,
+    ) -> list[TelegramSourceMessage]:
+        """FR-CR-05-09 — fetch the **adaptive context window** for a
+        single chat: prior messages older than ``before_message_id``,
+        ordered newest-first by ``(sent_at, message_id)``, expanded
+        in increments of ``step`` until the combined ``text`` length
+        crosses ``max_chars`` or we've pulled ``max_messages``.
+
+        Returns the messages **chronologically (oldest-first)** so
+        the caller can hand them to the intent pipeline as
+        ``ContextWindow.history_before`` directly.
+        """
+        if self._engine is None:
+            return []
+        if before_message_id is None:
+            return []
+        present = self._detect_columns()
+        date_cols = [c for c in _FIELD_MAP["sent_at"] if c in present]
+        if date_cols:
+            coalesce_expr = "COALESCE(" + ", ".join(date_cols) + ")"
+            order_clause = (
+                f"ORDER BY {coalesce_expr} DESC NULLS LAST, "
+                "message_id DESC"
+            )
+        else:
+            order_clause = "ORDER BY message_id DESC"
+
+        sql = text(
+            f"""
+            SELECT * FROM {self._view}
+            WHERE chat_id = :chat_id
+              AND message_id < :msg_id
+            {order_clause}
+            LIMIT :lim
+            """
+        )
+
+        # Pull progressively larger pages — 10, 20, 30 … up to
+        # ``max_messages`` — and stop as soon as the accumulated text
+        # crosses ``max_chars``. Doing it in one query with a generous
+        # LIMIT and trimming in Python is simpler and equally fast for
+        # these sizes.
+        accumulated: list[TelegramSourceMessage] = []
+        with self._engine.connect() as conn:
+            limit = min(max_messages, max(step, 10))
+            while True:
+                accumulated = []
+                total = 0
+                result = conn.execute(
+                    sql,
+                    {
+                        "chat_id": int(chat_id),
+                        "msg_id": int(before_message_id),
+                        "lim": limit,
+                    },
+                )
+                rows = list(result.mappings())
+                for row in rows:
+                    msg = _map_row(dict(row))
+                    if msg is None:
+                        continue
+                    accumulated.append(msg)
+                    total += len(msg.text or "")
+                    if total >= max_chars:
+                        break
+                if total >= max_chars or len(rows) < limit:
+                    # Either we have enough chars, or the chat doesn't
+                    # have any more messages — stop expanding.
+                    break
+                if limit >= max_messages:
+                    break
+                limit = min(limit + step, max_messages)
+
+        # Reverse — caller wants oldest first (chronological order).
+        return list(reversed(accumulated))
+
     def iter_newest(
         self, *, limit: int
     ) -> Iterable[TelegramSourceMessage]:

@@ -55,6 +55,48 @@ def test_title_prompt_covers_title_description_priority_only():
     assert "assignee" not in props
 
 
+def test_detect_prompt_lists_status_reports_and_parroted_phrases_as_no_action():
+    """FR-CR-05-09 — the detect prompt is taught to reject:
+
+    - status-list reports («DBS — нет, Jefferies — отправила, …»)
+    - parroted one-line acknowledgements without context
+      («хорошо! напишу ему», «ок, сделаю»)
+    - OCR / transcription noise («файндхэзом» as the entire message)
+
+    These show up enough in real chat traffic that we want them
+    pinned in the prompt, not just folded into the generic «chat»
+    bucket.
+    """
+    blob = DETECT_SYSTEM_PROMPT
+    assert "Status-list reports" in blob or "status-list" in blob.lower()
+    assert "Parroted" in blob or "parroted" in blob.lower()
+    # At least one example each side of the dash for status lists.
+    assert "DBS" in blob or "Jefferies" in blob
+    # Parroted-phrase example must be quoted so the model anchors
+    # on the exact pattern.
+    assert "напишу ему" in blob
+    # OCR-noise rejection must be explicit — we hit «файндхэзом»
+    # in real traffic and want it killed at the detect stage.
+    assert "OCR" in blob or "transcription" in blob.lower()
+
+
+def test_title_prompt_teaches_imperative_rewrite_from_context():
+    """FR-CR-05-09 — the title prompt is taught to use the
+    `context` block to rewrite parroted one-liners into a proper
+    imperative title. «хорошо, напишу ему» with a prior message
+    «надо ответить Андрею» must NOT land as the literal phrase —
+    the prompt explicitly forbids it and shows a rewrite example.
+    """
+    blob = TITLE_SYSTEM_PROMPT
+    assert "PARROTED" in blob or "parroted" in blob.lower()
+    # Forbid the verbatim copy and show the proper rewrite shape.
+    assert "напишу ему" in blob
+    assert "написать" in blob
+    # The instruction MUST mention the context block, since the
+    # rewrite depends on it.
+    assert "context" in blob.lower()
+
+
 def test_owner_prompt_sees_conversation_context_placeholder():
     from app.intent.owner_prompt import build_owner_user_prompt
 

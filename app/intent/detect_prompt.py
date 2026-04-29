@@ -48,6 +48,28 @@ Return ``is_task=false`` for:
   Note: an UNFINISHED report of someone else's outstanding ask
   («Артем сказал отправить, я пока не успел») still COUNTS AS A
   TASK — the action is owed.
+- *Status-list reports* — multiple parties' progress strung
+  together with dashes / commas. Each item describes WHAT IS or
+  WHAT ISN'T, not what to DO. Examples:
+  «DBS — нет, Jefferies — отправила линки на регистрацию,
+   Stifel — не ответил»,
+  «Q1 done, Q2 in progress, Q3 not started»,
+  «Petya — done, Masha — not yet, Vlad — blocked».
+  These are read-only updates; they do NOT create tasks even
+  when individual list items contain unfinished work.
+- *Parroted acknowledgements / one-line replies* without context
+  — «хорошо! напишу ему», «ок, сделаю», «договорились», «понял,
+  займусь», «yes, will do». By themselves these are
+  status-promises, not tasks. They become tasks ONLY when the
+  surrounding context makes the actual work unambiguous (a prior
+  message saying «нужен ответ на письмо XYZ»). Use the
+  ``context`` block to decide. Without context, treat as
+  no_action — better than capturing a vague widget.
+- *OCR / transcription noise* — a single non-word artefact like
+  «файндхэзом», «бумаусы», «zzzx» on its own is not a task.
+  Reject when the message is a single token that doesn't form a
+  recognisable Russian / English word and has no surrounding
+  imperative.
 - *Bare questions without an imperative*. A question is no_action
   when no one has to *do* anything to answer it:
   «как дела?», «что думаешь?», «это была задача?»,

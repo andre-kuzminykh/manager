@@ -38,12 +38,22 @@ class IngestReport:
     error_samples: list[str] = field(default_factory=list)
 
 
-def _build_window(msg: TelegramSourceMessage) -> ContextWindow:
+def _build_window(
+    msg: TelegramSourceMessage,
+    *,
+    history_before: list[dict] | None = None,
+) -> ContextWindow:
     """Wrap a TelegramSourceMessage in a Slack-shaped ContextWindow.
 
     The intent pipeline reads ``conversation_id`` / ``source_ts`` /
     ``source_message`` — we hand it Telegram identifiers in the same
     fields so no pipeline code changes.
+
+    ``history_before`` is the optional adaptive-context window
+    (FR-CR-05-09) — chronological list of recent chat messages
+    feeding the detect / title / owner stages so vague phrases
+    like «хорошо! напишу ему» get rewritten into proper imperative
+    titles using the surrounding conversation.
     """
     return ContextWindow(
         conversation_id=str(msg.chat_id),
@@ -56,6 +66,96 @@ def _build_window(msg: TelegramSourceMessage) -> ContextWindow:
             "text": msg.text,
             "subtype": None,
         },
+        history_before=list(history_before or []),
+    )
+
+
+def _adaptive_context_for(
+    reader,
+    *,
+    chat_id: int,
+    before_message_id: int,
+    max_chars: int = 10_000,
+) -> list[dict]:
+    """FR-CR-05-09 — fetch the chat-local adaptive context window
+    via the reader and return it shaped for `ContextWindow.history_
+    before` (Slack-shape dicts the intent pipeline already consumes).
+
+    Wrapped in a try/except so a missing / unconfigured reader (the
+    listener doesn't always have one), or a transient Postgres
+    issue, drops back to «no context» rather than aborting the
+    capture.
+    """
+    if reader is None:
+        return []
+    try:
+        prior = reader.recent_in_chat(
+            chat_id=int(chat_id),
+            before_message_id=int(before_message_id),
+            max_chars=max_chars,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.info("telegram_adaptive_context_failed", error=str(e))
+        return []
+    out: list[dict] = []
+    for m in prior:
+        out.append(
+            {
+                "ts": str(m.message_id),
+                "thread_ts": str(m.reply_to) if m.reply_to else None,
+                "user": (
+                    str(m.user_id) if m.user_id else (m.user_name or "tg_unknown")
+                ),
+                "text": m.text or "",
+                "subtype": None,
+            }
+        )
+    return out
+
+
+def _admin_fallback_owner_id() -> str | None:
+    """FR-CR-05-09 — when the classifier can't resolve a real owner,
+    route the task to the first admin from
+    ``TELEGRAM_ADMIN_USER_IDS`` instead of leaving it unassigned (or
+    worse, attached to a bot account / a bare hint like «Валя»).
+    Returns None when no admins are configured."""
+    try:
+        from app.telegram_bot.handlers import admin_user_ids
+
+        admins = sorted(admin_user_ids())
+    except Exception as e:  # noqa: BLE001
+        log.info("telegram_admin_fallback_unavailable", error=str(e))
+        return None
+    return admins[0] if admins else None
+
+
+def _author_fallback_allowed(
+    user_id: str | None, *, known_employees: list[dict]
+) -> bool:
+    """Decide whether to keep the legacy FR-CR-04-30 «author becomes
+    owner when LLM extracted nothing» fallback for the given sender.
+
+    Two-axis rule:
+
+    - If ``known_employees`` is empty (the chat-members registry
+      hasn't observed any traffic in this chat yet, or the table
+      doesn't exist in the test fixture) → ALLOW the fallback.
+      We have no signal that says the sender is a bot / forwarded
+      post, so the conservative legacy behaviour wins.
+    - If ``known_employees`` IS populated for this chat → require
+      the sender to actually appear in it. A non-member sender is
+      typically a bot account or a forwarded post from outside the
+      chat, and auto-assigning to them produces the «CEO_office1
+      bot owns this task» bug.
+
+    Returns True when the author fallback may run, False to defer
+    to the admin fallback."""
+    if not user_id:
+        return False
+    if not known_employees:
+        return True
+    return any(
+        e.get("slack_user_id") == str(user_id) for e in known_employees
     )
 
 
@@ -107,9 +207,15 @@ class TelegramIngestService:
         *,
         classifier: IntentClassifier,
         orchestrator: Orchestrator,
+        reader=None,
     ) -> None:
         self._classifier = classifier
         self._orchestrator = orchestrator
+        # FR-CR-05-09 — optional read-only Telegram view reader used
+        # to pull the adaptive context window (~10k chars of recent
+        # chat history) before the LLM classify call. When None we
+        # fall back to «no chat history» — same behaviour as before.
+        self._reader = reader
 
     def process_one(
         self,
@@ -159,15 +265,22 @@ class TelegramIngestService:
             )
             return []
 
-        window = _build_window(message)
+        known_employees = _known_members_for(session, chat_id=message.chat_id)
+        history_before: list[dict] = []
         if classification is None:
+            history_before = _adaptive_context_for(
+                self._reader,
+                chat_id=message.chat_id,
+                before_message_id=message.message_id,
+            )
+            window = _build_window(message, history_before=history_before)
             classification = self._classifier.classify(
                 context=window,
                 invocation_type=InvocationType.passive,
-                known_employees=_known_members_for(
-                    session, chat_id=message.chat_id
-                ),
+                known_employees=known_employees,
             )
+        else:
+            window = _build_window(message)
 
         if classification.intent != IntentType.create_task or not classification.tasks:
             session.add(
@@ -180,13 +293,36 @@ class TelegramIngestService:
             )
             return []
 
-        # FR-CR-04-30 — fill the owner from the sender on each draft
-        # when the LLM didn't extract one. Same rule applies to every
-        # task in a multi-task message.
+        # FR-CR-04-30 + FR-CR-05-09 — owner fallback chain:
+        #
+        # 1. LLM-resolved owner (already on the draft) → win.
+        # 2. Sender, but ONLY when they're a registered chat member
+        #    (FR-CR-05-07). A non-member sender is typically a bot
+        #    account or a forwarded post; auto-assigning to them
+        #    produces the «CEO_office1 bot owns this task» bug.
+        # 3. First admin from TELEGRAM_ADMIN_USER_IDS — same fallback
+        #    the listener already used for DM delivery.
+        admin_uid = _admin_fallback_owner_id()
         for td in classification.tasks:
-            if not td.owner_user_id and message.user_id:
-                td.owner_user_id = str(message.user_id)
-            if not td.owner_display_name and message.user_name:
+            if not td.owner_user_id:
+                if _author_fallback_allowed(
+                    str(message.user_id) if message.user_id else None,
+                    known_employees=known_employees,
+                ):
+                    td.owner_user_id = str(message.user_id)
+                    if not td.owner_display_name and message.user_name:
+                        td.owner_display_name = message.user_name
+                elif admin_uid:
+                    td.owner_user_id = admin_uid
+                    if not td.owner_display_name:
+                        # Look up the admin's display name from the
+                        # chat-members registry so the card shows
+                        # «@andre_andreevich» rather than «222968032».
+                        for e in known_employees:
+                            if e.get("slack_user_id") == admin_uid:
+                                td.owner_display_name = e.get("display_name") or admin_uid
+                                break
+            elif not td.owner_display_name and message.user_name:
                 td.owner_display_name = message.user_name
 
         snapshot = self._orchestrator.persist_context_snapshot(
@@ -338,15 +474,21 @@ class TelegramIngestService:
             )
             return []
 
-        window = _build_window(message)
+        known_employees = _known_members_for(session, chat_id=message.chat_id)
         if classification is None:
+            history_before = _adaptive_context_for(
+                self._reader,
+                chat_id=message.chat_id,
+                before_message_id=message.message_id,
+            )
+            window = _build_window(message, history_before=history_before)
             classification = self._classifier.classify(
                 context=window,
                 invocation_type=InvocationType.passive,
-                known_employees=_known_members_for(
-                    session, chat_id=message.chat_id
-                ),
+                known_employees=known_employees,
             )
+        else:
+            window = _build_window(message)
 
         if classification.intent != IntentType.create_task or not classification.tasks:
             session.add(
@@ -359,10 +501,24 @@ class TelegramIngestService:
             )
             return []
 
+        admin_uid = _admin_fallback_owner_id()
         for td in classification.tasks:
-            if not td.owner_user_id and message.user_id:
-                td.owner_user_id = str(message.user_id)
-            if not td.owner_display_name and message.user_name:
+            if not td.owner_user_id:
+                if _author_fallback_allowed(
+                    str(message.user_id) if message.user_id else None,
+                    known_employees=known_employees,
+                ):
+                    td.owner_user_id = str(message.user_id)
+                    if not td.owner_display_name and message.user_name:
+                        td.owner_display_name = message.user_name
+                elif admin_uid:
+                    td.owner_user_id = admin_uid
+                    if not td.owner_display_name:
+                        for e in known_employees:
+                            if e.get("slack_user_id") == admin_uid:
+                                td.owner_display_name = e.get("display_name") or admin_uid
+                                break
+            elif not td.owner_display_name and message.user_name:
                 td.owner_display_name = message.user_name
 
         snapshot = self._orchestrator.persist_context_snapshot(
@@ -452,6 +608,13 @@ class TelegramIngestService:
                     "context_snapshot_id": snapshot.id,
                     "source_chat_id": message.chat_id,
                     "source_message_id": message.message_id,
+                    # FR-CR-05-09 — keep the raw source text on the
+                    # draft so `post_draft_confirmation` can fall
+                    # back to an inline quote when forwardMessage
+                    # fails (which it does for every historical-
+                    # migration draft — the bot never observed those
+                    # messages, so Telegram refuses to forward them).
+                    "source_text": (message.text or "")[:10_000],
                 }
                 draft.payload = payload
                 out.append(draft)

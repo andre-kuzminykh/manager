@@ -984,6 +984,70 @@ Same model is used in the live-listener cards (FR-CR-04-32) and
 the Accept-on-draft path that swaps a confirm widget for the
 final card.
 
+#### 13.11 — Adaptive chat context, admin-owner fallback, source forwards
+
+> **As an operator** scrolling through 100 freshly-extracted
+> drafts, I want widgets that **make sense in context** — not
+> «hi! I'll write to him» as a verbatim title with a bot account
+> as owner and zero hint of what triggered it.
+
+Three quality issues surfaced after the first 100-message
+historical migration. All three solved here.
+
+**1. Adaptive chat context.** The classifier was running with
+zero prior history per Telegram message, so vague replies like
+«хорошо! напишу ему» had nothing to anchor against and landed
+as the title verbatim. Fix:
+`TelegramSourceReader.recent_in_chat` pulls prior messages from
+the same chat, expands the window in increments of 10 (10 → 20
+→ 30 …) until the combined text crosses ~10 000 characters,
+and hands the result to `ContextWindow.history_before`. Every
+stage of the intent pipeline already consumes `history_before`,
+so the detect / title / owner stages now see meaningful chat
+context.
+
+The detect prompt is taught to flag parroted one-liners
+(«ок, сделаю», «договорились», «хорошо, напишу ему») as
+no_action by default — they only become tasks when the
+surrounding context makes the work unambiguous. The title
+prompt is taught to *rewrite* such phrases into a proper
+imperative using context: with a prior message «надо ответить
+Андрею по сделке Acme», «хорошо, напишу ему» becomes the title
+«написать Андрею по сделке Acme», not the literal phrase.
+Status-list reports («DBS — нет, Jefferies — отправила, Stifel
+— не ответил») and OCR-noise singletons («файндхэзом») are
+explicitly rejected upstream too.
+
+**2. Admin-owner fallback chain.** The author-fallback used to
+land bot accounts as task owners (a forwarded post from a `bot`
+user has `from.is_bot=true` and the bot's own user_id, so the
+draft inherited that). The new chain is:
+
+1. LLM-resolved owner — wins.
+2. Sender, **only when** they're a registered chat member
+   (FR-CR-05-07). A non-member sender is typically a bot
+   account or a forwarded post; we don't promote them to owner.
+3. First admin from `TELEGRAM_ADMIN_USER_IDS` — same identity
+   the confirm-first widget already DMs by default.
+
+This kills the «Валя is the owner because she was named in the
+text but isn't in the table» class of bug.
+
+**3. Inline-quote source fallback.** `post_draft_confirmation`
+already tries `forwardMessage` first, but the Bot API only
+forwards messages the bot has **observed via getUpdates** —
+historical migration drafts come out of the colleague's
+read-only view, so every forward call returns «message to
+forward not found». The widget arrived without source context.
+
+Now the prepare-drafts step pre-stashes `source_text` on
+`draft.payload["_pending"]`, and when the forward fails (sender
+returns `{}`) the card helper emits a `<blockquote>`-wrapped
+HTML quote of the source so the operator sees what triggered
+the widget without leaving the DM. Live listener captures still
+get a real `forwardMessage` because the bot did observe them —
+the fallback only fires when the forward genuinely can't work.
+
 
 ---
 

@@ -65,6 +65,36 @@ Examples (every date-like tail is removed from the title):
   "отправь письмо завтра утром"
       → title: "отправить письмо"
 
+PARROTED ONE-LINERS — when the source message is a vague
+acknowledgement promise («хорошо! напишу ему», «ок, сделаю»,
+«договорились, скину»), the literal text is NOT a usable title.
+NEVER copy these phrases verbatim:
+  WRONG → title: "хорошо! напишу ему"
+  WRONG → title: "ок, сделаю"
+  WRONG → title: "договорились"
+
+Instead, READ THE CONTEXT messages above and rewrite the title
+into a proper imperative referencing the actual work. Look for the
+prior message that defined what to do, and surface the recipient /
+artefact / topic in the title:
+  context: «надо ответить Андрею по сделке Acme»
+  source:  «хорошо, напишу ему»
+      → title: "написать Андрею по сделке Acme"
+  context: «нужен ответ на письмо клиента Stifel»
+  source:  «ок, отвечу»
+      → title: "ответить клиенту Stifel"
+  context: «давай скинешь файл с расчётом?»
+  source:  «договорились, скину»
+      → title: "скинуть файл с расчётом"
+
+When the context doesn't make the recipient / artefact clear, fall
+back to a generic imperative that at least uses the right verb —
+NEVER the parroted phrase as-is. Examples:
+  context: (none useful)  source: «хорошо! напишу ему»
+      → title: "написать ему"
+  context: (none useful)  source: «ок, отправлю»
+      → title: "отправить"
+
 NOTE-STYLE INPUTS — drop the leading context tag, keep the action:
   "Olayan — напомнить Татьяне про контакт"
       → title: "напомнить Татьяне про контакт"

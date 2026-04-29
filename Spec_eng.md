@@ -1299,6 +1299,17 @@ user's typed reply for an owner-hint pattern
 text as `owner_display_name`. Card renders «Андрей Кузьминых»
 hyperlinked to the resolved uid instead of `222968032`.
 
+#### 13.19 — Permalink for stripped-prefix supergroup ids
+
+The colleague's Supabase ingestion strips the Bot API's `-100`
+prefix when storing chat_ids — `-2061886148` instead of
+`-1002061886148`. The original `_telegram_permalink` only
+recognised the API form and returned `None` for stripped ids,
+so widgets had no 🔗 line. Updated rule recognises both forms:
+strip `-100` when present, use the abs value as-is otherwise,
+and only return `None` for basic groups (≤ 8-digit id) and
+private chats.
+
 
 ---
 

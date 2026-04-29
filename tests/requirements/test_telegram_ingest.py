@@ -370,11 +370,32 @@ def test_recent_in_chat_filters_by_chat_id_only(monkeypatch):
     )
 
 
-def test_telegram_permalink_for_supergroup():
+def test_telegram_permalink_for_supergroup_with_api_prefix():
+    """`-1002061886148` (Bot API form) ⇒ strip the `-100` prefix."""
     msg = TelegramSourceMessage(
         chat_id=-1001234567890, message_id=99, text="x"
     )
     assert _telegram_permalink(msg) == "https://t.me/c/1234567890/99"
+
+
+def test_telegram_permalink_for_supergroup_without_prefix():
+    """FR-CR-05-17 — some ingestion pipelines drop the `-100`
+    prefix when storing chat_ids in Postgres. The chat_id arrives
+    as `-2061886148` (10-digit) instead of `-1002061886148`. Treat
+    it as the same supergroup and emit the same `t.me/c/2061886148`
+    URL — without this fix, the widget rendered no source link
+    at all on real-world historical migrations."""
+    msg = TelegramSourceMessage(
+        chat_id=-2061886148, message_id=2981, text="x"
+    )
+    assert _telegram_permalink(msg) == "https://t.me/c/2061886148/2981"
+
+
+def test_telegram_permalink_returns_none_for_basic_group():
+    """Small (≤ 8-digit) negative ids are basic groups. They have
+    no `t.me/c/<id>` URL form."""
+    msg = TelegramSourceMessage(chat_id=-12345, message_id=1, text="x")
+    assert _telegram_permalink(msg) is None
 
 
 def test_telegram_permalink_returns_none_for_private_chat():

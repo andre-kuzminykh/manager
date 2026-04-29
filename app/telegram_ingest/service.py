@@ -277,19 +277,30 @@ def _author_fallback_allowed(
 def _telegram_permalink(msg: TelegramSourceMessage) -> str | None:
     """Best-effort shareable link to the original Telegram message.
 
-    The ``t.me/c/<id>/<msg>`` URL scheme **only works for supergroups
-    and channels** — those carry chat_ids with the ``-100`` prefix
-    (so ``|id| > 10**12``). Basic groups have small negative ids and
-    no public URL form: a generated link would 404 with «no access»
-    even for members. Private chats: same — no shareable URL.
+    The ``t.me/c/<id>/<msg>`` URL scheme works for supergroups and
+    channels, but the source chat_id can land here in two forms
+    depending on which ingestion pipeline produced it:
+
+      - Bot API form: `-1002061886148` (supergroup with the API's
+        ``-100`` prefix); strip it.
+      - Stripped form: `-2061886148` (some pipelines drop the
+        prefix when storing). Use the raw abs value.
+
+    Private chats (positive chat_id) and basic groups (small
+    negative id, ≤ 100 000 000) have no shareable URL form: a
+    generated link would 404 with «no access» even for members.
     """
     if msg.chat_id >= 0:
         return None
     public = abs(msg.chat_id)
-    if public <= 1000000000000:
-        # Basic group — no shareable URL.
+    if public > 1_000_000_000_000:
+        # Bot API form `-100xxxxxxxxxx` — strip the prefix.
+        public -= 1_000_000_000_000
+    elif public < 100_000_000:
+        # Basic group (≤ 8-digit id) — no shareable URL.
         return None
-    public -= 1000000000000
+    # Else: supergroup id stored without the `-100` prefix
+    # (Supabase view convention) — use the abs value as-is.
     return f"https://t.me/c/{public}/{msg.message_id}"
 
 

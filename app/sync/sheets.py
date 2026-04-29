@@ -260,3 +260,325 @@ def _parse_row_id(updated_range: str) -> int | None:
         return int(digits) if digits else None
     except Exception:  # noqa: BLE001
         return None
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-11 — Sheet → DB pull (operator edits propagate back)
+# --------------------------------------------------------------------------- #
+
+
+# Fields the operator can edit on the spreadsheet and have those edits
+# applied to the DB on the next pull. Anything not listed here is
+# read-only from the sheet's side (changes are silently ignored).
+_EDITABLE_FIELDS: set[str] = {
+    "title",
+    "description",
+    "owner",
+    "priority",
+    "category",
+    "start_date",
+    "start_time",
+    "due_date",
+    "due_time",
+    "status",
+    "completion_artifact",
+}
+
+
+def _parse_date_or_none(s: str | None):
+    from datetime import date as _date
+
+    if not s:
+        return None
+    try:
+        return _date.fromisoformat(s.strip())
+    except ValueError:
+        return None
+
+
+def _parse_time_or_none(s: str | None):
+    from datetime import time as _time
+
+    if not s:
+        return None
+    try:
+        hh, mm = s.strip().split(":")[:2]
+        return _time(int(hh), int(mm))
+    except (ValueError, IndexError):
+        return None
+
+
+def _resolve_owner_back_to_id(
+    session: Session, raw: str
+) -> tuple[str | None, str | None]:
+    """FR-CR-05-11 — operator types an owner name on the sheet; we
+    map it back to a user id for the DB. Strategy:
+
+      1. Bare uid (`U…` or all-digits) → keep as-is.
+      2. `@handle` → match against `team_members.telegram_username`.
+      3. Display / real name → match against
+         `team_members.real_name` / Slack `employees.real_name`.
+      4. Otherwise → owner_user_id stays None, display_name keeps
+         the raw text so the operator's intent isn't lost.
+
+    Returns ``(owner_user_id, owner_display_name)``."""
+    s = (raw or "").strip()
+    if not s:
+        return None, None
+    # Bare uid?
+    if s.startswith("U") or s.startswith("W") or s.lstrip("-").isdigit():
+        return s, None
+    # @handle?
+    if s.startswith("@"):
+        handle = s[1:].lower()
+        try:
+            from app.models import TeamMember
+
+            row = (
+                session.query(TeamMember)
+                .filter(TeamMember.telegram_username.ilike(handle))
+                .first()
+            )
+            if row is not None:
+                if row.telegram_user_id is not None:
+                    return str(row.telegram_user_id), s
+                if row.slack_user_id:
+                    return row.slack_user_id, s
+        except Exception:  # noqa: BLE001
+            pass
+    # Real / display name match.
+    try:
+        from app.models import TeamMember
+
+        row = (
+            session.query(TeamMember)
+            .filter(TeamMember.real_name.ilike(s))
+            .first()
+        )
+        if row is not None:
+            if row.telegram_user_id is not None:
+                return str(row.telegram_user_id), s
+            if row.slack_user_id:
+                return row.slack_user_id, s
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from app.models import Employee
+
+        row = (
+            session.query(Employee)
+            .filter(Employee.real_name.ilike(s))
+            .first()
+        )
+        if row is not None:
+            return row.slack_user_id, s
+    except Exception:  # noqa: BLE001
+        pass
+    # Couldn't resolve — keep the typed text as display_name so the
+    # operator sees their input on the next push.
+    return None, s
+
+
+def _apply_sheet_row(
+    session: Session, task: Task, row: dict[str, str]
+) -> dict[str, str]:
+    """Diff one sheet row against the DB Task. Returns a dict of
+    fields that actually changed (for logging). Status changes are
+    routed through `TransitionService` so audit + subscribers fire."""
+    from app.models import TaskPriority, TaskStatus
+    from app.services.transitions import InvalidTransition, TransitionService
+
+    changes: dict[str, str] = {}
+
+    new_title = (row.get("title") or "").strip()
+    if new_title and new_title != (task.title or ""):
+        task.title = new_title[:_MAX_TITLE_CHARS]
+        changes["title"] = new_title
+
+    if "description" in row:
+        new_desc = (row.get("description") or "").strip() or None
+        if new_desc != (task.description or None):
+            task.description = new_desc[:_MAX_DESCRIPTION_CHARS] if new_desc else None
+            changes["description"] = new_desc or ""
+
+    if "owner" in row:
+        raw = row.get("owner") or ""
+        new_uid, new_display = _resolve_owner_back_to_id(session, raw)
+        # Compare against the rendered cell — that's what the operator
+        # sees, so a no-op edit shouldn't fire a diff.
+        old_render = _resolve_owner_name(session, task)
+        if (raw.strip() or "") != (old_render or ""):
+            task.owner_user_id = new_uid
+            task.owner_display_name = new_display
+            changes["owner"] = raw.strip()
+
+    if "priority" in row:
+        raw = (row.get("priority") or "").strip().lower()
+        if raw and raw != task.priority.value:
+            try:
+                task.priority = TaskPriority(raw)
+                changes["priority"] = raw
+            except ValueError:
+                log.info(
+                    "sheet_pull_invalid_priority",
+                    task_id=task.id,
+                    raw=raw,
+                )
+
+    if "category" in row:
+        cat = (row.get("category") or "").strip() or None
+        if cat != (task.category or None):
+            task.category = cat
+            changes["category"] = cat or ""
+
+    if "start_date" in row:
+        d = _parse_date_or_none(row.get("start_date"))
+        if d != task.start_date:
+            task.start_date = d
+            changes["start_date"] = d.isoformat() if d else ""
+
+    if "start_time" in row:
+        t = _parse_time_or_none(row.get("start_time"))
+        if t != task.start_time:
+            task.start_time = t
+            changes["start_time"] = t.strftime("%H:%M") if t else ""
+
+    if "due_date" in row:
+        d = _parse_date_or_none(row.get("due_date"))
+        if d != task.due_date:
+            task.due_date = d
+            changes["due_date"] = d.isoformat() if d else ""
+
+    if "due_time" in row:
+        t = _parse_time_or_none(row.get("due_time"))
+        if t != task.due_time:
+            task.due_time = t
+            changes["due_time"] = t.strftime("%H:%M") if t else ""
+
+    if "completion_artifact" in row:
+        art = (row.get("completion_artifact") or "").strip() or None
+        if art != (task.completion_artifact or None):
+            task.completion_artifact = art
+            changes["completion_artifact"] = art or ""
+
+    if "status" in row:
+        raw = (row.get("status") or "").strip().lower()
+        if raw and raw != "deleted" and raw != task.status.value:
+            try:
+                target = TaskStatus(raw)
+            except ValueError:
+                log.info(
+                    "sheet_pull_invalid_status", task_id=task.id, raw=raw
+                )
+                return changes
+            try:
+                TransitionService().apply(
+                    session,
+                    task=task,
+                    new_status=target,
+                    actor_slack_user_id="sheet_sync",
+                    reason="sheet_edit",
+                )
+                changes["status"] = raw
+            except InvalidTransition as e:
+                log.info(
+                    "sheet_pull_invalid_transition",
+                    task_id=task.id,
+                    error=str(e),
+                )
+
+    return changes
+
+
+# Field-level caps for safety. Keep matched to TaskDraft._MAX_FIELD_CHARS.
+_MAX_TITLE_CHARS = 10_000
+_MAX_DESCRIPTION_CHARS = 10_000
+
+
+class SheetsPullService:
+    """FR-CR-05-11 — read every row from the Tasks sheet and apply
+    field-level diffs back to the corresponding DB Task.
+
+    Authoritative direction: the Sheet wins. An operator's manual
+    edit always propagates to the DB on the next pull tick. The
+    DB → Sheet push (via `SheetsSyncService.sync`) keeps running
+    on every Task change as before, so the Sheet stays current
+    when the bot makes changes too.
+
+    Conflict window: at most one tick-interval (~5 min by default).
+    No `updated_at` comparison — keeping the rule simple beats
+    fighting clock skew between the bot and the operator's edits.
+    """
+
+    def __init__(
+        self,
+        *,
+        credentials: Credentials,
+        spreadsheet_id: str,
+        sheet_name: str = "Main",
+    ) -> None:
+        self._service = build(
+            "sheets", "v4", credentials=credentials, cache_discovery=False
+        )
+        self._spreadsheet_id = spreadsheet_id
+        self._sheet_name = sheet_name
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+        retry=retry_if_exception_type(HttpError),
+    )
+    def _read_all(self) -> list[list[str]]:
+        end_col = chr(ord("A") + len(_HEADER_ROW) - 1)
+        rng = f"{self._sheet_name}!A1:{end_col}"
+        resp = (
+            self._service.spreadsheets()
+            .values()
+            .get(spreadsheetId=self._spreadsheet_id, range=rng)
+            .execute()
+        )
+        return list(resp.get("values") or [])
+
+    def pull(self, session: Session) -> tuple[int, int, int]:
+        """Read every row from the sheet, diff against DB, apply
+        edits in place. Returns ``(rows_seen, rows_changed,
+        rows_skipped)``.
+
+        Skipped rows: missing / non-numeric `task_id`; task already
+        soft-deleted; task not found in DB.
+        """
+        rows = self._read_all()
+        if not rows:
+            return 0, 0, 0
+        # Drop header.
+        if rows and rows[0] and rows[0][0].strip().lower() == "task_id":
+            rows = rows[1:]
+
+        seen = changed = skipped = 0
+        for cells in rows:
+            seen += 1
+            cells = list(cells) + [""] * (len(_HEADER_ROW) - len(cells))
+            row_dict = dict(zip(_HEADER_ROW, cells))
+            tid_raw = (row_dict.get("task_id") or "").strip()
+            if not tid_raw.isdigit():
+                skipped += 1
+                continue
+            task = session.get(Task, int(tid_raw))
+            if task is None or task.deleted_at is not None:
+                skipped += 1
+                continue
+            diffs = _apply_sheet_row(session, task, row_dict)
+            if diffs:
+                changed += 1
+                log.info(
+                    "sheet_pull_applied",
+                    task_id=task.id,
+                    fields=list(diffs.keys()),
+                )
+        if changed:
+            session.flush()
+        return seen, changed, skipped
+
+
+__all__ = ["SheetsSyncService", "SheetsPullService"]

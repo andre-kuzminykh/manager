@@ -28,7 +28,7 @@ from app.sync.google_auth import (
     build_google_credentials,
     load_service_account_credentials,
 )
-from app.sync.sheets import SheetsSyncService
+from app.sync.sheets import SheetsPullService, SheetsSyncService
 from app.sync.tasks_api import GoogleTasksSyncService
 from app.sync.team_sheet import TeamSheetSync
 
@@ -75,6 +75,27 @@ def build_sheets_factory(settings: Settings) -> Callable[[], SheetsSyncService |
         if creds is None:
             return None
         return SheetsSyncService(
+            credentials=creds,
+            spreadsheet_id=settings.google_sheets_spreadsheet_id,
+            sheet_name=settings.google_sheets_tab_name or "Main",
+        )
+
+    return factory
+
+
+def build_sheets_pull_factory(
+    settings: Settings,
+) -> Callable[[], SheetsPullService | None] | None:
+    """FR-CR-05-11 — factory for the Sheet → DB pull. Same
+    spreadsheet + tab as the existing push factory."""
+    if not settings.google_sheets_spreadsheet_id:
+        return None
+
+    def factory() -> SheetsPullService | None:
+        creds = _resolve_credentials(GOOGLE_SCOPES_SHEETS)
+        if creds is None:
+            return None
+        return SheetsPullService(
             credentials=creds,
             spreadsheet_id=settings.google_sheets_spreadsheet_id,
             sheet_name=settings.google_sheets_tab_name or "Main",

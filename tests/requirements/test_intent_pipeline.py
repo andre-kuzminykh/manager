@@ -503,3 +503,42 @@ def test_detect_stage_failure_returns_no_action():
     # classify_with_backend safety net (separate concern) handles the
     # rules-based override above this layer.
     assert out.intent == IntentType.no_action
+
+
+def test_intent_prompt_teaches_multi_task_split():
+    """FR-CR-05-46 — the SYSTEM_PROMPT carries explicit guidance to
+    split conjunctions / enumerations / two-verb sentences into
+    separate tasks. Pinned because the regression we hit was a
+    voice-dictated «надо разработать бота а ещё дашборд» being
+    captured as one task with both verbs concatenated."""
+    from app.intent.prompts import SYSTEM_PROMPT
+
+    blob = SYSTEM_PROMPT
+    # Splitting signals taught.
+    assert "а ещё" in blob or "а еще" in blob.lower()
+    assert "tasks" in blob.lower()
+    # The exact failure mode worked-example is pinned.
+    assert "разработать бота" in blob and "сделать дашборд" in blob
+    # Single-task instruction also documented (use tasks with one
+    # item, don't fall back to legacy `task`).
+    assert "single-item" in blob.lower() or "one item" in blob.lower()
+
+
+def test_intent_tool_schema_has_tasks_array():
+    """FR-CR-05-46 — `INTENT_TOOL_PARAMETERS` exposes a `tasks`
+    array (in addition to legacy `task`) so the LLM can return
+    multi-task extraction directly. Without this field the
+    multi-task path was unreachable from the LLM side even
+    though `IntentClassification.tasks` was wired in code."""
+    from app.intent.llm_backends import INTENT_TOOL_PARAMETERS
+
+    props = INTENT_TOOL_PARAMETERS["properties"]
+    assert "tasks" in props
+    assert props["tasks"]["type"] == "array"
+    assert props["tasks"]["items"]["type"] == "object"
+    # Each task in the array has at least a title + the four
+    # standard optional fields.
+    item_props = props["tasks"]["items"]["properties"]
+    for f in ("title", "description", "owner_display_name", "priority", "due_date"):
+        assert f in item_props
+    assert props["tasks"]["items"]["required"] == ["title"]

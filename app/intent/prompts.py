@@ -29,9 +29,43 @@ Return ONLY one of the following intents:
 Rules:
 1. Be conservative. When ambiguous, emit "no_action" with a low confidence.
 2. Confidence must be in [0, 1]. Reserve >= 0.75 for clear, explicit cases.
-3. For "create_task", extract title (imperative), description,
+3. For "create_task", split the message into ALL separately-actionable
+   tasks and return them as an array on the `tasks` field. ONE message can
+   contain MULTIPLE tasks — never merge two actions into one title.
+
+   Splitting signals (treat each as a separate task):
+   - Conjunctions: «а ещё», «и ещё», «и», «также», «плюс», "and", "also"
+   - Enumerations: «во-первых … во-вторых», «1) … 2) …», «- … - …»
+   - Two distinct verbs each describing a different action
+     («разработать бота», «сделать дашборд»)
+   - Two distinct objects of work
+     («подготовить отчёт» + «обновить презентацию»)
+
+   Worked examples:
+   - "мне нужно разработать бота а еще мне нужно сделать дашборд"
+     → tasks=[
+         {"title": "разработать бота"},
+         {"title": "сделать дашборд"}
+       ]
+   - "Андрею презентацию к пятнице, Ире отчёт к среде"
+     → tasks=[
+         {"title": "подготовить презентацию", "owner_display_name": "Андрей",
+          "due_date": "<Friday ISO>"},
+         {"title": "подготовить отчёт", "owner_display_name": "Ира",
+          "due_date": "<Wednesday ISO>"}
+       ]
+   - "напишите крутой пост в блог про новый релиз"  (one task)
+     → tasks=[{"title": "написать пост в блог про новый релиз"}]
+
+   For each task in the array extract title (imperative), description,
    owner_display_name, priority ("low"|"medium"|"high"|"urgent"), and
-   due_date (YYYY-MM-DD).
+   due_date (YYYY-MM-DD). Distinct task fields go on each task — don't
+   share owner / due across the array unless the source genuinely shares
+   them.
+
+   Single-task messages: still emit `tasks` with ONE item. The legacy
+   `task` (singular) field is accepted by the parser but `tasks` is
+   the canonical shape — prefer it.
 4. For "create_meeting", extract title, notes, participants (list),
    datetime_at (ISO 8601 with timezone offset when known), timezone.
 5. DO resolve relative and weekday phrases against current_date (this

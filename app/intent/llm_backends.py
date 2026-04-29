@@ -34,8 +34,50 @@ INTENT_TOOL_PARAMETERS: dict[str, Any] = {
         },
         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "reasoning": {"type": "string"},
+        # FR-CR-05-46 — multi-task extraction. A single message
+        # can carry several distinct tasks («надо разработать
+        # бота, а ещё дашборд» = 2 tasks). The canonical shape is
+        # `tasks` (array); the legacy `task` (singular) is kept
+        # for back-compat — both are accepted by the parser, but
+        # for any message with TWO+ actionable items the LLM MUST
+        # emit `tasks` so each gets its own card.
+        "tasks": {
+            "type": "array",
+            "description": (
+                "Every separately-actionable task in the message. "
+                "Use this when the source carries more than one "
+                "distinct action (split on conjunctions like «а "
+                "ещё», «и»; on enumerations «во-первых, во-вторых»; "
+                "on multiple verbs each describing a different "
+                "task). One task → still allowed to use this with "
+                "a single-item array. NEVER concatenate two "
+                "actions into one title."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "owner_display_name": {"type": "string"},
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "urgent"],
+                    },
+                    "due_date": {
+                        "type": "string",
+                        "description": "ISO YYYY-MM-DD or null",
+                    },
+                },
+                "required": ["title"],
+            },
+        },
         "task": {
             "type": "object",
+            "description": (
+                "Legacy single-task field — kept for back-compat. "
+                "Prefer `tasks` (array) for any new extraction. "
+                "If both are emitted, `tasks` wins."
+            ),
             "properties": {
                 "title": {"type": "string"},
                 "description": {"type": "string"},

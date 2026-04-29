@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String
+from sqlalchemy import BigInteger, Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -78,7 +78,14 @@ class TeamMember(Base, TimestampMixin):
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
     )
-    notes: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # FR-CR-05-42 — long-form notes from the Team sheet routinely
+    # exceed the original 512-char cap (operators paste full role
+    # descriptions, multi-paragraph onboarding context, etc.). The
+    # column was widened to TEXT so the Sheet pull stops failing
+    # with `StringDataRightTruncation`. The 200-char render-time
+    # cap on the owner-prompt block (FR-CR-05-31) keeps prompts
+    # reasonable even with a very long notes string in DB.
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     last_synced_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

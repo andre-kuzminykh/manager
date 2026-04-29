@@ -1,8 +1,13 @@
-"""One-shot historical Telegram ingest (FR-CR-04-26).
+"""One-shot historical Telegram ingest (FR-CR-04-26 / FR-CR-04-32).
 
 Walks the entire Supabase view ``humanoid_tg_chats_readonly`` from
-oldest to newest, processes every message through the intent pipeline
-and persists tasks with ``source_kind = 'telegram'``.
+oldest to newest and runs every message through the intent
+pipeline. By default — *confirm-first* — each detected task lands
+as an ``ActionDraft`` in `proposed` state and the bot DMs every TG
+admin (and the author when reachable) a «Create this task?» widget.
+The Task itself is materialised only when the user clicks ✅ Accept.
+This is the same gate the live listener uses for group messages
+(FR-CR-04-32) — the historical backfill now matches it.
 
 Use this once at deploy time to seed the team's existing Telegram
 history. Run-of-the-mill incremental updates go through
@@ -10,13 +15,19 @@ history. Run-of-the-mill incremental updates go through
 
 Usage::
 
-    python -m ops.migrate_telegram_history --dry-run
-    python -m ops.migrate_telegram_history
-    python -m ops.migrate_telegram_history --batch-size 500
-    python -m ops.migrate_telegram_history --since 2026-04-28
+    # Default — drafts go to your DM as widgets.
     python -m ops.migrate_telegram_history --since-days 1
 
-Idempotent: each processed (chat_id, message_id) is recorded in
+    # Auto-confirm: legacy behaviour, every classified task is
+    # written straight to the DB without a widget. Use only when
+    # you really don't want to click N buttons.
+    python -m ops.migrate_telegram_history --auto-confirm
+
+    python -m ops.migrate_telegram_history --dry-run
+    python -m ops.migrate_telegram_history --batch-size 500
+    python -m ops.migrate_telegram_history --since 2026-04-28
+
+Idempotent: each (chat_id, message_id) is recorded in
 ``processed_telegram_messages`` so a re-run picks up only new
 messages added since. Messages older than the optional ``--since``
 cutoff are bookmarked as «skipped (too old)» without consuming any
@@ -83,6 +94,16 @@ def _parse_args() -> argparse.Namespace:
             "with --since."
         ),
     )
+    p.add_argument(
+        "--auto-confirm",
+        action="store_true",
+        help=(
+            "Skip the confirm-first widget — write every classified "
+            "task straight to the DB. Default behaviour is to create "
+            "an ActionDraft and DM the author/admins a «Create this "
+            "task?» widget instead (FR-CR-04-32 parity)."
+        ),
+    )
     args = p.parse_args()
     if args.since and args.since_days is not None:
         p.error("Pass either --since or --since-days, not both.")
@@ -141,6 +162,60 @@ def _bookmark_skipped(messages: list) -> int:
     return written
 
 
+def _confirm_first_chunk(
+    service,
+    sender,
+    messages: list,
+) -> tuple[int, int, int]:
+    """Per-message confirm-first processing for a chunk.
+
+    For each message: classify into one or more `ActionDraft`s
+    (state=proposed) and DM a «Create this task?» widget to the
+    standard recipient set (author + admins). Returns
+    ``(drafts_proposed, no_action_or_empty, errors)``.
+    """
+    from app.telegram_bot.cards import post_draft_confirmation
+
+    drafts_proposed = 0
+    nothing = 0
+    errors = 0
+    for m in messages:
+        try:
+            with session_scope() as session:
+                drafts = service.prepare_drafts(session, m)
+                if not drafts:
+                    nothing += 1
+                    continue
+                for d in drafts:
+                    payload = d.payload or {}
+                    try:
+                        post_draft_confirmation(
+                            sender=sender,
+                            session=session,
+                            draft=d,
+                            source_chat_id=m.chat_id,
+                            source_message_id=m.message_id,
+                            author_user_id=str(m.user_id) if m.user_id else None,
+                            owner_user_id=payload.get("owner_user_id"),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.warning(
+                            "telegram_history_widget_failed",
+                            draft_id=d.id,
+                            error=str(e),
+                        )
+                    drafts_proposed += 1
+        except Exception as e:  # noqa: BLE001
+            errors += 1
+            log.warning(
+                "telegram_history_message_failed",
+                chat_id=m.chat_id,
+                message_id=m.message_id,
+                error=str(e),
+            )
+    return drafts_proposed, nothing, errors
+
+
 def main() -> int:
     setup_logging()
     args = _parse_args()
@@ -183,7 +258,27 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         log.warning("tg_history_syncer_setup_failed", error=str(e))
 
+    confirm_first = not args.auto_confirm and not args.dry_run
+    sender = None
+    if confirm_first:
+        from app.telegram_bot.sender import TelegramSender
+
+        token = settings.telegram_bot_token or ""
+        if not token:
+            log.error(
+                "telegram_history_confirm_first_needs_token",
+                hint=(
+                    "TELEGRAM_BOT_TOKEN is not set; cannot DM widgets. "
+                    "Either set the token or pass --auto-confirm to "
+                    "create tasks directly."
+                ),
+            )
+            return 2
+        sender = TelegramSender(token=token)
+
     overall = IngestReport()
+    drafts_proposed_total = 0
+    drafts_nothing_total = 0
     batch: list = []
     skipped_too_old: list = []
     skipped_too_old_total = 0
@@ -212,6 +307,22 @@ def main() -> int:
                     head=str(batch[0].message_id) if batch else None,
                 )
                 overall.seen += len(batch)
+            elif confirm_first:
+                proposed, nothing, errs = _confirm_first_chunk(
+                    service, sender, batch
+                )
+                drafts_proposed_total += proposed
+                drafts_nothing_total += nothing
+                overall.seen += len(batch)
+                overall.errors += errs
+                log.info(
+                    "telegram_history_chunk_done",
+                    seen=len(batch),
+                    drafts_proposed=proposed,
+                    nothing=nothing,
+                    errors=errs,
+                    mode="confirm_first",
+                )
             else:
                 with session_scope() as session:
                     report = service.process_batch(session, batch)
@@ -227,6 +338,14 @@ def main() -> int:
     if batch and not args.limit or (batch and processed < args.limit):
         if args.dry_run:
             overall.seen += len(batch)
+        elif confirm_first:
+            proposed, nothing, errs = _confirm_first_chunk(
+                service, sender, batch
+            )
+            drafts_proposed_total += proposed
+            drafts_nothing_total += nothing
+            overall.seen += len(batch)
+            overall.errors += errs
         else:
             with session_scope() as session:
                 report = service.process_batch(session, batch)
@@ -241,12 +360,14 @@ def main() -> int:
         "telegram_history_migration_done",
         seen=overall.seen,
         tasks_created=overall.tasks_created,
-        no_action=overall.no_action,
+        drafts_proposed=drafts_proposed_total,
+        no_action=overall.no_action + drafts_nothing_total,
         skipped_already_processed=overall.skipped_already_processed,
         skipped_empty_text=overall.skipped_empty_text,
         skipped_too_old=skipped_too_old_total,
         errors=overall.errors,
         dry_run=args.dry_run,
+        confirm_first=confirm_first,
         since=since_date.isoformat() if since_date else None,
     )
     return 0

@@ -142,6 +142,64 @@ def main() -> int:
         log.info("telegram_ingest_no_new_messages")
         return 0
 
+    # FR-CR-04-32 parity: when a TG bot token is configured, route
+    # the freshly-ingested messages through the confirm-first widget
+    # flow — drafts go to the author/admins as «Create this task?»
+    # DMs and the user clicks ✅ Accept to materialise the Task.
+    # When no token is set we fall back to the legacy immediate-
+    # create path so the cron job still produces something useful.
+    if settings.telegram_bot_token:
+        from app.telegram_bot.cards import post_draft_confirmation
+        from app.telegram_bot.sender import TelegramSender
+
+        sender = TelegramSender(token=settings.telegram_bot_token)
+        drafts_proposed = 0
+        nothing = 0
+        errors = 0
+        for m in page:
+            try:
+                with session_scope() as session:
+                    drafts = service.prepare_drafts(session, m)
+                    if not drafts:
+                        nothing += 1
+                        continue
+                    for d in drafts:
+                        payload = d.payload or {}
+                        try:
+                            post_draft_confirmation(
+                                sender=sender,
+                                session=session,
+                                draft=d,
+                                source_chat_id=m.chat_id,
+                                source_message_id=m.message_id,
+                                author_user_id=str(m.user_id) if m.user_id else None,
+                                owner_user_id=payload.get("owner_user_id"),
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            log.warning(
+                                "telegram_ingest_widget_failed",
+                                draft_id=d.id,
+                                error=str(e),
+                            )
+                        drafts_proposed += 1
+            except Exception as e:  # noqa: BLE001
+                errors += 1
+                log.warning(
+                    "telegram_ingest_message_failed",
+                    chat_id=m.chat_id,
+                    message_id=m.message_id,
+                    error=str(e),
+                )
+        log.info(
+            "telegram_ingest_done",
+            seen=len(page),
+            drafts_proposed=drafts_proposed,
+            no_action=nothing,
+            errors=errors,
+            mode="confirm_first",
+        )
+        return 0
+
     with session_scope() as session:
         report = service.process_batch(session, page)
 
@@ -154,6 +212,7 @@ def main() -> int:
         skipped_empty_text=report.skipped_empty_text,
         errors=report.errors,
         error_samples=report.error_samples,
+        mode="auto_confirm",
     )
     return 0
 

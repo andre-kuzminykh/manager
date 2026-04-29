@@ -343,6 +343,110 @@ def test_parse_edit_with_llm_freeform_calls_backend(session):
     assert out == {"priority": "high", "due": "2026-05-15"}
 
 
+def test_parse_edit_with_llm_includes_known_employees_in_prompt(session):
+    """FR-CR-05-14 — when the team registry is non-empty, the Edit
+    prompt surfaces every active member with role / notes so the
+    LLM can map «ответственный Андрей Кузьминых» to the right id."""
+    tid = _mk(session, owner_user_id="11", title="x")
+    task = session.get(Task, tid)
+    backend = _FakeBackend(payload={"owner": "222968032"})
+
+    known = [
+        {
+            "slack_user_id": "222968032",
+            "display_name": "@andre_andreevich",
+            "real_name": "Андрей Кузьминых",
+            "role": "founder",
+            "notes": "",
+        },
+        {
+            "slack_user_id": "412243973",
+            "display_name": "@valentina_pm",
+            "real_name": "Валентина",
+            "role": "project manager / аналитик",
+            "notes": "",
+        },
+    ]
+    out = h.parse_edit_with_llm(
+        task=task,
+        reply_text="ответственный Андрей Кузьминых",
+        backend=backend,
+        known_employees=known,
+    )
+    assert "Андрей Кузьминых" in backend.last_user_prompt
+    assert "founder" in backend.last_user_prompt
+    assert "project manager" in backend.last_user_prompt.lower()
+    # The LLM round-tripped the right id; that's what the apply step
+    # commits as `task.owner_user_id`.
+    assert out == {"owner": "222968032"}
+
+
+def test_apply_edit_resolves_owner_name_via_team_registry(session):
+    """End-to-end: user types «ответственный Андрей Кузьминых»; the
+    LLM may return only the name (or the registry id). Either way
+    the apply step lands a valid `task.owner_user_id` looked up
+    against the team registry, with display_name backfilled."""
+    from app.models import TeamMember
+    from datetime import datetime, timezone as _tz
+
+    session.add(
+        TeamMember(
+            telegram_user_id=222968032,
+            telegram_username="andre_andreevich",
+            real_name="Андрей Кузьминых",
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+    tid = _mk(session, owner_user_id="11", title="x")
+    backend = _FakeBackend(payload={"owner": "Андрей Кузьминых"})
+
+    out, applied = h.apply_edit_reply_ex(
+        session,
+        task_id=tid,
+        actor="11",
+        reply_text="ответственный Андрей Кузьминых",
+        llm_backend=backend,
+    )
+    assert out is not None
+    assert out.owner_user_id == "222968032"
+    # display_name backfilled from the registry.
+    assert "@andre_andreevich" in (out.owner_display_name or "")
+    assert applied.get("owner") == "Андрей Кузьминых"
+
+
+def test_apply_edit_drops_unresolvable_owner_text_to_display_name(session):
+    """When the LLM returns a name that doesn't match anyone in the
+    registry, the apply step keeps the typed text on display_name
+    (so the operator's intent is visible) and clears the id —
+    avoiding bogus DM targets."""
+    from app.models import TeamMember
+    from datetime import datetime, timezone as _tz
+
+    session.add(
+        TeamMember(
+            telegram_user_id=222968032,
+            real_name="Андрей Кузьминых",
+            active=True,
+            last_synced_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+    tid = _mk(session, owner_user_id="11", title="x")
+    backend = _FakeBackend(payload={"owner": "John from Acme"})
+    out, _ = h.apply_edit_reply_ex(
+        session,
+        task_id=tid,
+        actor="11",
+        reply_text="ответственный John from Acme",
+        llm_backend=backend,
+    )
+    assert out is not None
+    assert out.owner_user_id is None
+    assert out.owner_display_name == "John from Acme"
+
+
 def test_parse_edit_with_llm_no_backend_falls_back_to_kv(session):
     tid = _mk(session, owner_user_id="11")
     task = session.get(Task, tid)

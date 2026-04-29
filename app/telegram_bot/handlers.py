@@ -439,10 +439,39 @@ _EDIT_TOOL_PARAMS: dict[str, Any] = {
 }
 
 
-def _build_edit_user_prompt(*, current: dict[str, str], reply_text: str) -> str:
-    """Build the user-side prompt for the Edit LLM call."""
+def _build_edit_user_prompt(
+    *,
+    current: dict[str, str],
+    reply_text: str,
+    known_employees: list[dict] | None = None,
+) -> str:
+    """Build the user-side prompt for the Edit LLM call.
+
+    `known_employees` (FR-CR-05-14) is the team-registry list — same
+    shape `IntentClassifier` already gets for owner extraction. When
+    the user types «ответственный Андрей Кузьминых» the LLM picks
+    the matching row and round-trips the registry's id, so the
+    downstream apply step can DM the new owner directly.
+    """
     today = date.today().isoformat()
     cur_lines = "\n".join(f"  {k}={v}" for k, v in current.items())
+    employees_block = ""
+    if known_employees:
+        rows = ["  slack_user_id          | display_name        | real_name                      | role                       | notes"]
+        for e in known_employees:
+            sid = (e.get("slack_user_id") or "")[:22]
+            dn = (e.get("display_name") or "")[:25]
+            rn = (e.get("real_name") or "")[:30]
+            role = (e.get("role") or "")[:26]
+            notes = (e.get("notes") or "")[:60]
+            rows.append(
+                f"  {sid:<22} | {dn:<19} | {rn:<30} | {role:<26} | {notes}"
+            )
+        employees_block = (
+            "known_employees (assignable owners — pick a "
+            "slack_user_id from this table when the user names "
+            "someone):\n" + "\n".join(rows) + "\n\n"
+        )
     return (
         "You are editing an existing task. Read the user's reply "
         "(which may be free-form natural language in any language, "
@@ -455,11 +484,21 @@ def _build_edit_user_prompt(*, current: dict[str, str], reply_text: str) -> str:
         "('завтра', 'tomorrow', 'next Friday', '15 мая в 18:00'), "
         "default it to the `due` field (and `due_time` if a time "
         "was given). This is the most common one-word edit.\n"
+        "- For dates: distinguish DUE («дедлайн», «срок», «к...») "
+        "from START («начну», «начало», «start»). Emit ISO "
+        "YYYY-MM-DD on `due` / `start`; times go on `due_time` / "
+        "`start_time` as HH:MM 24h.\n"
+        "- For owner: when the user says «ответственный Иван», "
+        "«owner Petya», «assign to Андрей», look up the named "
+        "person in known_employees and emit `owner=<slack_user_id>` "
+        "(the value from the table, NOT the name). Use role / "
+        "notes to disambiguate same-first-name rows. When no row "
+        "matches, leave `owner` out — DON'T invent a uid.\n"
         "- Resolve relative dates ('завтра', 'next Friday', 'через "
         "неделю') against today.\n"
-        "- For dates emit ISO YYYY-MM-DD; for times emit HH:MM 24h.\n"
         "- To clear a field, set it to an empty string.\n"
         "- Don't invent values. If unsure, omit the key.\n\n"
+        f"{employees_block}"
         f"Current task values:\n{cur_lines}\n\n"
         f"User reply:\n{reply_text}"
     )
@@ -470,11 +509,17 @@ def parse_edit_with_llm(
     task: Task,
     reply_text: str,
     backend: Any | None,
+    known_employees: list[dict] | None = None,
 ) -> dict[str, str]:
     """LLM-driven parse of a free-form Edit reply. Falls back to the
     structured `key=value` parser when no backend is available, when
     the reply looks like explicit ``key=value`` lines, or when the LLM
     call fails.
+
+    `known_employees` (FR-CR-05-14): team registry feed so the LLM
+    can resolve names to ids when the user types «ответственный
+    Андрей Кузьминых». Optional — without it the parser still runs,
+    just without registry-aware owner mapping.
     """
     text = (reply_text or "").strip()
     if not text:
@@ -502,7 +547,11 @@ def parse_edit_with_llm(
         "category": task.category or "",
         "owner": task.owner_user_id or "",
     }
-    user_prompt = _build_edit_user_prompt(current=current, reply_text=text)
+    user_prompt = _build_edit_user_prompt(
+        current=current,
+        reply_text=text,
+        known_employees=known_employees,
+    )
     try:
         result = backend.call_tool(
             system_prompt=(
@@ -597,9 +646,24 @@ def apply_edit_reply_ex(
         return None, {}
     _ensure_can_edit(task, actor)
 
+    # FR-CR-05-14 — pass the team registry through so the LLM can
+    # resolve owner-by-name in the reply («ответственный Андрей
+    # Кузьминых» → uid). Wrapped in try/except so a missing /
+    # not-yet-migrated registry doesn't break the Edit flow.
+    known_employees: list[dict] = []
+    try:
+        from app.services.team_members import as_known_employees
+
+        known_employees = as_known_employees(session)
+    except Exception as e:  # noqa: BLE001
+        log.info("telegram_edit_team_registry_unavailable", error=str(e))
+
     if llm_backend is not None:
         payload = parse_edit_with_llm(
-            task=task, reply_text=reply_text, backend=llm_backend
+            task=task,
+            reply_text=reply_text,
+            backend=llm_backend,
+            known_employees=known_employees,
         )
     else:
         payload = parse_edit_payload(reply_text)
@@ -627,13 +691,55 @@ def apply_edit_reply_ex(
     if "category" in payload:
         task.category = payload["category"] or None
     if "owner" in payload:
-        new_owner = (payload["owner"] or "").strip() or None
+        new_owner_raw = (payload["owner"] or "").strip() or None
+        # FR-CR-05-14 — when the LLM resolved the owner against the
+        # registry, the value is already an id from
+        # known_employees. When the user typed a name and the LLM
+        # didn't resolve, the value comes back as the name itself
+        # — try a local registry match by name first; only commit
+        # the raw text if the registry has nothing.
+        new_owner = new_owner_raw
+        new_display: str | None = new_owner_raw
+        if new_owner_raw and known_employees:
+            valid_ids = {e.get("slack_user_id") for e in known_employees}
+            if new_owner_raw in valid_ids:
+                # LLM round-tripped a real id — backfill display
+                # name from the registry row.
+                for e in known_employees:
+                    if e.get("slack_user_id") == new_owner_raw:
+                        new_display = (
+                            e.get("display_name")
+                            or e.get("real_name")
+                            or new_owner_raw
+                        )
+                        break
+            else:
+                # LLM gave a name. Try to resolve locally before
+                # committing. Match against display / real name.
+                needle = new_owner_raw.lstrip("@").lower()
+                resolved = False
+                for e in known_employees:
+                    disp = (e.get("display_name") or "").lstrip("@").lower()
+                    real = (e.get("real_name") or "").lower()
+                    if needle == disp or needle == real:
+                        new_owner = e.get("slack_user_id")
+                        new_display = (
+                            e.get("display_name") or e.get("real_name") or new_owner
+                        )
+                        resolved = True
+                        break
+                if not resolved:
+                    # Keep the typed text on display_name so the
+                    # operator's intent is visible; clear the id
+                    # so we don't end up with a bogus DM target.
+                    new_owner = None
+                    new_display = new_owner_raw
         task.owner_user_id = new_owner
         # Reset display so the card reflects the new owner — the
         # renderer prefers `owner_display_name` over `owner_user_id`
         # and an unchanged display would cause a silent
         # «message is not modified» on every refresh.
-        task.owner_display_name = new_owner
+        task.owner_display_name = new_display
 
     # Drop the "owner_assumed" flag — once a human has explicitly
     # edited the task, we no longer hedge the owner label.
@@ -798,6 +904,7 @@ def parse_draft_edit_with_llm(
     draft: "ActionDraft",
     reply_text: str,
     backend: Any | None,
+    known_employees: list[dict] | None = None,
 ) -> dict[str, str]:
     """Free-form parse for Edit-on-draft. Mirrors
     :func:`parse_edit_with_llm` but reads the «current values» from
@@ -829,7 +936,11 @@ def parse_draft_edit_with_llm(
         "category": payload.get("category") or "",
         "owner": payload.get("owner_user_id") or "",
     }
-    user_prompt = _build_edit_user_prompt(current=current, reply_text=text)
+    user_prompt = _build_edit_user_prompt(
+        current=current,
+        reply_text=text,
+        known_employees=known_employees,
+    )
     try:
         result = backend.call_tool(
             system_prompt=(
@@ -877,8 +988,19 @@ def apply_edit_draft_reply(
     if actor != author and not is_admin(actor):
         raise NotAuthorised("Only the author or an admin can edit this draft.")
 
+    known_employees: list[dict] = []
+    try:
+        from app.services.team_members import as_known_employees
+
+        known_employees = as_known_employees(session)
+    except Exception as e:  # noqa: BLE001
+        log.info("telegram_draft_edit_team_registry_unavailable", error=str(e))
+
     parsed = parse_draft_edit_with_llm(
-        draft=draft, reply_text=reply_text, backend=llm_backend
+        draft=draft,
+        reply_text=reply_text,
+        backend=llm_backend,
+        known_employees=known_employees,
     )
     if not parsed:
         return draft, {}

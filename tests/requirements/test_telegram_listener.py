@@ -647,3 +647,104 @@ def test_listener_disabled_when_token_empty():
         IntentClassification(intent=IntentType.no_action, confidence=0.0)
     ))
     assert listener.enabled is False
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-14 — voice messages in pending replies
+# --------------------------------------------------------------------------- #
+
+
+def test_maybe_transcribe_voice_returns_text_for_text_message():
+    """FR-CR-05-14 — when the reply is plain text, transcription is
+    skipped (the early-return guard). The shortcut keeps the
+    common case fast."""
+    from app.telegram_ingest.reader import TelegramSourceMessage
+
+    listener = TelegramListener(token="123:abc", ingest=_make_ingest(
+        IntentClassification(intent=IntentType.no_action, confidence=0.0)
+    ))
+    msg = TelegramSourceMessage(
+        chat_id=1, message_id=2, text="Hello world", user_id=42, raw={}
+    )
+    assert listener._maybe_transcribe_voice(msg) == "Hello world"
+
+
+def test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio():
+    """A reply with neither text nor voice / audio attachment returns
+    empty — caller can nudge the user."""
+    from app.telegram_ingest.reader import TelegramSourceMessage
+
+    listener = TelegramListener(token="123:abc", ingest=_make_ingest(
+        IntentClassification(intent=IntentType.no_action, confidence=0.0)
+    ))
+    msg = TelegramSourceMessage(
+        chat_id=1, message_id=2, text="", user_id=42, raw={}
+    )
+    assert listener._maybe_transcribe_voice(msg) == ""
+
+
+def test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes(monkeypatch):
+    """When the reply has a `voice` attachment, the listener pulls
+    the bytes via the sender's `download_file_bytes` and feeds them
+    to `transcribe_bytes`. Returns the resulting text."""
+    from app.config import get_settings
+    from app.telegram_ingest.reader import TelegramSourceMessage
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    try:
+        listener = TelegramListener(token="123:abc", ingest=_make_ingest(
+            IntentClassification(intent=IntentType.no_action, confidence=0.0)
+        ))
+        # Stub the sender's download path.
+        listener._sender.download_file_bytes = lambda *, file_id: b"OGG-FAKE-BYTES"  # type: ignore[method-assign]
+
+        captured: dict = {}
+
+        def fake_transcribe(**kw):
+            captured.update(kw)
+            return "ответственный Андрей Кузьминых"
+
+        monkeypatch.setattr(
+            "app.services.transcription.transcribe_bytes", fake_transcribe
+        )
+        msg = TelegramSourceMessage(
+            chat_id=1, message_id=2, text="", user_id=42,
+            raw={"voice": {"file_id": "FILE-X", "duration": 3, "mime_type": "audio/ogg"}},
+        )
+        text = listener._maybe_transcribe_voice(msg)
+        assert text == "ответственный Андрей Кузьминых"
+        assert captured["audio_bytes"] == b"OGG-FAKE-BYTES"
+        assert captured["mimetype"] == "audio/ogg"
+        assert captured["openai_api_key"] == "sk-test"
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_maybe_transcribe_voice_skips_when_openai_key_missing(monkeypatch):
+    """No OPENAI_API_KEY → don't even try to download. Empty result."""
+    from app.config import get_settings
+    from app.telegram_ingest.reader import TelegramSourceMessage
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        listener = TelegramListener(token="123:abc", ingest=_make_ingest(
+            IntentClassification(intent=IntentType.no_action, confidence=0.0)
+        ))
+        called = {"download": False}
+
+        def must_not_call(**kw):
+            called["download"] = True
+            return b"x"
+
+        listener._sender.download_file_bytes = must_not_call  # type: ignore[method-assign]
+        msg = TelegramSourceMessage(
+            chat_id=1, message_id=2, text="", user_id=42,
+            raw={"voice": {"file_id": "F"}},
+        )
+        assert listener._maybe_transcribe_voice(msg) == ""
+        assert called["download"] is False
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]

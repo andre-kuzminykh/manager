@@ -743,6 +743,59 @@ class TelegramListener:
             )
         return None
 
+    def _maybe_transcribe_voice(
+        self, msg: TelegramSourceMessage
+    ) -> str:
+        """FR-CR-05-14 — if the user replied with a voice or audio
+        message instead of text, download via Bot API + `getFile`
+        and transcribe via Whisper. Returns the (possibly empty)
+        text — caller decides what to do with «no usable input».
+
+        The TelegramSourceMessage already carries a stripped `text`
+        plus the raw update payload in `raw`. Voice messages have
+        `voice: {file_id, ...}`; audio uploads have `audio:
+        {file_id, mime_type, ...}`. Either field, or none.
+        """
+        text = (msg.text or "").strip()
+        if text:
+            return text
+        raw = msg.raw or {}
+        voice = raw.get("voice") if isinstance(raw, dict) else None
+        audio = raw.get("audio") if isinstance(raw, dict) else None
+        attachment = voice or audio
+        if not isinstance(attachment, dict):
+            return ""
+        file_id = attachment.get("file_id")
+        if not file_id:
+            return ""
+        from app.config import get_settings
+
+        settings = get_settings()
+        if not settings.openai_api_key:
+            log.info("telegram_voice_transcribe_skipped_no_openai_key")
+            return ""
+        audio_bytes = self._sender.download_file_bytes(file_id=file_id)
+        if not audio_bytes:
+            return ""
+        from app.services.transcription import transcribe_bytes
+
+        mime = attachment.get("mime_type") or "audio/ogg"
+        # Whisper expects a filename — Telegram voice uses .oga.
+        filename = "voice.ogg" if (voice is not None) else "audio"
+        transcript = transcribe_bytes(
+            audio_bytes=audio_bytes,
+            mimetype=mime,
+            filename=filename,
+            openai_api_key=settings.openai_api_key,
+        )
+        if transcript:
+            log.info(
+                "telegram_voice_transcribed",
+                preview=transcript[:120],
+                duration=attachment.get("duration"),
+            )
+        return (transcript or "").strip()
+
     def _handle_pending_reply(
         self,
         session: Session,
@@ -761,6 +814,27 @@ class TelegramListener:
         """
         actor = str(msg.user_id) if msg.user_id else None
         if not actor:
+            return
+
+        # FR-CR-05-14 — voice messages: transcribe upfront, then
+        # treat the transcript as the user's reply text. Mutates a
+        # local copy so downstream handlers see the resolved text.
+        reply_text = (msg.text or "").strip()
+        if not reply_text:
+            transcribed = self._maybe_transcribe_voice(msg)
+            if transcribed:
+                reply_text = transcribed
+        if not reply_text:
+            # Neither text nor a useful transcript — nudge the user
+            # so they know the silent voice didn't go through.
+            self._sender.send_message(
+                chat_id=msg.chat_id,
+                text=(
+                    "🎙 Не разобрал голос. Попробуй ещё раз или "
+                    "напиши текстом."
+                ),
+                reply_to_message_id=msg.message_id,
+            )
             return
 
         def _drop_prompt() -> None:
@@ -782,7 +856,7 @@ class TelegramListener:
                 session,
                 task_id=pending.task_id,
                 actor=actor,
-                reply_text=msg.text,
+                reply_text=reply_text,
             )
             if task is not None:
                 _drop_prompt()
@@ -801,7 +875,7 @@ class TelegramListener:
                 session,
                 task_id=pending.task_id,
                 actor=actor,
-                reply_text=msg.text,
+                reply_text=reply_text,
                 llm_backend=backend,
             )
             if task is None:
@@ -836,7 +910,7 @@ class TelegramListener:
                 session,
                 draft_id=pending.task_id,
                 actor=actor,
-                reply_text=msg.text,
+                reply_text=reply_text,
                 llm_backend=backend,
             )
             if draft is None:

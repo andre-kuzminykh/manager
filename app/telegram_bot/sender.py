@@ -272,6 +272,53 @@ class TelegramSender:
             },
         )
 
+    def get_file(self, *, file_id: str) -> dict[str, Any]:
+        """Resolve a Telegram `file_id` to its `file_path` so the
+        caller can fetch the bytes from
+        ``https://api.telegram.org/file/bot<TOKEN>/<file_path>``.
+        Used by the voice-message transcription path
+        (FR-CR-05-14)."""
+        return self._post("getFile", {"file_id": file_id})
+
+    def download_file_bytes(
+        self, *, file_id: str, max_bytes: int = 25 * 1024 * 1024
+    ) -> bytes | None:
+        """Two-step download: `getFile` + raw GET on the resolved
+        URL. Returns ``None`` when the API rejects the file_id, when
+        the file exceeds ``max_bytes`` (Whisper's per-request cap),
+        or on any transport error.
+
+        Telegram tokens are scoped to the bot, so every download is
+        authorised by virtue of using the bot URL form."""
+        if not self._enabled:
+            return None
+        info = self.get_file(file_id=file_id)
+        path = info.get("file_path") if isinstance(info, dict) else None
+        if not path:
+            return None
+        url = f"https://api.telegram.org/file/bot{self._token}/{path}"
+        import urllib.error
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(url, timeout=self._timeout) as resp:
+                content = resp.read(max_bytes + 1)
+        except urllib.error.URLError as e:
+            log.warning("telegram_download_failed", file_id=file_id, error=str(e))
+            return None
+        except Exception as e:  # noqa: BLE001
+            log.warning("telegram_download_failed", file_id=file_id, error=str(e))
+            return None
+        if len(content) > max_bytes:
+            log.warning(
+                "telegram_audio_too_large",
+                file_id=file_id,
+                bytes=len(content),
+                cap=max_bytes,
+            )
+            return None
+        return content
+
     def answer_callback_query(
         self, *, callback_query_id: str, text: str | None = None
     ) -> dict[str, Any]:

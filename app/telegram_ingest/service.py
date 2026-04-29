@@ -230,6 +230,42 @@ def _resolve_owner(
         )
 
 
+def _format_dialogue(
+    history: list[dict], source: TelegramSourceMessage, *, max_chars: int = 8_000
+) -> str:
+    """FR-CR-05-14 — render the adaptive context window + the
+    source message as a single human-readable transcript that fits
+    in a Sheet cell.
+
+    Lines look like ``<author>: <text>``. We sort by timestamp
+    (already chronological from the reader), include the source
+    message at the end, and trim from the head if the total breaks
+    `max_chars` (Sheets cell limit is 50k; 8k leaves room for
+    other columns + the operator's own notes)."""
+    lines: list[str] = []
+    for m in (history or []):
+        user = m.get("user") or "?"
+        text = (m.get("text") or "").replace("\n", " ").strip()
+        if not text:
+            continue
+        lines.append(f"{user}: {text}")
+    src_user = (
+        str(source.user_id) if source.user_id else (source.user_name or "?")
+    )
+    src_text = (source.text or "").replace("\n", " ").strip()
+    if src_text:
+        lines.append(f"{src_user}: {src_text}")
+    blob = "\n".join(lines)
+    if len(blob) <= max_chars:
+        return blob
+    # Trim from the head until it fits, keeping the source message
+    # tail intact (it's the most relevant line).
+    while len(blob) > max_chars and lines:
+        lines.pop(0)
+        blob = "\n".join(lines)
+    return blob[:max_chars]
+
+
 def _fallback_description(message: TelegramSourceMessage) -> str:
     """FR-CR-05-10 — deterministic stand-in description for drafts
     where the LLM had no meaningful context to summarise. Better
@@ -528,6 +564,14 @@ class TelegramIngestService:
                 created_by_slack_user_id=author_str,
                 slack_message_ts=str(message.message_id),
             )
+            # FR-CR-05-14 — adaptive-context dialogue → propagates
+            # to `task.extra["context_dialogue"]` via
+            # `create_task_from_draft`.
+            dialogue = _format_dialogue(window.history_before or [], message)
+            if dialogue:
+                payload = dict(draft.payload or {})
+                payload["context_dialogue"] = dialogue
+                draft.payload = payload
             task = create_task_from_draft(
                 session,
                 draft=draft,
@@ -742,6 +786,15 @@ class TelegramIngestService:
                     # messages, so Telegram refuses to forward them).
                     "source_text": (message.text or "")[:10_000],
                 }
+                # FR-CR-05-14 — adaptive-context dialogue copied
+                # onto the draft so `create_task_from_draft` can
+                # pass it through to `task.extra` for the Sheet's
+                # new `dialogue` column.
+                dialogue = _format_dialogue(
+                    window.history_before or [], message
+                )
+                if dialogue:
+                    payload["context_dialogue"] = dialogue
                 draft.payload = payload
                 out.append(draft)
             except Exception as e:  # noqa: BLE001

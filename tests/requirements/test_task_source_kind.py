@@ -32,7 +32,9 @@ def test_explicit_telegram_source_kind_persists(session):
 
 
 def test_source_kind_enum_values():
-    assert {k.value for k in TaskSourceKind} == {"slack", "telegram"}
+    """FR-CR-05-39 — enum gained `fireflies` for tasks extracted
+    from Fireflies meeting transcripts."""
+    assert {k.value for k in TaskSourceKind} == {"slack", "telegram", "fireflies"}
 
 
 def test_create_task_from_draft_routes_telegram_source_kind(session):

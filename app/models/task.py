@@ -41,16 +41,19 @@ class TaskStatus(str, enum.Enum):
 
 
 class TaskSourceKind(str, enum.Enum):
-    """FR-CR-04-26 — discriminator for the channel a task came from.
+    """FR-CR-04-26 / FR-CR-05-39 — discriminator for the channel
+    a task came from.
 
-    Both kinds share the same `source_conversation_id /
-    source_message_ts / source_thread_ts / source_permalink` fields:
-    for Slack they hold Slack identifiers, for Telegram they hold the
-    chat id / message id / reply-to id / a t.me link respectively.
+    For Slack the source_* fields hold Slack identifiers, for
+    Telegram the chat id / message id / reply-to id / a t.me
+    link, for Fireflies the meeting transcript id /
+    transcript-locator / participants list / a Fireflies share
+    URL.
     """
 
     slack = "slack"
     telegram = "telegram"
+    fireflies = "fireflies"
 
 
 class MeetingStatus(str, enum.Enum):

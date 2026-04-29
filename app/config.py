@@ -111,6 +111,57 @@ class Settings(BaseSettings):
         default=500, alias="VIEW_POLL_BATCH_SIZE"
     )
 
+    # FR-CR-05-39..47 — Fireflies pipeline.
+    fireflies_api_token: str = Field(
+        default="", alias="FIREFLIES_API_TOKEN"
+    )
+    fireflies_api_url: str = Field(
+        default="https://api.fireflies.ai/graphql",
+        alias="FIREFLIES_API_URL",
+    )
+    # Local volume for downloaded mp3 files. Mount this from the
+    # host so audio survives container restarts.
+    fireflies_audio_dir: str = Field(
+        default="/app/fireflies", alias="FIREFLIES_AUDIO_DIR"
+    )
+    # Optional Drive folder for the detailed-summary docs. Empty
+    # string ⇒ docs land in the service-account's My Drive root.
+    fireflies_docs_folder_id: str = Field(
+        default="", alias="FIREFLIES_DOCS_FOLDER_ID"
+    )
+    # Models — the user can override per cost / quality.
+    fireflies_summary_model: str = Field(
+        default="gpt-4o", alias="FIREFLIES_SUMMARY_MODEL"
+    )
+    fireflies_short_summary_model: str = Field(
+        default="gpt-4o-mini", alias="FIREFLIES_SHORT_SUMMARY_MODEL"
+    )
+    fireflies_tasks_model: str = Field(
+        default="gpt-4o-mini", alias="FIREFLIES_TASKS_MODEL"
+    )
+    fireflies_whisper_model: str = Field(
+        default="whisper-1", alias="FIREFLIES_WHISPER_MODEL"
+    )
+    # Listener-side periodic poll (mirrors VIEW_REALTIME_ENABLED
+    # for TG view).
+    fireflies_realtime_enabled: bool = Field(
+        default=False, alias="FIREFLIES_REALTIME_ENABLED"
+    )
+    fireflies_poll_interval_seconds: int = Field(
+        default=30, alias="FIREFLIES_POLL_INTERVAL_SECONDS"
+    )
+    fireflies_poll_batch_size: int = Field(
+        default=20, alias="FIREFLIES_POLL_BATCH_SIZE"
+    )
+    # Hard cap on the audio file size we'll download + Whisper
+    # (Whisper API has a 25 MB request cap; meetings can run
+    # longer than that as a single mp3 — we'd need to chunk in
+    # that case, which is not yet implemented).
+    fireflies_audio_max_bytes: int = Field(
+        default=25 * 1024 * 1024,
+        alias="FIREFLIES_AUDIO_MAX_BYTES",
+    )
+
     # Intent policy
     intent_confidence_high: float = Field(default=0.75, alias="INTENT_CONFIDENCE_HIGH")
     intent_confidence_low: float = Field(default=0.40, alias="INTENT_CONFIDENCE_LOW")

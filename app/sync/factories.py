@@ -28,6 +28,7 @@ from app.sync.google_auth import (
     build_google_credentials,
     load_service_account_credentials,
 )
+from app.sync.docs import DocsExportService, GOOGLE_SCOPES_DOCS
 from app.sync.sheets import SheetsPullService, SheetsSyncService
 from app.sync.tasks_api import GoogleTasksSyncService
 from app.sync.team_sheet import TeamSheetSync
@@ -100,6 +101,21 @@ def build_sheets_pull_factory(
             spreadsheet_id=settings.google_sheets_spreadsheet_id,
             sheet_name=settings.google_sheets_tab_name or "Main",
         )
+
+    return factory
+
+
+def build_docs_factory(
+    settings: Settings,
+) -> Callable[[], DocsExportService | None] | None:
+    """FR-CR-05-43 — factory for the Google Docs export. Used by
+    the Fireflies pipeline to dump the detailed summary into a
+    Doc named after the meeting."""
+    def factory() -> DocsExportService | None:
+        creds = _resolve_credentials(GOOGLE_SCOPES_DOCS)
+        if creds is None:
+            return None
+        return DocsExportService(credentials=creds)
 
     return factory
 

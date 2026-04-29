@@ -1407,6 +1407,58 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.39 — Fireflies meeting-recording pipeline (3rd source)
+
+Operator request: hook Fireflies up alongside Slack and
+Telegram so meeting recordings flow through the same task
+extraction loop. For each new transcript Fireflies hosts:
+
+  1. Download the mp3.
+  2. Whisper transcribe (`whisper-1`).
+  3. Detailed RU summary via gpt-4o, ≥3000 chars,
+     structured (МЕТА / КЛЮЧЕВЫЕ РЕШЕНИЯ / ОБСУЖДЕНИЕ /
+     СЛЕДУЮЩИЕ ШАГИ / ОТКРЫТЫЕ ВОПРОСЫ).
+  4. Export the detailed summary to a Google Doc named
+     after the meeting (`FIREFLIES_DOCS_FOLDER_ID` parent).
+  5. Short summary ≤2000 chars (TG-friendly), DM'd to every
+     `TELEGRAM_ADMIN_USER_IDS` recipient.
+  6. Task extraction with the team registry rendered into
+     the prompt as `known_employees` (name / role / notes —
+     same shape 13.31 uses for owner prompts). All extracted
+     tasks get `due_date=date.today()` and
+     `source_kind=fireflies`. Owner resolves through the
+     13.11 admin-fallback chain (LLM picks a uid → must
+     match `known_employees`; null / hallucinated ⇒ admin
+     uid).
+
+Each step writes its artefact onto a `meeting_recordings`
+row + flips a progress flag (`audio_downloaded` →
+`transcribed` → `detailed_summarised` → `doc_exported` →
+`short_summary_sent` → `tasks_extracted`). Re-running on a
+finished recording is a no-op (`skipped_reason=
+'already_processed'`). Per-step failures record `last_error`
+and abort the rest of the pipeline so the next run picks up
+where it crashed.
+
+Two ingest modes:
+
+  - **One-shot**: `python -m ops.migrate_fireflies --newest --limit 5`
+    pulls the last N transcripts and runs each through
+    `FirefliesPipeline.process_one`. Used for the initial
+    backfill / smoke test.
+  - **Real-time**: the Telegram listener polls the Fireflies
+    API every `FIREFLIES_POLL_INTERVAL_SECONDS` (default 30)
+    when `FIREFLIES_REALTIME_ENABLED=true`. Same code path,
+    same idempotency guarantees. Off by default.
+
+Fully gated behind `FIREFLIES_API_TOKEN`: empty token =
+disabled, no DB rows touched, `migrate_fireflies` exits 2,
+listener silently skips the poll. Migration `0018` adds
+`'fireflies'` to the `task_source_kind` enum (PostgreSQL
+`ALTER TYPE … ADD VALUE IF NOT EXISTS`) and creates the
+`meeting_recordings` table with the progress flags above
+plus a unique index on `fireflies_id`.
+
 #### 13.37 — Mark-Done click transitions immediately
 
 Old flow opened a force-reply «add an artifact OR `/skip`»

@@ -723,6 +723,59 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-39 — Fireflies meeting-recording pipeline (3rd source)
+
+Operator request: «мне надо подключить ещё один источник
+данных, помимо слака и телеграма — Fireflies». For each new
+recording:
+
+  1. Download the mp3 (Fireflies hosts it).
+  2. Whisper transcribe (`whisper-1`).
+  3. Detailed RU summary via gpt-4o (≥3000 chars,
+     structured: МЕТА / КЛЮЧЕВЫЕ РЕШЕНИЯ / ОБСУЖДЕНИЕ /
+     СЛЕДУЮЩИЕ ШАГИ / ОТКРЫТЫЕ ВОПРОСЫ).
+  4. Export the detailed summary to a Google Doc named
+     after the meeting (parent folder
+     `FIREFLIES_DOCS_FOLDER_ID`).
+  5. Short summary ≤2000 chars (TG-friendly), DM'd to every
+     `TELEGRAM_ADMIN_USER_IDS` recipient.
+  6. Task extraction via the same `record_intent`-style
+     OpenAI tool call, with the team registry rendered into
+     the prompt as `known_employees` (name / role / notes —
+     same shape FR-CR-05-31 uses for owner prompts). All
+     extracted tasks land with `due_date=date.today()`,
+     `source_kind=fireflies`, `is_current_week=True`. Owner
+     resolves through the FR-CR-05-09 admin-fallback chain.
+
+Each step writes its artefact onto a `meeting_recordings`
+row + flips a progress flag (`audio_downloaded` →
+`transcribed` → `detailed_summarised` → `doc_exported` →
+`short_summary_sent` → `tasks_extracted`). Re-running on a
+finished recording short-circuits with
+`skipped_reason='already_processed'`. Per-step failures
+record `last_error` and abort the rest of the pipeline so
+the next run picks up where it crashed.
+
+Two ingest modes:
+
+  - **One-shot**: `python -m ops.migrate_fireflies --newest --limit 5`.
+    Pulls the last N transcripts and runs each through
+    `FirefliesPipeline.process_one`. Used for the initial
+    backfill / smoke test.
+  - **Real-time**: the Telegram listener also polls the
+    Fireflies API every `FIREFLIES_POLL_INTERVAL_SECONDS`
+    (default 30) when `FIREFLIES_REALTIME_ENABLED=true`.
+    Reuses the same `process_one` code path. Off by
+    default; the operator flips the flag to opt in.
+
+Fully gated behind `FIREFLIES_API_TOKEN`: empty token =
+disabled, no DB rows touched, `migrate_fireflies` exits 2,
+listener silently skips the poll. Migration `0018` adds
+`'fireflies'` to the `task_source_kind` enum (PostgreSQL
+`ALTER TYPE … ADD VALUE IF NOT EXISTS`) + creates the
+`meeting_recordings` table with the progress flags above
+and a unique index on `fireflies_id`.
+
 #### FR-CR-05-37 — Mark-Done click transitions immediately
 
 The Mark Done button used to open a force-reply «artifact?»
@@ -3086,6 +3139,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
 | FR-CR-05-38  | manual visual verification — after an Edit reply the listener posts a fresh DM with the full rendered task card / widget body in context; the original card / widget is also edited in place by `refresh_card` / `refresh_draft_widgets` |
+| FR-CR-05-39  | `test_fireflies.py::test_client_disabled_when_token_empty` (empty `FIREFLIES_API_TOKEN` ⇒ client.enabled=False, list_transcripts=[]); `::test_client_parses_graphql_transcripts_payload` (GraphQL response → `FirefliesTranscript`, unix-millis date, attendee shapes, Bearer auth header); `::test_client_handles_empty_response` (empty GraphQL body degrades to []); `::test_pipeline_process_one_runs_every_step` (every step lands an artefact + flips its flag, audio file lands on disk, tasks created with `source_kind=fireflies` + `due_date=date.today()` + admin attribution); `::test_pipeline_idempotent_when_already_processed` (re-run returns `skipped_reason='already_processed'` and creates no new tasks); `::test_pipeline_admin_fallback_for_unresolved_owner` (LLM null/hallucinated owner ⇒ admin uid wins via FR-CR-05-09 fallback); `::test_truncate_caps_at_limit` + `::test_truncate_passthrough_when_short` (2000-char hard cap on short summary); `test_task_source_kind.py::test_source_kind_enum_values` (enum carries `slack`, `telegram`, `fireflies`) |
 | FR-CR-05-29  | `test_team_members.py::test_upsert_from_sheet_rows_merges_duplicates_by_unique_column` (operator edits one row to carry BOTH `telegram_user_id` AND `slack_user_id` ⇒ orphan row that previously owned one of those ids gets deleted; pull lands cleanly without `UniqueViolation`) |
 | FR-CR-05-28  | `test_telegram_listener.py::test_listener_runs_sheet_pulls_when_interval_elapsed` (first call after construction fires both pulls); `::test_listener_throttles_sheet_pulls_within_interval` (repeated calls inside the window are no-ops); `::test_listener_skips_sheet_pulls_when_interval_zero` (`SHEET_POLL_INTERVAL_SECONDS=0` disables the in-listener poll); `::test_listener_swallows_sheet_pull_errors` (transient HTTP errors don't break the listener) |
 | FR-CR-05-27  | `test_telegram_members.py::test_upsert_member_creates_team_row_for_new_user` (brand-new user observed ⇒ team_members row auto-created with all available fields, `active=True`); `::test_upsert_member_creates_inactive_team_row_for_bot_account` (auto-bot detection ⇒ `active=False` on creation); `test_team_members.py::test_team_sheet_push_appends_only_new_rows` (existing operator edits preserved; only DB rows missing from the sheet get appended); `::test_team_sheet_push_writes_full_table_when_sheet_empty` (first-time bootstrap writes header + body) |

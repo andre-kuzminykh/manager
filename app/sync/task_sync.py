@@ -9,10 +9,23 @@ Wired in once at app startup (`app/main.py`) and called from every
 handler that mutates a task (start, mark done, edit, cancel, delete).
 A module-level holder lets the handlers reach the syncer without
 threading it through every signature.
+
+Two flavours of «trigger a sync»:
+
+- :func:`sync_task` — fires immediately. Use AFTER the outer
+  ``session_scope()`` has committed, otherwise the syncer's own
+  fresh session won't see the task row.
+- :func:`schedule_sync_task` — defers via SQLAlchemy's
+  ``after_commit`` event so the sync runs only once the caller's
+  transaction is durable. Use FROM INSIDE a ``session_scope()``
+  (Telegram listener path, ``create_task_from_draft``).
 """
 from __future__ import annotations
 
 from typing import Callable
+
+from sqlalchemy import event
+from sqlalchemy.orm import Session
 
 from app.db import session_scope
 from app.logging_setup import get_logger
@@ -75,10 +88,17 @@ def set_active_syncer(syncer: TaskSyncer | None) -> None:
 
 
 def sync_task(task_id: int | None) -> None:
-    """Best-effort sync of `task_id` via the active syncer.
+    """Best-effort immediate sync of `task_id` via the active syncer.
 
     No-op when no syncer is registered (tests, dev runs without
     Google credentials, etc.). Never raises.
+
+    **Important:** the syncer opens its own ``session_scope`` to
+    re-read the task. If you call this *inside* an open transaction
+    that hasn't committed yet, the syncer's fresh session won't see
+    the new row and the call silently no-ops. From inside a
+    ``with session_scope()`` block use :func:`schedule_sync_task`
+    instead.
     """
     if task_id is None or _active is None:
         return
@@ -86,3 +106,39 @@ def sync_task(task_id: int | None) -> None:
         _active.sync(task_id)
     except Exception as e:  # noqa: BLE001
         log.warning("task_sync_unexpected_failure", task_id=task_id, error=str(e))
+
+
+def schedule_sync_task(session: Session, task_id: int | None) -> None:
+    """Defer :func:`sync_task` until ``session`` commits.
+
+    The caller stashes ids on ``session.info["_pending_sync_task_ids"]``
+    and we register a one-shot ``after_commit`` listener on the same
+    session that drains the list. After the outer ``session_scope``
+    commits and closes, the syncer's fresh ``session_scope()`` will
+    see the new row.
+
+    No-op when no syncer is registered. Idempotent within a session
+    (same id can be scheduled multiple times — we de-dup).
+    """
+    if task_id is None or _active is None:
+        return
+    pending: list[int] = session.info.setdefault("_pending_sync_task_ids", [])
+    if task_id in pending:
+        return
+    pending.append(task_id)
+
+    if session.info.get("_sync_after_commit_registered"):
+        return
+    session.info["_sync_after_commit_registered"] = True
+
+    @event.listens_for(session, "after_commit", once=True)
+    def _drain_after_commit(s: Session) -> None:  # noqa: ARG001 — sa signature
+        ids = session.info.pop("_pending_sync_task_ids", None) or []
+        session.info.pop("_sync_after_commit_registered", None)
+        for tid in ids:
+            try:
+                sync_task(tid)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "task_sync_after_commit_failure", task_id=tid, error=str(e)
+                )

@@ -41,7 +41,10 @@ from app.services import (
     SubscriptionService,
     TransitionService,
 )
-from app.sync.task_sync import sync_task as _sync_task_to_sheets
+from app.sync.task_sync import (
+    schedule_sync_task as _schedule_sync_task,
+    sync_task as _sync_task_to_sheets,
+)
 
 log = get_logger(__name__)
 
@@ -113,7 +116,7 @@ def handle_start(session: Session, *, task_id: int, actor: str) -> Task | None:
     except InvalidTransition as e:
         log.info("telegram_start_invalid_transition", task_id=task_id, err=str(e))
         return task
-    _sync_task_to_sheets(task_id)
+    _schedule_sync_task(session, task_id)
     return task
 
 
@@ -140,7 +143,7 @@ def handle_done(session: Session, *, task_id: int, actor: str) -> Task | None:
         )
     except InvalidTransition:
         return task
-    _sync_task_to_sheets(task_id)
+    _schedule_sync_task(session, task_id)
     return task
 
 
@@ -201,7 +204,7 @@ def apply_done_artifact_reply(
     except InvalidTransition:
         # Already done — keep the artifact we just stored.
         log.info("telegram_done_already_done", task_id=task_id)
-    _sync_task_to_sheets(task_id)
+    _schedule_sync_task(session, task_id)
     return task
 
 
@@ -233,7 +236,7 @@ def handle_cancel(session: Session, *, task_id: int, actor: str) -> Task | None:
         )
     except InvalidTransition:
         return task
-    _sync_task_to_sheets(task_id)
+    _schedule_sync_task(session, task_id)
     return task
 
 
@@ -266,7 +269,7 @@ def handle_delete(session: Session, *, task_id: int, actor: str) -> Task | None:
         )
     )
     session.flush()
-    _sync_task_to_sheets(task_id)
+    _schedule_sync_task(session, task_id)
     return task
 
 
@@ -634,7 +637,7 @@ def apply_edit_reply_ex(
         task.extra = extra or None
 
     session.flush()
-    _sync_task_to_sheets(task_id)
+    _schedule_sync_task(session, task_id)
 
     # FR-CR-05-02 — fan out an edit DM to every non-owner subscriber.
     if payload:
@@ -726,7 +729,7 @@ def handle_confirm_draft(
         if proc is not None:
             proc.task_id = task.id
 
-    _sync_task_to_sheets(task.id)
+    _schedule_sync_task(session, task.id)
     return task, draft
 
 

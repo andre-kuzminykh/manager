@@ -1383,6 +1383,30 @@ Result: every owner whose @-handle has been observed at least
 once — anywhere in either table — renders as a clickable
 `t.me/<handle>` link.
 
+#### 13.23 — Registry-canonical display, listener auto-enriches team_members
+
+> **As an operator** I want the same teammate to render with the
+> SAME name everywhere. «Артем» on one widget and «Артем
+> Соколов» on the next is confusing. And I shouldn't have to
+> manually fill in TG @-handles for everyone — the listener has
+> already seen those people send messages.
+
+Two improvements:
+
+**Registry display always wins.** When `_resolve_owner` matches
+the LLM-picked `owner_user_id` to a `team_members` row, the
+registry's `display_name` / `real_name` overrides whatever name
+fragment the LLM extracted. The Sheet is the source of truth;
+all cards for that teammate render identically.
+
+**Listener auto-enriches blank registry fields.** Every observed
+message goes through `upsert_member`, which now also updates
+the matching `team_members` row when its `telegram_username` /
+`real_name` are blank. Operator-edited values are NEVER
+overwritten — only nulls get filled. The registry self-completes
+from natural chat traffic within minutes of the bot being added
+to a chat.
+
 
 ---
 

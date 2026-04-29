@@ -790,6 +790,47 @@ def test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin(
         get_settings.cache_clear()  # type: ignore[attr-defined]
 
 
+def test_resolve_owner_registry_display_wins_over_llm_short_form(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-21 — when the LLM picks an id that resolves to a
+    team_members row, the registry's canonical display ALWAYS wins
+    over the LLM-extracted display. Without this rule the same
+    teammate landed as «Артем» on one card and «Артем Соколов»
+    on another, depending on what fragment the source message
+    happened to use."""
+    from app.models import TeamMember
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(
+            title="x",
+            owner_user_id="97239970",      # LLM round-tripped the id
+            owner_display_name="Артем",   # but extracted only first name
+        ),
+    )
+    service = _make_service(classification)
+    msg = TelegramSourceMessage(
+        chat_id=-100, message_id=1, text="x", user_id=9999,
+    )
+    with SessionFactory() as s:
+        s.add(
+            TeamMember(
+                real_name="Артем Соколов",
+                telegram_user_id=97239970,
+                telegram_username=None,
+                active=True,
+            )
+        )
+        s.flush()
+        task = service.process_one(s, msg)
+        s.commit()
+        # Registry's «Артем Соколов» wins over LLM's «Артем».
+        assert task.owner_user_id == "97239970"
+        assert task.owner_display_name == "Артем Соколов"
+
+
 def test_resolve_owner_keeps_real_team_member(
     patched_session_scope, SessionFactory, monkeypatch
 ):

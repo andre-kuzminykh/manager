@@ -15,6 +15,101 @@ from app.services.telegram_members import (
 )
 
 
+def test_upsert_member_enriches_sparse_team_members_row(session):
+    """FR-CR-05-21 — when the listener observes a message from a
+    user who already has a `team_members` row but the row's TG
+    fields are blank (auto-seeded sparse, or operator hasn't
+    filled them yet), the observation populates the missing
+    fields: `telegram_username` and `real_name`. Operator-edited
+    values are NEVER overwritten."""
+    from app.models import TeamMember
+
+    session.add(
+        TeamMember(
+            telegram_user_id=97239970,
+            telegram_username=None,
+            real_name=None,
+            active=True,
+        )
+    )
+    session.flush()
+
+    upsert_member(
+        session,
+        chat_id=-100,
+        user_id=97239970,
+        username="artem_sokolov",
+        first_name="Артем",
+        last_name="Соколов",
+    )
+    session.flush()
+
+    row = (
+        session.query(TeamMember)
+        .filter(TeamMember.telegram_user_id == 97239970)
+        .first()
+    )
+    assert row.telegram_username == "artem_sokolov"
+    assert row.real_name == "Артем Соколов"
+
+
+def test_upsert_member_does_not_overwrite_operator_edits(session):
+    """Operator-edited values (a non-empty `real_name` or
+    `telegram_username`) MUST be preserved. Auto-enrich fills
+    BLANK fields only."""
+    from app.models import TeamMember
+
+    session.add(
+        TeamMember(
+            telegram_user_id=97239970,
+            telegram_username="custom_handle",
+            real_name="Артем Соколов - CEO",
+            active=True,
+        )
+    )
+    session.flush()
+
+    upsert_member(
+        session,
+        chat_id=-100,
+        user_id=97239970,
+        username="artem_sokolov",   # would clobber — must NOT
+        first_name="Артем",
+        last_name="Соколов",
+    )
+    session.flush()
+
+    row = (
+        session.query(TeamMember)
+        .filter(TeamMember.telegram_user_id == 97239970)
+        .first()
+    )
+    assert row.telegram_username == "custom_handle"
+    assert row.real_name == "Артем Соколов - CEO"
+
+
+def test_upsert_member_no_team_row_is_a_noop(session):
+    """A user with no `team_members` row (never seeded) gets
+    written to `telegram_chat_members` only — `upsert_member`
+    must NOT create a phantom team row."""
+    from app.models import TeamMember
+
+    upsert_member(
+        session,
+        chat_id=-100,
+        user_id=99999999,
+        username="nobody",
+        first_name="Nobody",
+    )
+    session.flush()
+    rows = (
+        session.query(TeamMember)
+        .filter(TeamMember.telegram_user_id == 99999999)
+        .all()
+    )
+    assert rows == []
+
+
 def test_upsert_member_inserts_new_row(session):
     upsert_member(
         session,

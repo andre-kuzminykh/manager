@@ -39,6 +39,48 @@ from app.models import TelegramChatMember
 log = get_logger(__name__)
 
 
+def _enrich_team_member_row(
+    session: Session,
+    *,
+    user_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+) -> None:
+    """FR-CR-05-21 — opportunistic backfill on the cross-channel
+    `team_members` row for ``user_id``. Only fills BLANK fields —
+    operator-edited values on the Sheet are never overwritten.
+
+    Wrapped in try/except so a missing migration in a stale test
+    fixture doesn't break the listener tick.
+    """
+    try:
+        from app.models import TeamMember as _TM
+
+        row = (
+            session.query(_TM)
+            .filter(_TM.telegram_user_id == int(user_id))
+            .first()
+        )
+        if row is None:
+            return
+        changed = False
+        if (not row.telegram_username) and username:
+            row.telegram_username = username
+            changed = True
+        if not row.real_name:
+            full = " ".join(
+                p for p in (first_name, last_name) if p
+            ).strip() or None
+            if full:
+                row.real_name = full
+                changed = True
+        if changed:
+            session.flush()
+    except Exception as e:  # noqa: BLE001
+        log.info("team_member_enrich_skipped", error=str(e))
+
+
 def upsert_member(
     session: Session,
     *,
@@ -97,6 +139,13 @@ def upsert_member(
             set_=update_set,
         )
         session.execute(stmt)
+        _enrich_team_member_row(
+            session,
+            user_id=int(user_id),
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+        )
         return
 
     # Generic fallback (SQLite tests). Flush pending writes first
@@ -119,6 +168,13 @@ def upsert_member(
             )
         )
         session.flush()
+        _enrich_team_member_row(
+            session,
+            user_id=int(user_id),
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+        )
         return
     if username is not None:
         existing.username = username
@@ -130,6 +186,13 @@ def upsert_member(
         existing.has_started_bot = True
     existing.last_seen_at = now
     session.flush()
+    _enrich_team_member_row(
+        session,
+        user_id=int(user_id),
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
+    )
 
 
 def list_members_for_chat(

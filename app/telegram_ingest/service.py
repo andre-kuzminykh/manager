@@ -179,14 +179,26 @@ def _resolve_owner(
             td.owner_user_id = None
             td.owner_display_name = None
         else:
-            # Fill in display_name from the registry when blank, so
-            # the card renders something readable.
-            if not td.owner_display_name and known_employees:
+            # FR-CR-05-21 — when the id matches a registry row, the
+            # registry's display ALWAYS wins over the LLM-extracted
+            # display. Otherwise the same teammate landed as «Артем»
+            # on one card and «Артем Соколов» on another, depending
+            # on what fragment the source message used. The Sheet
+            # is the operator's source of truth.
+            if known_employees:
                 for e in known_employees:
                     if e.get("slack_user_id") == td.owner_user_id:
-                        td.owner_display_name = (
-                            e.get("display_name") or td.owner_user_id
+                        canonical = (
+                            e.get("display_name") or e.get("real_name")
                         )
+                        if canonical and canonical != td.owner_user_id:
+                            td.owner_display_name = canonical
+                        elif not td.owner_display_name:
+                            td.owner_display_name = (
+                                e.get("display_name")
+                                or e.get("real_name")
+                                or td.owner_user_id
+                            )
                         break
             return
 

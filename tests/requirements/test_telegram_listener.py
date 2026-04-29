@@ -1058,3 +1058,99 @@ def test_maybe_transcribe_voice_skips_when_openai_key_missing(monkeypatch):
         assert called["download"] is False
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-44 — top-level voice / audio capture in DM
+# --------------------------------------------------------------------------- #
+
+
+def test_listener_tick_transcribes_voice_dm_and_creates_task(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """A voice message in a private DM (NOT a reply to a prompt)
+    used to fall through with `text=""` and silently no-op. The
+    listener now transcribes via Whisper and feeds the transcript
+    into the ingest pipeline as if it were a normal text capture."""
+    from app.config import get_settings
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        classification = IntentClassification(
+            intent=IntentType.create_task,
+            confidence=0.9,
+            task=TaskDraft(title="купить молоко"),
+            reasoning="r",
+        )
+        listener = _make_listener(
+            classification,
+            updates_per_call=[
+                [
+                    {
+                        "update_id": 200,
+                        "message": {
+                            "message_id": 1,
+                            "chat": {"id": 7, "type": "private"},
+                            "from": {"id": 1},
+                            "voice": {"file_id": "F", "duration": 2},
+                            "date": 0,
+                        },
+                    }
+                ]
+            ],
+        )
+        # Stub the audio download + Whisper.
+        listener._sender.download_file_bytes = lambda *, file_id: b"OGG"  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "app.services.transcription.transcribe_bytes",
+            lambda **kw: "купить молоко",
+        )
+
+        report = listener.tick()
+        assert report.tasks_created == 1
+        with SessionFactory() as s:
+            t = s.query(Task).first()
+            assert t is not None
+            assert "молок" in (t.title or "").lower()
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_listener_tick_voice_dm_no_transcript_sends_nudge(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """If the voice can't be transcribed (no key, empty bytes, etc.)
+    AND the chat is a private DM, the listener tells the user
+    explicitly so they don't think the bot ate their message."""
+    from app.config import get_settings
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        listener = _make_listener(
+            IntentClassification(intent=IntentType.no_action, confidence=0.0),
+            updates_per_call=[
+                [
+                    {
+                        "update_id": 300,
+                        "message": {
+                            "message_id": 1,
+                            "chat": {"id": 7, "type": "private"},
+                            "from": {"id": 1},
+                            "voice": {"file_id": "F"},
+                            "date": 0,
+                        },
+                    }
+                ]
+            ],
+        )
+        sent: list[dict] = []
+        listener._sender.send_message = lambda **kw: sent.append(kw) or {"message_id": 1}  # type: ignore[method-assign]
+
+        report = listener.tick()
+        assert report.tasks_created == 0
+        nudge = sent[-1]
+        assert "Не разобрал голос" in nudge["text"]
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]

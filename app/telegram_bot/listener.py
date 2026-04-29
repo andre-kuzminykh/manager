@@ -678,6 +678,44 @@ class TelegramListener:
                     continue
 
                 try:
+                    # FR-CR-05-44 — top-level voice / audio capture.
+                    # The Edit/Done reply path (above) already
+                    # transcribes via Whisper; without this branch a
+                    # voice message in a private DM that's NOT a
+                    # reply to a prompt would fall through with
+                    # `msg.text == ""` and hit `process_all` /
+                    # `prepare_drafts` as a silent no-op (or a
+                    # downstream crash). We transcribe in-place and
+                    # rebuild the message dataclass with the text
+                    # filled in so the rest of the pipeline sees a
+                    # normal text capture.
+                    if not (msg.text or "").strip():
+                        transcribed = self._maybe_transcribe_voice(msg)
+                        if transcribed:
+                            from dataclasses import replace as _replace
+
+                            msg = _replace(msg, text=transcribed)
+                        elif msg.is_private:
+                            # Private DM, no text and no transcript
+                            # — be polite, tell the user explicitly
+                            # so they don't think the bot ate their
+                            # voice silently.
+                            try:
+                                self._sender.send_message(
+                                    chat_id=msg.chat_id,
+                                    text=(
+                                        "🎙 Не разобрал голос. "
+                                        "Попробуй ещё раз или напиши "
+                                        "текстом."
+                                    ),
+                                    reply_to_message_id=msg.message_id,
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                log.info(
+                                    "telegram_voice_nudge_failed",
+                                    error=str(e),
+                                )
+                            continue
                     # FR-CR-04-32 ext: when the author *explicitly*
                     # @-mentioned a teammate, intent is unambiguous —
                     # skip the «Create this task?» widget and fall

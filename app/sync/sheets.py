@@ -40,11 +40,6 @@ _HEADER_ROW = [
     "updated_at",
     "deleted_at",
     "completion_artifact",
-    # FR-CR-05-14 — adaptive context window rendered as a
-    # plain-text «author: text» dialogue. Read from
-    # `task.extra["context_dialogue"]` populated at draft creation.
-    # Read-only from the sheet's perspective.
-    "dialogue",
 ]
 
 
@@ -84,7 +79,6 @@ def _task_row(task: Task, *, session: Session | None = None) -> list[str]:
     # (slack / telegram) so a glance at the sheet shows where each
     # task came from. Falls back to the enum's value as plain text.
     source_text = task.source_kind.value if task.source_kind else "slack"
-    dialogue = (task.extra or {}).get("context_dialogue") or ""
     return [
         str(task.id),
         task.title,
@@ -108,7 +102,6 @@ def _task_row(task: Task, *, session: Session | None = None) -> list[str]:
         task.updated_at.isoformat() if task.updated_at else "",
         task.deleted_at.isoformat() if task.deleted_at else "",
         task.completion_artifact or "",
-        dialogue,
     ]
 
 

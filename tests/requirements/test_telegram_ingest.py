@@ -318,6 +318,58 @@ def test_recent_in_chat_returns_empty_when_engine_unset():
     assert out == []
 
 
+def test_recent_in_chat_filters_by_chat_id_only(monkeypatch):
+    """FR-CR-05-15 — adaptive context must be drawn from the SAME
+    chat as the source message; mixing other chats' history would
+    pollute the LLM with unrelated discussions. The SQL ``WHERE``
+    clause carries `chat_id = :chat_id`, so cross-chat rows can't
+    leak through. Pinned by inspecting the rendered SQL the
+    reader emits."""
+    captured: dict = {}
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return iter(self._rows)
+
+        def keys(self):
+            return ("chat_id", "message_id", "text")
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            captured.setdefault("sql_strs", []).append(str(sql))
+            captured.setdefault("params_list", []).append(params)
+            return _FakeResult([])
+
+    class _FakeEngine:
+        def connect(self):
+            return _FakeConn()
+
+    reader = TelegramSourceReader(database_url="")
+    reader._engine = _FakeEngine()  # type: ignore[attr-defined]
+    reader._columns_cache = {"chat_id", "message_id", "text"}  # type: ignore[attr-defined]
+
+    reader.recent_in_chat(
+        chat_id=-100777, before_message_id=2000, max_chars=1000
+    )
+    # Every emitted SQL must carry the chat_id filter — anything
+    # else would be a cross-chat leak.
+    sql_blob = "\n".join(captured["sql_strs"])
+    assert "chat_id = :chat_id" in sql_blob
+    # And the parameter must be the chat we asked for.
+    assert any(
+        (p or {}).get("chat_id") == -100777 for p in captured["params_list"]
+    )
+
+
 def test_telegram_permalink_for_supergroup():
     msg = TelegramSourceMessage(
         chat_id=-1001234567890, message_id=99, text="x"

@@ -362,6 +362,44 @@ def test_draft_widget_text_drops_create_header_and_uses_emoji_only_priority(
     assert "2026-05-10" in text
 
 
+def test_draft_widget_text_includes_source_permalink_when_available(session):
+    """FR-CR-05-15 — widget shows a 🔗 line with the
+    `t.me/c/<chat>/<msg>` deeplink so the operator can jump back
+    to the original message."""
+    from app.telegram_bot.cards import _build_draft_widget_text
+
+    draft = _mk_proposed_draft(
+        session,
+        payload={
+            "title": "написать Андрею",
+            "_pending": {
+                "permalink": "https://t.me/c/2061886148/2981",
+                "source_chat_id": -1002061886148,
+                "source_message_id": 2981,
+            },
+        },
+    )
+    text = _build_draft_widget_text(draft)
+    assert "🔗" in text
+    assert "https://t.me/c/2061886148/2981" in text
+
+
+def test_draft_widget_text_omits_link_line_when_no_permalink(session):
+    """Private DMs and basic groups have no shareable URL — the
+    widget must NOT emit an empty `🔗 ` line in that case."""
+    from app.telegram_bot.cards import _build_draft_widget_text
+
+    draft = _mk_proposed_draft(
+        session,
+        payload={
+            "title": "x",
+            "_pending": {"permalink": None},
+        },
+    )
+    text = _build_draft_widget_text(draft)
+    assert "🔗" not in text
+
+
 def test_post_draft_confirmation_sends_only_widget_no_forward_no_quote(
     session, monkeypatch
 ):

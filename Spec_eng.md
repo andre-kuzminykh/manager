@@ -1236,15 +1236,38 @@ text → keep on `owner_display_name`, id cleared. Same plumbing
 for `parse_draft_edit_with_llm` / `apply_edit_draft_reply` so
 Edit-on-draft works the same way.
 
-**`dialogue` column in Tasks Sheet.** New 23rd column carries
-the FR-CR-05-09 adaptive-context window as a plain-text «author:
-text» transcript. Populated at draft creation by
-`_format_dialogue(history_before, source)` →
-`draft.payload["context_dialogue"]` →
-`task.extra["context_dialogue"]` via `create_task_from_draft`.
-Caps at 8 000 chars (Sheets cell limit is 50k; leaves room for
-other columns + operator notes). Read-only from the sheet's
-side — operator edits are ignored on pull.
+**`dialogue` column in Tasks Sheet.** *(Rolled back by 13.17 —
+operator reconsidered after the 50-message run: a full chat
+transcript in a Sheets cell was too noisy. Removed.)* Originally
+a 23rd column with the FR-CR-05-09 adaptive context rendered
+plain-text. The FR-CR-05-09 context window itself is still
+fed to the LLM through `history_before`; only the per-task
+sheet rendering was dropped.
+
+#### 13.17 — Source permalink on widget, dialogue column removed
+
+> **As an operator** I want a 🔗 link to the source message on
+> every widget so I can jump back to the chat in one tap. And
+> the full-dialogue column from 13.16 was overkill — drop it.
+
+Two follow-ups after the 50-message run.
+
+**🔗 source link on every widget.** `_build_draft_widget_text`
+appends a final `🔗 <permalink>` line when
+`draft.payload["_pending"]["permalink"]` is set. The deeplink
+is the same `t.me/c/<chat>/<msg>` URL the existing
+`_telegram_permalink` helper builds for supergroups; private
+chats / basic groups omit the line gracefully (no shareable
+URL form there).
+
+**Dialogue column removed.** `_HEADER_ROW` / `_task_row` are
+back to 22 columns. The `_format_dialogue` helper and the
+`task.extra["context_dialogue"]` write paths were removed too.
+
+**Same-chat context guarantee.** `recent_in_chat`'s SQL has
+always filtered by `chat_id = :chat_id`, so the LLM's adaptive
+window can never leak in unrelated chat history. Pinned by a
+test so a future refactor can't accidentally widen the query.
 
 
 ---

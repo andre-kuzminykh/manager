@@ -283,10 +283,13 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
         <priority-emoji> <b>title</b>
         📝 <description>
         👤 <owner> · 📅 <due>
+        🔗 <source link>
 
     Priority is rendered as a single emoji next to the title,
     with no «high» / «medium» word — the colour carries the
-    signal.
+    signal. The 🔗 line (FR-CR-05-15) carries the
+    ``t.me/c/<chat>/<msg>`` deeplink so the operator can jump
+    back to the original message in one tap.
     """
     payload = draft.payload or {}
     title = payload.get("title") or ""
@@ -294,6 +297,7 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
     priority = payload.get("priority") or "medium"
     due = payload.get("due_date") or ""
     description = payload.get("description") or ""
+    permalink = ((payload.get("_pending") or {}).get("permalink")) or ""
 
     priority_em = {
         "low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴",
@@ -309,6 +313,8 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
         meta.append(f"📅 {due}")
     if meta:
         lines.append(" · ".join(meta))
+    if permalink:
+        lines.append(f"🔗 {_escape_md(str(permalink))}")
     return "\n".join(lines)
 
 

@@ -96,17 +96,9 @@ def create_task_from_draft(
     except ValueError:
         source_kind = TaskSourceKind.slack
 
-    # FR-CR-05-14 — adaptive context dialogue carried on draft
-    # payload by the TG ingest gets copied onto `task.extra` so the
-    # Sheet sync can render it in the new `dialogue` column. Lets
-    # the operator see the conversation that produced the task
-    # without leaving the spreadsheet.
     extra: dict[str, Any] = {}
     if owner_assumed:
         extra["owner_assumed"] = True
-    dialogue = payload.get("context_dialogue")
-    if isinstance(dialogue, str) and dialogue.strip():
-        extra["context_dialogue"] = _cap(dialogue)
 
     task = Task(
         title=title,

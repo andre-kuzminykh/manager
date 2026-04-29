@@ -230,33 +230,19 @@ def test_pull_handles_empty_or_header_only_sheet(session):
     assert pull_header.pull(session) == (0, 0, 0)
 
 
-# --------------------------------------------------------------------------- #
-# FR-CR-05-14 — dialogue column
-# --------------------------------------------------------------------------- #
-
-
-def test_task_row_includes_dialogue_from_extra(session):
-    """`_task_row` reads the adaptive-context dialogue from
-    `task.extra["context_dialogue"]` and lays it as the last
-    column."""
+def test_task_row_does_not_include_dialogue_column(session):
+    """FR-CR-05-15 — operator dropped the «full chat dialogue in a
+    sheet cell» idea. The 23rd column is gone; pull / push are
+    back to the 22-column header."""
     from app.sync.sheets import _HEADER_ROW, _task_row
 
     t = _mk_task(
         session,
         title="x",
-        extra={"context_dialogue": "U1: давай отчёт\nU2: ок, к пятнице"},
+        extra={"context_dialogue": "should-be-ignored"},
     )
     row = _task_row(t, session=session)
-    # Column count matches header.
+    assert "dialogue" not in _HEADER_ROW
+    # 22 columns, last one is `completion_artifact`.
     assert len(row) == len(_HEADER_ROW)
-    # Last column is `dialogue`.
-    assert _HEADER_ROW[-1] == "dialogue"
-    assert row[-1] == "U1: давай отчёт\nU2: ок, к пятнице"
-
-
-def test_task_row_dialogue_empty_when_no_extra(session):
-    from app.sync.sheets import _task_row
-
-    t = _mk_task(session, title="x", extra=None)
-    row = _task_row(t, session=session)
-    assert row[-1] == ""
+    assert _HEADER_ROW[-1] == "completion_artifact"

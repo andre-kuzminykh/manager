@@ -1407,6 +1407,23 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.30 — Sheet pull auto-merges duplicate rows
+
+The auto-seed produces TWO team_members rows for many
+teammates: one from `chat_members` (TG id only) and one from
+Slack `employees` (Slack uid only). When the operator
+consolidates them on the Sheet by editing one row to carry
+BOTH ids, the previous `--pull` crashed on
+``UniqueViolation``.
+
+`upsert_from_sheet_rows` now detects this and deletes the
+orphan row whose UNIQUE column is being absorbed into the
+merge target. Operator's intent is to consolidate; the orphan
+is the row that's losing the merge.
+
+
+---
+
 #### 13.29 — Listener-driven periodic Sheet → DB poll
 
 13.13 documented bidirectional sync via cron, but the default

@@ -693,3 +693,62 @@ def test_upsert_from_sheet_rows_normalises_active_to_bool(session):
     upsert_from_sheet_rows(session, rows)
     actives = {m.real_name for m in list_active(session)}
     assert actives == {"A1", "A2", "A3", "A5"}
+
+
+def test_upsert_from_sheet_rows_merges_duplicates_by_unique_column(session):
+    """FR-CR-05-29 — the auto-seed often produces TWO rows for the
+    same teammate: one from `chat_members` (numeric TG id only)
+    and one from Slack `employees` (Slack uid only). The operator
+    consolidates them on the Sheet by editing one row to carry
+    BOTH ids. Without the merge logic, the pull crashes on
+    `UniqueViolation` because the OTHER row still owns that id.
+
+    Expected behaviour: when applying the update would conflict
+    on a UNIQUE column with a DIFFERENT row, that other row is
+    deleted (the operator is clearly merging) and the update
+    lands cleanly."""
+    # The two auto-seeded rows the operator wants to merge.
+    tg_only = TeamMember(
+        real_name="Andre",
+        telegram_user_id=222968032,
+        telegram_username=None,
+        slack_user_id=None,
+        active=True,
+    )
+    slack_only = TeamMember(
+        real_name="Andre",
+        telegram_user_id=None,
+        slack_user_id="U09LH2FGALC",
+        active=True,
+    )
+    session.add_all([tg_only, slack_only])
+    session.flush()
+    canonical_id = tg_only.id  # operator keeps this row
+
+    # Operator's edited Sheet row carries BOTH ids on the
+    # canonical row.
+    rows = [
+        [
+            str(canonical_id),
+            "Андрей Кузьминых",
+            "222968032",
+            "",                     # username still blank
+            "U09LH2FGALC",
+            "AI Lead",
+            "",
+            "true",
+            "",
+        ],
+    ]
+    updated, inserted = upsert_from_sheet_rows(session, rows)
+    assert (updated, inserted) == (1, 0)
+
+    # Orphan row (slack_only) is gone.
+    rows_left = list_active(session)
+    assert len(rows_left) == 1
+    survivor = rows_left[0]
+    assert survivor.id == canonical_id
+    assert survivor.real_name == "Андрей Кузьминых"
+    assert survivor.telegram_user_id == 222968032
+    assert survivor.slack_user_id == "U09LH2FGALC"
+    assert survivor.role == "AI Lead"

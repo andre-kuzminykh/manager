@@ -502,6 +502,14 @@ def upsert_from_sheet_rows(
 
     Empty-string cells are normalised to NULL. ``active`` parses
     truthy strings (`true`, `1`, `yes`, `да`).
+
+    FR-CR-05-29 — when the new values for ``telegram_user_id`` or
+    ``slack_user_id`` would conflict with a DIFFERENT row's
+    UNIQUE column, the operator is clearly consolidating
+    duplicates (e.g. an auto-seeded TG-only row + an auto-seeded
+    Slack-only row for the same teammate). The orphan row is
+    deleted so the merge lands instead of crashing on
+    ``UniqueViolation``.
     """
     updated = 0
     inserted = 0
@@ -533,6 +541,35 @@ def upsert_from_sheet_rows(
             notes=(as_dict.get("notes") or "").strip() or None,
             last_synced_at=now,
         )
+
+        # FR-CR-05-29 — clear any orphan row that owns one of the
+        # UNIQUE columns we're about to set on the target. The
+        # operator is consolidating; the orphan is the row that's
+        # losing the merge.
+        target_id = target.id if target is not None else None
+        if new_values["telegram_user_id"] is not None:
+            conflict = (
+                session.query(TeamMember)
+                .filter(
+                    TeamMember.telegram_user_id == new_values["telegram_user_id"]
+                )
+                .filter(TeamMember.id != target_id)
+                .first()
+            )
+            if conflict is not None:
+                session.delete(conflict)
+                session.flush()
+        if new_values["slack_user_id"]:
+            conflict = (
+                session.query(TeamMember)
+                .filter(TeamMember.slack_user_id == new_values["slack_user_id"])
+                .filter(TeamMember.id != target_id)
+                .first()
+            )
+            if conflict is not None:
+                session.delete(conflict)
+                session.flush()
+
         if target is None:
             session.add(TeamMember(**new_values))
             inserted += 1

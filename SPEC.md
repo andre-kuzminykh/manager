@@ -723,6 +723,71 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-10 — Cross-channel team registry + context-rich descriptions
+
+Quality follow-up to FR-CR-05-09 testing on real traffic. Three
+entangled changes that together turn each draft widget into a
+self-contained card with a real owner and real context.
+
+**1. Team registry as authoritative owner source.** New table
+`team_members` (migration `0017`) carries one row per teammate
+with both Telegram and Slack identity, role, email, active flag.
+Synced bidirectionally with the `Team` tab of the spreadsheet
+pointed to by `GOOGLE_TEAM_SHEETS_SPREADSHEET_ID` (falls back to
+the tasks spreadsheet when only one sheet is configured).
+
+The registry replaces «whoever is in the chat» as the owner-
+universe. `_known_members_for(chat_id)` now returns
+`team_members.active=True` UNION the per-chat
+`telegram_chat_members` rows (de-duped by id) — team-registry
+rows win because they carry the operator's curated display name /
+real name.
+
+A new owner-resolution pipeline (`_resolve_owner` in
+`app/telegram_ingest/service.py`) replaces the earlier ad-hoc
+chain. First-match-wins:
+
+  1. LLM-picked `owner_user_id` resolves to a registry row → keep,
+     fill display_name from the registry when missing.
+  2. LLM-picked `owner_display_name` resolves to a registry row by
+     name match → backfill `owner_user_id` from the row.
+  3. Otherwise the display_name is DROPPED (the «CEO Rosecliff»
+     killer — outsiders mentioned in chat but not on the team
+     never become owners), and we fall through.
+  4. Sender, but only when `_author_fallback_allowed` (FR-CR-05-09
+     rule: registry empty for this chat OR sender is in it).
+  5. Admin uid from `TELEGRAM_ADMIN_USER_IDS`. ALWAYS clobbers
+     `owner_display_name` to the admin's registry label so a
+     stale hint doesn't render alongside the admin's id.
+
+The `Team` sheet is operator-owned. CLI:
+`python -m ops.sync_team --seed --pull --push` does a one-shot
+auto-seed (from `telegram_chat_members` + `employees`) +
+bidirectional sync.
+
+**2. Context-rich descriptions.** The title prompt is taught to
+produce a 1-3 sentence description summarising who's involved,
+what was discussed upstream, and what concretely needs to
+happen — using the full adaptive-context window from FR-CR-05-09.
+A vague source like «хорошо! напишу ему» with prior context «надо
+ответить Андрею Соколову по сделке Acme — он спрашивал про SoW»
+now yields a description like «Андрей спрашивал про SoW по сделке
+Acme, нужно подготовить ответ.» rather than empty / null.
+
+When the LLM genuinely has nothing to summarise (one-liner with
+empty history), the ingest fills in a deterministic
+`📝 обсуждалось в <chat_title> · <YYYY-MM-DD HH:MM>` so the
+operator at least sees where the draft came from.
+
+**3. Drop the inline-quote / forward DMs.** With the rich
+description carrying context, the FR-CR-05-09 inline-quote
+fallback became redundant — the operator has everything they
+need on the widget itself. `post_draft_confirmation` now sends
+exactly ONE DM per recipient (the widget). `_build_source_quote`
+helper removed. Source text is still stashed on
+`draft.payload["_pending"]["source_text"]` for any future
+«show original» feature.
+
 #### FR-CR-05-09 — Adaptive chat context, admin-owner fallback, source forwards
 
 Quality follow-up to the first 100-message historical migration.
@@ -2149,6 +2214,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-06  | `test_task_dedup.py` (empty lookback short-circuits; missing backend falls open; LLM «duplicate» propagates with verified id; LLM-invented task id is nulled; LLM error is swallowed; done / soft-deleted tasks excluded from lookback; only open tasks reach the prompt); `test_units_support.py::test_task_draft_truncates_long_strings_to_10k` + `::test_task_draft_short_strings_pass_through` (schema cap); `test_telegram_ingest.py` integration paths exercise the gate via `_make_service` fakes |
 | FR-CR-05-07  | `test_telegram_members.py` (idempotent upsert, profile fields don't blank out on a None, `has_started_bot` stickiness, `members_as_known_employees` shape with @username / first+last / numeric-id fallback, per-chat isolation); migration `0016_telegram_chat_members.py`; listener-side write covered by the existing `test_telegram_listener.py` flows that exercise `_upsert_member_from_update` via `parse_update` (no separate test — the upsert is wrapped in a try/except so a missing migration in fixture mode never breaks ingest) |
 | FR-CR-05-08  | `test_telegram_bot.py::test_task_card_keyboard_start_is_owner_only` (Start visible only to owner; admin sees Edit/Delete + Subscribe but no Start; bystander sees only Subscribe), `::test_task_card_keyboard_for_owner_in_progress_shows_done_edit_cancel_delete`, `::test_task_card_keyboard_for_bystander_shows_subscribe_only`, `::test_task_card_keyboard_subscribe_toggles_to_unsubscribe`, `::test_task_card_keyboard_done_status_collapses_to_delete_only`, `::test_task_card_keyboard_does_not_show_cancel_anywhere`, `::test_task_card_keyboard_edit_and_delete_share_a_row` |
-| FR-CR-05-09  | `test_telegram_ingest.py::test_build_window_carries_history_before` (history_before threads through to the ContextWindow); `::test_process_all_falls_back_to_admin_when_owner_unresolved` (no LLM owner + sender is a non-member ⇒ owner = first admin from `TELEGRAM_ADMIN_USER_IDS`); `::test_process_all_keeps_real_member_sender_as_owner` (sender registered in chat-members ⇒ author fallback wins, no admin promotion); `::test_prepare_drafts_stashes_source_text_for_quote_fallback` (`_pending["source_text"]` populated for the inline-quote fallback); `test_telegram_cards.py::test_post_draft_confirmation_uses_inline_quote_when_forward_fails` (forwardMessage returns `{}` ⇒ a `<blockquote>`-wrapped HTML quote is sent before the widget); `test_intent_pipeline.py::test_detect_prompt_lists_status_reports_and_parroted_phrases_as_no_action` + `::test_title_prompt_teaches_imperative_rewrite_from_context` (prompt content pinned) |
+| FR-CR-05-09  | `test_telegram_ingest.py::test_build_window_carries_history_before` (history_before threads through to the ContextWindow); `::test_process_all_falls_back_to_admin_when_owner_unresolved` (no LLM owner + sender is a non-member ⇒ owner = first admin from `TELEGRAM_ADMIN_USER_IDS`); `::test_process_all_keeps_real_member_sender_as_owner` (sender registered in chat-members ⇒ author fallback wins, no admin promotion); `::test_prepare_drafts_stashes_source_text_for_quote_fallback` (`_pending["source_text"]` populated for the inline-quote fallback); `test_intent_pipeline.py::test_detect_prompt_lists_status_reports_and_parroted_phrases_as_no_action` + `::test_title_prompt_teaches_imperative_rewrite_from_context` (prompt content pinned) |
+| FR-CR-05-10  | `test_team_members.py` (read paths, prefer-telegram id selection, find-by helpers; `seed_from_chat_members` / `seed_from_slack_employees` idempotent + bot-skip; sheet round-trip headers, insert-then-update-by-id, match-by-tg-id-when-no-id, active-bool normalisation incl. `да` / `yes` / `1` and empty→true default); `test_telegram_ingest.py::test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin` (the «CEO Rosecliff» killer — unresolvable display_name dropped, owner = admin, display = admin's registry label); `::test_resolve_owner_keeps_real_team_member` (LLM-picked `owner_user_id` matching a registry row stays, display_name backfilled); `::test_resolve_owner_resolves_display_name_via_registry` (name-only LLM hint → registry lookup → numeric id); `::test_prepare_drafts_fills_in_fallback_description_when_llm_silent` («обсуждалось в <chat> · <YYYY-MM-DD HH:MM>» when LLM produced no description); `::test_prepare_drafts_keeps_llm_description_when_present` (real LLM description not clobbered); `test_telegram_cards.py::test_post_draft_confirmation_sends_only_widget_no_forward_no_quote` (FR-CR-05-09 inline-quote DM removed — widget itself carries context via description); `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` updated for «no forward» |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |
 | NFR-CR-04-2  | `test_nfr_01_05.py` (`test_nfr2_dedup_retry_from_slack_does_not_post_new_card`)                              |

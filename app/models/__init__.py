@@ -21,6 +21,7 @@ from app.models.task import (
     TaskStatusHistory,
     TaskSubscription,
 )
+from app.models.team import TeamMember
 from app.models.telegram import (
     ProcessedTelegramMessage,
     TelegramChatMember,
@@ -54,4 +55,5 @@ __all__ = [
     "TaskStatus",
     "TaskStatusHistory",
     "TaskSubscription",
+    "TeamMember",
 ]

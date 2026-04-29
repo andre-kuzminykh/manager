@@ -129,6 +129,121 @@ def _admin_fallback_owner_id() -> str | None:
     return admins[0] if admins else None
 
 
+def _admin_display_for(
+    admin_uid: str, known_employees: list[dict]
+) -> str | None:
+    """Look up the admin's friendly label from the registry so the
+    card shows `@andre_andreevich` rather than the raw numeric id."""
+    for e in known_employees or []:
+        if e.get("slack_user_id") == admin_uid:
+            return e.get("display_name") or admin_uid
+    return None
+
+
+def _resolve_owner(
+    td,
+    *,
+    known_employees: list[dict],
+    sender_user_id: str | None,
+    sender_user_name: str | None,
+    admin_uid: str | None,
+) -> None:
+    """FR-CR-05-10 — single owner-resolution pipeline applied to
+    each TaskDraft after the LLM stages have run.
+
+    The chain — first match wins:
+
+      1. LLM picked a `owner_user_id` AND it resolves to a row in
+         `known_employees` (the team registry + per-chat members).
+         Keep as-is; ensure `owner_display_name` is set from the
+         registry row when missing.
+      2. LLM gave only a `owner_display_name` that isn't in the
+         registry (the «CEO Rosecliff» case — outsider mentioned
+         in chat). Drop it entirely and fall through to admin.
+      3. Sender, but only when the registry is populated AND they
+         appear in it (FR-CR-05-09 author-fallback rule).
+      4. Admin uid from `TELEGRAM_ADMIN_USER_IDS`. ALWAYS clobber
+         `owner_display_name` to the admin's label — otherwise a
+         stale «CEO Rosecliff» from step 2 would render on the
+         card next to the admin's id.
+
+    Mutates `td` in place. Pass-through when nothing in the chain
+    matches (rare — only when no admins are configured AND the
+    LLM returned nothing AND the registry is empty)."""
+    valid_ids = {e.get("slack_user_id") for e in (known_employees or [])}
+
+    # Step 1 — keep an LLM-picked id only when it resolves.
+    if td.owner_user_id:
+        if known_employees and td.owner_user_id not in valid_ids:
+            # LLM hallucinated an id — drop it and re-run the chain.
+            td.owner_user_id = None
+            td.owner_display_name = None
+        else:
+            # Fill in display_name from the registry when blank, so
+            # the card renders something readable.
+            if not td.owner_display_name and known_employees:
+                for e in known_employees:
+                    if e.get("slack_user_id") == td.owner_user_id:
+                        td.owner_display_name = (
+                            e.get("display_name") or td.owner_user_id
+                        )
+                        break
+            return
+
+    # Step 2 — LLM returned only a display_name (no id) and it
+    # doesn't match any known team member. Drop it.
+    if td.owner_display_name and known_employees:
+        # `owner_display_name` may include `@`-prefix; normalise.
+        needle = td.owner_display_name.strip().lstrip("@").lower()
+        matched = False
+        for e in known_employees:
+            disp = (e.get("display_name") or "").strip().lstrip("@").lower()
+            real = (e.get("real_name") or "").strip().lower()
+            if needle and (needle == disp or needle == real):
+                td.owner_user_id = e.get("slack_user_id")
+                td.owner_display_name = e.get("display_name") or td.owner_display_name
+                matched = True
+                break
+        if not matched:
+            # «CEO Rosecliff» — outsider; drop the hint entirely.
+            td.owner_display_name = None
+
+    if td.owner_user_id:
+        return
+
+    # Step 3 — sender fallback (only when allowed by FR-CR-05-09 rule).
+    if _author_fallback_allowed(
+        sender_user_id, known_employees=known_employees
+    ):
+        td.owner_user_id = sender_user_id
+        if not td.owner_display_name and sender_user_name:
+            td.owner_display_name = sender_user_name
+        return
+
+    # Step 4 — admin fallback. Always clobber display_name so a
+    # stray hint from the LLM doesn't end up rendered next to the
+    # admin's id.
+    if admin_uid:
+        td.owner_user_id = admin_uid
+        td.owner_display_name = (
+            _admin_display_for(admin_uid, known_employees) or admin_uid
+        )
+
+
+def _fallback_description(message: TelegramSourceMessage) -> str:
+    """FR-CR-05-10 — deterministic stand-in description for drafts
+    where the LLM had no meaningful context to summarise. Better
+    than an empty `📝` field — gives the operator chat name + date
+    so they can find the original conversation manually."""
+    chat_label = message.chat_title or f"chat {message.chat_id}"
+    when = (
+        message.sent_at.strftime("%Y-%m-%d %H:%M")
+        if message.sent_at
+        else "—"
+    )
+    return f"обсуждалось в {chat_label} · {when}"
+
+
 def _author_fallback_allowed(
     user_id: str | None, *, known_employees: list[dict]
 ) -> bool:
@@ -179,17 +294,50 @@ def _telegram_permalink(msg: TelegramSourceMessage) -> str | None:
 
 
 def _known_members_for(session: Session, *, chat_id: int) -> list[dict[str, str]]:
-    """Wrap the FR-CR-05-07 members service in a try/except so a
-    schema-not-yet-migrated environment (e.g. a stale test fixture
-    or a brand-new VM) doesn't crash the ingest. Failure → empty
-    list, classifier falls through to no-known-employees mode."""
+    """Build the LLM owner-stage candidate list as the UNION of:
+
+      - FR-CR-05-10 cross-channel team registry (`team_members`) —
+        the authoritative directory the operator maintains via the
+        `Team` Google Sheet. Active rows only.
+      - FR-CR-05-07 per-chat members observed in this chat
+        (`telegram_chat_members`) — hint-only fallback so we don't
+        regress to «known nobody» on a fresh deploy where the team
+        sheet hasn't been seeded.
+
+    De-duped by `slack_user_id` (the opaque id field that carries
+    either a numeric TG user_id or a Slack uid) — when the same
+    person appears in both sources, the team-registry row wins
+    because it carries the operator's curated `display_name` /
+    `real_name`.
+
+    Wrapped in a try/except so a missing migration (test fixture
+    without the new tables) drops back to «no known employees»
+    rather than aborting the ingest."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    try:
+        from app.services.team_members import as_known_employees
+
+        for row in as_known_employees(session):
+            sid = row.get("slack_user_id")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            out.append(row)
+    except Exception as e:  # noqa: BLE001
+        log.info("telegram_team_registry_unavailable", error=str(e))
     try:
         from app.services.telegram_members import members_as_known_employees
 
-        return members_as_known_employees(session, chat_id=chat_id)
+        for row in members_as_known_employees(session, chat_id=chat_id):
+            sid = row.get("slack_user_id")
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            out.append(row)
     except Exception as e:  # noqa: BLE001
         log.info("telegram_known_members_unavailable", error=str(e))
-        return []
+    return out
 
 
 class TelegramIngestService:
@@ -293,37 +441,22 @@ class TelegramIngestService:
             )
             return []
 
-        # FR-CR-04-30 + FR-CR-05-09 — owner fallback chain:
-        #
-        # 1. LLM-resolved owner (already on the draft) → win.
-        # 2. Sender, but ONLY when they're a registered chat member
-        #    (FR-CR-05-07). A non-member sender is typically a bot
-        #    account or a forwarded post; auto-assigning to them
-        #    produces the «CEO_office1 bot owns this task» bug.
-        # 3. First admin from TELEGRAM_ADMIN_USER_IDS — same fallback
-        #    the listener already used for DM delivery.
         admin_uid = _admin_fallback_owner_id()
+        fallback_desc = _fallback_description(message)
         for td in classification.tasks:
-            if not td.owner_user_id:
-                if _author_fallback_allowed(
-                    str(message.user_id) if message.user_id else None,
-                    known_employees=known_employees,
-                ):
-                    td.owner_user_id = str(message.user_id)
-                    if not td.owner_display_name and message.user_name:
-                        td.owner_display_name = message.user_name
-                elif admin_uid:
-                    td.owner_user_id = admin_uid
-                    if not td.owner_display_name:
-                        # Look up the admin's display name from the
-                        # chat-members registry so the card shows
-                        # «@andre_andreevich» rather than «222968032».
-                        for e in known_employees:
-                            if e.get("slack_user_id") == admin_uid:
-                                td.owner_display_name = e.get("display_name") or admin_uid
-                                break
-            elif not td.owner_display_name and message.user_name:
-                td.owner_display_name = message.user_name
+            _resolve_owner(
+                td,
+                known_employees=known_employees,
+                sender_user_id=str(message.user_id) if message.user_id else None,
+                sender_user_name=message.user_name,
+                admin_uid=admin_uid,
+            )
+            # FR-CR-05-10 — when the LLM produced no usable
+            # description, fill in the deterministic «обсуждалось в
+            # <chat> · <date>» so the operator at least sees where
+            # the draft came from.
+            if not (td.description or "").strip():
+                td.description = fallback_desc
 
         snapshot = self._orchestrator.persist_context_snapshot(
             session, window.to_snapshot_dict()
@@ -502,24 +635,17 @@ class TelegramIngestService:
             return []
 
         admin_uid = _admin_fallback_owner_id()
+        fallback_desc = _fallback_description(message)
         for td in classification.tasks:
-            if not td.owner_user_id:
-                if _author_fallback_allowed(
-                    str(message.user_id) if message.user_id else None,
-                    known_employees=known_employees,
-                ):
-                    td.owner_user_id = str(message.user_id)
-                    if not td.owner_display_name and message.user_name:
-                        td.owner_display_name = message.user_name
-                elif admin_uid:
-                    td.owner_user_id = admin_uid
-                    if not td.owner_display_name:
-                        for e in known_employees:
-                            if e.get("slack_user_id") == admin_uid:
-                                td.owner_display_name = e.get("display_name") or admin_uid
-                                break
-            elif not td.owner_display_name and message.user_name:
-                td.owner_display_name = message.user_name
+            _resolve_owner(
+                td,
+                known_employees=known_employees,
+                sender_user_id=str(message.user_id) if message.user_id else None,
+                sender_user_name=message.user_name,
+                admin_uid=admin_uid,
+            )
+            if not (td.description or "").strip():
+                td.description = fallback_desc
 
         snapshot = self._orchestrator.persist_context_snapshot(
             session, window.to_snapshot_dict()

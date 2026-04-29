@@ -1048,6 +1048,64 @@ the widget without leaving the DM. Live listener captures still
 get a real `forwardMessage` because the bot did observe them —
 the fallback only fires when the forward genuinely can't work.
 
+**Note:** the inline-quote fallback was superseded by FR-CR-05-10
+(rich descriptions). It's kept in the spec for historical
+context, but the code path was removed.
+
+#### 13.12 — Cross-channel team registry + context-rich descriptions
+
+> **As an operator** I want every draft to come with enough
+> context to act on without scrolling back to the chat — and to
+> never see «CEO Rosecliff» (an outsider mentioned in the deal)
+> as the owner of «организовать встречу с CEO Rosecliff». Owners
+> must come from a list of REAL teammates that I curate.
+
+Three connected fixes that turn each draft widget into a self-
+contained, actionable card:
+
+**1. Team registry as authoritative owner source.** New table
+`team_members` carries one row per teammate with both Telegram
+and Slack identity, role, email, active flag. The operator owns
+it through the `Team` tab of a Google Sheet
+(`GOOGLE_TEAM_SHEETS_SPREADSHEET_ID`); the bot syncs it
+bidirectionally via `python -m ops.sync_team --seed --pull
+--push`.
+
+`as_known_employees(session)` from this table replaces «whoever
+was in the chat» as the owner-resolution universe. The new
+`_resolve_owner` chain (`app/telegram_ingest/service.py`):
+
+1. LLM `owner_user_id` resolves to a registry row → keep.
+2. LLM `owner_display_name` resolves by name match → backfill
+   the numeric id from the row.
+3. **Otherwise drop the display_name entirely** — the «CEO
+   Rosecliff» case (outsiders mentioned but not on the team).
+4. Fall through to sender (only when registry empty or sender is
+   in it) or to admin from `TELEGRAM_ADMIN_USER_IDS`. Admin
+   fallback ALWAYS clobbers the display_name so a stale hint
+   never renders next to the admin's id.
+
+**2. Context-rich descriptions.** The title prompt is taught to
+write a 1-3 sentence summary of who's involved, what was
+discussed upstream, and what concretely needs to happen — using
+the FR-CR-05-09 adaptive context window. «хорошо! напишу ему»
+with prior context «надо ответить Андрею Соколову по сделке
+Acme — он спрашивал про SoW» yields a description like «Андрей
+спрашивал про SoW по сделке Acme, нужно подготовить ответ.»
+rather than empty.
+
+When the LLM has nothing to summarise (one-liner with empty
+history), the ingest fills in `📝 обсуждалось в <chat_title> ·
+<YYYY-MM-DD HH:MM>` so the operator at least sees where the
+draft came from.
+
+**3. Drop the inline-quote / forward DMs.** The rich description
+makes the FR-CR-05-09 fallbacks redundant. `post_draft_
+confirmation` now sends EXACTLY ONE message per recipient — the
+widget itself, with the description in `📝`. Source text is
+still kept on `draft.payload["_pending"]["source_text"]` for
+any future «show original» feature.
+
 
 ---
 

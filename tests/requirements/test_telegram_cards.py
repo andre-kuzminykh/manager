@@ -324,13 +324,14 @@ def _mk_proposed_draft(session, *, payload):
     return d
 
 
-def test_post_draft_confirmation_uses_inline_quote_when_forward_fails(
+def test_post_draft_confirmation_sends_only_widget_no_forward_no_quote(
     session, monkeypatch
 ):
-    """FR-CR-05-09 — when forwardMessage fails (the bot never
-    observed the message, Telegram refuses to forward), the widget
-    DM still carries source context: a `<blockquote>`-wrapped HTML
-    quote sent right before the actual confirm widget."""
+    """FR-CR-05-10 — `post_draft_confirmation` no longer fans out
+    a `forwardMessage` and a separate inline-quote DM. The widget
+    itself carries the LLM-generated context summary in its
+    description, so each recipient gets EXACTLY ONE message: the
+    widget."""
     monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
     from app.config import get_settings
     from app.telegram_bot.cards import post_draft_confirmation
@@ -341,9 +342,9 @@ def test_post_draft_confirmation_uses_inline_quote_when_forward_fails(
             session,
             payload={
                 "title": "написать Андрею",
+                "description": "Андрей спрашивал про SoW по сделке Acme.",
                 "owner_user_id": "111",
                 "_pending": {
-                    "source_text": "хорошо! напишу ему",
                     "source_chat_id": -1001234,
                     "source_message_id": 42,
                 },
@@ -360,85 +361,15 @@ def test_post_draft_confirmation_uses_inline_quote_when_forward_fails(
             author_user_id="111",
             owner_user_id="111",
         )
-        # Forward attempted once per recipient (author + admin = 2).
-        assert len(sender.forwards) == 2
-        # Each recipient also got the inline-quote DM (HTML blockquote
-        # carrying the escaped source text) BEFORE the widget DM.
-        # That's 2 quote DMs + 2 widget DMs = 4 sends.
-        assert len(sender.sent) == 4
-        quote_dms = [s for s in sender.sent if "<blockquote>" in s["text"]]
-        widget_dms = [s for s in sender.sent if "<blockquote>" not in s["text"]]
-        assert len(quote_dms) == 2
-        assert len(widget_dms) == 2
-        for q in quote_dms:
-            assert "хорошо! напишу ему" in q["text"]
-            assert "Original message" in q["text"]
-        # Widgets carry the inline keyboard, quote DMs don't.
-        for w in widget_dms:
-            assert "reply_markup" in w
-        for q in quote_dms:
-            assert q.get("reply_markup") is None
-    finally:
-        get_settings.cache_clear()  # type: ignore[attr-defined]
-
-
-def test_post_draft_confirmation_skips_quote_when_forward_succeeds(
-    session, monkeypatch
-):
-    """When forwardMessage succeeds (live listener path — bot saw
-    the original via getUpdates), the inline-quote fallback must NOT
-    fire — the recipient already sees the forwarded message above
-    the widget."""
-    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
-    from app.config import get_settings
-    from app.telegram_bot.cards import post_draft_confirmation
-
-    get_settings.cache_clear()  # type: ignore[attr-defined]
-    try:
-        draft = _mk_proposed_draft(
-            session,
-            payload={
-                "title": "написать Андрею",
-                "_pending": {
-                    "source_text": "хорошо! напишу ему",
-                    "source_chat_id": -1001234,
-                    "source_message_id": 42,
-                },
-            },
-        )
-
-        @dataclass
-        class _ForwardingSender:
-            enabled: bool = True
-            sent: list[dict] = field(default_factory=list)
-            next_message_id: int = 9000
-
-            def send_message(self, **kw):
-                mid = self.next_message_id
-                self.next_message_id += 1
-                self.sent.append({**kw, "_assigned_message_id": mid})
-                return {"message_id": mid}
-
-            def update_message(self, **kw):
-                return {}
-
-            def forward_message(self, **kw):
-                return {"message_id": 12345}  # success
-
-        sender = _ForwardingSender()
-        post_draft_confirmation(
-            sender=sender,
-            session=session,
-            draft=draft,
-            source_chat_id=-1001234,
-            source_message_id=42,
-            author_user_id="111",
-            owner_user_id=None,
-        )
-        # 2 recipients (author + admin), all forwards succeed → no
-        # quote fallback DMs, only the 2 widget DMs.
+        # FR-CR-05-10: zero forwards, zero quote DMs. Just the
+        # widget itself, one per recipient (author + admin = 2).
+        assert sender.forwards == []
         assert len(sender.sent) == 2
         for s in sender.sent:
             assert "<blockquote>" not in s["text"]
+            # The LLM-generated description carries context.
+            assert "Андрей" in s["text"] or "написать" in s["text"]
+            # And the widget keyboard rides along.
+            assert "reply_markup" in s
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]

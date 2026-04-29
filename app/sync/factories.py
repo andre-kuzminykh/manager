@@ -30,6 +30,7 @@ from app.sync.google_auth import (
 )
 from app.sync.sheets import SheetsSyncService
 from app.sync.tasks_api import GoogleTasksSyncService
+from app.sync.team_sheet import TeamSheetSync
 
 log = get_logger(__name__)
 
@@ -77,6 +78,32 @@ def build_sheets_factory(settings: Settings) -> Callable[[], SheetsSyncService |
             credentials=creds,
             spreadsheet_id=settings.google_sheets_spreadsheet_id,
             sheet_name=settings.google_sheets_tab_name or "Main",
+        )
+
+    return factory
+
+
+def build_team_sheet_factory(
+    settings: Settings,
+) -> Callable[[], TeamSheetSync | None] | None:
+    """FR-CR-05-10 — factory for the Team registry sync. Falls back
+    to the tasks spreadsheet when ``GOOGLE_TEAM_SHEETS_SPREADSHEET_ID``
+    isn't set (single-sheet deploy → just add a `Team` tab)."""
+    spreadsheet_id = (
+        settings.google_team_sheets_spreadsheet_id
+        or settings.google_sheets_spreadsheet_id
+    )
+    if not spreadsheet_id:
+        return None
+
+    def factory() -> TeamSheetSync | None:
+        creds = _resolve_credentials(GOOGLE_SCOPES_SHEETS)
+        if creds is None:
+            return None
+        return TeamSheetSync(
+            credentials=creds,
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=settings.google_team_sheets_tab_name or "Team",
         )
 
     return factory

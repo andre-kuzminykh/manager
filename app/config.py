@@ -52,6 +52,16 @@ class Settings(BaseSettings):
     google_sheets_tab_name: str = Field(
         default="Main", alias="GOOGLE_SHEETS_TAB_NAME"
     )
+    # FR-CR-05-10 — separate spreadsheet for the Team registry
+    # (cross-channel directory of who's assignable). Falls back to
+    # the tasks spreadsheet when this is empty so a single-sheet
+    # deploy still works (just add a `Team` tab).
+    google_team_sheets_spreadsheet_id: str = Field(
+        default="", alias="GOOGLE_TEAM_SHEETS_SPREADSHEET_ID"
+    )
+    google_team_sheets_tab_name: str = Field(
+        default="Team", alias="GOOGLE_TEAM_SHEETS_TAB_NAME"
+    )
     # Service-Account auth — alternative to OAuth. Provide ONE of:
     # - GOOGLE_SERVICE_ACCOUNT_JSON: full JSON key inline (single line);
     # - GOOGLE_SERVICE_ACCOUNT_JSON_PATH: filesystem path to the key file.

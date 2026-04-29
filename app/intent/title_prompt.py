@@ -36,16 +36,51 @@ Produce three fields:
                 upstream classifier should mark them no_action;
                 if you somehow get one anyway, give it the title
                 «уточнить статус задачи».
-- description:  any supplementary detail present in the source
-                message — references, numbers, sub-items, rationale.
-                Also use it for the leading project / context tag
-                of a note-style input («Olayan — …») and for the
-                assigner of a reported assignment («по поручению
-                Артема»). null when the title already captures
-                everything. Do NOT copy the date phrase here either.
-                Don't invent a description from a stray name out of
-                nowhere — only set it when the source message
-                actually carries the tag / assigner.
+- description:  a 1-3 sentence context summary of WHY this is a
+                task and WHAT the work concretely involves. This
+                is the operator's main reading — the title is the
+                action verb, the description provides enough
+                context to act on the task without scrolling back
+                through the chat.
+
+                Use the prior `context` messages to enrich the
+                description: who's involved, what was discussed
+                that led to this ask, references / numbers /
+                deadlines mentioned upstream, the project or deal
+                name. A good description for «хорошо! напишу ему»
+                with prior context «надо ответить Андрею Соколову
+                по сделке Acme — он спрашивал про SoW» reads:
+                «Андрей Соколов спрашивал про SoW по сделке Acme,
+                нужно подготовить и отправить ответ.»
+
+                Examples of GOOD descriptions:
+                  - «По итогам обсуждения возможной инвестиции от
+                    Rosecliff — нужно организовать встречу с их
+                    CEO для обсуждения условий.»
+                  - «Юля попросила уточнить таймзону встречи и
+                    детали по CFO — для подготовки приглашения.»
+                  - «Артем дал поручение отправить отчёт по Q1
+                    инвестору Olayan — обсуждалось вчера в чате.»
+
+                Bad descriptions (don't do this):
+                  - «по запросу» (zero context — the operator
+                    can't tell what's going on)
+                  - «прошу прощения за беспокойство» (parroted
+                    chat noise)
+                  - empty / null when there IS prior context to
+                    summarise
+
+                When the source message + context genuinely have
+                no extractable detail (a one-liner with empty
+                history), the description MAY be null — caller
+                will substitute a deterministic fallback like
+                «обсуждалось в <chat> · <date>».
+
+                Also use this field to capture the leading
+                project / context tag of a note-style input
+                («Olayan — …») and the assigner of a reported
+                assignment («по поручению Артема»). Don't copy
+                the date phrase here.
 - priority:     one of "low" | "medium" | "high" | "urgent".
                 Default "medium". Use "urgent" only when the author
                 says so ("срочно", "ASAP", "blocker", "сегодня же"),

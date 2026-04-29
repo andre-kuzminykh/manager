@@ -311,33 +311,6 @@ def _draft_widgets(draft: ActionDraft) -> list[dict[str, int]]:
     ]
 
 
-def _build_source_quote(draft: ActionDraft, *, max_chars: int = 1500) -> str | None:
-    """FR-CR-05-09 — inline-quote fallback when ``forwardMessage``
-    fails (the colleague's view holds messages we never received via
-    the Bot API, so Telegram has no way to forward them; or the
-    recipient hasn't /started us yet).
-
-    Reads the source text from the draft's ``_pending`` block, which
-    `prepare_drafts` always writes. Returns ``None`` when there's no
-    text to quote — caller skips the fallback in that case. The
-    HTML-escaped quote is wrapped in a ``<blockquote>`` so Telegram's
-    HTML parser renders it visually distinct from the widget body.
-    """
-    pending = (draft.payload or {}).get("_pending") or {}
-    raw = pending.get("source_text") or ""
-    raw = raw.strip()
-    if not raw:
-        return None
-    if len(raw) > max_chars:
-        raw = raw[: max_chars - 1] + "…"
-    chat_id = pending.get("source_chat_id")
-    msg_id = pending.get("source_message_id")
-    header = "🗣 <b>Original message</b>"
-    if chat_id is not None and msg_id is not None:
-        header += f" <code>(chat {chat_id} · msg {msg_id})</code>"
-    return f"{header}\n<blockquote>{_escape_md(raw)}</blockquote>"
-
-
 def post_draft_confirmation(
     *,
     sender: TelegramSender,
@@ -379,50 +352,17 @@ def post_draft_confirmation(
 
     text = _build_draft_widget_text(draft)
     keyboard = confirm_keyboard(draft_id=draft.id)
-    quote_fallback = _build_source_quote(draft)
     widgets: list[dict[str, int]] = []
     for uid in out:
         try:
             uid_int = int(uid)
         except ValueError:
             continue
-        # FR-CR-05-09 — try a real `forwardMessage` first so the
-        # recipient sees Telegram's native sender attribution above
-        # the widget. The Bot API requires the bot to have actually
-        # OBSERVED the message via getUpdates for forward to work, so
-        # historical-migration drafts (rows pulled out of the
-        # colleague's read-only view) almost always fall back to the
-        # inline quote below. Sender returns an empty dict on
-        # failure — including when Telegram itself rejects the call
-        # with «message to forward not found».
-        forwarded = False
-        try:
-            res = sender.forward_message(
-                chat_id=uid_int,
-                from_chat_id=source_chat_id,
-                message_id=source_message_id,
-            )
-            forwarded = bool(res and res.get("message_id"))
-        except Exception as e:  # noqa: BLE001
-            log.info(
-                "telegram_draft_forward_failed",
-                draft_id=draft.id,
-                uid=uid,
-                error=str(e),
-            )
-        if not forwarded and quote_fallback:
-            # Inline-quote fallback so the operator still sees the
-            # source text. Failure here is silent — the widget below
-            # still carries enough info to act on.
-            try:
-                sender.send_message(chat_id=uid_int, text=quote_fallback)
-            except Exception as e:  # noqa: BLE001
-                log.info(
-                    "telegram_draft_quote_failed",
-                    draft_id=draft.id,
-                    uid=uid,
-                    error=str(e),
-                )
+        # FR-CR-05-10 — no separate forward / quote DM. The widget's
+        # `description` field already carries the LLM-generated
+        # context summary (1-3 sentences explaining what the task
+        # is about), so the operator has everything they need in a
+        # single message.
         resp = sender.send_message(
             chat_id=uid_int, text=text, reply_markup=keyboard
         )

@@ -477,9 +477,12 @@ def test_listener_routes_group_messages_to_draft_flow(
         # handler can finalise the draft into a real Task.
         assert (d.payload or {}).get("_pending", {}).get("source_chat_id") == -1001
 
-    # forwardMessage + sendMessage both called for the author DM.
+    # FR-CR-05-10: only sendMessage now — the widget itself carries
+    # the LLM-generated context summary in its description, so we
+    # no longer split into a separate forwardMessage + widget.
     kinds = [list(x.keys())[0] for x in sent]
-    assert "forward" in kinds and "send" in kinds
+    assert "send" in kinds
+    assert "forward" not in kinds
 
 
 def test_listener_confirm_button_finalises_draft_into_task(

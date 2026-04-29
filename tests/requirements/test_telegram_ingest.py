@@ -630,10 +630,9 @@ def test_prepare_drafts_stashes_source_text_for_quote_fallback(
     patched_session_scope, SessionFactory
 ):
     """FR-CR-05-09 — every prepared draft carries the raw source
-    text on `_pending["source_text"]` so `post_draft_confirmation`
-    can fall back to an inline quote when forwardMessage fails
-    (which it does for every historical-migration draft — the bot
-    never observed those messages)."""
+    text on `_pending["source_text"]`. Kept as a back-stop even
+    after FR-CR-05-10 dropped the inline-quote DM, so any future
+    «show source» feature has the data on hand."""
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
@@ -655,6 +654,186 @@ def test_prepare_drafts_stashes_source_text_for_quote_fallback(
         assert pending.get("source_text") == "хорошо! напишу ему"
         assert pending.get("source_chat_id") == -100
         assert pending.get("source_message_id") == 99
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-10 — owner-resolution + fallback description
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """The «CEO Rosecliff» killer: LLM extracted a display_name that
+    doesn't match any team member or chat member. The hint must be
+    DROPPED entirely (not displayed on the card) and the owner must
+    fall through to the admin from `TELEGRAM_ADMIN_USER_IDS`."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+    from app.services.team_members import as_known_employees
+    from app.models import TeamMember
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        classification = IntentClassification(
+            intent=IntentType.create_task,
+            confidence=0.9,
+            task=TaskDraft(
+                title="организовать встречу",
+                owner_display_name="CEO Rosecliff",
+            ),
+        )
+        service = _make_service(classification)
+        msg = TelegramSourceMessage(
+            chat_id=-100,
+            message_id=1,
+            text="организовать встречу с CEO Rosecliff",
+            user_id=9999,
+        )
+        with SessionFactory() as s:
+            # Populate the registry — admin uid 777 + some other
+            # teammate so the registry is non-empty.
+            s.add_all(
+                [
+                    TeamMember(
+                        real_name="Admin", telegram_user_id=777,
+                        telegram_username="admin", active=True,
+                    ),
+                    TeamMember(
+                        real_name="Petya", telegram_user_id=42, active=True,
+                    ),
+                ]
+            )
+            s.flush()
+            task = service.process_one(s, msg)
+            s.commit()
+            assert task is not None
+            # «CEO Rosecliff» dropped → admin fallback fires.
+            assert task.owner_user_id == "777"
+            # Display name MUST be the admin's, not the stale hint.
+            assert task.owner_display_name == "@admin"
+            assert "Rosecliff" not in (task.owner_display_name or "")
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_resolve_owner_keeps_real_team_member(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """When the LLM picks an owner_user_id that resolves to a real
+    team member, keep it as-is and fill display_name from the
+    registry."""
+    from app.models import TeamMember
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(
+            title="отправить отчёт",
+            owner_user_id="42",  # LLM round-tripped Petya's id
+        ),
+    )
+    service = _make_service(classification)
+    msg = TelegramSourceMessage(
+        chat_id=-100, message_id=1, text="x", user_id=9999,
+    )
+    with SessionFactory() as s:
+        s.add(
+            TeamMember(
+                real_name="Petya Pupkin", telegram_user_id=42,
+                telegram_username="petya", active=True,
+            )
+        )
+        s.flush()
+        task = service.process_one(s, msg)
+        s.commit()
+        assert task.owner_user_id == "42"
+        assert task.owner_display_name == "@petya"
+
+
+def test_resolve_owner_resolves_display_name_via_registry(
+    patched_session_scope, SessionFactory
+):
+    """LLM gave only a display_name («Petya»). Lookup against the
+    registry should backfill the numeric id so the bot can DM the
+    assignee."""
+    from app.models import TeamMember
+
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(
+            title="отправить отчёт",
+            owner_display_name="@petya",  # name-only
+        ),
+    )
+    service = _make_service(classification)
+    msg = TelegramSourceMessage(
+        chat_id=-100, message_id=1, text="x", user_id=9999,
+    )
+    with SessionFactory() as s:
+        s.add(
+            TeamMember(
+                real_name="Petya", telegram_user_id=42,
+                telegram_username="petya", active=True,
+            )
+        )
+        s.flush()
+        task = service.process_one(s, msg)
+        s.commit()
+        assert task.owner_user_id == "42"
+
+
+def test_prepare_drafts_fills_in_fallback_description_when_llm_silent(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-10 — when the LLM didn't produce a description, the
+    draft gets a deterministic «обсуждалось в <chat> · <date>»
+    summary so the operator at least sees where it came from."""
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(title="отправить отчёт"),  # no description
+    )
+    service = _make_service(classification)
+    sent_at = datetime(2026, 4, 29, 13, 45, tzinfo=timezone.utc)
+    msg = TelegramSourceMessage(
+        chat_id=-100, message_id=1, text="x", user_id=42,
+        chat_title="Acme Deal",
+        sent_at=sent_at,
+    )
+    with SessionFactory() as s:
+        drafts = service.prepare_drafts(s, msg)
+        s.commit()
+        assert len(drafts) == 1
+        desc = (drafts[0].payload or {}).get("description") or ""
+        assert "Acme Deal" in desc
+        assert "2026-04-29" in desc
+
+
+def test_prepare_drafts_keeps_llm_description_when_present(
+    patched_session_scope, SessionFactory
+):
+    """The fallback must NOT overwrite a real LLM description."""
+    classification = IntentClassification(
+        intent=IntentType.create_task,
+        confidence=0.9,
+        task=TaskDraft(
+            title="отправить отчёт",
+            description="Юля просила Q1 отчёт по сделке Acme.",
+        ),
+    )
+    service = _make_service(classification)
+    msg = TelegramSourceMessage(
+        chat_id=-100, message_id=1, text="x", user_id=42,
+        chat_title="Acme Deal",
+    )
+    with SessionFactory() as s:
+        drafts = service.prepare_drafts(s, msg)
+        s.commit()
+        desc = (drafts[0].payload or {}).get("description") or ""
+        assert "Юля" in desc
+        assert "Acme Deal" not in desc  # fallback didn't fire
 
 
 def test_process_one_creates_task_with_telegram_source_kind(

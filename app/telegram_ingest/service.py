@@ -342,6 +342,11 @@ class TelegramIngestService:
         author_str = str(author_id) if author_id else None
 
         out: list = []
+        log.info(
+            "telegram_prepare_drafts_loop_start",
+            message_id=message.message_id,
+            task_count=len(classification.tasks),
+        )
         for td in classification.tasks:
             # Same dedup gate as `process_all`: skip the draft +
             # widget when the LLM thinks the candidate duplicates an
@@ -349,11 +354,19 @@ class TelegramIngestService:
             # below still gets written so we don't re-classify.
             from app.services.task_dedup import check_duplicate
 
-            dup = check_duplicate(
-                session,
-                candidate=td.model_dump(mode="json"),
-                llm_backend=getattr(self._classifier, "backend", None),
-            )
+            try:
+                dup = check_duplicate(
+                    session,
+                    candidate=td.model_dump(mode="json"),
+                    llm_backend=getattr(self._classifier, "backend", None),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "telegram_prepare_drafts_dedup_check_failed",
+                    title=td.title[:80],
+                    error=str(e),
+                )
+                dup = type("Tmp", (), {"is_duplicate": False, "duplicate_of_task_id": None, "reason": None})()
             if dup.is_duplicate:
                 log.info(
                     "telegram_prepare_drafts_skipped_duplicate",
@@ -363,40 +376,56 @@ class TelegramIngestService:
                 )
                 continue
 
-            single = type(classification)(
-                intent=classification.intent,
-                confidence=classification.confidence,
-                reasoning=classification.reasoning,
-                task=td,
-            )
-            inference = self._orchestrator.persist_inference(
-                session,
-                context_snapshot=snapshot,
-                classification=single,
-                invocation_type=InvocationType.passive,
-            )
-            draft = self._orchestrator.create_draft(
-                session,
-                inference=inference,
-                classification=single,
-                created_by_slack_user_id=author_str,
-                slack_message_ts=str(message.message_id),
-            )
-            payload = dict(draft.payload or {})
-            payload["_pending"] = {
-                "source_kind": "telegram",
-                "conversation_id": str(message.chat_id),
-                "message_ts": str(message.message_id),
-                "thread_ts": str(message.reply_to) if message.reply_to else None,
-                "permalink": _telegram_permalink(message),
-                "fallback_author": author_str,
-                "context_snapshot_id": snapshot.id,
-                "source_chat_id": message.chat_id,
-                "source_message_id": message.message_id,
-            }
-            draft.payload = payload
-            out.append(draft)
+            try:
+                single = type(classification)(
+                    intent=classification.intent,
+                    confidence=classification.confidence,
+                    reasoning=classification.reasoning,
+                    task=td,
+                )
+                inference = self._orchestrator.persist_inference(
+                    session,
+                    context_snapshot=snapshot,
+                    classification=single,
+                    invocation_type=InvocationType.passive,
+                )
+                draft = self._orchestrator.create_draft(
+                    session,
+                    inference=inference,
+                    classification=single,
+                    created_by_slack_user_id=author_str,
+                    slack_message_ts=str(message.message_id),
+                )
+                payload = dict(draft.payload or {})
+                payload["_pending"] = {
+                    "source_kind": "telegram",
+                    "conversation_id": str(message.chat_id),
+                    "message_ts": str(message.message_id),
+                    "thread_ts": str(message.reply_to) if message.reply_to else None,
+                    "permalink": _telegram_permalink(message),
+                    "fallback_author": author_str,
+                    "context_snapshot_id": snapshot.id,
+                    "source_chat_id": message.chat_id,
+                    "source_message_id": message.message_id,
+                }
+                draft.payload = payload
+                out.append(draft)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "telegram_prepare_drafts_persist_failed",
+                    title=td.title[:80],
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
+                # Don't re-raise — keep processing the remaining
+                # tasks in the message.
 
+        log.info(
+            "telegram_prepare_drafts_loop_done",
+            message_id=message.message_id,
+            tasks_in=len(classification.tasks),
+            drafts_out=len(out),
+        )
         session.flush()
         session.add(
             ProcessedTelegramMessage(

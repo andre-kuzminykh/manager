@@ -298,6 +298,29 @@ class TelegramListener:
         self._view_poll_interval = max(0, int(view_poll_interval_seconds))
         self._view_poll_batch = max(1, int(view_poll_batch_size))
         self._last_view_poll_at = 0.0
+        # FR-CR-05-39 — periodic poll of the Fireflies API. Same
+        # toggle pattern as the TG view poll above.
+        self._fireflies_pipeline = None  # set via wire_fireflies()
+        self._fireflies_realtime_enabled = False
+        self._fireflies_poll_interval = 30
+        self._fireflies_poll_batch = 20
+        self._last_fireflies_poll_at = 0.0
+
+    def wire_fireflies(
+        self,
+        *,
+        pipeline,
+        enabled: bool,
+        poll_interval_seconds: int,
+        poll_batch_size: int,
+    ) -> None:
+        """Hook a configured FirefliesPipeline + the toggle from
+        settings into the listener. Called from
+        `ops/telegram_listener.py` at startup."""
+        self._fireflies_pipeline = pipeline
+        self._fireflies_realtime_enabled = bool(enabled)
+        self._fireflies_poll_interval = max(0, int(poll_interval_seconds))
+        self._fireflies_poll_batch = max(1, int(poll_batch_size))
 
     @property
     def enabled(self) -> bool:
@@ -409,6 +432,63 @@ class TelegramListener:
 
     # ---- one tick ---------------------------------------------------------
 
+    def _maybe_poll_fireflies(self) -> None:
+        """FR-CR-05-39 — periodically pull new recordings from
+        Fireflies and run them through the full pipeline.
+        Disabled unless ``FIREFLIES_REALTIME_ENABLED=true`` and
+        a pipeline has been wired via `wire_fireflies()`."""
+        if not self._fireflies_realtime_enabled:
+            return
+        if self._fireflies_poll_interval <= 0:
+            return
+        if self._fireflies_pipeline is None:
+            return
+        now = time.time()
+        if now - self._last_fireflies_poll_at < self._fireflies_poll_interval:
+            return
+        self._last_fireflies_poll_at = now
+
+        try:
+            transcripts = self._fireflies_pipeline._client.list_transcripts(
+                limit=self._fireflies_poll_batch
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "listener_fireflies_poll_list_failed", error=str(e)
+            )
+            return
+        if not transcripts:
+            return
+        processed = 0
+        skipped = 0
+        errors = 0
+        tasks_total = 0
+        for t in transcripts:
+            try:
+                with session_scope() as session:
+                    report = self._fireflies_pipeline.process_one(session, t)
+                if report.skipped_reason:
+                    skipped += 1
+                else:
+                    processed += 1
+                    tasks_total += report.tasks_created
+            except Exception as e:  # noqa: BLE001
+                errors += 1
+                log.warning(
+                    "listener_fireflies_poll_recording_failed",
+                    fireflies_id=t.id,
+                    error=str(e),
+                )
+        if processed or errors:
+            log.info(
+                "listener_fireflies_poll_done",
+                seen=len(transcripts),
+                processed=processed,
+                skipped=skipped,
+                tasks_created=tasks_total,
+                errors=errors,
+            )
+
     def _maybe_poll_source_view(self) -> None:
         """FR-CR-05-35 / FR-CR-05-36 — periodically pull the
         freshest messages from the Supabase TG view and run them
@@ -515,6 +595,8 @@ class TelegramListener:
         # FR-CR-05-35 — fire scheduled Supabase view poll, also
         # throttled internally.
         self._maybe_poll_source_view()
+        # FR-CR-05-39 — Fireflies poll on the same tick.
+        self._maybe_poll_fireflies()
 
         with session_scope() as session:
             offset = _get_offset(session)

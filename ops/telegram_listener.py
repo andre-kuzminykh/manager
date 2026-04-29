@@ -103,6 +103,35 @@ def main() -> int:
         view_poll_batch_size=settings.view_poll_batch_size,
     )
 
+    # FR-CR-05-39 — Fireflies pipeline wired in. Disabled unless
+    # FIREFLIES_API_TOKEN is set; the toggle on top of that
+    # decides whether the listener also polls automatically.
+    if settings.fireflies_api_token:
+        try:
+            from app.fireflies.client import FirefliesClient
+            from app.fireflies.pipeline import FirefliesPipeline
+            from app.sync.factories import build_docs_factory
+
+            ff_client = FirefliesClient(
+                token=settings.fireflies_api_token,
+                endpoint=settings.fireflies_api_url,
+            )
+            ff_pipeline = FirefliesPipeline(
+                settings=settings,
+                client=ff_client,
+                llm_backend=backend,
+                docs_factory=build_docs_factory(settings),
+                sender=listener._sender,  # noqa: SLF001 — same process
+            )
+            listener.wire_fireflies(
+                pipeline=ff_pipeline,
+                enabled=settings.fireflies_realtime_enabled,
+                poll_interval_seconds=settings.fireflies_poll_interval_seconds,
+                poll_batch_size=settings.fireflies_poll_batch_size,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("tg_listener_fireflies_setup_failed", error=str(e))
+
     # FR-CR-04-23 / FR-CR-04-26 — register the active TaskSyncer so
     # every persistence call from the Telegram process (initial
     # `create_task_from_draft` sync, button-driven `sync_task` calls

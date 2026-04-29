@@ -1407,6 +1407,24 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.31 — Owner prompt: role + notes are the source of truth
+
+Operator hand-curates `role` / `notes` on the Team Sheet to
+describe who's responsible for what. The owner prompt was
+treating those columns as «just disambiguation hints» — the LLM
+used them only when several rows shared a first name.
+
+Two changes:
+
+**Stronger system prompt.** New SOURCE-OF-TRUTH block: when the
+source describes work without naming a person, the LLM should
+pick the teammate whose role / notes match the responsibility
+area. Three concrete examples baked in.
+
+**Wider notes column.** The 60-char truncation in the user
+prompt was clipping operator-written blurbs before the LLM
+could see them. Now 200 chars.
+
 #### 13.30 — Sheet pull auto-merges duplicate rows
 
 The auto-seed produces TWO team_members rows for many

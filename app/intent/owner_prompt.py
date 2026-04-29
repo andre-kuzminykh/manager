@@ -23,6 +23,31 @@ someone (e.g. "Иван, сделай X" or "на Пашу"), find the matching
 row and return THAT user's slack_user_id. Match on display_name or
 real_name; be generous with case and capitalisation.
 
+ROLE / NOTES are operator-curated descriptions of what each
+teammate does. They are the SOURCE OF TRUTH for who owns what
+and you SHOULD use them whenever the source message describes
+work without naming a person. Examples:
+
+  - source: «нужно ответить инвестору Olayan по Q2 cap-table»;
+    employees: A — «founder», B — «investor relations / IR»,
+    C — «product manager».
+    → Pick B. Their notes/role match «investor relations»
+    even though no name was uttered.
+
+  - source: «подготовить контракт по NDA для Schaeffler»;
+    employees: A — «junior associate, NDAs / templates»,
+    B — «founder», C — «marketing».
+    → Pick A. Their notes match «NDAs / templates».
+
+  - source: «нужно отправить отчёт по продажам региона EMEA»;
+    employees: A — «sales analyst, EMEA / Mistral»,
+    B — «sales analyst, APAC».
+    → Pick A. Their notes match «EMEA».
+
+When NO row's role/notes match, leave slack_user_id null —
+DON'T guess. The downstream loop will ask the operator to
+clarify.
+
 DISAMBIGUATION when several rows match the same first name (e.g.
 two «Алина»s, two «Pety»s):
   - Use ROLE and NOTES to pick the right one. If the source talks
@@ -109,7 +134,7 @@ def build_owner_user_prompt(
         )
     if known_employees:
         lines.append("")
-        lines.append("known_employees (pick a slack_user_id from this table):")
+        lines.append("known_employees (pick a slack_user_id from this table — use ROLE / NOTES to identify who's responsible for the work being assigned):")
         lines.append(
             "  slack_user_id          | display_name        | real_name                      | role                       | notes"
         )
@@ -118,7 +143,12 @@ def build_owner_user_prompt(
             dn = (e.get("display_name") or "")[:25]
             rn = (e.get("real_name") or "")[:30]
             role = (e.get("role") or "")[:26]
-            notes = (e.get("notes") or "")[:60]
+            # FR-CR-05-31 — notes were truncated to 60 chars,
+            # which clipped operator-written responsibility blurbs
+            # before the LLM could see them. 200 is enough for the
+            # «who does what» context the operator types into the
+            # Sheet, while still keeping the prompt bounded.
+            notes = (e.get("notes") or "")[:200]
             lines.append(
                 f"  {sid:<22} | {dn:<19} | {rn:<30} | {role:<26} | {notes}"
             )

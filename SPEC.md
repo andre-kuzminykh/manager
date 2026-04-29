@@ -723,6 +723,44 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-31 — Owner prompt: role + notes are the source of truth
+
+The operator hand-curates `team_members.role` /
+`team_members.notes` on the Sheet to describe what each teammate
+is responsible for. The owner-extraction prompt previously
+treated those columns as «just disambiguation hints» — the LLM
+used them only when several rows shared a first name. For
+unnamed assignments («нужно ответить инвестору Olayan»), the
+LLM had no signal and returned ``null``.
+
+Two fixes:
+
+**Stronger system prompt.** New SOURCE-OF-TRUTH block tells
+the LLM: when the source describes work without naming a
+person, pick the teammate whose role / notes match the
+responsibility area. Three concrete examples (investor
+relations, NDA templates, EMEA sales) anchor the model's
+behaviour.
+
+**Wider notes column.** The user-prompt table truncated `notes`
+to 60 chars, clipping operator-written blurbs before the LLM
+could see them. New cap is 200 — enough for «ответственная за
+инвестор-релейшнс, готовит cap-table и ходит на встречи с
+инвесторами», bounded so the prompt stays compact.
+
+#### FR-CR-05-30 — Pull skips timestamp-only diffs (no-op poll is silent)
+
+Live observation: the FR-CR-05-28 listener-side polling printed
+`updated=53` every minute even when the operator hadn't touched
+the Sheet, because `upsert_from_sheet_rows` always set
+`last_synced_at=now` and incremented the updated counter.
+
+Fix: compare each field BEFORE assigning. Only set fields that
+actually moved; bump `last_synced_at` and the `updated` counter
+only when at least one real data field changed. Timestamp-only
+diffs are now invisible — the listener log fires only when the
+operator actually edited something on the Sheet.
+
 #### FR-CR-05-29 — Sheet pull merges duplicate rows on UNIQUE conflict
 
 The auto-seed often produces TWO `team_members` rows for the
@@ -2878,6 +2916,8 @@ pure unit tests for internal helpers.
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared). The original `test_task_row_includes_dialogue_from_extra` / `_dialogue_empty_when_no_extra` tests were rolled back by FR-CR-05-15. |
 | FR-CR-05-15  | `test_telegram_cards.py::test_draft_widget_text_includes_source_permalink_when_available` (🔗 line carries `t.me/c/<chat>/<msg>` when `_pending["permalink"]` is set); `::test_draft_widget_text_omits_link_line_when_no_permalink` (no empty 🔗 line for private DMs / basic groups); `test_sheets_pull.py::test_task_row_does_not_include_dialogue_column` (22-column header restored, last column is `completion_artifact`); `test_telegram_ingest.py::test_recent_in_chat_filters_by_chat_id_only` (adaptive context window is per-chat — SQL `WHERE chat_id = :chat_id` pinned so a future refactor can't widen the query) |
 | FR-CR-05-23  | `test_team_members.py::test_backfill_fills_blank_team_members_from_chat_members` (sparse rows enriched from listener observations; operator edits preserved); `::test_backfill_no_op_when_chat_members_empty` (no observations ⇒ no rows changed) |
+| FR-CR-05-30  | manual visual verification — listener logs `listener_team_sheet_pulled` only when the operator actually changed something on the Sheet (no timestamp-only diffs) |
+| FR-CR-05-31  | `test_intent_pipeline.py::test_owner_prompt_uses_role_notes_for_unnamed_assignments` (system prompt has SOURCE OF TRUTH block + investor-relations example anchored); `::test_owner_user_prompt_keeps_long_notes_intact` (200-char notes cap; previously-clipped «cap-table / встречи с инвесторами» blurbs survive into the prompt) |
 | FR-CR-05-29  | `test_team_members.py::test_upsert_from_sheet_rows_merges_duplicates_by_unique_column` (operator edits one row to carry BOTH `telegram_user_id` AND `slack_user_id` ⇒ orphan row that previously owned one of those ids gets deleted; pull lands cleanly without `UniqueViolation`) |
 | FR-CR-05-28  | `test_telegram_listener.py::test_listener_runs_sheet_pulls_when_interval_elapsed` (first call after construction fires both pulls); `::test_listener_throttles_sheet_pulls_within_interval` (repeated calls inside the window are no-ops); `::test_listener_skips_sheet_pulls_when_interval_zero` (`SHEET_POLL_INTERVAL_SECONDS=0` disables the in-listener poll); `::test_listener_swallows_sheet_pull_errors` (transient HTTP errors don't break the listener) |
 | FR-CR-05-27  | `test_telegram_members.py::test_upsert_member_creates_team_row_for_new_user` (brand-new user observed ⇒ team_members row auto-created with all available fields, `active=True`); `::test_upsert_member_creates_inactive_team_row_for_bot_account` (auto-bot detection ⇒ `active=False` on creation); `test_team_members.py::test_team_sheet_push_appends_only_new_rows` (existing operator edits preserved; only DB rows missing from the sheet get appended); `::test_team_sheet_push_writes_full_table_when_sheet_empty` (first-time bootstrap writes header + body) |

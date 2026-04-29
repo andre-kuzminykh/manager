@@ -211,6 +211,54 @@ def test_owner_prompt_disambiguation_section_lists_role_first():
     assert "notes" in blob.lower()
 
 
+def test_owner_prompt_uses_role_notes_for_unnamed_assignments():
+    """FR-CR-05-31 — when the source describes work without
+    naming a person («нужно ответить инвестору Olayan по
+    cap-table»), the LLM MUST pick the teammate whose role /
+    notes match the responsibility area. Pinned in the system
+    prompt so the model doesn't fall back to «no one named ⇒
+    null»."""
+    blob = OWNER_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+    # The prompt now has a SOURCE OF TRUTH block + concrete
+    # examples that show role/notes-driven owner picks.
+    assert "SOURCE OF TRUTH" in flat or "source of truth" in flat.lower()
+    # At least one example wording the model can anchor on.
+    assert "investor relations" in flat or "investor" in flat.lower()
+
+
+def test_owner_user_prompt_keeps_long_notes_intact():
+    """FR-CR-05-31 — operator-written notes can be ~150 chars
+    («ответственная за инвестор-релейшнс, готовит cap-table и
+    ходит на встречи с инвесторами»). The render previously
+    truncated to 60 chars, which clipped the very signal the
+    LLM needs. New cap is 200; long notes survive."""
+    from app.intent.owner_prompt import build_owner_user_prompt
+
+    long_notes = (
+        "ответственная за инвестор-релейшнс, готовит cap-table "
+        "и ходит на встречи с инвесторами; в команде с 2024"
+    )
+    assert len(long_notes) > 60
+    prompt = build_owner_user_prompt(
+        source_text="нужно ответить инвестору",
+        context_messages=[],
+        author_user_id=None,
+        known_employees=[
+            {
+                "slack_user_id": "111",
+                "display_name": "Маша",
+                "real_name": "Маша IR",
+                "role": "investor relations",
+                "notes": long_notes,
+            }
+        ],
+    )
+    # Full notes survive the render (truncation cap is now 200).
+    assert "cap-table" in prompt
+    assert "встречи с инвесторами" in prompt
+
+
 def test_owner_prompt_sees_conversation_context_placeholder():
     from app.intent.owner_prompt import build_owner_user_prompt
 

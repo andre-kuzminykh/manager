@@ -104,6 +104,16 @@ def _parse_args() -> argparse.Namespace:
             "task?» widget instead (FR-CR-04-32 parity)."
         ),
     )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Log the source text + classifier verdict (intent, "
+            "confidence, reasoning) for every message that reaches "
+            "the pipeline. Useful when the run produces 0 drafts and "
+            "you want to see WHY each candidate was rejected."
+        ),
+    )
     args = p.parse_args()
     if args.since and args.since_days is not None:
         p.error("Pass either --since or --since-days, not both.")
@@ -166,6 +176,8 @@ def _confirm_first_chunk(
     service,
     sender,
     messages: list,
+    *,
+    debug: bool = False,
 ) -> tuple[int, int, int]:
     """Per-message confirm-first processing for a chunk.
 
@@ -173,6 +185,13 @@ def _confirm_first_chunk(
     (state=proposed) and DM a «Create this task?» widget to the
     standard recipient set (author + admins). Returns
     ``(drafts_proposed, no_action_or_empty, errors)``.
+
+    When ``debug=True`` every message is also re-classified upfront
+    via the service's classifier (one extra detect-LLM call per
+    candidate — bounded by the chunk size, not free) so we can log
+    the source text + verdict + reasoning before taking the
+    prepare_drafts path. Use this to figure out why a backfill is
+    producing 0 drafts.
     """
     from app.telegram_bot.cards import post_draft_confirmation
 
@@ -181,6 +200,42 @@ def _confirm_first_chunk(
     errors = 0
     for m in messages:
         try:
+            if debug:
+                # Repeat the classify call so we can log what the
+                # LLM actually said. This is the same pipeline the
+                # service uses internally; the result here is
+                # discarded — `prepare_drafts` re-classifies.
+                from app.context.retriever import ContextWindow
+                from app.schemas.intent import InvocationType
+
+                window = ContextWindow(
+                    conversation_id=str(m.chat_id),
+                    source_ts=str(m.message_id),
+                    thread_ts=str(m.reply_to) if m.reply_to else None,
+                    source_message={
+                        "ts": str(m.message_id),
+                        "user": (
+                            str(m.user_id) if m.user_id else (m.user_name or "tg_unknown")
+                        ),
+                        "text": m.text,
+                        "subtype": None,
+                    },
+                )
+                classification = service._classifier.classify(  # noqa: SLF001
+                    context=window,
+                    invocation_type=InvocationType.passive,
+                    known_employees=None,
+                )
+                log.info(
+                    "telegram_history_debug",
+                    chat_id=m.chat_id,
+                    message_id=m.message_id,
+                    text_preview=(m.text or "")[:200].replace("\n", " "),
+                    intent=classification.intent.value,
+                    confidence=round(classification.confidence, 2),
+                    reasoning=(classification.reasoning or "")[:200],
+                    tasks=[t.title[:80] for t in classification.tasks],
+                )
             with session_scope() as session:
                 drafts = service.prepare_drafts(session, m)
                 if not drafts:
@@ -309,7 +364,7 @@ def main() -> int:
                 overall.seen += len(batch)
             elif confirm_first:
                 proposed, nothing, errs = _confirm_first_chunk(
-                    service, sender, batch
+                    service, sender, batch, debug=args.debug
                 )
                 drafts_proposed_total += proposed
                 drafts_nothing_total += nothing

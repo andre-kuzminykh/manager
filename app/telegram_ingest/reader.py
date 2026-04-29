@@ -321,6 +321,24 @@ class TelegramSourceReader:
                 # Shorter-than-asked-for page → end of view.
                 break
 
+    def _detect_columns(self) -> set[str]:
+        """Return the set of column names present in the configured
+        view. Cached on the instance after the first call.
+
+        We probe the view via a zero-row LIMIT 0 query; the result's
+        `keys()` carry the column names. Cheaper than asking
+        `information_schema` and works against any backend.
+        """
+        cached = getattr(self, "_columns_cache", None)
+        if cached is not None:
+            return cached
+        sql = text(f"SELECT * FROM {self._view} LIMIT 0")
+        with self._engine.connect() as conn:
+            result = conn.execute(sql)
+            cols = set(result.keys())
+        self._columns_cache = cols
+        return cols
+
     def iter_newest(
         self, *, limit: int
     ) -> Iterable[TelegramSourceMessage]:
@@ -329,45 +347,44 @@ class TelegramSourceReader:
         --newest`` to grab «latest 50 messages, regardless of which
         chat they came from».
 
-        The view's date column varies (`date` / `sent_at` / `created_at`
-        / `timestamp`); we try them in that priority order via
-        `COALESCE` so the same query works against every shape we've
-        seen so far. Falls back to ordering by `(chat_id DESC,
-        message_id DESC)` when no date column is present — close
-        enough for «most recent within each chat».
+        The view's date column varies (`date` / `sent_at` /
+        `created_at` / `timestamp`). We probe the schema upfront and
+        build a `COALESCE(...)` over ONLY the columns that actually
+        exist — feeding a non-existent column to PostgreSQL would
+        raise `UndefinedColumn` AND abort the transaction (so even a
+        fallback query fails). When the view has no date column at
+        all, fall back to ordering by `(chat_id DESC, message_id
+        DESC)` — close enough for «most recent within each chat».
         """
         if self._engine is None:
             return iter(())
 
-        sent_at_cols = _FIELD_MAP["sent_at"]
-        coalesce_expr = "COALESCE(" + ", ".join(sent_at_cols) + ")"
+        present = self._detect_columns()
+        date_cols = [c for c in _FIELD_MAP["sent_at"] if c in present]
+        if date_cols:
+            coalesce_expr = "COALESCE(" + ", ".join(date_cols) + ")"
+            order_clause = (
+                f"ORDER BY {coalesce_expr} DESC NULLS LAST, "
+                "chat_id DESC, message_id DESC"
+            )
+        else:
+            log.warning(
+                "telegram_iter_newest_no_date_column",
+                view=self._view,
+                tried=list(_FIELD_MAP["sent_at"]),
+                present=sorted(present),
+            )
+            order_clause = "ORDER BY chat_id DESC, message_id DESC"
+
         sql = text(
             f"""
             SELECT * FROM {self._view}
-            ORDER BY {coalesce_expr} DESC NULLS LAST,
-                     chat_id DESC, message_id DESC
+            {order_clause}
             LIMIT :lim
             """
         )
         with self._engine.connect() as conn:
-            try:
-                result = conn.execute(sql, {"lim": limit})
-            except Exception as e:  # noqa: BLE001
-                # The view doesn't carry any of the canonical date
-                # columns — fall back to chat_id / message_id DESC.
-                log.warning(
-                    "telegram_iter_newest_no_date_column",
-                    error=str(e),
-                    tried_columns=list(sent_at_cols),
-                )
-                fb = text(
-                    f"""
-                    SELECT * FROM {self._view}
-                    ORDER BY chat_id DESC, message_id DESC
-                    LIMIT :lim
-                    """
-                )
-                result = conn.execute(fb, {"lim": limit})
+            result = conn.execute(sql, {"lim": limit})
             for row in result.mappings():
                 msg = _map_row(dict(row))
                 if msg is not None:

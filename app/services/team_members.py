@@ -224,6 +224,119 @@ def _looks_like_bot(name: str | None, username: str | None) -> bool:
     return False
 
 
+def backfill_team_members_from_chat_members(session: Session) -> int:
+    """FR-CR-05-23 — one-shot backfill that fills BLANK
+    `telegram_username` / `real_name` fields on existing
+    `team_members` rows from whatever the listener has captured
+    in `telegram_chat_members`.
+
+    The FR-CR-05-21 auto-enrich runs on every NEW observation;
+    this pass takes care of existing rows that were seeded with
+    only a numeric id but the same user has been observed (with a
+    username) in `chat_members` from earlier traffic.
+
+    Operator-edited values are NEVER overwritten — only blanks
+    get filled. Returns the count of rows actually changed.
+    """
+    rows = (
+        session.execute(select(TeamMember))
+        .scalars()
+        .all()
+    )
+    changed = 0
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        if r.telegram_user_id is None:
+            continue
+        # Skip rows that are already populated.
+        if r.telegram_username and r.real_name:
+            continue
+        # Most recent observation wins.
+        chat_row = (
+            session.query(TelegramChatMember)
+            .filter(TelegramChatMember.user_id == int(r.telegram_user_id))
+            .order_by(TelegramChatMember.last_seen_at.desc())
+            .first()
+        )
+        if chat_row is None:
+            continue
+        row_changed = False
+        if not r.telegram_username and chat_row.username:
+            r.telegram_username = chat_row.username
+            row_changed = True
+        if not r.real_name:
+            full = " ".join(
+                p for p in (chat_row.first_name, chat_row.last_name) if p
+            ).strip() or None
+            if full:
+                r.real_name = full
+                row_changed = True
+        if row_changed:
+            r.last_synced_at = now
+            changed += 1
+    if changed:
+        session.flush()
+    return changed
+
+
+def enrich_team_members_from_bot_api(session: Session, sender) -> int:
+    """FR-CR-05-24 — for every `team_members` row that has a
+    numeric `telegram_user_id` but a blank `telegram_username`,
+    call Telegram Bot API `getChat(user_id)` and adopt the
+    returned profile fields.
+
+    Works only for users the bot has ever interacted with — the
+    user has /started the bot, replied to a bot message, or is a
+    member of a chat the bot is in. For never-seen users
+    `getChat` returns `{}` and we leave the row alone.
+
+    Operator-edited values are NEVER overwritten. Returns the
+    count of rows actually changed.
+    """
+    if sender is None or not getattr(sender, "enabled", False):
+        return 0
+    rows = (
+        session.execute(select(TeamMember))
+        .scalars()
+        .all()
+    )
+    changed = 0
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        if r.telegram_user_id is None:
+            continue
+        if r.telegram_username and r.real_name:
+            continue
+        try:
+            info = sender.get_chat(chat_id=int(r.telegram_user_id))
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "team_member_bot_api_enrich_failed",
+                user_id=r.telegram_user_id,
+                error=str(e),
+            )
+            continue
+        if not isinstance(info, dict) or not info.get("id"):
+            continue
+        row_changed = False
+        if not r.telegram_username and info.get("username"):
+            r.telegram_username = info["username"]
+            row_changed = True
+        if not r.real_name:
+            full = " ".join(
+                p for p in (info.get("first_name"), info.get("last_name")) if p
+            ).strip() or None
+            if full:
+                r.real_name = full
+                row_changed = True
+        if row_changed:
+            r.last_synced_at = now
+            changed += 1
+    if changed:
+        session.flush()
+    return changed
+
+
 def seed_from_telegram_source(session: Session, reader) -> int:
     """FR-CR-05-10 — pull every distinct sender out of the Supabase
     `humanoid_tg_chats_readonly` view (via the same reader the

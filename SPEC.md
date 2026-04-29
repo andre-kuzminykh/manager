@@ -723,6 +723,59 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-24 — Bot-API enrichment for never-observed users
+
+`telegram_chat_members` only carries usernames the live listener
+has actually OBSERVED — users who have never sent a message in
+a chat the bot is in stay invisible there even after a
+`--backfill` pass. The Telegram Bot API's `getChat(<user_id>)`
+returns the user's public profile (`username`, `first_name`,
+`last_name`) for any user the bot has ever interacted with —
+they /started the bot, replied to a bot message, or are a
+member of a chat the bot is in.
+
+New CLI flag `python -m ops.sync_team --enrich-bot-api` walks
+every sparse `team_members` row (numeric id + blank
+`telegram_username` / `real_name`), calls `getChat`, and adopts
+the returned profile fields. Slower than `--backfill` (one HTTP
+call per row), but reaches a wider set of users. Operator-edited
+values are NEVER overwritten.
+
+Recommended one-line catch-up after upgrading:
+
+```
+python -m ops.sync_team --backfill --enrich-bot-api --pull --push
+```
+
+`--backfill` runs first (cheap, local DB), `--enrich-bot-api`
+catches the rest, then `--pull` / `--push` round-trips the Sheet.
+
+#### FR-CR-05-23 — One-shot team_members backfill from chat_members
+
+FR-CR-05-21 auto-enrichment runs on every NEW listener
+observation, but rows seeded BEFORE that fix landed (the bulk of
+the registry on a deploy that came up before the auto-enrich)
+stayed sparse — `telegram_username` / `real_name` blank — even
+though `chat_members` already had the matching usernames /
+names from prior traffic.
+
+New CLI flag `python -m ops.sync_team --backfill` walks every
+`team_members` row, looks up the most recent
+`telegram_chat_members` observation for that `user_id`, and
+fills in BLANK fields. Operator-edited values are preserved.
+
+Combine with the existing flags for a one-line catch-up after
+upgrading:
+
+```
+python -m ops.sync_team --backfill --pull --push
+```
+
+After this pass the owner-deeplink resolver (FR-CR-05-19/20)
+finds an `@handle` for every user the listener has ever seen,
+and widget owner labels start hyperlinking without further
+manual Sheet edits.
+
 #### FR-CR-05-22 — Title prompt: no placeholder pronouns, no 1st-person-plural
 
 Two more description-quality bugs from the live test:
@@ -2647,6 +2700,8 @@ pure unit tests for internal helpers.
 | FR-CR-05-10  | `test_team_members.py` (read paths, prefer-telegram id selection, find-by helpers; `seed_from_chat_members` / `seed_from_slack_employees` idempotent + bot-skip; sheet round-trip headers, insert-then-update-by-id, match-by-tg-id-when-no-id, active-bool normalisation incl. `да` / `yes` / `1` and empty→true default); `test_telegram_ingest.py::test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin` (the «CEO Rosecliff» killer — unresolvable display_name dropped, owner = admin, display = admin's registry label); `::test_resolve_owner_keeps_real_team_member` (LLM-picked `owner_user_id` matching a registry row stays, display_name backfilled); `::test_resolve_owner_resolves_display_name_via_registry` (name-only LLM hint → registry lookup → numeric id); `::test_prepare_drafts_fills_in_fallback_description_when_llm_silent` («обсуждалось в <chat> · <YYYY-MM-DD HH:MM>» when LLM produced no description); `::test_prepare_drafts_keeps_llm_description_when_present` (real LLM description not clobbered); `test_telegram_cards.py::test_post_draft_confirmation_sends_only_widget_no_forward_no_quote` (FR-CR-05-09 inline-quote DM removed — widget itself carries context via description); `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` updated for «no forward» |
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared). The original `test_task_row_includes_dialogue_from_extra` / `_dialogue_empty_when_no_extra` tests were rolled back by FR-CR-05-15. |
 | FR-CR-05-15  | `test_telegram_cards.py::test_draft_widget_text_includes_source_permalink_when_available` (🔗 line carries `t.me/c/<chat>/<msg>` when `_pending["permalink"]` is set); `::test_draft_widget_text_omits_link_line_when_no_permalink` (no empty 🔗 line for private DMs / basic groups); `test_sheets_pull.py::test_task_row_does_not_include_dialogue_column` (22-column header restored, last column is `completion_artifact`); `test_telegram_ingest.py::test_recent_in_chat_filters_by_chat_id_only` (adaptive context window is per-chat — SQL `WHERE chat_id = :chat_id` pinned so a future refactor can't widen the query) |
+| FR-CR-05-23  | `test_team_members.py::test_backfill_fills_blank_team_members_from_chat_members` (sparse rows enriched from listener observations; operator edits preserved); `::test_backfill_no_op_when_chat_members_empty` (no observations ⇒ no rows changed) |
+| FR-CR-05-24  | `test_team_members.py::test_enrich_from_bot_api_populates_blank_fields` (Bot API getChat result populates blank username / real_name; rows already populated are skipped without calls); `::test_enrich_from_bot_api_silently_skips_unknown_users` (getChat returns `{}` ⇒ row stays sparse, no crash); `::test_enrich_from_bot_api_noop_when_sender_disabled` (no token / sender ⇒ early-return) |
 | FR-CR-05-22  | `test_intent_pipeline.py::test_title_prompt_forbids_vague_placeholder_phrases_in_description` (CONCRETE OVER VAGUE block + concrete examples «указанных людей» / «правильной командой» / «the right people» pinned; «(уточнить)» fallback when context lacks names); `::test_title_prompt_forbids_first_person_plural_in_description` (THIRD PERSON block + «нам» / «будем рады» / «we'd love» pinned) |
 | FR-CR-05-21  | `test_telegram_ingest.py::test_resolve_owner_registry_display_wins_over_llm_short_form` (LLM extracted «Артем», registry has «Артем Соколов» ⇒ registry wins); `test_telegram_members.py::test_upsert_member_enriches_sparse_team_members_row` (listener observation populates blank `telegram_username` / `real_name` on the matching `team_members` row); `::test_upsert_member_does_not_overwrite_operator_edits` (operator-edited fields are preserved); `::test_upsert_member_no_team_row_is_a_noop` (users without a team row stay only in chat_members) |
 | FR-CR-05-20  | `test_telegram_bot.py::test_build_task_card_text_resolves_owner_link_via_team_registry` (registry has both numeric id + handle ⇒ public `t.me/<handle>` wins over `tg://user?id=`); `::test_build_task_card_text_falls_back_to_chat_members_for_username` (team_members row has only the numeric id but `telegram_chat_members` has the `@handle` ⇒ adopt the chat-members username); `::test_build_task_card_text_falls_back_to_tg_user_id_when_no_handle_anywhere` (no handle in either table ⇒ last-ditch `tg://user?id=` link) |

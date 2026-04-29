@@ -1407,6 +1407,37 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.25 — One-shot team_members backfill (chat_members + Bot API)
+
+13.23 auto-enrich runs on every NEW listener observation, but
+rows seeded BEFORE that fix landed (the bulk of the registry on
+a deploy that came up before the auto-enrich) stayed sparse
+even though earlier traffic in `chat_members` already had the
+matching usernames. And users who never sent a message in any
+chat the bot is in were invisible to the listener too.
+
+Two new flags on `ops.sync_team`:
+
+**`--backfill`** — walks every `team_members` row, looks up the
+most recent `chat_members` observation for that `user_id`, and
+fills BLANK fields. Local DB only — fast.
+
+**`--enrich-bot-api`** — for every still-sparse row, calls
+Telegram Bot API `getChat(<user_id>)` and adopts the returned
+`username` / `first_name` / `last_name`. Works for any user the
+bot has ever interacted with (they /started the bot, sent a DM,
+or are a member of a chat the bot is in). Slower (one HTTP call
+per row), but reaches users the listener hasn't observed.
+
+Operator edits never get overwritten — both passes only fill
+nulls.
+
+Recommended catch-up after an upgrade:
+
+```
+python -m ops.sync_team --backfill --enrich-bot-api --pull --push
+```
+
 #### 13.24 — No placeholder pronouns, no 1st-person-plural in descriptions
 
 Description-quality bugs from the live test:

@@ -236,6 +236,171 @@ def test_seed_from_chat_members_is_idempotent(session):
     assert second == 0
 
 
+def test_backfill_fills_blank_team_members_from_chat_members(session):
+    """FR-CR-05-23 — one-shot backfill catches rows seeded before
+    FR-CR-05-21 auto-enrich landed: walks every team_members row,
+    pulls username / first+last from the most recent
+    telegram_chat_members observation for that user_id, and fills
+    in BLANK fields. Operator-edited values are preserved."""
+    from app.services.team_members import (
+        backfill_team_members_from_chat_members,
+    )
+    from datetime import datetime, timezone as _tz
+
+    # Sparse row — only id, no name / username yet.
+    session.add(
+        TeamMember(
+            telegram_user_id=97239970,
+            telegram_username=None,
+            real_name=None,
+            active=True,
+        )
+    )
+    # Operator-curated row — must be preserved.
+    session.add(
+        TeamMember(
+            telegram_user_id=222968032,
+            telegram_username="custom_handle",
+            real_name="Andre Custom",
+            active=True,
+        )
+    )
+    # Listener has observed both users speaking in some chat.
+    session.add(
+        TelegramChatMember(
+            chat_id=-1001234, user_id=97239970,
+            username="artem_sokolov",
+            first_name="Артем", last_name="Соколов",
+            last_seen_at=datetime.now(_tz.utc),
+        )
+    )
+    session.add(
+        TelegramChatMember(
+            chat_id=-1001234, user_id=222968032,
+            username="andre_andreevich",
+            first_name="Андрей", last_name="Кузьминых",
+            last_seen_at=datetime.now(_tz.utc),
+        )
+    )
+    session.flush()
+
+    changed = backfill_team_members_from_chat_members(session)
+    assert changed == 1  # Artem's sparse row got filled
+
+    artem = (
+        session.query(TeamMember)
+        .filter(TeamMember.telegram_user_id == 97239970)
+        .first()
+    )
+    assert artem.telegram_username == "artem_sokolov"
+    assert artem.real_name == "Артем Соколов"
+
+    # Operator's edits preserved.
+    andre = (
+        session.query(TeamMember)
+        .filter(TeamMember.telegram_user_id == 222968032)
+        .first()
+    )
+    assert andre.telegram_username == "custom_handle"
+    assert andre.real_name == "Andre Custom"
+
+
+def test_enrich_from_bot_api_populates_blank_fields(session):
+    """FR-CR-05-24 — Bot API getChat returns user profile for
+    users the bot has interacted with. Sparse `team_members` rows
+    get their `telegram_username` / `real_name` filled in from
+    the response. Operator edits preserved."""
+    from app.services.team_members import enrich_team_members_from_bot_api
+
+    session.add(TeamMember(telegram_user_id=97239970, active=True))
+    session.add(
+        TeamMember(
+            telegram_user_id=222968032,
+            telegram_username="custom",
+            real_name="Custom Name",
+            active=True,
+        )
+    )
+    session.flush()
+
+    class _FakeSender:
+        enabled = True
+
+        def __init__(self):
+            self.calls = []
+
+        def get_chat(self, *, chat_id):
+            self.calls.append(chat_id)
+            if chat_id == 97239970:
+                return {
+                    "id": 97239970,
+                    "type": "private",
+                    "username": "artem_sokolov",
+                    "first_name": "Артем",
+                    "last_name": "Соколов",
+                }
+            # Operator-curated row should be skipped (its fields are
+            # already populated, so we never call getChat).
+            raise AssertionError(f"unexpected getChat call for {chat_id}")
+
+    sender = _FakeSender()
+    changed = enrich_team_members_from_bot_api(session, sender)
+    assert changed == 1
+    assert sender.calls == [97239970]
+
+    artem = (
+        session.query(TeamMember)
+        .filter(TeamMember.telegram_user_id == 97239970)
+        .first()
+    )
+    assert artem.telegram_username == "artem_sokolov"
+    assert artem.real_name == "Артем Соколов"
+
+
+def test_enrich_from_bot_api_silently_skips_unknown_users(session):
+    """`getChat` returns `{}` (or no `id`) for users the bot has
+    never seen. Those rows stay sparse — no crash, no garbage."""
+    from app.services.team_members import enrich_team_members_from_bot_api
+
+    session.add(TeamMember(telegram_user_id=99999999, active=True))
+    session.flush()
+
+    class _StubSender:
+        enabled = True
+
+        def get_chat(self, *, chat_id):
+            return {}
+
+    assert enrich_team_members_from_bot_api(session, _StubSender()) == 0
+
+
+def test_enrich_from_bot_api_noop_when_sender_disabled(session):
+    """No bot token ⇒ no Bot API calls ⇒ early-return."""
+    from app.services.team_members import enrich_team_members_from_bot_api
+
+    class _Disabled:
+        enabled = False
+
+        def get_chat(self, **kw):  # pragma: no cover
+            raise AssertionError("must not be called")
+
+    assert enrich_team_members_from_bot_api(session, _Disabled()) == 0
+    assert enrich_team_members_from_bot_api(session, None) == 0
+
+
+def test_backfill_no_op_when_chat_members_empty(session):
+    """No `chat_members` data ⇒ nothing to fill ⇒ no rows changed."""
+    from app.services.team_members import (
+        backfill_team_members_from_chat_members,
+    )
+
+    session.add(
+        TeamMember(telegram_user_id=42, active=True)
+    )
+    session.flush()
+    assert backfill_team_members_from_chat_members(session) == 0
+
+
 def test_seed_from_telegram_source_pulls_distinct_users(session):
     """FR-CR-05-10 — seeding from the Supabase view inserts one
     `team_members` row per distinct user_id we've ever seen send a

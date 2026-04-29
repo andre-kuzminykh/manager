@@ -25,6 +25,8 @@ from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import get_logger, setup_logging
 from app.services.team_members import (
+    backfill_team_members_from_chat_members,
+    enrich_team_members_from_bot_api,
     seed_from_chat_members,
     seed_from_slack_employees,
     seed_from_telegram_source,
@@ -59,9 +61,43 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Write the DB state to the sheet (clears + rewrites).",
     )
+    p.add_argument(
+        "--backfill",
+        action="store_true",
+        help=(
+            "FR-CR-05-23 — one-shot backfill: fill BLANK "
+            "`telegram_username` / `real_name` on existing "
+            "`team_members` rows from whatever the listener has "
+            "captured in `telegram_chat_members`. Operator-edited "
+            "values are never overwritten. Useful after deploying "
+            "FR-CR-05-21 to catch up rows seeded before the "
+            "auto-enrich landed."
+        ),
+    )
+    p.add_argument(
+        "--enrich-bot-api",
+        action="store_true",
+        help=(
+            "FR-CR-05-24 — for every `team_members` row with a "
+            "blank `telegram_username`, call Telegram Bot API "
+            "`getChat(<user_id>)` and adopt the returned profile "
+            "fields. Works only for users the bot has interacted "
+            "with (they /started the bot, sent it a DM, or are a "
+            "member of a chat the bot is in). Operator-edited "
+            "values are never overwritten. Slower than --backfill "
+            "(one HTTP call per sparse row), but reaches users "
+            "the listener hasn't observed since FR-CR-05-21."
+        ),
+    )
     args = p.parse_args()
-    if not (args.seed or args.pull or args.push):
-        p.error("specify at least one of --seed / --pull / --push")
+    if not (
+        args.seed or args.pull or args.push or args.backfill
+        or args.enrich_bot_api
+    ):
+        p.error(
+            "specify at least one of --seed / --backfill / "
+            "--enrich-bot-api / --pull / --push"
+        )
     return args
 
 
@@ -81,6 +117,27 @@ def main() -> int:
             ),
         )
         return 2
+
+    backfilled = 0
+    if args.backfill:
+        with session_scope() as session:
+            backfilled = backfill_team_members_from_chat_members(session)
+        log.info("team_sync_backfilled", rows=backfilled)
+
+    enriched_bot_api = 0
+    if args.enrich_bot_api:
+        if not settings.telegram_bot_token:
+            log.error(
+                "team_sync_enrich_bot_api_needs_token",
+                hint="TELEGRAM_BOT_TOKEN is required for getChat calls.",
+            )
+            return 2
+        from app.telegram_bot.sender import TelegramSender
+
+        sender = TelegramSender(token=settings.telegram_bot_token)
+        with session_scope() as session:
+            enriched_bot_api = enrich_team_members_from_bot_api(session, sender)
+        log.info("team_sync_enriched_bot_api", rows=enriched_bot_api)
 
     seeded_chat = seeded_slack = seeded_tg_view = 0
     if args.seed:
@@ -139,6 +196,8 @@ def main() -> int:
         seeded_chat=seeded_chat,
         seeded_slack=seeded_slack,
         seeded_tg_view=seeded_tg_view,
+        backfilled=backfilled,
+        enriched_bot_api=enriched_bot_api,
         pulled_updated=pulled_updated,
         pulled_inserted=pulled_inserted,
         pushed=pushed,

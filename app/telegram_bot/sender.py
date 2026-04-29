@@ -445,6 +445,15 @@ class TelegramSender:
             },
         )
 
+    def get_chat(self, *, chat_id: int | str) -> dict[str, Any]:
+        """FR-CR-05-24 — Bot API `getChat`. Returns the chat /
+        user object including ``username``, ``first_name``,
+        ``last_name`` for users the bot has interacted with (the
+        user has /started the bot, sent a DM, or is a member of a
+        chat the bot is in). Returns ``{}`` on failure / unknown
+        user — caller treats as «no info available»."""
+        return self._post("getChat", {"chat_id": chat_id})
+
     def get_file(self, *, file_id: str) -> dict[str, Any]:
         """Resolve a Telegram `file_id` to its `file_path` so the
         caller can fetch the bytes from

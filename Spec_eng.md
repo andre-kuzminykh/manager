@@ -1407,6 +1407,27 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.37 — Mark-Done click transitions immediately
+
+Old flow opened a force-reply «add an artifact OR `/skip`»
+conversation. Operator wanted: just mark it done, the artifact
+is purely optional.
+
+New flow: click → transition + card refresh; bot posts a
+follow-up «✅ done. Хочешь — пришли ссылку / коммент». No
+force-reply, no `/skip`. Replies still get stored on the task
+as the completion artifact.
+
+#### 13.38 — Edit reply: post full updated card, not a receipt
+
+13.32's receipt («✓ Готово / 👤 owner → 222968032») used raw
+uids and didn't show the new state of the task. After a
+successful Edit reply the listener now sends the FULL re-
+rendered card body as a fresh DM under the operator's reply,
+using the same `build_task_card_text` / `_build_draft_widget_text`
+helpers the live card uses. The original card is also edited
+in place as before.
+
 #### 13.36 — Pull every new message per poll
 
 13.35's view poll capped at 50 rows per tick; busy deploys

@@ -723,6 +723,52 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-37 — Mark-Done click transitions immediately
+
+The Mark Done button used to open a force-reply «artifact?»
+conversation that required either a link / note OR `/skip`.
+Operator complaint: «зачем нажимать ещё `/skip`, если я
+ничего не хочу добавлять».
+
+New flow:
+
+  - Click Mark Done → task transitions to `done` IMMEDIATELY
+    (`handle_done` runs in `_open_done_conversation` instead
+    of being deferred to the reply step). Card refreshes in
+    place.
+  - Bot posts an optional follow-up: «✅ Task #N marked as
+    done. Хочешь — ответь сюда ссылкой или коротким
+    комментом, добавлю в карточку. Иначе просто пропусти.»
+    No `force_reply`; the user can ignore.
+  - When the user does reply, `apply_done_artifact_reply`
+    stores the text/URL on `completion_artifact` /
+    `completion_artifact_kind`. No more `/skip` carve-out and
+    no transition attempt (already done).
+
+#### FR-CR-05-38 — Edit reply: post full updated card, not a receipt
+
+The FR-CR-05-32 receipt («✓ Готово / 👤 owner → 222968032»)
+was using raw uids and didn't show the operator the new state
+of the task. Operator wanted to see the WHOLE updated card
+right under their reply.
+
+After a successful edit reply the listener now:
+
+  - Edits the original card in place (`refresh_card` /
+    `refresh_draft_widgets`, unchanged).
+  - Sends a fresh DM with the FULL re-rendered card body
+    (`build_task_card_text` / `_build_draft_widget_text` —
+    same code paths the live card uses, with all the
+    FR-CR-05-26 / 05-19 / 05-20 owner / link rendering).
+    Reply-to the user's message so it appears in context.
+  - Falls back to a clarification nudge when the user's reply
+    asked for a vague owner change («другого оунера») that the
+    LLM didn't resolve.
+
+The small text-receipt helper `format_edit_receipt` stays in
+the codebase for fallback use but is no longer wired into the
+default Edit flow.
+
 #### FR-CR-05-36 — Pull every new message per poll (large default batch)
 
 The FR-CR-05-35 listener-side view poll initially capped at 50
@@ -3038,6 +3084,8 @@ pure unit tests for internal helpers.
 | FR-CR-05-34  | `test_telegram_bot.py::test_confirm_keyboard_has_three_buttons_in_order` (order pinned as `[ignore, edit, confirm]`); manual verification that `_looks_like_confirm_widget` now accepts either order so widgets in flight from before the upgrade still route Edit clicks correctly |
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
+| FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-38  | manual visual verification — after an Edit reply the listener posts a fresh DM with the full rendered task card / widget body in context; the original card / widget is also edited in place by `refresh_card` / `refresh_draft_widgets` |
 | FR-CR-05-29  | `test_team_members.py::test_upsert_from_sheet_rows_merges_duplicates_by_unique_column` (operator edits one row to carry BOTH `telegram_user_id` AND `slack_user_id` ⇒ orphan row that previously owned one of those ids gets deleted; pull lands cleanly without `UniqueViolation`) |
 | FR-CR-05-28  | `test_telegram_listener.py::test_listener_runs_sheet_pulls_when_interval_elapsed` (first call after construction fires both pulls); `::test_listener_throttles_sheet_pulls_within_interval` (repeated calls inside the window are no-ops); `::test_listener_skips_sheet_pulls_when_interval_zero` (`SHEET_POLL_INTERVAL_SECONDS=0` disables the in-listener poll); `::test_listener_swallows_sheet_pull_errors` (transient HTTP errors don't break the listener) |
 | FR-CR-05-27  | `test_telegram_members.py::test_upsert_member_creates_team_row_for_new_user` (brand-new user observed ⇒ team_members row auto-created with all available fields, `active=True`); `::test_upsert_member_creates_inactive_team_row_for_bot_account` (auto-bot detection ⇒ `active=False` on creation); `test_team_members.py::test_team_sheet_push_appends_only_new_rows` (existing operator edits preserved; only DB rows missing from the sheet get appended); `::test_team_sheet_push_writes_full_table_when_sheet_empty` (first-time bootstrap writes header + body) |

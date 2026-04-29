@@ -155,17 +155,25 @@ def handle_done(session: Session, *, task_id: int, actor: str) -> Task | None:
 def prompt_done(
     session: Session, *, task_id: int, actor: str
 ) -> tuple[Task, str]:
-    """Step 1 of the Mark-done conversation: return the prompt text
-    the listener should post in the chat. Raises ``NotAuthorised``
-    when the actor isn't allowed to complete the task."""
+    """FR-CR-05-37 — Mark-done click is now self-completing:
+    `_open_done_conversation` transitions the task to ``done``
+    immediately and only then posts this prompt as an OPTIONAL
+    follow-up. The user can reply with a link or a short note
+    (added as the completion artifact) or just ignore it.
+
+    Returns the prompt text the listener posts. Raises
+    ``NotAuthorised`` when the actor isn't allowed to complete
+    the task — the listener calls this BEFORE the transition,
+    so an unauthorised user gets the lock toast and nothing
+    changes on the task."""
     task = session.get(Task, task_id)
     if task is None or task.deleted_at is not None:
         raise NotAuthorised("Task not found or already deleted.")
     _ensure_can_edit(task, actor)
     text = (
-        f"🎉 <b>Marking task #{task.id} as done</b>\n"
-        f"📎 Optionally reply with a link or a short note about the result.\n"
-        f"Or reply <code>/skip</code> to complete without an artifact."
+        f"✅ <b>Task #{task.id} marked as done</b>\n"
+        f"📎 Хочешь — ответь сюда ссылкой или коротким комментом, "
+        f"добавлю в карточку. Иначе просто пропусти."
     )
     return task, text
 
@@ -177,33 +185,32 @@ def apply_done_artifact_reply(
     actor: str,
     reply_text: str,
 ) -> Task | None:
-    """Step 2 of the Mark-done conversation: parse the user's
-    reply, persist the artifact (URL → kind=url, anything else →
-    kind=text), and transition the task to done."""
+    """FR-CR-05-37 — apply the operator's optional follow-up
+    reply to a task that's ALREADY been transitioned to done by
+    `handle_done`. The reply text is stored as the completion
+    artifact (URL → kind=url, anything else → kind=text). When
+    the reply is empty or just whitespace, the function is a
+    no-op — the task stays done with no artifact.
+
+    No more ``/skip`` carve-out; the listener no longer requires
+    a reply at all (force_reply removed). This helper just
+    persists the artifact when the operator chose to provide
+    one.
+    """
     task = session.get(Task, task_id)
     if task is None or task.deleted_at is not None:
         return None
     _ensure_can_edit(task, actor)
 
     text = (reply_text or "").strip()
-    if text and text != "/skip":
-        if re.match(r"^https?://", text):
-            task.completion_artifact = text
-            task.completion_artifact_kind = "url"
-        else:
-            task.completion_artifact = text
-            task.completion_artifact_kind = "text"
-
-    try:
-        TransitionService().apply(
-            session,
-            task=task,
-            new_status=TaskStatus.done,
-            actor_slack_user_id=actor,
-        )
-    except InvalidTransition:
-        # Already done — keep the artifact we just stored.
-        log.info("telegram_done_already_done", task_id=task_id)
+    if not text:
+        return task
+    if re.match(r"^https?://", text):
+        task.completion_artifact = text
+        task.completion_artifact_kind = "url"
+    else:
+        task.completion_artifact = text
+        task.completion_artifact_kind = "text"
     _schedule_sync_task(session, task_id)
     return task
 

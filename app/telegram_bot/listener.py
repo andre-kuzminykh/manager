@@ -62,7 +62,7 @@ from app.telegram_bot.keyboards import (
     parse_callback_data,
 )
 from app.telegram_bot.pending import PendingRegistry
-from app.telegram_bot.sender import TelegramSender
+from app.telegram_bot.sender import TelegramSender, build_task_card_text
 from app.telegram_ingest.reader import TelegramSourceMessage
 from app.telegram_ingest.service import TelegramIngestService
 
@@ -824,9 +824,17 @@ class TelegramListener:
         actor: str,
         cq: dict[str, Any],
     ) -> Task | None:
-        """Click on Mark done → post the artifact prompt and register
-        a pending question. The user's reply (text or `/skip`) lands
-        in `_handle_pending_reply` on the next tick."""
+        """FR-CR-05-37 — click on Mark done = transition the task
+        to ``done`` immediately. The artifact prompt that follows
+        is purely OPTIONAL — the user can reply with a link /
+        comment to attach as the completion artifact, or just
+        ignore the message.
+
+        The pending registration stays so a reply does land back
+        on `_handle_pending_reply` and gets stored on the task.
+        """
+        # Pre-flight authorisation check (raises NotAuthorised on
+        # failure — the listener catches it and toasts the user).
         task, prompt_text = tg_handlers.prompt_done(
             session, task_id=task_id, actor=actor
         )
@@ -834,10 +842,33 @@ class TelegramListener:
         chat_id = chat.get("id")
         if chat_id is None:
             return None
+
+        # Transition immediately. Returns the (possibly-already-
+        # done) task so we can refresh the card.
+        try:
+            task = tg_handlers.handle_done(
+                session, task_id=task_id, actor=actor
+            )
+        except tg_handlers.NotAuthorised:
+            raise
+        if task is not None:
+            try:
+                refresh_card(
+                    sender=self._sender,
+                    session=session,
+                    task=task,
+                    viewer=actor,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("telegram_done_refresh_failed", error=str(e))
+
+        # Optional artifact prompt — NOT a force_reply (the user
+        # can ignore it). Pending registration is keyed on
+        # `prompt_message_id` so a swipe-reply from the operator
+        # still routes correctly.
         resp = self._sender.send_message(
             chat_id=chat_id,
             text=prompt_text,
-            reply_markup={"force_reply": True, "selective": True},
         )
         prompt_msg_id = resp.get("message_id")
         if prompt_msg_id:
@@ -848,9 +879,8 @@ class TelegramListener:
                 user_id=int(actor),
                 prompt_message_id=int(prompt_msg_id),
             )
-        # Returning None means the listener won't try to refresh
-        # the original card right now — it'll happen after the
-        # user replies.
+        # Already refreshed the card above; nothing for the
+        # caller to do.
         return None
 
     def _open_edit_draft_conversation(
@@ -1078,20 +1108,58 @@ class TelegramListener:
                 task=task,
                 viewer=actor,
             )
-            # FR-CR-05-32 — visible receipt confirming which fields
-            # actually applied. Without this the operator had no
-            # signal that the edit landed (the prompt was deleted
-            # and the original card edited in place far up in chat).
+            # FR-CR-05-38 — instead of a small «✓ Готово / owner →
+            # 222968032» receipt, post the FULL updated card as a
+            # new DM message right under the operator's reply.
+            # That way the operator sees the whole new state in
+            # context (no scrolling up to find the in-place edit
+            # of the original card) and the receipt always shows
+            # human-friendly labels via build_task_card_text.
             try:
+                from app.telegram_bot.cards import _keyboard_for
+                from app.services import SubscriptionService
+
+                is_subscribed = (
+                    SubscriptionService().is_subscribed(
+                        session, task=task, slack_user_id=actor
+                    )
+                    if task.owner_user_id
+                    else False
+                )
+                kb = _keyboard_for(task, actor, subscribed=is_subscribed)
                 self._sender.send_message(
                     chat_id=msg.chat_id,
-                    text=tg_handlers.format_edit_receipt(
-                        applied, raw_reply=reply_text
-                    ),
+                    text=build_task_card_text(task, session=session),
+                    reply_markup=kb,
                     reply_to_message_id=msg.message_id,
                 )
             except Exception as e:  # noqa: BLE001
                 log.info("telegram_edit_receipt_failed", error=str(e))
+            # Optional clarification nudge for vague-owner edits
+            # (operator typed «другого оунера» but no resolution).
+            if "owner" not in applied:
+                low = (reply_text or "").lower()
+                vague = any(
+                    m in low
+                    for m in (
+                        "другого оунер",
+                        "другого ответствен",
+                        "другую ответствен",
+                        "another owner",
+                    )
+                )
+                if vague:
+                    try:
+                        self._sender.send_message(
+                            chat_id=msg.chat_id,
+                            text=(
+                                "🤔 ответственного хотел поменять? "
+                                "уточни на кого именно (имя или @handle)."
+                            ),
+                            reply_to_message_id=msg.message_id,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
         elif pending.action == "edit_draft":
             # Edit-on-draft — user tapped ✏ Edit on a confirm widget.
             # Same LLM backend; on success re-render every widget DM
@@ -1122,13 +1190,17 @@ class TelegramListener:
             refresh_draft_widgets(
                 sender=self._sender, draft=draft, session=session
             )
-            # FR-CR-05-32 — same receipt for Edit-on-draft.
+            # FR-CR-05-38 — full updated widget body as a fresh DM
+            # under the operator's reply. Same rationale as the
+            # task-card path: visible state in context.
             try:
+                from app.telegram_bot.cards import _build_draft_widget_text
+                from app.telegram_bot.keyboards import confirm_keyboard
+
                 self._sender.send_message(
                     chat_id=msg.chat_id,
-                    text=tg_handlers.format_edit_receipt(
-                        applied, raw_reply=reply_text
-                    ),
+                    text=_build_draft_widget_text(draft, session=session),
+                    reply_markup=confirm_keyboard(draft_id=draft.id),
                     reply_to_message_id=msg.message_id,
                 )
             except Exception as e:  # noqa: BLE001

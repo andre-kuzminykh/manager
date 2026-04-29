@@ -130,10 +130,17 @@ def test_pending_take_doesnt_match_a_different_prompt_message():
 
 
 def test_prompt_done_returns_text_for_owner(session):
+    """FR-CR-05-37 — Mark Done click is now self-completing,
+    so the prompt invites an OPTIONAL artifact reply rather than
+    asking for one. No more `/skip` carve-out — the user just
+    ignores the message if they don't want to add a comment."""
     tid = _mk(session, owner_user_id="11", status=TaskStatus.in_progress)
     task, text = h.prompt_done(session, task_id=tid, actor="11")
     assert task.id == tid
-    assert "Mark done" in text or "/skip" in text
+    # Headline confirms the transition, optional-reply CTA below.
+    assert "marked as done" in text.lower() or "✅" in text
+    # No more «/skip» wording.
+    assert "/skip" not in text
 
 
 def test_prompt_done_blocks_stranger(session):
@@ -142,10 +149,13 @@ def test_prompt_done_blocks_stranger(session):
         h.prompt_done(session, task_id=tid, actor="99")
 
 
-def test_apply_done_skip_completes_without_artifact(session):
-    tid = _mk(session, owner_user_id="11", status=TaskStatus.in_progress)
+def test_apply_done_no_op_when_reply_empty(session):
+    """FR-CR-05-37 — Done transition already happened on click;
+    `apply_done_artifact_reply` is a no-op when the optional
+    reply is empty (the user didn't bother to add a comment)."""
+    tid = _mk(session, owner_user_id="11", status=TaskStatus.done)
     task = h.apply_done_artifact_reply(
-        session, task_id=tid, actor="11", reply_text="/skip"
+        session, task_id=tid, actor="11", reply_text=""
     )
     assert task.status == TaskStatus.done
     assert task.completion_artifact is None
@@ -153,7 +163,10 @@ def test_apply_done_skip_completes_without_artifact(session):
 
 
 def test_apply_done_url_artifact(session):
-    tid = _mk(session, owner_user_id="11", status=TaskStatus.in_progress)
+    """Already-done task + URL reply ⇒ artifact stored, status
+    stays done. No transition attempt (no more InvalidTransition
+    log spam)."""
+    tid = _mk(session, owner_user_id="11", status=TaskStatus.done)
     task = h.apply_done_artifact_reply(
         session,
         task_id=tid,
@@ -166,7 +179,7 @@ def test_apply_done_url_artifact(session):
 
 
 def test_apply_done_text_artifact(session):
-    tid = _mk(session, owner_user_id="11", status=TaskStatus.in_progress)
+    tid = _mk(session, owner_user_id="11", status=TaskStatus.done)
     task = h.apply_done_artifact_reply(
         session,
         task_id=tid,

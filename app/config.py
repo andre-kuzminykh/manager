@@ -77,6 +77,15 @@ class Settings(BaseSettings):
     google_tasks_default_tasklist_id: str = Field(
         default="@default", alias="GOOGLE_TASKS_DEFAULT_TASKLIST_ID"
     )
+    # FR-CR-05-28 — listener polls both Sheets (Tasks + Team)
+    # every N seconds and applies operator edits to the DB. 60s
+    # default keeps the operator-edit-to-DB delay below a minute
+    # without burning Sheets API quota. Set to 0 to disable
+    # in-listener polling (e.g. when running an external cron
+    # instead).
+    sheet_poll_interval_seconds: int = Field(
+        default=60, alias="SHEET_POLL_INTERVAL_SECONDS"
+    )
 
     # Intent policy
     intent_confidence_high: float = Field(default=0.75, alias="INTENT_CONFIDENCE_HIGH")

@@ -262,6 +262,9 @@ class TelegramListener:
         sender: TelegramSender | None = None,
         long_poll_timeout: int = 30,
         pending: PendingRegistry | None = None,
+        team_sheet_factory=None,
+        tasks_sheet_pull_factory=None,
+        sheet_poll_interval_seconds: int = 60,
     ) -> None:
         self._token = token
         self._ingest = ingest
@@ -273,10 +276,69 @@ class TelegramListener:
         # FR-CR-04-29 — in-memory state for reply-conversation flows
         # (Mark done with artifact, Edit via key=value reply).
         self._pending = pending if pending is not None else PendingRegistry()
+        # FR-CR-05-28 — periodic Sheet → DB polling. The listener's
+        # main loop is a long-poll on getUpdates that wakes up every
+        # ≤30s; on each wake we also tick the Sheet pulls when the
+        # poll interval has elapsed. No external cron needed.
+        self._team_sheet_factory = team_sheet_factory
+        self._tasks_sheet_pull_factory = tasks_sheet_pull_factory
+        self._sheet_poll_interval = max(0, int(sheet_poll_interval_seconds))
+        self._last_sheet_poll_at = 0.0
 
     @property
     def enabled(self) -> bool:
         return bool(self._token)
+
+    def _maybe_run_sheet_pulls(self) -> None:
+        """FR-CR-05-28 — pull operator edits from both Sheets
+        into the DB on a schedule. Called on every tick; no-op
+        unless ``_sheet_poll_interval`` seconds have elapsed
+        since the last run.
+
+        Each pull runs in its own session_scope so a transient
+        Google Sheets HTTP error doesn't poison the listener
+        transaction. Errors are logged and swallowed — the
+        listener keeps processing Telegram updates either way.
+        """
+        if self._sheet_poll_interval <= 0:
+            return
+        now = time.time()
+        if now - self._last_sheet_poll_at < self._sheet_poll_interval:
+            return
+        self._last_sheet_poll_at = now
+        if self._team_sheet_factory is not None:
+            try:
+                sync = self._team_sheet_factory()
+                if sync is not None:
+                    with session_scope() as s:
+                        updated, inserted = sync.pull(s)
+                    if updated or inserted:
+                        log.info(
+                            "listener_team_sheet_pulled",
+                            updated=updated,
+                            inserted=inserted,
+                        )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "listener_team_sheet_pull_failed", error=str(e)
+                )
+        if self._tasks_sheet_pull_factory is not None:
+            try:
+                sync = self._tasks_sheet_pull_factory()
+                if sync is not None:
+                    with session_scope() as s:
+                        seen, changed, skipped = sync.pull(s)
+                    if changed:
+                        log.info(
+                            "listener_tasks_sheet_pulled",
+                            seen=seen,
+                            changed=changed,
+                            skipped=skipped,
+                        )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "listener_tasks_sheet_pull_failed", error=str(e)
+                )
 
     def _llm_backend(self):
         """The intent classifier's backend, or None when running in
@@ -341,6 +403,11 @@ class TelegramListener:
         re-fetches the same range — `processed_telegram_messages`
         backstops dedup on retry.
         """
+        # FR-CR-05-28 — fire scheduled Sheet → DB pulls. Runs on
+        # every tick but throttled to `sheet_poll_interval_seconds`
+        # internally, so the cost is bounded.
+        self._maybe_run_sheet_pulls()
+
         with session_scope() as session:
             offset = _get_offset(session)
 

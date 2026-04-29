@@ -72,9 +72,30 @@ def main() -> int:
     ingest = TelegramIngestService(
         classifier=classifier, orchestrator=orchestrator, reader=reader
     )
+
+    # FR-CR-05-28 — wire the Sheet-pull factories into the listener
+    # so it polls operator edits from both Sheets every
+    # ``SHEET_POLL_INTERVAL_SECONDS`` (default 60s). Edits land in
+    # the DB on the next tick — no external cron needed.
+    team_sheet_factory = None
+    tasks_sheet_pull_factory = None
+    try:
+        from app.sync.factories import (
+            build_sheets_pull_factory,
+            build_team_sheet_factory,
+        )
+
+        team_sheet_factory = build_team_sheet_factory(settings)
+        tasks_sheet_pull_factory = build_sheets_pull_factory(settings)
+    except Exception as e:  # noqa: BLE001
+        log.warning("tg_listener_sheet_factories_setup_failed", error=str(e))
+
     listener = TelegramListener(
         token=settings.telegram_bot_token,
         ingest=ingest,
+        team_sheet_factory=team_sheet_factory,
+        tasks_sheet_pull_factory=tasks_sheet_pull_factory,
+        sheet_poll_interval_seconds=settings.sheet_poll_interval_seconds,
     )
 
     # FR-CR-04-23 / FR-CR-04-26 — register the active TaskSyncer so

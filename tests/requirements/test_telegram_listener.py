@@ -650,6 +650,109 @@ def test_listener_disabled_when_token_empty():
 
 
 # --------------------------------------------------------------------------- #
+# FR-CR-05-28 — periodic Sheet → DB poll
+# --------------------------------------------------------------------------- #
+
+
+def test_listener_runs_sheet_pulls_when_interval_elapsed():
+    """FR-CR-05-28 — listener fires both Sheet pulls (Tasks +
+    Team) every ``sheet_poll_interval_seconds``; first tick
+    after construction always runs them."""
+    team_calls = {"n": 0}
+    tasks_calls = {"n": 0}
+
+    class _StubTeamSync:
+        def pull(self, session):
+            team_calls["n"] += 1
+            return 0, 0
+
+    class _StubTasksPull:
+        def pull(self, session):
+            tasks_calls["n"] += 1
+            return 0, 0, 0
+
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=_make_ingest(IntentClassification(
+            intent=IntentType.no_action, confidence=0.0
+        )),
+        team_sheet_factory=lambda: _StubTeamSync(),
+        tasks_sheet_pull_factory=lambda: _StubTasksPull(),
+        sheet_poll_interval_seconds=60,
+    )
+    listener._maybe_run_sheet_pulls()
+    assert team_calls["n"] == 1
+    assert tasks_calls["n"] == 1
+
+
+def test_listener_throttles_sheet_pulls_within_interval():
+    """Calling `_maybe_run_sheet_pulls` repeatedly within the
+    interval window must NOT fire repeated pulls."""
+    team_calls = {"n": 0}
+
+    class _StubTeamSync:
+        def pull(self, session):
+            team_calls["n"] += 1
+            return 0, 0
+
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=_make_ingest(IntentClassification(
+            intent=IntentType.no_action, confidence=0.0
+        )),
+        team_sheet_factory=lambda: _StubTeamSync(),
+        sheet_poll_interval_seconds=60,
+    )
+    listener._maybe_run_sheet_pulls()
+    listener._maybe_run_sheet_pulls()
+    listener._maybe_run_sheet_pulls()
+    assert team_calls["n"] == 1
+
+
+def test_listener_skips_sheet_pulls_when_interval_zero():
+    """``sheet_poll_interval_seconds=0`` disables the listener-side
+    polling — useful when running an external cron that does the
+    same work."""
+    team_calls = {"n": 0}
+
+    class _StubTeamSync:
+        def pull(self, session):
+            team_calls["n"] += 1
+            return 0, 0
+
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=_make_ingest(IntentClassification(
+            intent=IntentType.no_action, confidence=0.0
+        )),
+        team_sheet_factory=lambda: _StubTeamSync(),
+        sheet_poll_interval_seconds=0,
+    )
+    listener._maybe_run_sheet_pulls()
+    assert team_calls["n"] == 0
+
+
+def test_listener_swallows_sheet_pull_errors():
+    """A transient HTTP error from Sheets must not break the
+    listener — it logs and continues so Telegram updates stay
+    flowing."""
+    class _BoomTeamSync:
+        def pull(self, session):
+            raise RuntimeError("HTTP 500")
+
+    listener = TelegramListener(
+        token="123:abc",
+        ingest=_make_ingest(IntentClassification(
+            intent=IntentType.no_action, confidence=0.0
+        )),
+        team_sheet_factory=lambda: _BoomTeamSync(),
+        sheet_poll_interval_seconds=60,
+    )
+    # Should not raise.
+    listener._maybe_run_sheet_pulls()
+
+
+# --------------------------------------------------------------------------- #
 # FR-CR-05-14 — voice messages in pending replies
 # --------------------------------------------------------------------------- #
 

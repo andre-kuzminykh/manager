@@ -1407,6 +1407,34 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.29 — Listener-driven periodic Sheet → DB poll
+
+13.13 documented bidirectional sync via cron, but the default
+deploy has no cron set up — operators were stuck running
+`--pull` manually after every Sheet edit. New behaviour: the
+listener itself polls both Sheets every
+``SHEET_POLL_INTERVAL_SECONDS`` (default 60) and applies edits
+to the DB.
+
+On each listener tick, when the interval has elapsed since the
+last pull, both `TeamSheetSync.pull` and `SheetsPullService.pull`
+run in their own session scopes (HTTP errors log + swallow, the
+next tick retries). Setting the interval to 0 disables the
+in-listener poll for deploys that run an external cron instead.
+
+Operator workflow:
+
+  1. Edit a cell in the Tasks or Team Sheet.
+  2. Within ~60 s the listener picks up the edit and updates
+     the DB.
+  3. The next render of the affected card / widget reflects the
+     new state.
+
+No manual `--pull` invocations needed.
+
+
+---
+
 #### 13.28 — Auto-add new chat users + non-destructive `--push`
 
 Two operator-friendly registry tweaks after losing a round of

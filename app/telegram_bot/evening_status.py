@@ -160,20 +160,27 @@ def _done_today_for_owner(
     session: Session, *, owner_uid: str, today: date
 ) -> list[Task]:
     """Tasks the owner closed at any point today (history-driven —
-    a task closed and re-opened still counts)."""
+    a task closed and re-opened still counts).
+
+    Uses an `IN (subquery)` instead of `JOIN ... DISTINCT` to avoid
+    Postgres' «could not identify an equality operator for type
+    json» on `tasks.extra` — DISTINCT on the full row would
+    require comparing JSON values column-wise."""
     start, end = _day_bounds(today)
     return (
         session.query(Task)
-        .join(TaskStatusHistory, TaskStatusHistory.task_id == Task.id)
         .filter(
             Task.owner_user_id == owner_uid,
             Task.deleted_at.is_(None),
-            TaskStatusHistory.to_status == TaskStatus.done,
-            TaskStatusHistory.at >= start,
-            TaskStatusHistory.at < end,
+            Task.id.in_(
+                session.query(TaskStatusHistory.task_id).filter(
+                    TaskStatusHistory.to_status == TaskStatus.done,
+                    TaskStatusHistory.at >= start,
+                    TaskStatusHistory.at < end,
+                )
+            ),
         )
         .order_by(Task.completed_at.desc().nullslast(), Task.id.desc())
-        .distinct()
         .all()
     )
 
@@ -211,17 +218,21 @@ def _todo_for_owner(session: Session, *, owner_uid: str) -> list[Task]:
 
 
 def _subscribed_open_for(session: Session, *, recipient_uid: str) -> list[Task]:
+    """Open tasks the user follows but doesn't own. `IN (subquery)`
+    instead of `JOIN ... DISTINCT` for Postgres-JSON safety."""
     return (
         session.query(Task)
-        .join(TaskSubscription, TaskSubscription.task_id == Task.id)
         .filter(
-            TaskSubscription.slack_user_id == recipient_uid,
             Task.deleted_at.is_(None),
             Task.status.in_(_OPEN),
             (Task.owner_user_id != recipient_uid) | (Task.owner_user_id.is_(None)),
+            Task.id.in_(
+                session.query(TaskSubscription.task_id).filter(
+                    TaskSubscription.slack_user_id == recipient_uid,
+                )
+            ),
         )
         .order_by(Task.due_date.is_(None), Task.due_date, Task.id)
-        .distinct()
         .all()
     )
 
@@ -437,19 +448,23 @@ def _build_groups(
 
 
 def _done_today_all(session: Session, *, today: date) -> list[Task]:
-    """Admin-view selector — every Telegram-owned task closed today."""
+    """Admin-view selector — every Telegram-owned task closed today.
+    `IN (subquery)` instead of `JOIN ... DISTINCT` for
+    Postgres-JSON safety (see `_done_today_for_owner`)."""
     start, end = _day_bounds(today)
     return (
         session.query(Task)
-        .join(TaskStatusHistory, TaskStatusHistory.task_id == Task.id)
         .filter(
             Task.deleted_at.is_(None),
-            TaskStatusHistory.to_status == TaskStatus.done,
-            TaskStatusHistory.at >= start,
-            TaskStatusHistory.at < end,
+            Task.id.in_(
+                session.query(TaskStatusHistory.task_id).filter(
+                    TaskStatusHistory.to_status == TaskStatus.done,
+                    TaskStatusHistory.at >= start,
+                    TaskStatusHistory.at < end,
+                )
+            ),
         )
         .order_by(Task.completed_at.desc().nullslast(), Task.id.desc())
-        .distinct()
         .all()
     )
 

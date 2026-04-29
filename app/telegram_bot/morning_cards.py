@@ -138,12 +138,13 @@ def _subscribed_due_today(
     session: Session, *, recipient_uid: str, today: date
 ) -> list[Task]:
     """Open tasks the user follows that are due today (or
-    already in flight)."""
+    already in flight). `IN (subquery)` instead of `JOIN ...
+    DISTINCT` to avoid Postgres' «no equality operator for json»
+    on `tasks.extra` (DISTINCT on the full row needs to compare
+    every column)."""
     return (
         session.query(Task)
-        .join(TaskSubscription, TaskSubscription.task_id == Task.id)
         .filter(
-            TaskSubscription.slack_user_id == recipient_uid,
             Task.deleted_at.is_(None),
             Task.status.in_(_OPEN),
             (Task.owner_user_id != recipient_uid) | (Task.owner_user_id.is_(None)),
@@ -151,8 +152,12 @@ def _subscribed_due_today(
                 Task.due_date == today,
                 Task.status == TaskStatus.in_progress,
             ),
+            Task.id.in_(
+                session.query(TaskSubscription.task_id).filter(
+                    TaskSubscription.slack_user_id == recipient_uid,
+                )
+            ),
         )
-        .distinct()
         .all()
     )
 

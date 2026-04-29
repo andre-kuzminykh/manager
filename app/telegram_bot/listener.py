@@ -69,6 +69,24 @@ from app.telegram_ingest.service import TelegramIngestService
 log = get_logger(__name__)
 
 
+# FR-CR-05-45 — welcome widget shown on `/start` (and `/help`) in
+# any private DM with the bot. Read by `tick()` before any ingest
+# routing. Single source of truth so the message stays consistent
+# across re-deploys.
+_WELCOME_WIDGET_TEXT = (
+    "👋 <b>Привет! Я веду список задач.</b>\n\n"
+    "📝 Напиши задачу текстом или продиктуй голосом — я разберу.\n"
+    "Можно списком: <i>«первая задача …, вторая задача …»</i> — "
+    "раскидаю в виде отдельных карточек.\n\n"
+    "🚦 На каждой карточке кнопки: <b>Start</b>, <b>Edit</b>, "
+    "<b>Mark done</b>, <b>Subscribe</b>. Нажмёшь Edit — отвечай "
+    "сразу под промптом, можно текстом или голосом.\n\n"
+    "📊 Каждый вечер пришлю краткий статус по всем задачам.\n"
+    "☀ Каждое утро — карточки на сегодня в порядке приоритета.\n\n"
+    "Начнём — что нужно сделать?"
+)
+
+
 _API_BASE = "https://api.telegram.org/bot"
 
 
@@ -678,6 +696,27 @@ class TelegramListener:
                     continue
 
                 try:
+                    # FR-CR-05-45 — welcome widget on /start (and /help).
+                    # Operators arrive at the bot's DM cold and need a
+                    # one-screen pitch: «Запиши задачи текстом или
+                    # голосом — я разберу. Можно списком». No buttons
+                    # — the conversation IS the UI from message #1.
+                    text_stripped = (msg.text or "").strip()
+                    if msg.is_private and text_stripped in (
+                        "/start", "/help", "/start@",
+                    ):
+                        try:
+                            self._sender.send_message(
+                                chat_id=msg.chat_id,
+                                text=_WELCOME_WIDGET_TEXT,
+                            )
+                        except Exception as e:  # noqa: BLE001
+                            log.info(
+                                "telegram_welcome_send_failed",
+                                error=str(e),
+                            )
+                        continue
+
                     # FR-CR-05-44 — top-level voice / audio capture.
                     # The Edit/Done reply path (above) already
                     # transcribes via Whisper; without this branch a

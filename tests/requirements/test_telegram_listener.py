@@ -1154,3 +1154,101 @@ def test_listener_tick_voice_dm_no_transcript_sends_nudge(
         assert "Не разобрал голос" in nudge["text"]
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-45 — /start welcome widget
+# --------------------------------------------------------------------------- #
+
+
+def test_listener_tick_responds_to_start_with_welcome_widget(
+    patched_session_scope, SessionFactory
+):
+    """`/start` in a private DM gets the welcome widget back. The
+    classifier is NOT called (the message isn't a task capture)
+    and no Task row lands in the DB."""
+    listener = _make_listener(
+        IntentClassification(intent=IntentType.no_action, confidence=0.0),
+        updates_per_call=[
+            [
+                {
+                    "update_id": 400,
+                    "message": {
+                        "message_id": 1,
+                        "chat": {"id": 7, "type": "private"},
+                        "from": {"id": 1},
+                        "text": "/start",
+                        "date": 0,
+                    },
+                }
+            ]
+        ],
+    )
+    sent: list[dict] = []
+    listener._sender.send_message = lambda **kw: sent.append(kw) or {"message_id": 1}  # type: ignore[method-assign]
+
+    report = listener.tick()
+    assert report.tasks_created == 0
+    assert sent
+    assert "Привет" in sent[0]["text"]
+    assert "голосом" in sent[0]["text"]
+    with SessionFactory() as s:
+        assert s.query(Task).count() == 0
+
+
+def test_listener_tick_help_command_also_returns_welcome_widget(
+    patched_session_scope, SessionFactory
+):
+    """`/help` is treated the same as `/start` so users who type the
+    canonical Telegram help command get the same one-screen pitch."""
+    listener = _make_listener(
+        IntentClassification(intent=IntentType.no_action, confidence=0.0),
+        updates_per_call=[
+            [
+                {
+                    "update_id": 401,
+                    "message": {
+                        "message_id": 1,
+                        "chat": {"id": 7, "type": "private"},
+                        "from": {"id": 1},
+                        "text": "/help",
+                        "date": 0,
+                    },
+                }
+            ]
+        ],
+    )
+    sent: list[dict] = []
+    listener._sender.send_message = lambda **kw: sent.append(kw) or {"message_id": 1}  # type: ignore[method-assign]
+    listener.tick()
+    assert sent and "задач" in sent[0]["text"].lower()
+
+
+def test_listener_tick_start_in_group_chat_falls_through_to_ingest(
+    patched_session_scope, SessionFactory
+):
+    """`/start` in a GROUP chat is NOT a welcome trigger — groups
+    don't need an onboarding widget. Falls through to the normal
+    ingest path."""
+    listener = _make_listener(
+        IntentClassification(intent=IntentType.no_action, confidence=0.0),
+        updates_per_call=[
+            [
+                {
+                    "update_id": 402,
+                    "message": {
+                        "message_id": 1,
+                        "chat": {"id": -100, "type": "supergroup", "title": "Team"},
+                        "from": {"id": 1},
+                        "text": "/start",
+                        "date": 0,
+                    },
+                }
+            ]
+        ],
+    )
+    sent: list[dict] = []
+    listener._sender.send_message = lambda **kw: sent.append(kw) or {"message_id": 1}  # type: ignore[method-assign]
+    listener.tick()
+    # No welcome widget would have been posted to a group.
+    assert not any("Привет" in m.get("text", "") for m in sent)

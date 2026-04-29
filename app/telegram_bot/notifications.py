@@ -132,6 +132,33 @@ def _fmt_task_line(task: Task) -> str:
     return "• " + " · ".join(parts)
 
 
+def _fmt_task_today_line(task: Task) -> str:
+    """Minimal task line for the morning «Today» digest.
+
+    Drops the noise — no `#id`, no owner (it's the recipient
+    themselves), no status, no `due_date` repetition (every task in
+    this list is by definition due today). Keeps only fields that
+    carry value: title, optional description, priority, optional
+    category, optional start/due times.
+    """
+    head = f"• {task.title}"
+    parts: list[str] = [head]
+    if task.description:
+        parts.append(f"  📝 {task.description}")
+    meta: list[str] = []
+    pri_em = PRIORITY_EMOJI.get(task.priority.value, "")
+    meta.append(f"{pri_em} {task.priority.value}")
+    if task.category:
+        meta.append(f"🏷 {task.category}")
+    if task.start_time:
+        meta.append(f"🚦 {task.start_time.strftime('%H:%M')}")
+    if task.due_time:
+        meta.append(f"⏰ {task.due_time.strftime('%H:%M')}")
+    if meta:
+        parts.append("  " + " · ".join(meta))
+    return "\n".join(parts)
+
+
 @dataclass
 class TelegramDigestReport:
     recipients: int = 0
@@ -193,7 +220,7 @@ def send_morning_digest(
 
         body = (
             f"<b>📅 Today — {today.isoformat()}</b>\n"
-            + "\n".join(_fmt_task_line(t) for t in today_tasks)
+            + "\n".join(_fmt_task_today_line(t) for t in today_tasks)
         )
         try:
             sender.send_message(chat_id=int(uid), text=body)

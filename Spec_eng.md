@@ -639,8 +639,8 @@ edit / cancel / delete any task, plus admin watch-list digest.
 **Operator setup** — the cron schedule mirrors the Slack one,
 just doubled with a Telegram call per slot:
 ```
-09:00  python -m ops.telegram_digest --type morning-digest
-09:00  python -m ops.telegram_digest --type plan-morning
+08:00  python -m ops.telegram_digest --type morning-digest
+08:00  python -m ops.telegram_digest --type plan-morning
 10:00  python -m ops.telegram_digest --type thread-reminders   (Mon-Fri)
 18:00  python -m ops.telegram_digest --type plan-evening
 20:00  python -m ops.telegram_digest --type weekly             (Sundays)
@@ -748,11 +748,13 @@ its own imperative + object». A phrase like «сделать отчёт и
 презентацию по нему» stays one task because the second clause is
 a sub-item of the first.
 
-#### 13.2 — Morning digest at 09:00 local: today only
+#### 13.2 — Morning digest at 08:00 local: today only
 
-> **As an owner of tasks**, I want my 09:00 DM to contain *only*
+> **As an owner of tasks**, I want my 08:00 DM to contain *only*
 > what I'm doing today — not Approaching / Overdue / etc — **so
-> that** the message is short and actionable.
+> that** the message is short and actionable AND lands before the
+> work day starts (we used to fire at 09:00 — too late for the
+> «what's on for today?» glance).
 
 Behaviour:
 - One section: «Today's tasks» — the user's own Tasks with

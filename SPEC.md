@@ -824,9 +824,24 @@ Per-recipient idempotency lives in `audit_logs` under
 `category='subscriber_update'` keyed by
 `(task_id, recipient_user_id, transition_id)`.
 
-#### FR-CR-05-01 — Morning digest (09:00 local): today's tasks only
+#### FR-CR-05-01 — Morning digest (08:00 local): today's tasks only
 
-The 09:00 DM is now exactly *one* section: «Today's tasks»
+The 08:00 DM is now exactly *one* section: «Today's tasks»
+
+The canonical time was nudged from 09:00 to 08:00 per UX feedback
+— users want the day's plan in front of them BEFORE the work day
+starts, not at the moment it starts.
+
+The Today line dropped its noise: the previous
+`*#42* title · status · due_date · priority · owner` collapsed to
+`*title* · priority [· category · start HH:MM · due HH:MM]` —
+`#id` is internal, owner is the recipient themselves, status is
+either `todo` or `in_progress` (both mean «do it today»), and the
+due_date repeats for every task in the section. The morning DM
+now reads like a plain to-do list. The Slack and Telegram
+renderers each got a dedicated `_today_*` helper so the noisy
+multi-context formatter (`_tasks_mrkdwn` / `_fmt_task_line`)
+keeps serving the evening report and watchlists unchanged.
 — the owner's own Tasks with `due_date == today`, ordered by
 `status` then `priority`. The previous combo of *Today /
 Approaching / Overdue* moves to a separate optional weekly digest

@@ -890,6 +890,33 @@ def _tasks_mrkdwn(tasks: list[Any], *, include_owner: bool = False) -> str:
     return "\n".join(lines)
 
 
+def _today_tasks_mrkdwn(tasks: list[Any]) -> str:
+    """FR-CR-05-01 morning digest «Today» renderer — minimal copy.
+
+    Drops `#id`, owner, status, repeated due-date (every task here
+    is by definition due today). Keeps title + optional description
+    + priority + optional category + optional start / due times.
+    """
+    if not tasks:
+        return "(empty)"
+    lines: list[str] = []
+    for t in tasks:
+        head = f"• *{t.title}*"
+        meta: list[str] = [t.priority.value]
+        if t.category:
+            meta.append(t.category)
+        if getattr(t, "start_time", None):
+            meta.append(f"start {t.start_time.strftime('%H:%M')}")
+        if getattr(t, "due_time", None):
+            meta.append(f"due {t.due_time.strftime('%H:%M')}")
+        block = head
+        if t.description:
+            block += f"\n  _{t.description}_"
+        block += f"\n  {' · '.join(meta)}"
+        lines.append(block)
+    return "\n".join(lines)
+
+
 def daily_digest_blocks(
     *,
     today,
@@ -920,7 +947,7 @@ def daily_digest_blocks(
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*Today ({len(today_tasks)})*\n{_tasks_mrkdwn(today_tasks)}",
+                "text": f"*Today ({len(today_tasks)})*\n{_today_tasks_mrkdwn(today_tasks)}",
             },
         },
         {"type": "divider"},

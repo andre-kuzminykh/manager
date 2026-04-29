@@ -124,6 +124,51 @@ def test_morning_digest_today_only(
     # Overdue / Approaching no longer in the morning DM.
     assert "Overdue" not in body
     assert "late" not in body
+    # Minimal renderer: no `#id`, no owner, no status, no per-task
+    # `📅 due_date` repetition.
+    body_below_header = body.split("Today")[1]
+    assert "#" not in body_below_header
+    assert "555" not in body_below_header
+    assert "todo" not in body_below_header
+    assert "📅" not in body_below_header  # date is in the header only
+
+
+def test_morning_digest_today_renders_optional_fields(
+    patched_session_scope, SessionFactory
+):
+    """When a Task carries description / category / start / due
+    times the morning line surfaces them; minimal tasks only show
+    title + priority — no «(none)» noise."""
+    from datetime import time as _time
+
+    today = date(2026, 5, 1)
+    sender = _RecordingSender()
+    with SessionFactory() as s:
+        _mk(
+            s,
+            owner_user_id="555",
+            title="full",
+            description="детали",
+            due_date=today,
+            start_time=_time(10, 0),
+            due_time=_time(18, 0),
+            category="ops",
+        )
+        _mk(s, owner_user_id="555", title="bare", due_date=today)
+        s.commit()
+    with SessionFactory() as s:
+        tn.send_morning_digest(s, sender=sender, today=today)
+        s.commit()
+    body = sender.sent[0]["text"]
+    # Filled task surfaces every optional field.
+    assert "full" in body
+    assert "детали" in body
+    assert "ops" in body
+    assert "10:00" in body
+    assert "18:00" in body
+    # Minimal task: no «(none)» / no empty placeholders.
+    assert "bare" in body
+    assert "(none)" not in body
 
 
 def test_starts_now_dms_owner_when_start_time_is_now(

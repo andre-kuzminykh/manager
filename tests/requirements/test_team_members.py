@@ -148,6 +148,52 @@ def test_find_by_slack_user_id_returns_match(session):
 # --------------------------------------------------------------------------- #
 
 
+def test_looks_like_bot_heuristics():
+    """FR-CR-05-13 — the bot-detection heuristic must catch the
+    common bot-name patterns from real chat_members traffic
+    (`CEO_office1 bot`, `notif_bot`, etc.) without false-positiving
+    real human names with «bot» as a substring buried inside (e.g.
+    «Bobotov»)."""
+    from app.services.team_members import _looks_like_bot
+
+    # True positives.
+    assert _looks_like_bot("CEO_office1 bot", None)
+    assert _looks_like_bot(None, "notif_bot")
+    assert _looks_like_bot("support_assistant", None)
+    assert _looks_like_bot("CRM Webhook", "crm_webhook")
+    # False positives we don't want — real names with substrings.
+    # Note: the current heuristic is intentionally conservative, so
+    # «Бот» as a Russian surname WILL flag (operator can flip on
+    # the sheet). We pin the «space + bot» / «_bot» behaviour:
+    assert not _looks_like_bot("Bobotov", None)
+    assert not _looks_like_bot("Petya Pupkin", None)
+    assert not _looks_like_bot("Алина", "alina")
+
+
+def test_seed_from_chat_members_marks_bot_accounts_inactive(session):
+    """FR-CR-05-13 — bot accounts seeded from chat_members default
+    `active=False` so they never make it into the LLM owner-
+    candidate list. Operator can flip on the sheet if a row was
+    misclassified."""
+    session.add_all(
+        [
+            TelegramChatMember(
+                chat_id=-100, user_id=42, username="petya", first_name="Petya",
+                last_seen_at=datetime.now(timezone.utc),
+            ),
+            TelegramChatMember(
+                chat_id=-100, user_id=99, first_name="CEO_office1 bot",
+                last_seen_at=datetime.now(timezone.utc),
+            ),
+        ]
+    )
+    session.flush()
+    seed_from_chat_members(session)
+    actives = {m.real_name or m.telegram_username for m in list_active(session)}
+    assert "petya" in actives or "Petya" in actives
+    assert "CEO_office1 bot" not in actives
+
+
 def test_seed_from_chat_members_creates_one_row_per_distinct_user(session):
     """Same user speaking in multiple chats deduplicates to ONE
     team_members row keyed by telegram_user_id."""

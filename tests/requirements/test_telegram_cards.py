@@ -324,6 +324,44 @@ def _mk_proposed_draft(session, *, payload):
     return d
 
 
+def test_draft_widget_text_drops_create_header_and_uses_emoji_only_priority(
+    session,
+):
+    """FR-CR-05-13 — widget body no longer leads with «📥 Create
+    this task?». The first line is the priority emoji + the task
+    title in bold; the «high» / «medium» word is gone. The
+    inline keyboard already says ✅ / ✏ / ✖ so the operator
+    knows what to do."""
+    from app.telegram_bot.cards import _build_draft_widget_text
+
+    draft = _mk_proposed_draft(
+        session,
+        payload={
+            "title": "написать Андрею",
+            "description": "Андрей спрашивал про SoW.",
+            "priority": "high",
+            "owner_user_id": "111",
+            "owner_display_name": "Андре",
+            "due_date": "2026-05-10",
+        },
+    )
+    text = _build_draft_widget_text(draft)
+    # No «Create this task?» / «📥» header anymore.
+    assert "Create this task" not in text
+    assert "📥" not in text
+    # First line: priority emoji + bold title.
+    first_line = text.splitlines()[0]
+    assert "🟠" in first_line  # high
+    assert "<b>написать Андрею</b>" in first_line
+    # No «high» / «medium» text in the body — emoji only.
+    assert "high" not in text
+    assert "medium" not in text
+    # Description + meta still present.
+    assert "📝" in text
+    assert "Андре" in text
+    assert "2026-05-10" in text
+
+
 def test_post_draft_confirmation_sends_only_widget_no_forward_no_quote(
     session, monkeypatch
 ):

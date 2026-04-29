@@ -112,6 +112,18 @@ def test_title_prompt_teaches_imperative_rewrite_from_context():
     assert "context" in blob.lower()
 
 
+def test_title_prompt_forbids_third_party_status_promises():
+    """FR-CR-05-13 — «Нет Алина сама отправит» (a third-party
+    promise sentence about another teammate's commitment) must NOT
+    land verbatim as the title. The title prompt teaches an
+    explicit rewrite path."""
+    blob = TITLE_SYSTEM_PROMPT
+    assert "THIRD-PARTY" in blob or "third-party" in blob.lower()
+    assert "Нет Алина сама отправит" in blob
+    # The example must show a clean imperative as the rewrite.
+    assert "отправить" in blob
+
+
 def test_title_prompt_forbids_trailing_clauses_in_descriptions():
     """FR-CR-05-12 — the title prompt now caps the description at
     1-3 short sentences and explicitly forbids trailing-clause

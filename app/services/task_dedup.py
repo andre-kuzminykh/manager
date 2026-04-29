@@ -24,12 +24,26 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.logging_setup import get_logger
-from app.models import Task, TaskStatus
+from app.models import ActionDraft, ActionDraftState, Task, TaskStatus
 
 log = get_logger(__name__)
 
 
 _OPEN = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress)
+
+
+@dataclass
+class _ExistingItem:
+    """Unified shape for «things the candidate might duplicate» —
+    open Tasks (existing in the DB) AND open ActionDrafts (created
+    earlier in the same prepare_drafts batch)."""
+
+    item_id: int
+    kind: str  # "task" or "draft"
+    title: str
+    description: str | None
+    owner_label: str
+    due_date: str
 
 
 @dataclass
@@ -90,9 +104,20 @@ existing task's id. Otherwise return false.
 """
 
 
-def _fetch_recent(session: Session, limit: int = 20) -> list[Task]:
-    """Return the most recently created open Tasks, newest first."""
-    return (
+def _fetch_recent(session: Session, limit: int = 20) -> list[_ExistingItem]:
+    """Return the most recently created «open work items» — both
+    saved Tasks and pending ActionDrafts — newest first.
+
+    Including drafts catches the case where two adjacent source
+    messages produce siblings of the same task within one
+    prepare_drafts batch («добавить Юру в участников» × 2). Without
+    this, the dedup gate only sees the DB Task table and the
+    first draft of the batch isn't there yet — both sibling
+    drafts go through, and the operator gets two widgets for the
+    same work.
+    """
+    out: list[_ExistingItem] = []
+    tasks = (
         session.query(Task)
         .filter(
             Task.deleted_at.is_(None),
@@ -102,21 +127,61 @@ def _fetch_recent(session: Session, limit: int = 20) -> list[Task]:
         .limit(limit)
         .all()
     )
+    for t in tasks:
+        out.append(
+            _ExistingItem(
+                item_id=t.id,
+                kind="task",
+                title=t.title or "",
+                description=t.description,
+                owner_label=t.owner_display_name or t.owner_user_id or "?",
+                due_date=t.due_date.isoformat() if t.due_date else "—",
+            )
+        )
+    drafts = (
+        session.query(ActionDraft)
+        .filter(ActionDraft.state == ActionDraftState.proposed)
+        .order_by(ActionDraft.id.desc())
+        .limit(limit)
+        .all()
+    )
+    for d in drafts:
+        payload = d.payload or {}
+        out.append(
+            _ExistingItem(
+                item_id=d.id,
+                kind="draft",
+                title=str(payload.get("title") or ""),
+                description=payload.get("description"),
+                owner_label=str(
+                    payload.get("owner_display_name")
+                    or payload.get("owner_user_id")
+                    or "?"
+                ),
+                due_date=str(payload.get("due_date") or "—"),
+            )
+        )
+    return out
 
 
-def _fmt_existing(tasks: list[Task]) -> str:
-    """Compact one-line-per-task listing fed to the LLM. Trim
-    description to 200 chars so the prompt stays bounded."""
-    if not tasks:
+def _fmt_existing(items: list[_ExistingItem]) -> str:
+    """Compact one-line-per-item listing fed to the LLM. Mark
+    drafts with `D#` and tasks with `T#` so the model can address
+    them separately when reporting which one is the duplicate."""
+    if not items:
         return "(none)"
     lines: list[str] = []
-    for t in tasks:
-        owner = t.owner_display_name or t.owner_user_id or "?"
-        due = t.due_date.isoformat() if t.due_date else "—"
-        desc = (t.description or "").replace("\n", " ").strip()
+    for it in items:
+        prefix = "T#" if it.kind == "task" else "D#"
+        desc = (it.description or "").replace("\n", " ").strip()
         if len(desc) > 200:
             desc = desc[:197] + "..."
-        bits = [f"#{t.id}", t.title, f"owner={owner}", f"due={due}"]
+        bits = [
+            f"{prefix}{it.item_id}",
+            it.title,
+            f"owner={it.owner_label}",
+            f"due={it.due_date}",
+        ]
         if desc:
             bits.append(f"desc={desc}")
         lines.append("- " + " | ".join(bits))
@@ -193,8 +258,9 @@ def check_duplicate(
         except (TypeError, ValueError):
             of_id = None
         # Don't trust an id that isn't actually in our lookback set —
-        # the model occasionally invents.
-        if of_id not in {t.id for t in existing}:
+        # the model occasionally invents. Match against both Tasks
+        # and Drafts in the existing set.
+        if of_id not in {it.item_id for it in existing}:
             of_id = None
     return DedupResult(
         is_duplicate=is_dup,

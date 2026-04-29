@@ -723,6 +723,53 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-13 — Bot filter, sibling-draft dedup, third-party titles, widget polish
+
+Targeted fixes after the third 100-message run.
+
+**1. Bot account auto-deactivation.** «CEO_office1 bot» kept
+landing as task owner because the seed step marked every TG
+sender `active=True`. New `_looks_like_bot` heuristic in
+`app/services/team_members.py` catches the common patterns —
+`bot` / `_bot` suffix, ` bot` substring, `office1` /
+`notif` / `support_` / `assistant_` / `webhook` /
+`crm_` markers — and seeds those rows `active=False` with
+`notes="auto: looks like bot account"`. They're invisible to
+`as_known_employees()`, so the LLM owner stage can never pick
+them. Operator can flip on the sheet if a real person was
+caught (rare).
+
+**2. Sibling-draft dedup.** `check_duplicate` now includes open
+`ActionDraft(state=proposed)` rows in the lookback alongside
+saved Tasks. Two adjacent source messages producing siblings of
+the same task within one `prepare_drafts` batch («добавить Юру»
+× 2, «организовать профиль на платформе» × 3) used to slip
+through because the first draft wasn't a Task yet. Items are
+now prefixed `T#` (saved task) or `D#` (pending draft) in the
+LLM prompt so the model can address them distinctly. The
+hallucination guard validates the returned id against the union.
+
+**3. Third-party status promises in titles.** «Нет Алина сама
+отправит» (a status sentence about another teammate's
+commitment) was landing verbatim as the title. The title prompt
+gains an explicit `THIRD-PARTY STATUS PROMISES` block teaching
+the model to read context, identify the actual deliverable, and
+write a clean imperative title — putting the original
+delegation note in the description instead.
+
+**4. Widget polish.** Per UX feedback the «📥 Create this task?»
+header was redundant — the inline keyboard already says
+✅ / ✏ / ✖. New layout:
+
+```
+🟠 <b>title</b>
+📝 description
+👤 owner · 📅 due-date
+```
+
+Priority is rendered as a single emoji next to the bold title,
+no «high» / «medium» word — colour carries the signal.
+
 #### FR-CR-05-12 — Description completeness, role-aware owner pick, passive-past detect
 
 Targeted fixes after the second 100-message historical run.
@@ -2300,6 +2347,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-08  | `test_telegram_bot.py::test_task_card_keyboard_start_is_owner_only` (Start visible only to owner; admin sees Edit/Delete + Subscribe but no Start; bystander sees only Subscribe), `::test_task_card_keyboard_for_owner_in_progress_shows_done_edit_cancel_delete`, `::test_task_card_keyboard_for_bystander_shows_subscribe_only`, `::test_task_card_keyboard_subscribe_toggles_to_unsubscribe`, `::test_task_card_keyboard_done_status_collapses_to_delete_only`, `::test_task_card_keyboard_does_not_show_cancel_anywhere`, `::test_task_card_keyboard_edit_and_delete_share_a_row` |
 | FR-CR-05-09  | `test_telegram_ingest.py::test_build_window_carries_history_before` (history_before threads through to the ContextWindow); `::test_process_all_falls_back_to_admin_when_owner_unresolved` (no LLM owner + sender is a non-member ⇒ owner = first admin from `TELEGRAM_ADMIN_USER_IDS`); `::test_process_all_keeps_real_member_sender_as_owner` (sender registered in chat-members ⇒ author fallback wins, no admin promotion); `::test_prepare_drafts_stashes_source_text_for_quote_fallback` (`_pending["source_text"]` populated for the inline-quote fallback); `test_intent_pipeline.py::test_detect_prompt_lists_status_reports_and_parroted_phrases_as_no_action` + `::test_title_prompt_teaches_imperative_rewrite_from_context` (prompt content pinned) |
 | FR-CR-05-10  | `test_team_members.py` (read paths, prefer-telegram id selection, find-by helpers; `seed_from_chat_members` / `seed_from_slack_employees` idempotent + bot-skip; sheet round-trip headers, insert-then-update-by-id, match-by-tg-id-when-no-id, active-bool normalisation incl. `да` / `yes` / `1` and empty→true default); `test_telegram_ingest.py::test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin` (the «CEO Rosecliff» killer — unresolvable display_name dropped, owner = admin, display = admin's registry label); `::test_resolve_owner_keeps_real_team_member` (LLM-picked `owner_user_id` matching a registry row stays, display_name backfilled); `::test_resolve_owner_resolves_display_name_via_registry` (name-only LLM hint → registry lookup → numeric id); `::test_prepare_drafts_fills_in_fallback_description_when_llm_silent` («обсуждалось в <chat> · <YYYY-MM-DD HH:MM>» when LLM produced no description); `::test_prepare_drafts_keeps_llm_description_when_present` (real LLM description not clobbered); `test_telegram_cards.py::test_post_draft_confirmation_sends_only_widget_no_forward_no_quote` (FR-CR-05-09 inline-quote DM removed — widget itself carries context via description); `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` updated for «no forward» |
+| FR-CR-05-13  | `test_team_members.py::test_looks_like_bot_heuristics` (`bot` / `_bot` / `office1` / `support_` markers caught; «Bobotov» / «Алина» pass through unflagged); `::test_seed_from_chat_members_marks_bot_accounts_inactive` (auto-seed leaves obvious bot rows `active=False` so they never enter the owner-candidate list); `test_task_dedup.py::test_dedup_lookback_includes_open_action_drafts` (proposed `ActionDraft` rows show up in the lookback with `D#`-prefix; sibling drafts within one batch dedup); `::test_dedup_invented_id_dropped_when_drafts_in_lookback` (hallucination guard validates against the Task ∪ Draft id union); `test_intent_pipeline.py::test_title_prompt_forbids_third_party_status_promises` («Нет Алина сама отправит» pinned as a forbidden title with a context-driven imperative rewrite as the example); `test_telegram_cards.py::test_draft_widget_text_drops_create_header_and_uses_emoji_only_priority` (no «📥 Create this task?» header, first line is `priority-emoji <b>title</b>`, no «high» / «medium» word in the body) |
 | FR-CR-05-12  | `test_intent_pipeline.py::test_detect_prompt_rejects_passive_past_tense_status_reports` (passive forms `отправлены` / `подписан` / `оплачен` / `утверждён` + EN `sent` / `approved` listed; concrete «письма в Abundance отправлены» example pinned); `::test_title_prompt_forbids_trailing_clauses_in_descriptions` (LENGTH RULE block + «complete sentence» / «trail off» language); `::test_owner_prompt_renders_role_and_notes_columns` (role + notes columns rendered in the user-prompt table); `::test_owner_prompt_disambiguation_section_lists_role_first` (system prompt has a DISAMBIGUATION block teaching the LLM to USE role / notes); `test_team_members.py::test_as_known_employees_carries_role_and_notes` (registry rows feed role + notes into the LLM's candidate list) |
 | FR-CR-05-11  | `test_sheets_pull.py::test_pull_applies_editable_fields_only` (title / description / priority / category / start+due dates+times / completion_artifact picked up; read-only columns ignored); `::test_pull_routes_status_change_through_transition_service` (status flip emits a TaskStatusHistory row via TransitionService); `::test_pull_drops_invalid_priority_silently` (`urgent!` ignored, no exception); `::test_pull_drops_invalid_status_transition` (todo→done shortcut without LLM still allowed; nonsense statuses logged + skipped); `::test_pull_resolves_owner_by_uid_handle_and_realname` (bare uid kept, `@handle` resolves via team_members.telegram_username, real-name resolves via team_members.real_name → telegram_user_id); `::test_pull_keeps_unresolvable_owner_text_as_display_name` (operator's typed «John from Acme» preserved on `owner_display_name`); `::test_pull_skips_soft_deleted_and_missing_tasks` (skipped count); `::test_pull_handles_empty_or_header_only_sheet` (no exception on empty data) |
 | NFR-CR-04-1  | `test_intent_pipeline.py` (stage-failure tests), `test_intent_graph.py` (per-node failure isolation), `test_owner_focused_prompt.py` (owner-stage failure) |

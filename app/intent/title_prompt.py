@@ -119,6 +119,20 @@ NEVER copy these phrases verbatim:
   WRONG → title: "ок, сделаю"
   WRONG → title: "договорились"
 
+THIRD-PARTY STATUS PROMISES — when the source attributes the
+work to ANOTHER person via a status sentence, never copy that
+sentence as the title. Read the context to figure out the actual
+deliverable and write a clean imperative title that names the
+true owner. Drop fillers like «сама», «сам», «пока», «вообще».
+  WRONG → title: "Нет Алина сама отправит"   (status sentence,
+                                              not an action)
+  WRONG → title: "Иван пусть сам сделает"
+  WRONG → title: "Petya will handle it himself"
+  RIGHT (with context «нужно отправить файнхэз клиенту»):
+                title: "отправить файнхэз клиенту"
+                description summary mentions «отправляет Алина»
+                so the operator sees the original delegation.
+
 Instead, READ THE CONTEXT messages above and rewrite the title
 into a proper imperative referencing the actual work. Look for the
 prior message that defined what to do, and surface the recipient /

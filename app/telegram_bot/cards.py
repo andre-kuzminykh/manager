@@ -274,7 +274,20 @@ def render_tombstone(
 
 
 def _build_draft_widget_text(draft: ActionDraft) -> str:
-    """Render the draft as a compact HTML preview for the widget."""
+    """FR-CR-05-13 — compact HTML preview.
+
+    Layout (no «Create this task?» header anymore — the inline
+    keyboard already says ✅ / ✏ / ✖, the operator knows what to
+    do):
+
+        <priority-emoji> <b>title</b>
+        📝 <description>
+        👤 <owner> · 📅 <due>
+
+    Priority is rendered as a single emoji next to the title,
+    with no «high» / «medium» word — the colour carries the
+    signal.
+    """
     payload = draft.payload or {}
     title = payload.get("title") or ""
     owner_disp = payload.get("owner_display_name") or payload.get("owner_user_id") or ""
@@ -286,14 +299,12 @@ def _build_draft_widget_text(draft: ActionDraft) -> str:
         "low": "🟢", "medium": "🟡", "high": "🟠", "urgent": "🔴",
     }.get(priority, "🟡")
 
-    lines = [f"📥 <b>Create this task?</b>"]
-    lines.append(f"📌 {_escape_md(str(title))}")
+    lines = [f"{priority_em} <b>{_escape_md(str(title))}</b>"]
     if description:
         lines.append(f"📝 {_escape_md(str(description))}")
     meta: list[str] = []
     if owner_disp:
         meta.append(f"👤 {_escape_md(str(owner_disp))}")
-    meta.append(f"{priority_em} {priority}")
     if due:
         meta.append(f"📅 {due}")
     if meta:

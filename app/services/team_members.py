@@ -179,12 +179,16 @@ def seed_from_chat_members(session: Session) -> int:
         full_name = " ".join(
             p for p in (m.first_name, m.last_name) if p
         ).strip() or None
+        is_bot = _looks_like_bot(full_name, m.username)
         session.add(
             TeamMember(
                 telegram_user_id=uid,
                 telegram_username=m.username,
                 real_name=full_name,
-                active=True,
+                # FR-CR-05-13 — bot rows default inactive so they
+                # never appear in the owner-candidate list.
+                active=not is_bot,
+                notes="auto: looks like bot account" if is_bot else None,
                 last_synced_at=datetime.now(timezone.utc),
             )
         )
@@ -192,6 +196,32 @@ def seed_from_chat_members(session: Session) -> int:
     if added:
         session.flush()
     return added
+
+
+def _looks_like_bot(name: str | None, username: str | None) -> bool:
+    """Heuristic: a row is a bot account when its name or username
+    has obvious bot markers. Used at seed time to mark such rows
+    `active=False` so they never appear in the LLM's owner-
+    candidate list.
+
+    Patterns we catch:
+      - explicit `bot` / `_bot` suffix (e.g. `CEO_office1 bot`)
+      - `bot` substring with a separator on either side
+      - common bot prefixes: `office1`, `notif`, `support`,
+        `assistant`, `webhook`, `crm`
+    Conservative — better to leave a real person flagged inactive
+    (operator can flip it on the sheet) than to leave a bot active
+    and end up with «CEO_office1 bot» as task owner again.
+    """
+    blob = " ".join(filter(None, [name, username])).lower()
+    if not blob:
+        return False
+    if " bot" in blob or blob.endswith("bot") or "_bot" in blob:
+        return True
+    for marker in ("office1", "notif", "support_", "assistant_", "webhook", "crm_"):
+        if marker in blob:
+            return True
+    return False
 
 
 def seed_from_telegram_source(session: Session, reader) -> int:
@@ -235,12 +265,14 @@ def seed_from_telegram_source(session: Session, reader) -> int:
         if name and " " not in name and name.replace("_", "").isalnum() and not name.isdigit():
             username = name
             real_name = None
+        is_bot = _looks_like_bot(real_name, username)
         session.add(
             TeamMember(
                 telegram_user_id=int(uid),
                 telegram_username=username,
                 real_name=real_name,
-                active=True,
+                active=not is_bot,
+                notes="auto: looks like bot account" if is_bot else None,
                 last_synced_at=datetime.now(timezone.utc),
             )
         )

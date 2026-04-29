@@ -175,4 +175,86 @@ def test_dedup_lookback_includes_only_open_existing_tasks(session):
     assert backend.last_user_prompt is not None
     assert "открытая" in backend.last_user_prompt
     assert "закрытая" not in backend.last_user_prompt
-    assert f"#{open_id}" in backend.last_user_prompt
+    # T#-prefix marks this is a saved task (vs D#-prefix for drafts).
+    assert f"T#{open_id}" in backend.last_user_prompt
+
+
+def test_dedup_lookback_includes_open_action_drafts(session):
+    """FR-CR-05-13 — sibling-draft dedup: when an earlier prepare_
+    drafts call in the same batch left a proposed `ActionDraft`,
+    the next candidate must see it in the lookback. Without this
+    we'd ship two widgets («добавить Юру» × 2) for the same work
+    in a single migration run."""
+    from app.models import (
+        ActionDraft,
+        ActionDraftState,
+        ContextSnapshot,
+        IntentInference,
+    )
+    from app.models.intent import IntentType as IE
+
+    snap = ContextSnapshot(
+        conversation_id="C",
+        source_ts="1",
+        thread_ts=None,
+        source_message={"ts": "1", "text": "x", "user": "U1"},
+        history_before=[],
+        thread_messages=[],
+    )
+    session.add(snap)
+    session.flush()
+    inf = IntentInference(
+        context_snapshot_id=snap.id,
+        intent=IE.create_task,
+        confidence=0.9,
+        invocation_type="passive",
+    )
+    session.add(inf)
+    session.flush()
+    draft = ActionDraft(
+        inference_id=inf.id,
+        intent=IE.create_task,
+        state=ActionDraftState.proposed,
+        payload={"title": "добавить Юру в участников"},
+    )
+    session.add(draft)
+    session.flush()
+
+    backend = _FakeBackend(
+        {
+            "is_duplicate": True,
+            "duplicate_of_task_id": draft.id,
+            "reason": "duplicate of pending draft",
+        }
+    )
+    out = check_duplicate(
+        session,
+        candidate={"title": "добавить Юру"},
+        llm_backend=backend,
+    )
+    assert out.is_duplicate is True
+    assert out.duplicate_of_task_id == draft.id
+    # The prompt must surface the sibling draft with a D#-prefix
+    # so the LLM can address it distinctly from saved tasks.
+    assert "D#" in backend.last_user_prompt
+    assert "добавить Юру в участников" in backend.last_user_prompt
+
+
+def test_dedup_invented_id_dropped_when_drafts_in_lookback(session):
+    """The hallucination guard must work for both saved-task ids
+    and draft ids. An LLM-invented id outside the union must be
+    nulled."""
+    open_task_id = _mk(session, title="real task")
+    backend = _FakeBackend(
+        {
+            "is_duplicate": True,
+            "duplicate_of_task_id": 99999,  # not in DB or drafts
+        }
+    )
+    out = check_duplicate(
+        session,
+        candidate={"title": "x"},
+        llm_backend=backend,
+    )
+    assert out.is_duplicate is True
+    assert out.duplicate_of_task_id is None

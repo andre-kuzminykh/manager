@@ -1106,6 +1106,146 @@ widget itself, with the description in `📝`. Source text is
 still kept on `draft.payload["_pending"]["source_text"]` for
 any future «show original» feature.
 
+#### 13.13 — Bidirectional Sheet ↔ DB sync (Tasks + Team)
+
+> **As an operator** I want to edit tasks directly in the
+> spreadsheet — push the deadline, change the priority, mark
+> something done — and have the bot's DB pick those changes up on
+> the next sync. Same story for the Team registry.
+
+Until this fix the Sheet was strictly write-only from the bot's
+side: every change pushed a row, but operator edits died on the
+next push (overwritten). Now **the Sheet wins** — operator edits
+on either tab propagate to the DB on the next pull tick.
+
+**Tasks (`Main` tab).** New `SheetsPullService` reads every row,
+matches by `task_id`, applies field-level diffs.
+
+- **Editable from sheet:** title, description, owner, priority,
+  category, start_date, start_time, due_date, due_time, status,
+  completion_artifact.
+- **Read-only from sheet:** task_id, parent_task_id, source,
+  source_permalink, *_at timestamps, recurring_*.
+- Status changes route through `TransitionService` so audit-log
+  + subscriber notifications fire as if from a button click.
+  Invalid transitions log + drop.
+- Owner resolution: bare uid kept; `@handle` matches against
+  `team_members.telegram_username`; real-name match against
+  `team_members.real_name` then `employees.real_name`.
+  Unresolvable text stays in `owner_display_name` so the
+  operator's intent isn't lost.
+- New CLI `python -m ops.pull_tasks_sheet` — designed for cron.
+
+**Team (`Team` tab).** Already bidirectional via
+`ops.sync_team --pull --push` from FR-CR-05-10. Schedule on cron
+at the same cadence.
+
+**Cron** (5 min default, run on the listener host or a sidecar):
+
+```cron
+*/5 * * * *  python -m ops.pull_tasks_sheet
+*/5 * * * *  python -m ops.sync_team --pull --push
+```
+
+Conflict rule: Sheet wins within a single tick window. No
+`updated_at` arbitration — keeping it simple beats fighting
+clock skew between the bot and the operator's edits.
+
+#### 13.14 — Description completeness, role-aware owner, passive-past detect
+
+Targeted fixes after a second 100-message run.
+
+**Description completeness.** `gpt-4o-mini` was sometimes
+clipping the description mid-sentence («так как осталось
+открытым с»). The title prompt now has an explicit LENGTH RULE:
+40-200 chars, finish every sentence with a period, never trail
+off. If the thought won't fit, stop after the first complete
+sentence — partial trailing clauses are worse than a shorter
+description.
+
+**Role-aware owner disambiguation.** Two «Алина»s in the
+registry landed «Валентина» as the owner of «подать заявку на
+StartUp Qatar» because the LLM had nothing to tell same-first-
+name rows apart. `as_known_employees()` now also surfaces
+`role` and `notes`; the owner prompt has a new
+`DISAMBIGUATION` block teaching the model to USE role/notes
+when several rows share a first name.
+
+**Passive-past status reports.** «письма в Abundance отправлены»
+(passive, completed) was being captured as a task. The detect
+prompt was extended with passive Russian forms (`отправлены`,
+`подписан`, `оплачен`, `утверждён`) plus EN present-perfect
+(`sent`, `done`, `approved`, `signed`) and a verbatim example.
+
+#### 13.15 — Bot filter, sibling-draft dedup, third-party titles, widget polish
+
+Targeted fixes after a third 100-message run.
+
+**Bot-account auto-deactivation.** «CEO_office1 bot» kept
+landing as a task owner because seed marked every TG sender
+`active=True`. New `_looks_like_bot` heuristic catches `bot` /
+`_bot` suffix, ` bot` substring, and common bot prefixes
+(`office1`, `notif`, `support_`, `assistant_`, `webhook`,
+`crm_`); rows that match seed `active=False` with notes «auto:
+looks like bot account». Operator can flip on the sheet if the
+heuristic was wrong.
+
+**Sibling-draft dedup.** Two adjacent source messages producing
+sibling drafts of the same task within one `prepare_drafts`
+batch («добавить Юру» × 2, «организовать профиль» × 3) used to
+slip through because the first draft wasn't a Task yet.
+`check_duplicate` now includes open `ActionDraft(state=
+proposed)` rows in the lookback alongside saved Tasks, prefixed
+`D#` / `T#` so the LLM can address them distinctly.
+
+**Third-party status promises.** «Нет Алина сама отправит» (a
+status sentence about another teammate's commitment) was
+landing verbatim as a title. The title prompt gains a
+`THIRD-PARTY STATUS PROMISES` block teaching the model to read
+context, identify the actual deliverable, and write a clean
+imperative — putting the original delegation note in the
+description.
+
+**Widget polish.** Removed «📥 Create this task?» header (the
+inline keyboard already says ✅ / ✏ / ✖). New layout:
+priority emoji + bold title on line 1, description on line 2,
+owner + due on line 3. No «high» / «medium» word — colour
+carries the signal.
+
+#### 13.16 — Voice replies, registry-aware Edit, source-dialogue column
+
+Three gaps from live Edit-on-task testing.
+
+**Voice messages in pending replies.** The Edit / Mark-done reply
+handler accepted only plain text — a voice DM died silently. New
+`_maybe_transcribe_voice` on the listener detects `voice` /
+`audio` payloads, downloads via Bot API `getFile` + raw GET,
+transcribes via Whisper, and treats the transcript as the reply
+text. Falls back to «🎙 Не разобрал голос» when nothing usable
+came back.
+
+**Registry-aware Edit owner resolution.**
+`parse_edit_with_llm` now accepts `known_employees` and renders a
+five-column table (slack_user_id / display_name / real_name /
+role / notes) into the prompt. The LLM is instructed to round-
+trip an id from the table when the user names someone
+(«ответственный Андрей Кузьминых»).
+`apply_edit_reply_ex` validates: id-from-registry → keep with
+display name backfilled; name → resolve locally; unresolvable
+text → keep on `owner_display_name`, id cleared. Same plumbing
+for `parse_draft_edit_with_llm` / `apply_edit_draft_reply` so
+Edit-on-draft works the same way.
+
+**`dialogue` column in Tasks Sheet.** New 23rd column carries
+the FR-CR-05-09 adaptive-context window as a plain-text «author:
+text» transcript. Populated at draft creation by
+`_format_dialogue(history_before, source)` →
+`draft.payload["context_dialogue"]` →
+`task.extra["context_dialogue"]` via `create_task_from_draft`.
+Caps at 8 000 chars (Sheets cell limit is 50k; leaves room for
+other columns + operator notes). Read-only from the sheet's
+side — operator edits are ignored on pull.
+
 
 ---
 

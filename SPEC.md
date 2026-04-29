@@ -1018,21 +1018,20 @@ hallucinated an owner name that doesn't resolve to a real
 user_id, the FR-CR-04-22 guard nulls it, and now the admin
 fallback catches the gap instead of the message author bot.
 
-**3. Inline-quote source fallback.** `post_draft_confirmation`
-already tries `forwardMessage` first, but the Bot API only
-forwards messages the bot has **observed via getUpdates**.
-Historical migration drafts come out of the colleague's
-read-only view, so the bot never saw them — every forward call
-returns «message to forward not found» and the operator gets a
-widget with no context. New code path: when forwardMessage
-fails (sender returns `{}` or no `message_id`), the prepare-
-drafts step pre-stashes `source_text` on `draft.payload[
-"_pending"]`, and the card helper emits a
-`<blockquote>`-wrapped HTML quote of the source so the operator
-sees what triggered the widget without leaving the DM. Live
-listener captures still get a real `forwardMessage` because the
-bot did observe them — the fallback only fires when the forward
-genuinely can't work.
+**3. Inline-quote source fallback.** *(Superseded by FR-CR-05-10
+which replaced both `forwardMessage` and the inline-quote DM
+with a context-rich description on the widget itself.)*
+`post_draft_confirmation` originally tried `forwardMessage` first,
+but the Bot API only forwards messages the bot had observed via
+`getUpdates` — every historical migration draft failed forward.
+The prepare-drafts step pre-stashed `source_text` on
+`draft.payload["_pending"]` so the card helper could emit a
+`<blockquote>`-wrapped HTML quote when the forward returned
+empty. The mechanism worked but produced two DMs per recipient;
+FR-CR-05-10 collapsed it to a single widget message whose
+`description` already carries the chat context. The
+`source_text` field is still stashed on every draft for any
+future «show original» feature.
 
 #### FR-CR-05-08 — Task-card keyboard permission tightening
 
@@ -2385,7 +2384,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-06  | `test_task_dedup.py` (empty lookback short-circuits; missing backend falls open; LLM «duplicate» propagates with verified id; LLM-invented task id is nulled; LLM error is swallowed; done / soft-deleted tasks excluded from lookback; only open tasks reach the prompt); `test_units_support.py::test_task_draft_truncates_long_strings_to_10k` + `::test_task_draft_short_strings_pass_through` (schema cap); `test_telegram_ingest.py` integration paths exercise the gate via `_make_service` fakes |
 | FR-CR-05-07  | `test_telegram_members.py` (idempotent upsert, profile fields don't blank out on a None, `has_started_bot` stickiness, `members_as_known_employees` shape with @username / first+last / numeric-id fallback, per-chat isolation); migration `0016_telegram_chat_members.py`; listener-side write covered by the existing `test_telegram_listener.py` flows that exercise `_upsert_member_from_update` via `parse_update` (no separate test — the upsert is wrapped in a try/except so a missing migration in fixture mode never breaks ingest) |
 | FR-CR-05-08  | `test_telegram_bot.py::test_task_card_keyboard_start_is_owner_only` (Start visible only to owner; admin sees Edit/Delete + Subscribe but no Start; bystander sees only Subscribe), `::test_task_card_keyboard_for_owner_in_progress_shows_done_edit_cancel_delete`, `::test_task_card_keyboard_for_bystander_shows_subscribe_only`, `::test_task_card_keyboard_subscribe_toggles_to_unsubscribe`, `::test_task_card_keyboard_done_status_collapses_to_delete_only`, `::test_task_card_keyboard_does_not_show_cancel_anywhere`, `::test_task_card_keyboard_edit_and_delete_share_a_row` |
-| FR-CR-05-09  | `test_telegram_ingest.py::test_build_window_carries_history_before` (history_before threads through to the ContextWindow); `::test_process_all_falls_back_to_admin_when_owner_unresolved` (no LLM owner + sender is a non-member ⇒ owner = first admin from `TELEGRAM_ADMIN_USER_IDS`); `::test_process_all_keeps_real_member_sender_as_owner` (sender registered in chat-members ⇒ author fallback wins, no admin promotion); `::test_prepare_drafts_stashes_source_text_for_quote_fallback` (`_pending["source_text"]` populated for the inline-quote fallback); `test_intent_pipeline.py::test_detect_prompt_lists_status_reports_and_parroted_phrases_as_no_action` + `::test_title_prompt_teaches_imperative_rewrite_from_context` (prompt content pinned) |
+| FR-CR-05-09  | `test_telegram_ingest.py::test_build_window_carries_history_before` (history_before threads through to the ContextWindow); `::test_process_all_falls_back_to_admin_when_owner_unresolved` + `::test_process_all_keeps_real_member_sender_as_owner` (later refactored into the FR-CR-05-10 `_resolve_owner` chain); `::test_prepare_drafts_stashes_source_text_for_quote_fallback` (`_pending["source_text"]` still populated as a safety net for any future «show original» feature, even though FR-CR-05-10 superseded the inline-quote DM with a rich description); `::test_recent_in_chat_returns_chronological_with_char_cap` + `::test_recent_in_chat_expands_in_steps_when_under_threshold` (10→20→30 expansion until ~10k chars); `test_intent_pipeline.py::test_detect_prompt_lists_status_reports_and_parroted_phrases_as_no_action` + `::test_title_prompt_teaches_imperative_rewrite_from_context` (prompt content pinned) |
 | FR-CR-05-10  | `test_team_members.py` (read paths, prefer-telegram id selection, find-by helpers; `seed_from_chat_members` / `seed_from_slack_employees` idempotent + bot-skip; sheet round-trip headers, insert-then-update-by-id, match-by-tg-id-when-no-id, active-bool normalisation incl. `да` / `yes` / `1` and empty→true default); `test_telegram_ingest.py::test_resolve_owner_kills_unknown_display_name_and_falls_back_to_admin` (the «CEO Rosecliff» killer — unresolvable display_name dropped, owner = admin, display = admin's registry label); `::test_resolve_owner_keeps_real_team_member` (LLM-picked `owner_user_id` matching a registry row stays, display_name backfilled); `::test_resolve_owner_resolves_display_name_via_registry` (name-only LLM hint → registry lookup → numeric id); `::test_prepare_drafts_fills_in_fallback_description_when_llm_silent` («обсуждалось в <chat> · <YYYY-MM-DD HH:MM>» when LLM produced no description); `::test_prepare_drafts_keeps_llm_description_when_present` (real LLM description not clobbered); `test_telegram_cards.py::test_post_draft_confirmation_sends_only_widget_no_forward_no_quote` (FR-CR-05-09 inline-quote DM removed — widget itself carries context via description); `test_telegram_listener.py::test_listener_routes_group_messages_to_draft_flow` updated for «no forward» |
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared); `test_sheets_pull.py::test_task_row_includes_dialogue_from_extra` (Tasks Sheet last column reads `task.extra["context_dialogue"]`); `::test_task_row_dialogue_empty_when_no_extra` (empty when extra is null) |
 | FR-CR-05-13  | `test_team_members.py::test_looks_like_bot_heuristics` (`bot` / `_bot` / `office1` / `support_` markers caught; «Bobotov» / «Алина» pass through unflagged); `::test_seed_from_chat_members_marks_bot_accounts_inactive` (auto-seed leaves obvious bot rows `active=False` so they never enter the owner-candidate list); `test_task_dedup.py::test_dedup_lookback_includes_open_action_drafts` (proposed `ActionDraft` rows show up in the lookback with `D#`-prefix; sibling drafts within one batch dedup); `::test_dedup_invented_id_dropped_when_drafts_in_lookback` (hallucination guard validates against the Task ∪ Draft id union); `test_intent_pipeline.py::test_title_prompt_forbids_third_party_status_promises` («Нет Алина сама отправит» pinned as a forbidden title with a context-driven imperative rewrite as the example); `test_telegram_cards.py::test_draft_widget_text_drops_create_header_and_uses_emoji_only_priority` (no «📥 Create this task?» header, first line is `priority-emoji <b>title</b>`, no «high» / «medium» word in the body) |

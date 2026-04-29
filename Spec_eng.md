@@ -922,6 +922,68 @@ The legacy «task straight to DB» path lives behind
 `--auto-confirm`, for the rare case where the operator really
 doesn't want to click N buttons.
 
+#### 13.9 — Telegram chat-members registry
+
+> **As an operator**, when somebody writes «Валя сделай отчёт» in
+> the chat, I want the bot to map «Валя» to the actual numeric
+> Telegram user id, and (when she's `/start`-ed the bot) DM her
+> the «Create this task?» widget directly — not just me as admin.
+
+The classifier used to get `known_employees=None` for every
+Telegram message, so the LLM owner stage couldn't validate names.
+Mentions landed as raw display strings, owners couldn't be DM'd
+directly, and the FR-CR-04-22 hallucination guard had nothing to
+compare against.
+
+Solution — a self-populating per-chat membership table that the
+**live listener writes on every observed message**:
+
+- New `telegram_chat_members` table (migration `0016`), keyed by
+  `(chat_id, user_id)`. Carries `username`, `first_name`,
+  `last_name`, `has_started_bot` (sticky-True flag), and audit
+  timestamps.
+- The listener's `tick` upserts every observed sender into the
+  registry. The flag flips to True the first time we see traffic
+  in that user's private chat with the bot — that's the only
+  signal we have that proves they're DM-able.
+- The ingest pipeline reads `members_as_known_employees(chat_id)`
+  and feeds it as `known_employees` to the classifier. The LLM
+  owner stage now has real names + numeric ids to map mentions
+  against.
+- No separate discovery RPC. Bot API admin enumeration only
+  returns chat admins anyway; live traffic is good enough — every
+  user who has spoken in a chat the bot can see lands in the
+  table within seconds.
+
+When the migration hasn't run yet (a brand-new VM, a stale test
+fixture) the read path swallows the error and returns an empty
+list, so the classifier just falls through to no-known-employees
+mode the same way it always did.
+
+#### 13.10 — Task-card keyboard permission model
+
+> **As a contributor**, I should only see the buttons that make
+> sense for my role. Bystanders shouldn't be able to *Start*
+> someone else's task; the assignee shouldn't see a no-op
+> *Subscribe* toggle (they're already auto-subscribed).
+
+The Telegram task card now follows a strict role-based visibility
+model:
+
+- **▶ Start** — only the OWNER (assignee). Admins and bystanders
+  see no Start button. An unowned task no longer surfaces Start
+  to bystanders either.
+- **✔ Mark done / ✏ Edit / 🗑 Delete** — OWNER or ADMIN.
+- **🔔 Subscribe / 🔕 Unsubscribe** — anyone EXCEPT the owner.
+
+Layout: row 1 carries the primary action (Start / Mark done) when
+visible, row 2 is Edit + Delete side-by-side, row 3 is the
+Subscribe toggle.
+
+Same model is used in the live-listener cards (FR-CR-04-32) and
+the Accept-on-draft path that swaps a confirm widget for the
+final card.
+
 
 ---
 

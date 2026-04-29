@@ -871,16 +871,14 @@ def apply_edit_reply_ex(
     session.flush()
     _schedule_sync_task(session, task_id)
 
-    # FR-CR-05-02 — fan out an edit DM to every non-owner subscriber.
-    if payload:
-        from app.services.subscriber_updates import dispatch_edit
-
-        dispatch_edit(
-            session,
-            task=task,
-            applied_payload=payload,
-            actor_user_id=actor,
-        )
+    # FR-CR-05-43 — edit-fanout silenced. The earlier behaviour
+    # (FR-CR-05-02) DM'd every non-owner subscriber a one-line
+    # «✏ #N title — description=…, priority=high by 222968032»
+    # technical receipt. Operator feedback: «такие сообщения после
+    # редактирования писать не надо» — the noise outweighed the
+    # signal. Status-change fanout (`dispatch_status_change` from
+    # the transition service) is unaffected — subscribers still see
+    # «started» / «done» events.
     return task, payload
 
 

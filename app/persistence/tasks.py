@@ -52,12 +52,24 @@ def create_task_from_draft(
     """
 
     payload: dict[str, Any] = draft.payload or {}
-    title = (payload.get("title") or "").strip()
+    # Truncate every user-provided string to a sensible upper bound
+    # (FR-CR-XX). Forwarded chat threads / pasted documents can in
+    # principle blow past the Sheets cell limit (50 000 chars) and
+    # bloat downstream LLM prompts. 10 000 chars is generous enough
+    # to keep useful detail and well under every downstream cap.
+    _MAX = 10_000
+
+    def _cap(v: Any) -> Any:
+        if isinstance(v, str) and len(v) > _MAX:
+            return v[:_MAX]
+        return v
+
+    title = _cap((payload.get("title") or "").strip())
     if not title:
         raise ValueError("Task title is required")
 
-    owner_user_id = payload.get("owner_user_id")
-    owner_display_name = payload.get("owner_display_name")
+    owner_user_id = _cap(payload.get("owner_user_id"))
+    owner_display_name = _cap(payload.get("owner_display_name"))
     # The upstream pipeline already populates owner_user_id = author
     # with owner_assumed=True when no explicit assignee is present
     # (see app/slack_bot/handlers/shared.py). Respect that flag so the
@@ -86,9 +98,9 @@ def create_task_from_draft(
 
     task = Task(
         title=title,
-        description=payload.get("description"),
+        description=_cap(payload.get("description")),
         owner_user_id=owner_user_id,
-        owner_display_name=payload.get("owner_display_name"),
+        owner_display_name=_cap(payload.get("owner_display_name")),
         priority=_coerce_priority(payload.get("priority", "medium")),
         due_date=due,
         status=status,

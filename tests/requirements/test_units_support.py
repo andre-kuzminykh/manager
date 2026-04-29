@@ -451,6 +451,31 @@ def test_task_draft_rejects_unknown_priority():
         TaskDraft(title="t", priority="critical")
 
 
+def test_task_draft_truncates_long_strings_to_10k():
+    """FR-CR-XX — every user-provided string field is capped at
+    10 000 chars at schema ingestion time so we never feed a multi-
+    MB blob into the DB / Sheets cell / LLM prompt."""
+    long_title = "x" * 12_000
+    long_desc = "y" * 50_000
+    long_owner = "z" * 30_000
+    t = TaskDraft(
+        title=long_title,
+        description=long_desc,
+        owner_display_name=long_owner,
+        owner_user_id=long_owner,
+    )
+    assert len(t.title) == 10_000
+    assert len(t.description) == 10_000
+    assert len(t.owner_display_name) == 10_000
+    assert len(t.owner_user_id) == 10_000
+
+
+def test_task_draft_short_strings_pass_through():
+    t = TaskDraft(title="short", description="also short")
+    assert t.title == "short"
+    assert t.description == "also short"
+
+
 # =============================================================================
 # Token cipher
 # =============================================================================

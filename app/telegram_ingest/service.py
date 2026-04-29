@@ -180,6 +180,26 @@ class TelegramIngestService:
 
         out: list[Task] = []
         for td in classification.tasks:
+            # Dedup against the last 20 open tasks. Skip the candidate
+            # silently when the LLM says it duplicates an existing one
+            # — the source-message bookmark below ensures we don't
+            # re-classify it on the next pass.
+            from app.services.task_dedup import check_duplicate
+
+            dup = check_duplicate(
+                session,
+                candidate=td.model_dump(mode="json"),
+                llm_backend=getattr(self._classifier, "backend", None),
+            )
+            if dup.is_duplicate:
+                log.info(
+                    "telegram_ingest_skipped_duplicate",
+                    title=td.title,
+                    duplicate_of=dup.duplicate_of_task_id,
+                    reason=dup.reason,
+                )
+                continue
+
             # Each per-chunk inference + draft is its own row. The
             # IntentInference table doesn't carry the task draft body
             # so we just persist N copies — cheap, and keeps the
@@ -305,6 +325,26 @@ class TelegramIngestService:
 
         out: list = []
         for td in classification.tasks:
+            # Same dedup gate as `process_all`: skip the draft +
+            # widget when the LLM thinks the candidate duplicates an
+            # already-existing open Task. Source-message bookmark
+            # below still gets written so we don't re-classify.
+            from app.services.task_dedup import check_duplicate
+
+            dup = check_duplicate(
+                session,
+                candidate=td.model_dump(mode="json"),
+                llm_backend=getattr(self._classifier, "backend", None),
+            )
+            if dup.is_duplicate:
+                log.info(
+                    "telegram_prepare_drafts_skipped_duplicate",
+                    title=td.title,
+                    duplicate_of=dup.duplicate_of_task_id,
+                    reason=dup.reason,
+                )
+                continue
+
             single = type(classification)(
                 intent=classification.intent,
                 confidence=classification.confidence,

@@ -1,0 +1,178 @@
+"""Dedup gate for newly-proposed tasks (FR-CR-XX).
+
+Every fresh `TaskDraft` from the ingest pipeline gets compared
+against the last 20 open tasks via the LLM backend. When the LLM
+says «duplicate», the candidate is skipped before a draft / widget
+is dispatched.
+"""
+from __future__ import annotations
+
+from datetime import date
+
+from app.models import Task, TaskPriority, TaskSourceKind, TaskStatus
+from app.services.task_dedup import DedupResult, check_duplicate
+
+
+class _FakeBackend:
+    """Minimal LLMBackend stub that returns a preset payload and
+    records the user-prompt it was called with."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.last_user_prompt = None
+        self.calls = 0
+
+    def call_tool(self, **kw):
+        self.calls += 1
+        self.last_user_prompt = kw.get("user_prompt")
+        return self.payload
+
+
+def _mk(session, **kw) -> int:
+    base = dict(
+        title="t",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        owner_user_id="11111",
+        source_kind=TaskSourceKind.telegram,
+    )
+    base.update(kw)
+    t = Task(**base)
+    session.add(t)
+    session.flush()
+    return t.id
+
+
+def test_dedup_returns_not_duplicate_when_no_recent_tasks(session):
+    backend = _FakeBackend({"is_duplicate": True})
+    out = check_duplicate(
+        session,
+        candidate={"title": "новая задача"},
+        llm_backend=backend,
+    )
+    # Empty lookback short-circuits — no LLM call is even made.
+    assert out.is_duplicate is False
+    assert backend.calls == 0
+
+
+def test_dedup_returns_not_duplicate_when_no_backend(session):
+    _mk(session, title="существующая")
+    out = check_duplicate(
+        session,
+        candidate={"title": "новая"},
+        llm_backend=None,
+    )
+    assert out.is_duplicate is False
+
+
+def test_dedup_returns_duplicate_when_llm_says_so(session):
+    existing = _mk(session, title="подготовить отчёт по продажам")
+    backend = _FakeBackend(
+        {
+            "is_duplicate": True,
+            "duplicate_of_task_id": existing,
+            "reason": "same deliverable",
+        }
+    )
+    out = check_duplicate(
+        session,
+        candidate={"title": "сделать отчёт по продажам"},
+        llm_backend=backend,
+    )
+    assert out.is_duplicate is True
+    assert out.duplicate_of_task_id == existing
+    # The prompt must contain both the candidate title and the
+    # existing one — without that the LLM has nothing to compare.
+    assert "подготовить отчёт по продажам" in backend.last_user_prompt
+    assert "сделать отчёт по продажам" in backend.last_user_prompt
+
+
+def test_dedup_drops_invented_task_id(session):
+    """The LLM occasionally hallucinates a task id outside our
+    lookback — keep `is_duplicate=true` if the model claimed it,
+    but null the id so the caller doesn't dereference garbage."""
+    _mk(session, title="настоящая")
+    backend = _FakeBackend(
+        {
+            "is_duplicate": True,
+            "duplicate_of_task_id": 9999,  # not in the seeded lookback
+        }
+    )
+    out = check_duplicate(
+        session,
+        candidate={"title": "новая"},
+        llm_backend=backend,
+    )
+    assert out.is_duplicate is True
+    assert out.duplicate_of_task_id is None
+
+
+def test_dedup_returns_not_duplicate_when_llm_says_no(session):
+    _mk(session, title="отчёт по продажам")
+    backend = _FakeBackend({"is_duplicate": False})
+    out = check_duplicate(
+        session,
+        candidate={"title": "позвонить клиенту"},
+        llm_backend=backend,
+    )
+    assert out.is_duplicate is False
+
+
+def test_dedup_swallows_llm_failure(session):
+    """An LLM-side error (network, malformed response) must not
+    abort the caller — the dedup gate falls open."""
+    _mk(session, title="существующая")
+
+    class _Boom:
+        def call_tool(self, **kw):
+            raise RuntimeError("network down")
+
+    out = check_duplicate(
+        session,
+        candidate={"title": "новая"},
+        llm_backend=_Boom(),
+    )
+    assert out.is_duplicate is False
+
+
+def test_dedup_lookback_is_open_tasks_only(session):
+    """Done / soft-deleted tasks aren't part of the lookback —
+    they shouldn't suppress a fresh duplicate of completed work.
+    With ONLY done/deleted tasks in the DB the lookback is empty,
+    the LLM call short-circuits, and the candidate is allowed."""
+    from datetime import datetime, timezone
+
+    _mk(session, title="закрытая", status=TaskStatus.done)
+    deleted_id = _mk(session, title="удалённая")
+    deleted = session.get(Task, deleted_id)
+    deleted.deleted_at = datetime.now(timezone.utc)
+    session.flush()
+
+    backend = _FakeBackend({"is_duplicate": True})  # would say dup
+    out = check_duplicate(
+        session,
+        candidate={"title": "новая"},
+        llm_backend=backend,
+    )
+    # No open tasks in lookback ⇒ no LLM call ⇒ not a duplicate.
+    assert out.is_duplicate is False
+    assert backend.calls == 0
+    assert backend.last_user_prompt is None
+
+
+def test_dedup_lookback_includes_only_open_existing_tasks(session):
+    """Mixed seed: one open task and one done task. The prompt the
+    LLM sees must mention only the open one."""
+    open_id = _mk(session, title="открытая")
+    _mk(session, title="закрытая", status=TaskStatus.done)
+
+    backend = _FakeBackend({"is_duplicate": False})
+    check_duplicate(
+        session,
+        candidate={"title": "новая"},
+        llm_backend=backend,
+    )
+    assert backend.last_user_prompt is not None
+    assert "открытая" in backend.last_user_prompt
+    assert "закрытая" not in backend.last_user_prompt
+    assert f"#{open_id}" in backend.last_user_prompt

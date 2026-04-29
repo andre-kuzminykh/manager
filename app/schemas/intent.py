@@ -19,6 +19,27 @@ class InvocationType(str, Enum):
     shortcut = "shortcut"
 
 
+_MAX_FIELD_CHARS = 10_000
+
+
+def _cap(s: str | None) -> str | None:
+    """Truncate any user-provided string to ``_MAX_FIELD_CHARS``.
+
+    Telegram and Slack messages can in principle be huge (forwarded
+    threads, copy-pasted documents). Carrying multi-MB strings into
+    the DB / Sheets / LLM prompts is a footgun: it blows up the
+    Sheets cell limit (50 000 chars), pads context budgets, and
+    slows down every render. 10 000 chars is comfortably under
+    every downstream limit and still long enough to capture useful
+    detail.
+    """
+    if s is None:
+        return None
+    if len(s) <= _MAX_FIELD_CHARS:
+        return s
+    return s[:_MAX_FIELD_CHARS]
+
+
 class TaskDraft(BaseModel):
     """Structured extraction of a task from a Slack message."""
 
@@ -36,6 +57,14 @@ class TaskDraft(BaseModel):
         False,
         description="True when the owner slot is a fallback to the message author rather than an explicit assignment.",
     )
+
+    @model_validator(mode="after")
+    def _cap_long_strings(self) -> "TaskDraft":
+        for field in ("title", "description", "owner_display_name", "owner_user_id"):
+            v = getattr(self, field, None)
+            if isinstance(v, str) and len(v) > _MAX_FIELD_CHARS:
+                object.__setattr__(self, field, v[:_MAX_FIELD_CHARS])
+        return self
 
 
 class MeetingDraft(BaseModel):

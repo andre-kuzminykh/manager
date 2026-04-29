@@ -47,7 +47,9 @@ def test_daily_digest_sent_to_each_owner_once(session):
     assert set(channels) == {"U1", "U2"}
 
 
-def test_daily_digest_lists_today_approaching_and_overdue(session):
+def test_daily_digest_lists_today_only(session):
+    """FR-CR-05-01 — morning digest narrowed to «Today's tasks»
+    only. Approaching / Overdue moved to dedicated channels."""
     today = date(2026, 4, 20)
     _task(session, owner="U1", due=today, title="do_today")
     _task(session, owner="U1", due=today + timedelta(days=1), title="tomorrow")
@@ -56,17 +58,17 @@ def test_daily_digest_lists_today_approaching_and_overdue(session):
 
     sender = _RecordingSender()
     DigestService(sender=sender).send(session, DigestKind.daily, today=today)
-    # Daily digest now uses a multi-block layout; concatenate every section's
-    # text to assert presence.
     body = "\n".join(
         b["text"]["text"]
         for b in sender.messages[0]["blocks"]
         if b.get("type") == "section"
     )
+    # Today's task is shown.
     assert "do_today" in body
-    assert "tomorrow" in body
-    assert "after_tomorrow" in body
-    assert "overdue" in body
+    # Approaching / Overdue tasks are NOT in the morning digest anymore.
+    assert "tomorrow" not in body
+    assert "after_tomorrow" not in body
+    assert "overdue" not in body
 
 
 def test_daily_digest_skipped_idempotently_on_second_run(session):

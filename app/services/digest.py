@@ -148,6 +148,10 @@ class DigestService:
     # ---- daily -----------------------------------------------------------
 
     def _daily(self, session: Session, today: date) -> DigestReport:
+        """FR-CR-05-01 — morning digest narrows to «Today's tasks» plus
+        a tracked-items section. The old Approaching / Overdue panels
+        moved to dedicated channels (deadline reminders + the evening
+        3-section DM under FR-CR-05-04)."""
         from app.slack_bot.blocks import daily_digest_blocks
 
         report = DigestReport()
@@ -158,17 +162,11 @@ class DigestService:
                 continue
 
             today_tasks = self._tasks_due_on(session, user, today)
-            approaching = self._tasks_due_between(
-                session, user, today + timedelta(days=1), today + timedelta(days=2)
-            )
-            overdue = self._overdue(session, user, today)
             tracked = _tracked_by(session, user)
 
             blocks = daily_digest_blocks(
                 today=today,
                 today_tasks=today_tasks,
-                approaching=approaching,
-                overdue=overdue,
                 tracked=tracked,
             )
             self._sender.post_message(
@@ -180,15 +178,11 @@ class DigestService:
                 user_id=user,
                 payload={
                     "today": len(today_tasks),
-                    "approaching": len(approaching),
-                    "overdue": len(overdue),
                     "tracked": len(tracked),
                 },
             )
             report.recipients += 1
-            report.tasks_included += (
-                len(today_tasks) + len(approaching) + len(overdue) + len(tracked)
-            )
+            report.tasks_included += len(today_tasks) + len(tracked)
         return report
 
     # ---- weekly ----------------------------------------------------------

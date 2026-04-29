@@ -97,9 +97,11 @@ def test_telegram_owner_ids_skips_deleted_and_done(session):
 # --------------------------------------------------------------------------- #
 
 
-def test_morning_digest_sends_per_user_with_today_and_overdue(
+def test_morning_digest_today_only(
     patched_session_scope, SessionFactory
 ):
+    """FR-CR-05-01 — morning DM is just «Today» now. Overdue moves
+    to the per-task deadline reminder + the evening 3-section DM."""
     today = date(2026, 5, 1)
     sender = _RecordingSender()
     with SessionFactory() as s:
@@ -119,7 +121,9 @@ def test_morning_digest_sends_per_user_with_today_and_overdue(
     assert sender.sent
     body = sender.sent[0]["text"]
     assert "due_today" in body
-    assert "Overdue" in body
+    # Overdue / Approaching no longer in the morning DM.
+    assert "Overdue" not in body
+    assert "late" not in body
 
 
 def test_morning_digest_idempotent(patched_session_scope, SessionFactory):

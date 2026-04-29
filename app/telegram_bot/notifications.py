@@ -151,8 +151,10 @@ def send_morning_digest(
     sender: TelegramSender,
     today: date | None = None,
 ) -> TelegramDigestReport:
+    """FR-CR-05-01 — morning DM at 09:00 narrows to «Today's tasks»
+    only. Approaching / Overdue moved to dedicated channels (per-task
+    deadline reminders + the evening 3-section DM)."""
     today = today or date.today()
-    soon = today + timedelta(days=2)
     report = TelegramDigestReport()
 
     for uid in _telegram_owner_ids(session):
@@ -177,33 +179,8 @@ def send_morning_digest(
             .order_by(Task.id)
             .all()
         )
-        approaching = (
-            session.query(Task)
-            .filter(
-                Task.owner_user_id == uid,
-                Task.status.in_(_OPEN),
-                Task.deleted_at.is_(None),
-                Task.due_date.isnot(None),
-                Task.due_date > today,
-                Task.due_date <= soon,
-            )
-            .order_by(Task.due_date)
-            .all()
-        )
-        overdue = (
-            session.query(Task)
-            .filter(
-                Task.owner_user_id == uid,
-                Task.status.in_(_OPEN),
-                Task.deleted_at.is_(None),
-                Task.due_date.isnot(None),
-                Task.due_date < today,
-            )
-            .order_by(Task.due_date)
-            .all()
-        )
 
-        if not (today_tasks or approaching or overdue):
+        if not today_tasks:
             report.skipped_no_tasks += 1
             _mark_sent(
                 session,
@@ -214,13 +191,9 @@ def send_morning_digest(
             )
             continue
 
-        body = "\n\n".join(
-            f"*{label}*\n" + ("\n".join(_fmt_task_line(t) for t in tasks) or "_(none)_")
-            for label, tasks in (
-                (f"Today — {today.isoformat()}", today_tasks),
-                ("Approaching (2 days)", approaching),
-                ("Overdue", overdue),
-            )
+        body = (
+            f"<b>📅 Today — {today.isoformat()}</b>\n"
+            + "\n".join(_fmt_task_line(t) for t in today_tasks)
         )
         try:
             sender.send_message(chat_id=int(uid), text=body)

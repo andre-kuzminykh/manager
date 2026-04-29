@@ -894,11 +894,19 @@ def daily_digest_blocks(
     *,
     today,
     today_tasks: list[Any],
-    approaching: list[Any],
-    overdue: list[Any],
-    tracked: list[Any],
+    approaching: list[Any] | None = None,  # legacy — ignored under FR-CR-05-01
+    overdue: list[Any] | None = None,      # legacy — ignored under FR-CR-05-01
+    tracked: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Personal morning digest: mine + tracking + Manage-subscriptions CTA."""
+    """FR-CR-05-01 — morning digest narrows to «Today's tasks» only.
+
+    The previous *Today / Approaching / Overdue* mash-up moved to
+    dedicated reminders (deadline reminder fires per task as it
+    approaches; overdue gets its own line in the evening 3-section
+    DM under FR-CR-05-04). The Slack callers still pass the old
+    arguments for back-compat — we silently drop them.
+    """
+    tracked = tracked or []
     blocks: list[dict[str, Any]] = [
         {
             "type": "header",
@@ -913,20 +921,6 @@ def daily_digest_blocks(
             "text": {
                 "type": "mrkdwn",
                 "text": f"*Today ({len(today_tasks)})*\n{_tasks_mrkdwn(today_tasks)}",
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Approaching ({len(approaching)})*\n{_tasks_mrkdwn(approaching)}",
-            },
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*Overdue ({len(overdue)})*\n{_tasks_mrkdwn(overdue)}",
             },
         },
         {"type": "divider"},

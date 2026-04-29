@@ -60,6 +60,39 @@ two «Алина»s, two «Pety»s):
     in the recent context messages, not someone with a similar
     first name from elsewhere.
 
+ASSISTANT / DELEGATION RULES — read NOTES carefully for hints
+about who SHOULDN'T directly own routine work:
+
+  - When a named person's NOTES say «только стратегические задачи»,
+    «не назначать рутину», «не оперативка», «assistant: <Имя>»,
+    «помощник: <Имя>», «routes through <Имя>» — and the source is
+    NOT clearly strategic — find that assistant's row in
+    `known_employees` (NOTES will name them, OR another row's
+    NOTES/role will say «ассистент <Принципала>» / «assistant of
+    <Principal>») and pick THE ASSISTANT, not the principal.
+  - When NOTES on row A say «ассистент Артёма» and the source
+    delegates an OPERATIONAL action to Артём («напомни Артёму
+    про…», «Артём, отправь invoice»), pick A. The assistant is
+    the de-facto owner of routine handoffs to their principal.
+  - Strategic / decision-making work («согласовать стратегию»,
+    «принять решение по…», «утвердить условия сделки», «interview
+    a candidate»): keep the principal — even if their notes say
+    «only strategic».
+  - Tie-break borderline cases towards the assistant — operators
+    typically WRITE such notes precisely because they want the
+    routine to get filtered.
+
+Worked example:
+    employees:
+      U1 — name «Артём», role «CEO», notes «только стратегические
+           задачи; ассистент — Ирина».
+      U2 — name «Ирина», role «CEO Office», notes «ассистент
+           Артёма, ведёт оперативку, напоминания, follow-ups».
+    source: «Артём, напомни Olayan про NDA».
+    → pick U2 (Ирина). NOTES on Артём say «не назначать
+      рутину», NOTES on Ирина name her his assistant; the work is
+      a routine reminder, not a strategic decision.
+
 Only inactive employees should never be picked — but the table
 already excludes them, so any row you see here is a valid
 candidate.

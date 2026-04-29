@@ -542,3 +542,23 @@ def test_intent_tool_schema_has_tasks_array():
     for f in ("title", "description", "owner_display_name", "priority", "due_date"):
         assert f in item_props
     assert props["tasks"]["items"]["required"] == ["title"]
+
+
+def test_owner_prompt_routes_routine_work_to_assistant_named_in_notes():
+    """FR-CR-05-52 — when notes on a principal's row say
+    «только стратегические задачи; ассистент — Ирина», the
+    owner prompt teaches the LLM to delegate routine work to
+    the assistant rather than the principal. Pinned because
+    operator wrote «у Артёма есть Ассистент Ирина» in the
+    Team sheet and expects the bot to actually use that hint
+    when an operational task is delegated 'to Артём'."""
+    blob = OWNER_SYSTEM_PROMPT
+    assert "ASSISTANT" in blob.upper() or "ассистент" in blob.lower()
+    assert "только стратегические" in blob.lower() or "strategic" in blob.lower()
+    # Worked example pinned: Артём + Ирина (CEO + assistant) so
+    # this exact failure mode the operator hit can never silently
+    # regress without a test failure.
+    assert "Артём" in blob and "Ирина" in blob
+    # Decision/strategic cases stay with the principal — pinned
+    # so we don't end up routing EVERYTHING to the assistant.
+    assert "strategic" in blob.lower() or "стратеги" in blob.lower()

@@ -35,20 +35,21 @@ def _row(*buttons: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def confirm_keyboard(*, draft_id: int) -> dict[str, Any]:
-    """Inline keyboard for a draft card (Accept / Edit / Reject).
+    """Inline keyboard for a draft card.
 
-    The Edit button opens a follow-up message conversation rather
-    than a Telegram modal (Telegram doesn't have Slack-style modals).
-    For the MVP, Edit is wired in but launches a separate flow that
-    is not yet implemented; users land in their existing Slack flow
-    or simply use the Telegram /edit command (planned).
+    FR-CR-05-34 — order is **Reject / Edit / Accept** so the
+    «commit» button is the rightmost / last-tap one. Operator
+    feedback: tapping Accept by accident (it was first) on a
+    not-yet-reviewed draft was easy. Reject on the left makes
+    the destructive button the safe «I'm out» choice and Accept
+    the «I read this and confirm» commit.
     """
     return {
         "inline_keyboard": [
             _row(
-                _btn("✅ Accept", ACTION_CONFIRM, draft_id),
-                _btn("✏ Edit", ACTION_EDIT, draft_id),
                 _btn("✖ Reject", ACTION_IGNORE, draft_id),
+                _btn("✏ Edit", ACTION_EDIT, draft_id),
+                _btn("✅ Accept", ACTION_CONFIRM, draft_id),
             )
         ]
     }

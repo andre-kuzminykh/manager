@@ -221,7 +221,12 @@ def _looks_like_confirm_widget(cq: dict[str, Any]) -> bool:
     for b in rows[0]:
         cd = (b or {}).get("callback_data") or ""
         actions.append(cd.split(":", 1)[0])
-    return actions == [ACTION_CONFIRM, ACTION_EDIT, ACTION_IGNORE]
+    # FR-CR-05-34 — current layout is [ignore, edit, confirm].
+    # Pre-FR-CR-05-34 widgets in the wild may still carry the
+    # legacy [confirm, edit, ignore] order; accept either.
+    return sorted(actions) == sorted(
+        [ACTION_CONFIRM, ACTION_EDIT, ACTION_IGNORE]
+    ) and len(actions) == 3
 
 
 def _get_offset(session: Session) -> int:

@@ -1407,6 +1407,18 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.34 — Confirm-widget button order: Reject / Edit / Accept
+
+Operator wanted Accept rightmost so it's the deliberate last-tap
+button after reading the widget; Reject leftmost as the safe
+«I'm out» choice. Widget keyboards swap from
+`[Accept, Edit, Reject]` to `[Reject, Edit, Accept]`.
+
+`_looks_like_confirm_widget` (the heuristic that routes Edit
+clicks to the draft-edit flow) now matches in order-agnostic
+mode so widgets in flight from before the upgrade still route
+correctly.
+
 #### 13.33 — Tombstone / reject lines render actor name
 
 «🗑 Task #155 — написать Крису — deleted by 222968032» showed

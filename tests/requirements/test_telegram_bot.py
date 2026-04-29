@@ -37,11 +37,14 @@ def _flat_callback_actions(kb):
 
 
 def test_confirm_keyboard_has_three_buttons_in_order():
+    """FR-CR-05-34 — order is Reject / Edit / Accept so the
+    commit-action is rightmost (last-tap) and the destructive
+    Reject is the safe leftmost choice."""
     kb = confirm_keyboard(draft_id=42)
     assert _flat_callback_actions(kb) == [
-        ACTION_CONFIRM,
-        ACTION_EDIT,
         ACTION_IGNORE,
+        ACTION_EDIT,
+        ACTION_CONFIRM,
     ]
 
 

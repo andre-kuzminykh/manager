@@ -1407,6 +1407,31 @@ overwritten — only nulls get filled. The registry self-completes
 from natural chat traffic within minutes of the bot being added
 to a chat.
 
+#### 13.26 — Use `sender_username` + `message_link` from the source view
+
+Inspecting the actual Supabase view's schema turned up two
+columns we hadn't been using:
+
+  - **`sender_username`** — the sender's @-handle, separate from
+    the display `sender_name`. We were heuristically guessing
+    whether `user_name` was a handle or a real name; now we get
+    both cleanly.
+  - **`message_link`** — pre-computed `t.me/c/<chat>/<msg>` URL
+    that Telegram itself produced. Correct for every chat shape,
+    incl. private DMs that we couldn't reconstruct on our side.
+
+The reader's `_FIELD_MAP` and `TelegramSourceMessage` gained the
+two new fields. `seed_from_telegram_source` uses the dedicated
+username when present and ALSO BACKFILLS existing
+team_members rows that were seeded before the view gained the
+column. `_telegram_permalink` prefers the view's URL when set,
+falling back to chat-id reconstruction.
+
+Result: re-running `python -m ops.sync_team --seed --pull --push`
+on a deploy with the modern view auto-fills @-handles for every
+teammate the view has ever seen — no manual Sheet edits, no
+Bot API round-trips.
+
 #### 13.25 — One-shot team_members backfill (chat_members + Bot API)
 
 13.23 auto-enrich runs on every NEW listener observation, but

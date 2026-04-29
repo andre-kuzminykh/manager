@@ -102,13 +102,29 @@ _FIELD_MAP: dict[str, tuple[str, ...]] = {
     "user_name": (
         "from_user_name",
         "user_name",
-        "username",
         "from_user",
         "sender_name",
+    ),
+    # FR-CR-05-25 — dedicated `@handle` column. Some Supabase
+    # ingestion pipelines split the username from the display
+    # name; previously we conflated them under `user_name` and
+    # heuristically guessed which form we got.
+    "username": (
+        "sender_username",
+        "from_username",
+        "from_user_username",
+        "username",
+        "tg_username",
     ),
     "chat_title": ("chat_title", "title", "chat_name"),
     "text": ("text", "message_text", "body", "content"),
     "sent_at": ("date", "sent_at", "created_at", "timestamp"),
+    # FR-CR-05-25 — many ingestion pipelines pre-compute the
+    # `t.me/c/<chat>/<msg>` URL into a column. When present we
+    # use it as-is and skip the brittle reconstruction in
+    # `_telegram_permalink` that requires guessing the chat-id
+    # form.
+    "permalink": ("message_link", "permalink", "tg_link", "link"),
 }
 
 
@@ -124,6 +140,17 @@ class TelegramSourceMessage:
     reply_to: int | None = None
     user_id: int | None = None
     user_name: str | None = None
+    # FR-CR-05-25 — sender's @-handle (without the leading `@`),
+    # when the source view has a dedicated `sender_username`
+    # column. Used to auto-populate `team_members.telegram_
+    # username` so owner deeplinks render as `t.me/<handle>`.
+    username: str | None = None
+    # FR-CR-05-25 — ready-made `t.me/c/<chat>/<msg>` URL from
+    # the source view's `message_link` column. Preferred over
+    # the bot-side reconstruction in `_telegram_permalink` —
+    # the view's URL is what Telegram itself produced, so it's
+    # correct for any chat shape (incl. private).
+    permalink: str | None = None
     chat_title: str | None = None
     # Telegram chat type: "private" (1:1 DM with the bot), "group",
     # "supergroup", "channel". Used to decide whether a task-shaped
@@ -171,6 +198,12 @@ def _map_row(row: dict[str, Any]) -> TelegramSourceMessage | None:
     if chat is None or msg is None:
         # Rows without identifiers are useless to us — skip silently.
         return None
+    raw_username = _pick(row, _FIELD_MAP["username"])
+    username = None
+    if raw_username:
+        username = str(raw_username).strip().lstrip("@") or None
+    raw_permalink = _pick(row, _FIELD_MAP["permalink"])
+    permalink = str(raw_permalink).strip() if raw_permalink else None
     return TelegramSourceMessage(
         chat_id=chat,
         message_id=msg,
@@ -179,6 +212,8 @@ def _map_row(row: dict[str, Any]) -> TelegramSourceMessage | None:
         reply_to=_coerce_int(_pick(row, _FIELD_MAP["reply_to"])),
         user_id=_coerce_int(_pick(row, _FIELD_MAP["user_id"])),
         user_name=(_pick(row, _FIELD_MAP["user_name"]) or None),
+        username=username,
+        permalink=permalink,
         chat_title=(_pick(row, _FIELD_MAP["chat_title"]) or None),
         raw=dict(row),
     )
@@ -340,17 +375,22 @@ class TelegramSourceReader:
         return cols
 
     def distinct_users(self) -> list[dict]:
-        """FR-CR-05-10 — pull every distinct sender from the source
-        view. Used by the team-registry seed (`ops.sync_team --seed`)
-        so the operator doesn't have to wait for the live listener
-        to observe every teammate before they show up in the
-        registry.
+        """FR-CR-05-10 / FR-CR-05-25 — pull every distinct sender
+        from the source view. Used by the team-registry seed
+        (`ops.sync_team --seed`) so the operator doesn't have to
+        wait for the live listener to observe every teammate
+        before they show up in the registry.
 
-        The view's user-name column varies (`from_user_name` /
-        `user_name` / `username` / …); we probe the schema first
-        and project only the columns that exist. Returns a list of
-        ``{user_id, user_name}`` dicts; consumers may further parse
-        `user_name` into first/last when it carries spaces.
+        Schema-aware: probes the view's columns and pulls
+        `user_id`, `user_name`, and (when present)
+        `sender_username` separately. The dedicated username
+        column lets us populate `team_members.telegram_username`
+        accurately — without it we fell back to a heuristic
+        guess that misclassified plain real-names like
+        «Артем Соколов» as if they were @-handles.
+
+        Returns a list of ``{user_id, user_name, username}``
+        dicts; consumers can use whichever fields are available.
         """
         if self._engine is None:
             return []
@@ -368,10 +408,15 @@ class TelegramSourceReader:
         user_name_col = next(
             (c for c in _FIELD_MAP["user_name"] if c in present), None
         )
+        username_col = next(
+            (c for c in _FIELD_MAP["username"] if c in present), None
+        )
 
         select_cols = [user_id_col]
         if user_name_col:
             select_cols.append(user_name_col)
+        if username_col:
+            select_cols.append(username_col)
         sql = text(
             f"""
             SELECT DISTINCT {", ".join(select_cols)}
@@ -380,7 +425,12 @@ class TelegramSourceReader:
             """
         )
         out: list[dict] = []
-        seen: set[int] = set()
+        # Per-uid bookkeeping: keep the FIRST observation (rows are
+        # already DISTINCT-projected by Postgres). When multiple
+        # rows for the same uid have different fields filled in,
+        # prefer rows with both name AND username over rows with
+        # one or the other.
+        per_uid: dict[int, dict] = {}
         with self._engine.connect() as conn:
             for row in conn.execute(sql).mappings():
                 raw_uid = row.get(user_id_col)
@@ -388,19 +438,29 @@ class TelegramSourceReader:
                     uid = int(raw_uid)
                 except (TypeError, ValueError):
                     continue
-                if uid in seen:
-                    continue
-                seen.add(uid)
                 name = (
-                    row.get(user_name_col) if user_name_col else None
+                    str(row.get(user_name_col)).strip()
+                    if user_name_col and row.get(user_name_col)
+                    else None
                 )
-                out.append(
-                    {
+                handle = (
+                    str(row.get(username_col)).strip().lstrip("@")
+                    if username_col and row.get(username_col)
+                    else None
+                )
+                cur = per_uid.get(uid)
+                if cur is None:
+                    per_uid[uid] = {
                         "user_id": uid,
-                        "user_name": (str(name) if name else None),
+                        "user_name": name,
+                        "username": handle,
                     }
-                )
-        return out
+                else:
+                    if name and not cur["user_name"]:
+                        cur["user_name"] = name
+                    if handle and not cur["username"]:
+                        cur["username"] = handle
+        return list(per_uid.values())
 
     def recent_in_chat(
         self,

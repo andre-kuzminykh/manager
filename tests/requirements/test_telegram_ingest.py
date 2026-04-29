@@ -82,15 +82,51 @@ def test_map_row_alternative_column_names():
             "messageid": 8,
             "body": "do X",
             "sender_id": 77,
-            "username": "alice",
+            "sender_name": "Alice Smith",
         }
     )
     assert out is not None
     assert out.chat_id == 555
     assert out.message_id == 8
     assert out.user_id == 77
-    assert out.user_name == "alice"
+    assert out.user_name == "Alice Smith"
     assert out.text == "do X"
+
+
+def test_map_row_extracts_dedicated_username_column():
+    """FR-CR-05-25 — the source view's `sender_username` column is
+    the @-handle, separate from the display name. The reader maps
+    it to the new `username` field, stripped of any leading `@`."""
+    out = _map_row(
+        {
+            "chat_id": -100,
+            "message_id": 1,
+            "sender_id": 42,
+            "sender_name": "Артем Соколов",
+            "sender_username": "@artem_sokolov",
+            "text": "hi",
+        }
+    )
+    assert out is not None
+    assert out.user_name == "Артем Соколов"
+    assert out.username == "artem_sokolov"  # leading @ stripped
+
+
+def test_map_row_extracts_message_link_as_permalink():
+    """FR-CR-05-25 — the source view often pre-computes the
+    `t.me/c/<chat>/<msg>` URL into a `message_link` column. We
+    use it as-is instead of reconstructing on our side."""
+    out = _map_row(
+        {
+            "chat_id": -2061886148,
+            "message_id": 2981,
+            "sender_id": 42,
+            "text": "x",
+            "message_link": "https://t.me/c/2061886148/2981",
+        }
+    )
+    assert out is not None
+    assert out.permalink == "https://t.me/c/2061886148/2981"
 
 
 def test_map_row_drops_when_no_identifiers():
@@ -401,6 +437,22 @@ def test_telegram_permalink_returns_none_for_basic_group():
 def test_telegram_permalink_returns_none_for_private_chat():
     msg = TelegramSourceMessage(chat_id=42, message_id=1, text="x")
     assert _telegram_permalink(msg) is None
+
+
+def test_telegram_permalink_prefers_view_supplied_link():
+    """FR-CR-05-25 — when the source view ships a ready-made
+    `message_link`, use it as-is. Bypasses the chat-id
+    reconstruction which can't generate a URL for private chats
+    or basic groups (Telegram doesn't have a public URL form
+    for those — but the view might know one, or it might
+    correctly leave it null)."""
+    msg = TelegramSourceMessage(
+        chat_id=42,  # would normally produce no URL
+        message_id=1,
+        text="x",
+        permalink="https://t.me/some/private/link",
+    )
+    assert _telegram_permalink(msg) == "https://t.me/some/private/link"
 
 
 # --------------------------------------------------------------------------- #

@@ -402,12 +402,11 @@ def test_backfill_no_op_when_chat_members_empty(session):
 
 
 def test_seed_from_telegram_source_pulls_distinct_users(session):
-    """FR-CR-05-10 — seeding from the Supabase view inserts one
-    `team_members` row per distinct user_id we've ever seen send a
-    message, even when the live listener hasn't observed them yet.
-
-    Reader is faked here — the unit test pins the parsing /
-    dedup logic that lives in `seed_from_telegram_source`."""
+    """FR-CR-05-10 / FR-CR-05-25 — seeding from the Supabase view
+    inserts one `team_members` row per distinct user_id. When the
+    view ships a dedicated `sender_username` column (FR-CR-05-25),
+    real_name and telegram_username are populated from separate
+    fields. When it doesn't, fall back to the legacy heuristic."""
     from app.services.team_members import seed_from_telegram_source
 
     class _FakeReader:
@@ -415,26 +414,37 @@ def test_seed_from_telegram_source_pulls_distinct_users(session):
 
         def distinct_users(self):
             return [
-                {"user_id": 42, "user_name": "petya"},
-                {"user_id": 99, "user_name": "Andre Kuzminykh"},
-                {"user_id": 700, "user_name": None},
+                # Both fields filled in (modern view shape).
+                {"user_id": 42, "user_name": "Артем Соколов",
+                 "username": "artem_sokolov"},
+                # No username column at all — heuristic guess.
+                {"user_id": 99, "user_name": "Andre Kuzminykh",
+                 "username": None},
+                # Empty everything — only id known.
+                {"user_id": 700, "user_name": None, "username": None},
+                # Heuristic-only legacy row: ascii token → username.
+                {"user_id": 800, "user_name": "petya", "username": None},
             ]
 
     added = seed_from_telegram_source(session, _FakeReader())
-    assert added == 3
+    assert added == 4
 
     out = {m.telegram_user_id: m for m in list_active(session)}
-    assert set(out.keys()) == {42, 99, 700}
-    # «petya» — single ASCII token → username, real_name=None.
-    assert out[42].telegram_username == "petya"
-    assert out[42].real_name is None
-    # «Andre Kuzminykh» has a space → real_name, username=None.
+    assert set(out.keys()) == {42, 99, 700, 800}
+    # FR-CR-05-25 — both fields populate cleanly when the view
+    # has them separately.
+    assert out[42].real_name == "Артем Соколов"
+    assert out[42].telegram_username == "artem_sokolov"
+    # «Andre Kuzminykh» has a space → still treated as real_name
+    # (no username available).
     assert out[99].real_name == "Andre Kuzminykh"
     assert out[99].telegram_username is None
-    # No name at all — both null but row still inserted (gives the
-    # operator a starting line with the numeric id).
+    # No data anywhere — row exists for the id alone.
     assert out[700].telegram_username is None
     assert out[700].real_name is None
+    # Legacy heuristic still works for views without sender_username.
+    assert out[800].telegram_username == "petya"
+    assert out[800].real_name is None
 
 
 def test_seed_from_telegram_source_is_idempotent(session):

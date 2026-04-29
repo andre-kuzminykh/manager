@@ -362,22 +362,44 @@ def seed_from_telegram_source(session: Session, reader) -> int:
         log.warning("seed_from_telegram_source_failed", error=str(e))
         return 0
     added = 0
+    enriched = 0
+    now = datetime.now(timezone.utc)
     for u in users:
         uid = u.get("user_id")
         if uid is None:
             continue
-        if find_by_telegram_user_id(session, int(uid)) is not None:
-            continue
+        # FR-CR-05-25 — the view now ships a dedicated
+        # `sender_username` column when present; otherwise fall
+        # back to the legacy heuristic (treat ASCII-only no-space
+        # `user_name` as a handle, anything else as a real name).
+        explicit_username = (u.get("username") or "").strip().lstrip("@") or None
         name = (u.get("user_name") or "").strip() or None
-        # Telegram's `from_user_name` field on the view often holds
-        # the @username (no leading «@»). Detect and split: looks
-        # like a handle if it's all-ASCII alnum + underscore and
-        # has no spaces, otherwise treat as the real name.
-        username: str | None = None
-        real_name: str | None = name
-        if name and " " not in name and name.replace("_", "").isalnum() and not name.isdigit():
+        if explicit_username:
+            username = explicit_username
+            real_name = name
+        elif name and " " not in name and name.replace("_", "").isalnum() and not name.isdigit():
             username = name
             real_name = None
+        else:
+            username = None
+            real_name = name
+
+        existing = find_by_telegram_user_id(session, int(uid))
+        if existing is not None:
+            # FR-CR-05-25 — backfill missing fields when re-seeding
+            # against an enriched view. Operator-edited values are
+            # NEVER overwritten — only blanks get filled.
+            row_changed = False
+            if not existing.telegram_username and username:
+                existing.telegram_username = username
+                row_changed = True
+            if not existing.real_name and real_name:
+                existing.real_name = real_name
+                row_changed = True
+            if row_changed:
+                existing.last_synced_at = now
+                enriched += 1
+            continue
         is_bot = _looks_like_bot(real_name, username)
         session.add(
             TeamMember(
@@ -386,13 +408,13 @@ def seed_from_telegram_source(session: Session, reader) -> int:
                 real_name=real_name,
                 active=not is_bot,
                 notes="auto: looks like bot account" if is_bot else None,
-                last_synced_at=datetime.now(timezone.utc),
+                last_synced_at=now,
             )
         )
         added += 1
-    if added:
+    if added or enriched:
         session.flush()
-    return added
+    return added + enriched
 
 
 def seed_from_slack_employees(session: Session) -> int:

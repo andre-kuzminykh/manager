@@ -723,6 +723,45 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-25 — Read `sender_username` + `message_link` from the source view
+
+The colleague's Supabase view turned out to ship two columns
+that we previously didn't use:
+
+  - **`sender_username`** — the sender's @-handle, separate
+    from the display name. We were heuristically guessing whether
+    `sender_name` was a username or a real name; the dedicated
+    column gives us both cleanly.
+  - **`message_link`** — pre-computed `t.me/c/<chat>/<msg>` URL
+    that Telegram itself produced. Correct for every chat shape
+    (incl. private), no chat-id form-guessing required on our
+    side.
+
+`_FIELD_MAP` extended with two new fields (`username`,
+`permalink`) covering common variants. `TelegramSourceMessage`
+gained both fields. `_map_row` extracts and normalises them
+(strips a leading `@` from username; trims permalink). The
+reader's `distinct_users()` now returns
+`{user_id, user_name, username}` triples.
+
+`seed_from_telegram_source` uses the dedicated `username` when
+available; falls back to the legacy heuristic on views without
+the column. ALSO BACKFILLS existing rows: re-running
+`--seed` after the view gains `sender_username` populates blank
+`telegram_username` / `real_name` on rows that were inserted
+before. Operator-edited values stay untouched.
+
+`_telegram_permalink` prefers `message.permalink` from the view
+when set; falls back to the chat-id reconstruction otherwise.
+The 🔗 link on the widget now appears for ANY message the view
+has a URL for — including private chats where the bot-side
+reconstruction returns `None`.
+
+After re-running `python -m ops.sync_team --seed --pull --push`
+on a deploy that has the new view columns, every team_member
+that ever sent a message gets their @-handle filled in
+automatically — no more `--enrich-bot-api` needed for them.
+
 #### FR-CR-05-24 — Bot-API enrichment for never-observed users
 
 `telegram_chat_members` only carries usernames the live listener
@@ -2701,6 +2740,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-14  | `test_telegram_listener.py::test_maybe_transcribe_voice_returns_text_for_text_message` (text replies skip transcription); `::test_maybe_transcribe_voice_returns_empty_when_no_voice_no_audio` (no attachment ⇒ empty); `::test_maybe_transcribe_voice_calls_whisper_with_downloaded_bytes` (voice payload ⇒ download via sender + Whisper round-trip); `::test_maybe_transcribe_voice_skips_when_openai_key_missing` (no OPENAI_API_KEY ⇒ no download attempt); `test_telegram_conversations.py::test_parse_edit_with_llm_includes_known_employees_in_prompt` (5-col registry table rendered into the Edit prompt); `::test_apply_edit_resolves_owner_name_via_team_registry` (LLM-returned name «Андрей Кузьминых» ⇒ owner_user_id resolved against team_members + display_name backfilled); `::test_apply_edit_drops_unresolvable_owner_text_to_display_name` (unresolvable text kept on owner_display_name, owner_user_id cleared). The original `test_task_row_includes_dialogue_from_extra` / `_dialogue_empty_when_no_extra` tests were rolled back by FR-CR-05-15. |
 | FR-CR-05-15  | `test_telegram_cards.py::test_draft_widget_text_includes_source_permalink_when_available` (🔗 line carries `t.me/c/<chat>/<msg>` when `_pending["permalink"]` is set); `::test_draft_widget_text_omits_link_line_when_no_permalink` (no empty 🔗 line for private DMs / basic groups); `test_sheets_pull.py::test_task_row_does_not_include_dialogue_column` (22-column header restored, last column is `completion_artifact`); `test_telegram_ingest.py::test_recent_in_chat_filters_by_chat_id_only` (adaptive context window is per-chat — SQL `WHERE chat_id = :chat_id` pinned so a future refactor can't widen the query) |
 | FR-CR-05-23  | `test_team_members.py::test_backfill_fills_blank_team_members_from_chat_members` (sparse rows enriched from listener observations; operator edits preserved); `::test_backfill_no_op_when_chat_members_empty` (no observations ⇒ no rows changed) |
+| FR-CR-05-25  | `test_telegram_ingest.py::test_map_row_extracts_dedicated_username_column` (`sender_username` ⇒ `TelegramSourceMessage.username`, leading @ stripped); `::test_map_row_extracts_message_link_as_permalink` (`message_link` column ⇒ `TelegramSourceMessage.permalink`); `::test_telegram_permalink_prefers_view_supplied_link` (`_telegram_permalink` returns the view's URL when set, even for chat shapes where reconstruction would return None); `test_team_members.py::test_seed_from_telegram_source_pulls_distinct_users` (modern view shape — both real_name and username populated cleanly; legacy heuristic still works for views without the column) |
 | FR-CR-05-24  | `test_team_members.py::test_enrich_from_bot_api_populates_blank_fields` (Bot API getChat result populates blank username / real_name; rows already populated are skipped without calls); `::test_enrich_from_bot_api_silently_skips_unknown_users` (getChat returns `{}` ⇒ row stays sparse, no crash); `::test_enrich_from_bot_api_noop_when_sender_disabled` (no token / sender ⇒ early-return) |
 | FR-CR-05-22  | `test_intent_pipeline.py::test_title_prompt_forbids_vague_placeholder_phrases_in_description` (CONCRETE OVER VAGUE block + concrete examples «указанных людей» / «правильной командой» / «the right people» pinned; «(уточнить)» fallback when context lacks names); `::test_title_prompt_forbids_first_person_plural_in_description` (THIRD PERSON block + «нам» / «будем рады» / «we'd love» pinned) |
 | FR-CR-05-21  | `test_telegram_ingest.py::test_resolve_owner_registry_display_wins_over_llm_short_form` (LLM extracted «Артем», registry has «Артем Соколов» ⇒ registry wins); `test_telegram_members.py::test_upsert_member_enriches_sparse_team_members_row` (listener observation populates blank `telegram_username` / `real_name` on the matching `team_members` row); `::test_upsert_member_does_not_overwrite_operator_edits` (operator-edited fields are preserved); `::test_upsert_member_no_team_row_is_a_noop` (users without a team row stay only in chat_members) |

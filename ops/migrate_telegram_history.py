@@ -13,21 +13,28 @@ Usage::
     python -m ops.migrate_telegram_history --dry-run
     python -m ops.migrate_telegram_history
     python -m ops.migrate_telegram_history --batch-size 500
+    python -m ops.migrate_telegram_history --since 2026-04-28
+    python -m ops.migrate_telegram_history --since-days 1
 
 Idempotent: each processed (chat_id, message_id) is recorded in
 ``processed_telegram_messages`` so a re-run picks up only new
-messages added since.
+messages added since. Messages older than the optional ``--since``
+cutoff are bookmarked as «skipped (too old)» without consuming any
+LLM budget — re-runs of the same script don't re-process them
+either.
 """
 from __future__ import annotations
 
 import argparse
 import sys
 from dataclasses import asdict
+from datetime import date, datetime, timedelta, timezone
 
 from app.config import get_settings
 from app.db import session_scope
 from app.intent import IntentClassifier
 from app.logging_setup import get_logger, setup_logging
+from app.models import ProcessedTelegramMessage
 from app.orchestrator import Orchestrator
 from app.telegram_ingest import TelegramSourceReader
 from app.telegram_ingest.service import IngestReport, TelegramIngestService
@@ -57,7 +64,42 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="Stop after processing this many messages (0 = no limit).",
     )
-    return p.parse_args()
+    p.add_argument(
+        "--since",
+        type=str,
+        default=None,
+        help=(
+            "Only process messages with sent_at >= this UTC date "
+            "(YYYY-MM-DD). Older messages are bookmarked as «skipped» "
+            "so they don't waste LLM budget — and a re-run is fast."
+        ),
+    )
+    p.add_argument(
+        "--since-days",
+        type=int,
+        default=None,
+        help=(
+            "Shortcut: --since (today - N days). Mutually exclusive "
+            "with --since."
+        ),
+    )
+    args = p.parse_args()
+    if args.since and args.since_days is not None:
+        p.error("Pass either --since or --since-days, not both.")
+    return args
+
+
+def _resolve_since(args: argparse.Namespace) -> date | None:
+    if args.since:
+        try:
+            return date.fromisoformat(args.since)
+        except ValueError:
+            raise SystemExit(
+                f"--since must be YYYY-MM-DD, got {args.since!r}"
+            )
+    if args.since_days is not None:
+        return date.today() - timedelta(days=args.since_days)
+    return None
 
 
 def _merge(a: IngestReport, b: IngestReport) -> IngestReport:
@@ -73,6 +115,32 @@ def _merge(a: IngestReport, b: IngestReport) -> IngestReport:
     )
 
 
+def _bookmark_skipped(messages: list) -> int:
+    """Bookmark messages we're skipping due to ``--since`` so a
+    re-run doesn't pull them through the reader again. Returns the
+    count actually written (existing rows are skipped). Idempotent."""
+    if not messages:
+        return 0
+    written = 0
+    with session_scope() as session:
+        for m in messages:
+            existing = session.get(
+                ProcessedTelegramMessage, (m.chat_id, m.message_id)
+            )
+            if existing is not None:
+                continue
+            session.add(
+                ProcessedTelegramMessage(
+                    chat_id=m.chat_id,
+                    message_id=m.message_id,
+                    processed_at=datetime.now(timezone.utc),
+                    task_id=None,
+                )
+            )
+            written += 1
+    return written
+
+
 def main() -> int:
     setup_logging()
     args = _parse_args()
@@ -80,6 +148,10 @@ def main() -> int:
     if not settings.telegram_source_database_url:
         log.error("missing_telegram_source_database_url")
         return 2
+
+    since_date: date | None = _resolve_since(args)
+    if since_date:
+        log.info("telegram_history_since_filter", since=since_date.isoformat())
 
     reader = TelegramSourceReader(
         database_url=settings.telegram_source_database_url,
@@ -113,8 +185,24 @@ def main() -> int:
 
     overall = IngestReport()
     batch: list = []
+    skipped_too_old: list = []
+    skipped_too_old_total = 0
     processed = 0
     for msg in reader.iter_all(batch_size=args.batch_size):
+        # Date cutoff: messages older than `since_date` get a
+        # «skipped» bookmark and never touch the LLM. We keep them
+        # off the main batch so the LLM budget goes only to the
+        # interesting range.
+        if since_date and msg.sent_at and msg.sent_at.date() < since_date:
+            skipped_too_old.append(msg)
+            if len(skipped_too_old) >= args.batch_size:
+                if not args.dry_run:
+                    skipped_too_old_total += _bookmark_skipped(skipped_too_old)
+                else:
+                    skipped_too_old_total += len(skipped_too_old)
+                skipped_too_old = []
+            continue
+
         batch.append(msg)
         if len(batch) >= args.batch_size:
             if args.dry_run:
@@ -143,6 +231,11 @@ def main() -> int:
             with session_scope() as session:
                 report = service.process_batch(session, batch)
             overall = _merge(overall, report)
+    if skipped_too_old:
+        if not args.dry_run:
+            skipped_too_old_total += _bookmark_skipped(skipped_too_old)
+        else:
+            skipped_too_old_total += len(skipped_too_old)
 
     log.info(
         "telegram_history_migration_done",
@@ -151,8 +244,10 @@ def main() -> int:
         no_action=overall.no_action,
         skipped_already_processed=overall.skipped_already_processed,
         skipped_empty_text=overall.skipped_empty_text,
+        skipped_too_old=skipped_too_old_total,
         errors=overall.errors,
         dry_run=args.dry_run,
+        since=since_date.isoformat() if since_date else None,
     )
     return 0
 

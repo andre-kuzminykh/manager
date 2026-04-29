@@ -28,6 +28,7 @@ from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import get_logger, setup_logging
 from app.telegram_bot import notifications as tg_notifications
+from app.telegram_bot.evening_status import send_evening_status_report
 from app.telegram_bot.sender import TelegramSender
 
 log = get_logger(__name__)
@@ -42,6 +43,9 @@ _TYPES = {
     "starts-now": tg_notifications.send_starts_now,  # FR-CR-05-03
     "thread-reminders": tg_notifications.send_thread_reminders,
     "admin-watchlist": tg_notifications.send_admin_watchlist,
+    # FR-CR-05-40 — evening status report (LLM narrative per task,
+    # admin overview + per-user DMs).
+    "evening-status-report": send_evening_status_report,
 }
 
 
@@ -75,6 +79,18 @@ def main() -> int:
         kwargs["plan_date"] = today
     else:
         kwargs["today"] = today
+
+    # FR-CR-05-40 — evening status report needs an LLM backend for
+    # the per-task narrative. Falls back to deterministic 1-liners
+    # when no key is set (the module's `_fallback_narrative`).
+    if args.type == "evening-status-report":
+        try:
+            from ops.telegram_ingest import _build_llm_backend
+
+            kwargs["llm"] = _build_llm_backend()
+        except Exception as e:  # noqa: BLE001
+            log.warning("evening_status_llm_setup_failed", error=str(e))
+            kwargs["llm"] = None
 
     with session_scope() as session:
         report = fn(session, **kwargs)

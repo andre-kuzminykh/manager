@@ -237,6 +237,34 @@ def list_members_for_chat(
     return list(rows)
 
 
+def users_who_started_bot(session: Session) -> set[str]:
+    """FR-CR-05-66 — set of numeric Telegram user_ids (as
+    strings) that have at any point /started the bot.
+
+    Used to filter digest / morning-card recipient sets so we
+    don't pound the Bot API with «Bad Request: chat not found»
+    errors for owners who appear in `tasks.owner_user_id` (e.g.
+    via Sheet edits or auto-extraction from group chats) but
+    never opened a DM with the bot — Telegram bans bot-
+    initiated conversations.
+
+    Anyone who has /started the bot has a private-DM row
+    (`chat_id == user_id`) with `has_started_bot=True`. We also
+    accept any other row's true flag because group activity
+    that flipped the same flag implies the user can be
+    DM-ed (the listener has already verified the path)."""
+    rows = (
+        session.execute(
+            select(TelegramChatMember.user_id).where(
+                TelegramChatMember.has_started_bot.is_(True)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {str(uid) for uid in rows}
+
+
 def members_as_known_employees(
     session: Session, chat_id: int
 ) -> list[dict[str, str]]:

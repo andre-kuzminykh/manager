@@ -55,7 +55,34 @@ def _mk_task(s, **kw) -> Task:
     t = Task(**base)
     s.add(t)
     s.flush()
+    # FR-CR-05-66 — auto-seed has_started_bot for the owner so
+    # the morning-cards recipient filter doesn't drop them.
+    if t.owner_user_id and str(t.owner_user_id).lstrip("-").isdigit():
+        _mark_started_bot(s, int(t.owner_user_id))
     return t
+
+
+def _mark_started_bot(s, user_id: int) -> None:
+    """Seed the `telegram_chat_members` row that signals
+    `has_started_bot=True` so the FR-CR-05-66 recipient
+    filter lets this uid through."""
+    from app.models import TelegramChatMember
+
+    existing = s.query(TelegramChatMember).filter_by(
+        chat_id=user_id, user_id=user_id
+    ).first()
+    if existing is None:
+        s.add(
+            TelegramChatMember(
+                chat_id=user_id,
+                user_id=user_id,
+                has_started_bot=True,
+            )
+        )
+        s.flush()
+    elif not existing.has_started_bot:
+        existing.has_started_bot = True
+        s.flush()
 
 
 # --------------------------------------------------------------------------- #
@@ -333,3 +360,37 @@ def test_morning_cards_no_alarm_for_done_overdue(
     assert "done-yesterday" not in bodies
     assert "ПРОСРОЧЕНО" not in bodies
     assert "real task" in bodies
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-66 — recipients filtered to has_started_bot=true
+# --------------------------------------------------------------------------- #
+
+
+def test_morning_cards_skips_recipients_without_started_bot(
+    patched_session_scope, SessionFactory
+):
+    """Operator: production logs were full of «Bad Request: chat
+    not found» because the morning digest tried to DM every
+    `tasks.owner_user_id` — including team-sheet entries that
+    never /started the bot. Telegram bans bot-initiated
+    conversations. The recipient set now filters by
+    `telegram_chat_members.has_started_bot=true`."""
+    today = date(2026, 4, 29)
+    with SessionFactory() as s:
+        # User 555 owns a task but never /started the bot.
+        # _mk_task auto-seeds 555 as started_bot — undo it.
+        _mk_task(s, title="x", owner_user_id="555", due_date=today)
+        from app.models import TelegramChatMember
+        member = s.query(TelegramChatMember).filter_by(user_id=555).one()
+        member.has_started_bot = False
+        s.flush()
+        s.commit()
+
+        sender = _RecordingTGSender()
+        report = send_morning_task_cards(s, sender=sender, today=today)
+        s.commit()
+
+    # 555 was filtered out — no DMs sent at all.
+    assert report.recipients == 0
+    assert sender.sent == []

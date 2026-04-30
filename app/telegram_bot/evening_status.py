@@ -646,7 +646,12 @@ def send_evening_status_report(
     owners = _telegram_owner_ids(session)
     # Subscribers may not own anything but should still get a recap.
     sub_only = _telegram_subscriber_ids(session)
-    recipients = sorted(set(owners) | set(sub_only))
+    # FR-CR-05-66 — only recipients who /started the bot are
+    # DM-able. Admin uids always pass through (operator-chosen).
+    from app.services.telegram_members import users_who_started_bot
+
+    started = users_who_started_bot(session) | set(admin_user_ids())
+    recipients = sorted((set(owners) | set(sub_only)) & started)
 
     for uid in recipients:
         if _already_sent(session, user_id=uid, day=today):

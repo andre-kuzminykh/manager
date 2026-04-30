@@ -238,7 +238,16 @@ def send_morning_task_cards(
     owners = _telegram_owner_ids(session)
     sub_only = _telegram_subscriber_ids(session)
     admin_uids = sorted(admin_user_ids())
-    recipients = sorted(set(owners) | set(sub_only))
+    # FR-CR-05-66 — drop recipients who never /started the bot.
+    # Telegram bans bot-initiated conversations, so DMs to them
+    # 400 with «chat not found» — clutters logs and counts as
+    # spurious sends. Admin uids ALWAYS pass through (the
+    # operator chose them deliberately, even if they happen
+    # to lack the registry row).
+    from app.services.telegram_members import users_who_started_bot
+
+    started = users_who_started_bot(session) | set(admin_uids)
+    recipients = sorted((set(owners) | set(sub_only)) & started)
 
     for uid in recipients:
         if _already_sent(session, user_id=uid, day=today):

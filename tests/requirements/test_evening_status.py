@@ -96,7 +96,34 @@ def _mk_task(s, **kw) -> Task:
     t = Task(**base)
     s.add(t)
     s.flush()
+    # FR-CR-05-66 — auto-seed has_started_bot for the owner so
+    # the evening-status recipient filter doesn't drop them.
+    if t.owner_user_id and str(t.owner_user_id).lstrip("-").isdigit():
+        _mark_started_bot(s, int(t.owner_user_id))
     return t
+
+
+def _mark_started_bot(s, user_id: int) -> None:
+    """FR-CR-05-66 — seed the `telegram_chat_members` row that
+    flags this uid as has_started_bot=True so the recipient
+    filter lets them through."""
+    from app.models import TelegramChatMember
+
+    existing = s.query(TelegramChatMember).filter_by(
+        chat_id=user_id, user_id=user_id
+    ).first()
+    if existing is None:
+        s.add(
+            TelegramChatMember(
+                chat_id=user_id,
+                user_id=user_id,
+                has_started_bot=True,
+            )
+        )
+        s.flush()
+    elif not existing.has_started_bot:
+        existing.has_started_bot = True
+        s.flush()
 
 
 def _mk_done_history(s, *, task_id: int, when: datetime, by: str = "111") -> None:
@@ -161,6 +188,10 @@ def test_evening_status_subscriber_only_user_still_gets_dm(
     with SessionFactory() as s:
         owner = _mk_task(s, title="someone else's task", owner_user_id="222")
         s.add(TaskSubscription(task_id=owner.id, slack_user_id="333"))
+        # Subscriber 333 isn't an owner anywhere → auto-seed
+        # has_started_bot manually so the FR-CR-05-66 filter
+        # lets them through.
+        _mark_started_bot(s, 333)
         s.commit()
 
         sender = _RecordingTGSender()

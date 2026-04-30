@@ -54,6 +54,11 @@ class TaskSourceKind(str, enum.Enum):
     slack = "slack"
     telegram = "telegram"
     fireflies = "fireflies"
+    # FR-CR-05-116 — Zoom Cloud Recordings as a second meeting
+    # source (mirror of Fireflies). Tasks extracted from a
+    # Zoom transcript carry source_kind=zoom + source_permalink
+    # set to the zoom share_url when available.
+    zoom = "zoom"
 
 
 class MeetingStatus(str, enum.Enum):

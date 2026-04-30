@@ -833,6 +833,50 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-116 — Zoom Cloud Recordings as a second meeting source
+
+Operator: «мне надо ещё одну таблицу-источник сделать как
+firefiles только zoom». Same pipeline, separate state.
+
+New module `app/zoom/` mirrors `app/fireflies/`:
+
+  - `app/models/zoom.py::ZoomRecording` — same shape as
+    `MeetingRecording` but keyed by `zoom_id` (UUID) instead
+    of `fireflies_id`. Unique constraint on `zoom_id`.
+  - `alembic/versions/0020_zoom_recordings.py` — migration
+    adds the table.
+  - `app/zoom/client.py::ZoomClient` — Zoom Server-to-Server
+    OAuth (account_id + Basic auth → access_token, cached
+    until 60 s before expiry) + `list_recordings(limit)` over
+    `GET /users/me/recordings` (returns
+    `ZoomRecordingMeta` rows with M4A audio preferred over
+    MP4) + `download_audio` with bearer auth on the
+    recording-file `download_url`. Same `request_func`
+    injection seam as the Fireflies client for tests.
+  - `app/zoom/pipeline.py::ZoomPipeline` — same six steps
+    (download → transcribe → detailed → doc → short →
+    tasks). Reuses Fireflies' shared helpers
+    (`_split_audio_into_chunks`, `_truncate`,
+    `_render_known_employees_table`,
+    `_admin_fallback_owner_id`) and prompts
+    (DETAILED_SUMMARY_SYSTEM, SHORT_SUMMARY_SYSTEM,
+    TASK_EXTRACTION_SYSTEM). Tasks land with
+    `source_kind=zoom` + `source_permalink=zoom_share_url`.
+  - `ops/migrate_zoom.py` — one-shot CLI mirroring
+    `ops/migrate_fireflies.py`. Usage:
+    `python -m ops.migrate_zoom --newest --limit 5`.
+  - `Settings` adds `ZOOM_ACCOUNT_ID` / `ZOOM_CLIENT_ID` /
+    `ZOOM_CLIENT_SECRET` / `ZOOM_SECRET_TOKEN` /
+    `ZOOM_API_BASE` / `ZOOM_OAUTH_URL` / `ZOOM_AUDIO_DIR` /
+    `ZOOM_DOCS_FOLDER_ID` / `ZOOM_AUDIO_MAX_BYTES` (200 MB
+    default).
+  - `TaskSourceKind` enum gains `zoom`.
+
+The audio-chunking + Google Doc anyone-with-link sharing +
+admin DM short summary all flow through unchanged because
+ZoomPipeline calls into the same shared helpers / docs
+service / sender as Fireflies.
+
 #### FR-CR-05-115 — Audio chunking via ffmpeg for Whisper 25 MB cap
 
 Operator: «значит мне надо резать файл по 24 мб, отдельно их
@@ -4904,6 +4948,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-116 | `test_zoom.py::test_zoom_client_disabled_when_credentials_missing`; `::test_zoom_client_oauth_basic_auth_and_list_recordings` (OAuth Basic+grant_type=account_credentials, M4A preferred over MP4 in audio_url); `::test_zoom_client_token_cached_until_expiry`; `::test_zoom_pipeline_runs_every_step_and_creates_zoom_source_tasks` (all 6 step flags True; Tasks land with `source_kind=zoom`); `::test_zoom_pipeline_idempotent_when_already_processed`; `test_task_source_kind.py::test_source_kind_enum_values` updated for `zoom`. |
 | FR-CR-05-115 | `test_fireflies.py::test_pipeline_chunks_oversize_audio_and_concatenates_transcripts` (30 MB audio → 2 chunks via stub `_split_audio_into_chunks`; both go through Whisper; joined transcript preserves order; no Fireflies-side fallback called) |
 | FR-CR-05-114 | manual: `_render_admin_tomorrow_plan_per_person` emits `_owner_html_link` for section headers and `<a href=tg://openmessage…>` for titles; `_split_groups_into_messages` inserts a blank line between tasks inside each section |
 | FR-CR-05-113 | `test_telegram_cards.py::test_viewer_is_owner_matches_via_team_member_uid_handle_realname` (case A: direct uid match; case B: owner=@handle, viewer=uid; case C: owner=real_name; negative: different person → False) |

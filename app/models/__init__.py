@@ -22,6 +22,7 @@ from app.models.task import (
     TaskSubscription,
 )
 from app.models.fireflies import MeetingRecording
+from app.models.zoom import ZoomRecording
 from app.models.team import TeamMember
 from app.models.telegram import (
     ProcessedTelegramMessage,
@@ -58,4 +59,5 @@ __all__ = [
     "TaskSubscription",
     "TeamMember",
     "MeetingRecording",
+    "ZoomRecording",
 ]

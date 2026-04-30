@@ -187,6 +187,30 @@ class Settings(BaseSettings):
         alias="FIREFLIES_AUDIO_MAX_BYTES",
     )
 
+    # FR-CR-05-116 — Zoom Cloud Recordings as a second meeting
+    # source, mirroring the Fireflies pipeline.
+    # Server-to-Server OAuth: account_id + client_id +
+    # client_secret → access_token. `secret_token` is the
+    # webhook verification secret (used only when we add
+    # webhook ingestion later).
+    zoom_account_id: str = Field(default="", alias="ZOOM_ACCOUNT_ID")
+    zoom_client_id: str = Field(default="", alias="ZOOM_CLIENT_ID")
+    zoom_client_secret: str = Field(default="", alias="ZOOM_CLIENT_SECRET")
+    zoom_secret_token: str = Field(default="", alias="ZOOM_SECRET_TOKEN")
+    zoom_api_base: str = Field(
+        default="https://api.zoom.us/v2", alias="ZOOM_API_BASE"
+    )
+    zoom_oauth_url: str = Field(
+        default="https://zoom.us/oauth/token", alias="ZOOM_OAUTH_URL"
+    )
+    zoom_audio_dir: str = Field(default="/app/zoom", alias="ZOOM_AUDIO_DIR")
+    zoom_docs_folder_id: str = Field(
+        default="", alias="ZOOM_DOCS_FOLDER_ID"
+    )
+    zoom_audio_max_bytes: int = Field(
+        default=200 * 1024 * 1024, alias="ZOOM_AUDIO_MAX_BYTES"
+    )
+
     # Intent policy
     intent_confidence_high: float = Field(default=0.75, alias="INTENT_CONFIDENCE_HIGH")
     intent_confidence_low: float = Field(default=0.40, alias="INTENT_CONFIDENCE_LOW")

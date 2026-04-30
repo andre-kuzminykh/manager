@@ -611,3 +611,19 @@ def test_intent_prompt_pins_no_list_item_dates():
     blob = SYSTEM_PROMPT
     assert "list-item" in blob.lower() or "enumeration" in blob.lower()
     assert "structural" in blob.lower()
+
+
+def test_owner_prompt_pins_dative_audience_rule():
+    """FR-CR-05-77 — operator: «подготовить отчёт артему завтра»
+    landed on Артём instead of self. Russian dative case
+    («отчёт Артёму») is AUDIENCE, not assignment. Prompt now
+    spells this out with the exact regression case as worked
+    counter-example."""
+    from app.intent.owner_prompt import OWNER_SYSTEM_PROMPT
+
+    blob = OWNER_SYSTEM_PROMPT
+    assert "DATIVE" in blob
+    assert "отчёт Артёму" in blob or "отчет Артёму" in blob
+    assert "AUDIENCE" in blob
+    # Vocative + verb is the canonical assignment signal.
+    assert "сделай" in blob

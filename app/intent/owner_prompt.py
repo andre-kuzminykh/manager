@@ -120,8 +120,30 @@ Do NOT pick:
   "author" — that's attribution, not assignment);
 - a bot user (id starting with UBOT… or marked is_bot in the
   table) — bots are never assignees;
-- a name mentioned only as a reference, e.g. "питчдек для Ивана"
-  (Ivan is the AUDIENCE, not the doer).
+- a name mentioned only as a reference / audience for the
+  output. The Russian DATIVE case is the most common trap:
+  «отчёт Артёму», «письмо Ивану», «презентация для команды»,
+  «питчдек для инвестора» — Артём / Иван / команда / инвестор
+  are the AUDIENCE, NOT the doer. Same in English: «report
+  for Artem», «email to Ivan», «deck for the board». These
+  end up as `null` owner — downstream falls back to the
+  message author, who is normally the one preparing the
+  output.
+
+  Worked counter-example (operator regression):
+    source: «подготовить отчёт Артёму к завтра»
+    BAD output: slack_user_id=Артём's id (Артём is dative
+                target / audience)
+    GOOD output: slack_user_id=null
+                 (downstream → message author = self)
+
+  ASSIGNMENT requires an explicit DOER signal:
+    «Артём, сделай / подготовь / отправь …»  (vocative + verb)
+    «делать будет Артём» / «сделает Артём» / «пусть Артём
+    сделает» / «прошу Артёма сделать» / «assign to Artem»
+    «<@U…>» Slack mention.
+  None of those? Treat the named person as audience and
+  return null.
 
 Prefer slack_user_id from known_employees whenever you can. Fall
 back to display_name only when the named person is genuinely not

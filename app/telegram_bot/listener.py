@@ -662,12 +662,17 @@ class TelegramListener:
                     fireflies_id=t.id,
                     error=str(e),
                 )
-        if processed or errors:
+        # FR-CR-05-118 — heartbeat: log every poll that saw any
+        # rows so the operator can confirm the loop is alive even
+        # on quiet days. The `seen` counter discriminates «no new
+        # meetings» from «polling broken».
+        if len(transcripts):
             log.info(
                 "listener_fireflies_poll_done",
                 seen=len(transcripts),
                 processed=processed,
                 skipped=skipped,
+                skipped_old=skipped_old,
                 tasks_created=tasks_total,
                 errors=errors,
             )
@@ -735,12 +740,13 @@ class TelegramListener:
                     zoom_id=m.id,
                     error=str(e),
                 )
-        if processed or errors:
+        if len(metas):
             log.info(
                 "listener_zoom_poll_done",
                 seen=len(metas),
                 processed=processed,
                 skipped=skipped,
+                skipped_old=skipped_old,
                 tasks_created=tasks_total,
                 errors=errors,
             )

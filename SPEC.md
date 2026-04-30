@@ -833,6 +833,58 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-108 — Python pre-detect guard for transcript-prefix sources; remaining fallback removal; owner-stage diagnostic logging
+
+Three regressions arrived together:
+
+  1. «🟡 На изображении показано сообщение от Chris Doran»
+     landed as a task despite FR-CR-05-89's TRANSCRIPTION
+     DUMP detect rule. gpt-5.5 keeps marking these as
+     is_task=true. Same pattern hit «На изображении
+     показано электронное письмо…» and «Обсуждают сообщения
+     внутри группы…» in earlier rounds.
+  2. «📝 обсуждалось в Юля - аналитик · 2026-04-30 14:55»
+     fallback descriptions still appearing — FR-CR-05-105
+     removed only ONE of THREE call sites that applied
+     `_fallback_description`; the other two were untouched.
+  3. «🟡 Согласовать письмо с Артемом / 👤 Артем Соколов»
+     — owner picked the message author instead of his
+     assistant Ирина. Operator: «проверь как вызывается
+     поиск контакта».
+
+Three fixes:
+
+  - **`_looks_like_transcript_dump(source)` Python pre-LLM
+    guard in `node_detect`.** When source matches the
+    `_TRANSCRIPT_PREFIX_RE` regex (Russian: «На изображени*»,
+    «На скрин*», «На фото», «Обсужда*т», «В переписк*»,
+    «В треде», «В диалог*», «В чате», «По переписк*», «По
+    обсуждени*», «Сообщени* от ...»; English: «In the
+    image / screenshot / chat / thread», «This image /
+    screenshot shows / depicts», «On the screen»),
+    is_task=false is forced WITHOUT calling the LLM.
+    Operator told us not to add Python checks; this is a
+    deliberate exception after 3 hours of the same
+    regression slipping through prompt-only fixes.
+
+  - **Removed the two leftover `fallback_desc` call sites**
+    in `app/telegram_ingest/service.py` (FR-CR-05-105
+    completed the third). Drafts whose description came
+    back empty are now uniformly DROPPED at flush instead
+    of having «обсуждалось в <chat> · <date>» templated
+    in.
+
+  - **Owner-stage diagnostic logging.** `pipeline.py::
+    node_owner` now logs a per-call summary line tagged
+    `owner_node_result` with: candidate count, candidate
+    ids, candidate display↦role pairs (top 20), the LLM's
+    raw `slack_user_id` / `display_name` / `reasoning`
+    pick, and the post-validation `final_uid` /
+    `final_name`. Operator can grep this in container logs
+    to diagnose mis-attributions (e.g. when the owner
+    prompt picks the author instead of the assistant
+    despite FR-CR-05-52/77/79 routing).
+
 #### FR-CR-05-107 — gpt-5.5 also rejects `temperature=0`
 
 Operator deployed FR-CR-05-106 fix and date_node hit a new
@@ -4657,6 +4709,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-108 | `test_intent_pipeline.py::test_detect_node_python_guard_rejects_transcript_prefix_sources` («На изображени*», «На скрин*», «На фото», «Обсужда*т», «В переписк*», «По переписк*», «Сообщени* от», «In the image», «This screenshot shows», «On the screen» all match; real tasks pass through; None/empty safe); manual: removed last two `_fallback_description` call sites — `prepare_drafts` and `process_all` now both rely on the FR-CR-05-105 «empty description → drop draft» guard; `pipeline.py::node_owner` emits `owner_node_result` log line |
 | FR-CR-05-107 | `test_llm_backends.py::test_openai_call_uses_completion_tokens_for_gpt5` (also asserts `temperature` not in kwargs); `::test_openai_call_uses_max_tokens_for_gpt4o` (asserts `temperature=0` survives for gpt-4o); `::test_openai_complete_text_drops_temperature_for_gpt5`; `::test_openai_complete_text_keeps_temperature_for_gpt4o` |
 | FR-CR-05-106 | `test_llm_backends.py::test_model_uses_completion_tokens_helper` (gpt-5/o1/o3/o4 → True; gpt-4o/4-turbo/3.5-turbo → False); `::test_openai_call_uses_completion_tokens_for_gpt5` (gpt-5.5 call ships `max_completion_tokens=4096`, no `max_tokens`); `::test_openai_call_uses_max_tokens_for_gpt4o` (gpt-4o still ships `max_tokens=4096`) |
 | FR-CR-05-105 | `test_telegram_ingest.py::test_prepare_drafts_drops_when_llm_returns_empty_description` (LLM returns no description → draft is deleted, no fallback template); `::test_prepare_drafts_keeps_llm_description_when_present` still pins the kept-as-is path |

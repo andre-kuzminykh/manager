@@ -131,7 +131,56 @@ def _safe_call_tool(
 # --------------------------------------------------------------------------- #
 
 
+_TRANSCRIPT_PREFIX_RE = __import__("re").compile(
+    # FR-CR-05-108 — operator regression after FR-CR-05-89/104:
+    # gpt-5.5 keeps marking transcript dumps as is_task=true
+    # despite the detect prompt's explicit rejection rule.
+    # This is the single Python guard that runs BEFORE the LLM
+    # call — sources that start with one of these transcript-
+    # describing phrases are forced to is_task=false. Operator
+    # took 3+ hours of regressions on this exact pattern; this
+    # is a deliberate safety belt.
+    r"^\s*("
+    r"на\s+(?:изображени|скрин|фото|картинк)|"
+    r"обсужда[еюя]т[ьс]?|"
+    r"в\s+(?:переписк|треде|диалог|чате)|"
+    r"по\s+(?:переписк|обсуждени)|"
+    r"сообщени[ея]\s+от\s+|"
+    r"in\s+the\s+(?:image|screenshot|chat|thread)|"
+    r"this\s+(?:image|screenshot)\s+(?:shows?|depicts?)|"
+    r"on\s+the\s+screen"
+    r")",
+    flags=__import__("re").IGNORECASE | __import__("re").UNICODE,
+)
+
+
+def _looks_like_transcript_dump(source: str) -> bool:
+    """FR-CR-05-108 — return True when the source starts with a
+    phrase that DESCRIBES a screenshot / chat snippet rather than
+    delegates work. Operator regressions on this pattern (single-
+    handedly): «На изображении показано электронное письмо…»;
+    «Обсуждают сообщения внутри группы…»; «На изображении
+    показано сообщение от Chris Doran…»."""
+    if not source:
+        return False
+    return _TRANSCRIPT_PREFIX_RE.match(source) is not None
+
+
 def node_detect(state: IntentState) -> dict[str, Any]:
+    # FR-CR-05-108 — fast-path: transcript-prefix sources are
+    # never tasks, regardless of what the LLM says. Skip the
+    # LLM call entirely.
+    if _looks_like_transcript_dump(state["source_text"]):
+        log.info(
+            "detect_node_transcript_prefix_dropped",
+            source=(state["source_text"] or "")[:120],
+        )
+        return {
+            "is_task": False,
+            "detect_confidence": 0.99,
+            "detect_reasoning": "transcript-prefix source rejected by Python guard (FR-CR-05-108)",
+            "task_chunks": [],
+        }
     data = _safe_call_tool(
         state["backend"],
         system_prompt=DETECT_SYSTEM_PROMPT,
@@ -279,6 +328,27 @@ def node_owner(state: IntentState) -> dict[str, Any]:
         ):
             display_name = None
 
+    # FR-CR-05-108 — operator: «проверь как вызывается поиск
+    # контакта». Log what the owner stage actually saw and
+    # decided so the operator can grep `owner_node_result`
+    # in the container logs to diagnose mis-attributions.
+    log.info(
+        "owner_node_result",
+        author_user_id=author_user_id,
+        candidate_count=len(known_employees),
+        candidate_ids=[
+            e.get("slack_user_id") for e in known_employees[:20]
+        ],
+        candidate_roles=[
+            f"{e.get('display_name') or '?'}={e.get('role') or '-'}"
+            for e in known_employees[:20]
+        ],
+        llm_picked_uid=data.get("slack_user_id"),
+        llm_picked_name=data.get("display_name"),
+        llm_reasoning=(data.get("reasoning") or "")[:200],
+        final_uid=slack_user_id,
+        final_name=display_name,
+    )
     return {
         "owner_user_id": slack_user_id,
         "owner_display_name": display_name,

@@ -517,7 +517,6 @@ class TelegramIngestService:
             return []
 
         admin_uid = _admin_fallback_owner_id()
-        fallback_desc = _fallback_description(message)
         for td in classification.tasks:
             _resolve_owner(
                 td,
@@ -526,12 +525,10 @@ class TelegramIngestService:
                 sender_user_name=message.user_name,
                 admin_uid=admin_uid,
             )
-            # FR-CR-05-10 — when the LLM produced no usable
-            # description, fill in the deterministic «обсуждалось в
-            # <chat> · <date>» so the operator at least sees where
-            # the draft came from.
-            if not (td.description or "").strip():
-                td.description = fallback_desc
+            # FR-CR-05-105 — the «обсуждалось в <chat> · <date>»
+            # fallback was operator-rejected. Drafts whose
+            # description came back empty are dropped at flush
+            # time below (see the matching guard).
 
         snapshot = self._orchestrator.persist_context_snapshot(
             session, window.to_snapshot_dict()
@@ -710,7 +707,6 @@ class TelegramIngestService:
             return []
 
         admin_uid = _admin_fallback_owner_id()
-        fallback_desc = _fallback_description(message)
         for td in classification.tasks:
             _resolve_owner(
                 td,

@@ -640,6 +640,34 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "temporal anchor" in blob.lower() or "к 5" in blob
 
 
+def test_detect_node_python_guard_rejects_transcript_prefix_sources():
+    """FR-CR-05-108 — operator: gpt-5.5 keeps emitting
+    is_task=true for screenshot/chat-dump messages despite
+    the detect-prompt rejection rule. The pipeline now has a
+    Python pre-LLM guard that drops transcript-prefix sources
+    before the model call."""
+    from app.intent.pipeline import _looks_like_transcript_dump
+
+    f = _looks_like_transcript_dump
+    # Operator regressions all match.
+    assert f("На изображении показано электронное письмо от Артема") is True
+    assert f("На скрине видно сообщение") is True
+    assert f("Обсуждают сообщения внутри группы CEO Office") is True
+    assert f("В переписке с Fubon обсудили слоты") is True
+    assert f("По переписке с командой нужно ...") is True
+    assert f("Сообщение от Chris Doran") is True
+    assert f("На изображении показано сообщение от Chris Doran") is True
+    assert f("In the image you can see ...") is True
+    assert f("This screenshot shows the latest reply") is True
+    # Real tasks pass through.
+    assert f("Подготовить отчёт по продажам к пятнице") is False
+    assert f("Send the deck to Acme") is False
+    assert f("Напомнить Юле про NDA") is False
+    # Empty / None safe.
+    assert f("") is False
+    assert f(None) is False
+
+
 def test_detect_prompt_rejects_chat_opener_retrospective_recap():
     """FR-CR-05-104 — operator regression: «Смотри, по GP
     Morgan, я вчера с Артёмом просто переписывалась, я у

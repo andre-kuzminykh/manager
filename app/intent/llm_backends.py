@@ -155,7 +155,7 @@ class AnthropicBackend:
         }
         response = self._client.messages.create(
             model=model or self._model,
-            max_tokens=1024,
+            max_tokens=4096,  # FR-CR-05-70 — fits multi-task array + 3-6 sentence descriptions without mid-sentence cuts
             system=[
                 {
                     "type": "text",
@@ -241,6 +241,12 @@ class OpenAIBackend:
                 "function": {"name": tool_name},
             },
             temperature=0,
+            # FR-CR-05-70 — operator: «📝 ... временных слотов с
+            # 5 по» — description got cut mid-sentence. The
+            # default max for tool-call responses is small;
+            # bump explicitly to 4096 so multi-task arrays +
+            # 3-6 sentence descriptions land complete.
+            max_tokens=4096,
         )
         return _extract_openai_tool_input(response)
 

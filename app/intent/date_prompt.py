@@ -56,6 +56,23 @@ Rules:
 6. Vague phrases stay null: "когда-нибудь", "скоро", "в ближайшее
    время", "some day", "asap".
 7. Do NOT invent a date when the message contains no date cue.
+8. NEVER treat list-item / enumeration NUMBERS as dates. The
+   patterns to ignore:
+     "1. ", "2. ", "3. " at the START of a line (numbered list)
+     "1)", "2)", "3)", "1/", "2/" (bullet variants)
+     "пункт 5", "item 5", "section 3"
+     "5." in front of a name / project («5. Мистраль — …»)
+   These are bullet labels, not dates. They look like dates («5»
+   ⇒ 5th of next month?) but they're structural. ONLY treat
+   numbers as dates when accompanied by a temporal anchor:
+     "к 5", "до 5", "к пятому", "5 мая", "5 May", "May 5",
+     "5/05", "05.05.2026" — a month / weekday / «к» / «до» /
+     «through» word MUST be present. Otherwise → null.
+
+   Worked counter-example (operator regression):
+     source: "5. Мистраль - Arthur Mehcsh - отправьте письмо…"
+     BAD output: due_date=2026-05-05 (treats «5.» as 5th day)
+     GOOD output: due_date=null (it's a list item, not a date)
 
 Worked examples:
   current_date 2026-04-24 (Friday)
@@ -64,6 +81,7 @@ Worked examples:
   "отчёт через пять дней"                            → 2026-04-29
   "ship in a couple of weeks"                        → 2026-05-08
   "отправь завтра утром"                             → 2026-04-25
+  "5. Мистраль — отправь письмо"                     → null
 
 Respond with a single JSON object matching the provided schema.
 """

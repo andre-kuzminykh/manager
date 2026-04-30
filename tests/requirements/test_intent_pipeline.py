@@ -583,3 +583,31 @@ def test_intent_prompt_demands_rich_3_to_6_sentence_descriptions():
     # «BAD desc» / «GOOD desc» worked example.
     assert "BAD desc" in blob
     assert "GOOD desc" in blob
+
+
+def test_date_prompt_pins_no_list_item_dates():
+    """FR-CR-05-71 — operator: a task source starting «5.
+    Мистраль - Arthur Mehcsh - отправь письмо» got
+    `due_date=2026-05-05` because the LLM read «5.» as the 5th
+    day of next month. The DATE_SYSTEM_PROMPT now explicitly
+    forbids treating numbered-list bullets as dates."""
+    from app.intent.date_prompt import DATE_SYSTEM_PROMPT
+
+    blob = DATE_SYSTEM_PROMPT
+    assert "list-item" in blob.lower() or "enumeration" in blob.lower()
+    # Worked counter-example pinned.
+    assert "Мистраль" in blob or "Arthur Mehcsh" in blob
+    # Anchor requirement.
+    assert "temporal anchor" in blob.lower() or "к 5" in blob
+
+
+def test_intent_prompt_pins_no_list_item_dates():
+    """FR-CR-05-71 — same anti-rule mirrored on the main intent
+    prompt's date-resolution section so the multi-task batch
+    extractor doesn't fall into the same trap as the
+    standalone date stage."""
+    from app.intent.prompts import SYSTEM_PROMPT
+
+    blob = SYSTEM_PROMPT
+    assert "list-item" in blob.lower() or "enumeration" in blob.lower()
+    assert "structural" in blob.lower()

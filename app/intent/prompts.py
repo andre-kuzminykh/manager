@@ -85,6 +85,18 @@ Rules:
      - "к пятнице" / "до пятницы"  → Friday from the table
      - "в четверг" / "by Thursday" → Thursday from the table
      - "к концу недели"            → Friday from the table
+   NEVER treat list-item / enumeration NUMBERS as dates. Patterns
+   to IGNORE:
+     "1. ", "2. ", "3. " at start of line (numbered list)
+     "1)", "2)", "3)" / "1/", "2/" (bullet variants)
+     "пункт 5", "item 5", "section 3", "5." before a name
+   These are STRUCTURAL labels, not dates. Only treat numbers as
+   dates when accompanied by a temporal anchor: «к 5», «до 5», «5
+   мая», «5 May», «5/05», «05.05.2026» — a month / weekday / «к»
+   / «до» / «by» / «through» word MUST be present.
+   Worked counter-example: «5. Мистраль — Arthur Mehcsh — отправь
+   письмо» → due_date null (it's the 5th list item, not the 5th
+   day of next month).
    Return YYYY-MM-DD for due_date and ISO 8601 for datetime_at. Only
    leave the field null if the phrase is genuinely vague, e.g.
    "когда-нибудь", "when I have time". Never back-date; the resolved

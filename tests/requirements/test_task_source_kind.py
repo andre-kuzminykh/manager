@@ -41,6 +41,49 @@ def test_source_kind_enum_values():
     }
 
 
+def test_postgres_enum_extension_pinned_in_migrations():
+    """FR-CR-05-118 regression guard. Postgres uses an actual
+    enum type for `task_source_kind`, so adding a new value to
+    the Python enum is NOT enough — there must be an alembic
+    migration that runs `ALTER TYPE task_source_kind ADD VALUE`
+    for it. SQLite tests don't catch this (the column is a
+    string under the hood), so this test scans the migration
+    files and asserts every `TaskSourceKind` value is mentioned
+    somewhere in alembic.
+
+    The bug we're guarding against: 0020_zoom_recordings created
+    the `zoom_recordings` table but forgot the enum extension;
+    production Postgres rejected `INSERT … source_kind='zoom'`
+    with «invalid input value for enum task_source_kind:
+    \"zoom\"» and rolled back the whole pipeline transaction.
+    0021_task_source_kind_zoom fixed it, but the same gap could
+    re-open if another value is added later without the matching
+    migration."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2]
+    versions = root / "alembic" / "versions"
+    blob = ""
+    for f in versions.glob("*.py"):
+        blob += f.read_text(encoding="utf-8")
+
+    for value in (k.value for k in TaskSourceKind):
+        # Either an explicit `ALTER TYPE … ADD VALUE 'X'` for
+        # the new value (FR-CR-05-39 fireflies, FR-CR-05-118
+        # zoom) or the original `Enum(...)`-inline list at
+        # initial-migration time (slack, telegram).
+        assert (
+            f"ADD VALUE IF NOT EXISTS '{value}'" in blob
+            or f"ADD VALUE '{value}'" in blob
+            or f"'{value}'" in blob
+        ), (
+            f"TaskSourceKind value {value!r} not found in any "
+            f"alembic migration. Add a migration that runs "
+            f"`ALTER TYPE task_source_kind ADD VALUE "
+            f"IF NOT EXISTS '{value}'` (mirror of 0021)."
+        )
+
+
 def test_create_task_from_draft_routes_telegram_source_kind(session):
     """`source.kind` in the metadata dict is honoured by
     `create_task_from_draft`. Slack call sites pass nothing → default.

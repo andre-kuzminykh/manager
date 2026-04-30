@@ -103,12 +103,13 @@ def test_passive_and_mention_ask_the_same_first_question(
     )
     mention_memo = _first_memo(sender_mention)
 
-    assert passive_memo is not None and mention_memo is not None, (
-        passive_memo,
-        mention_memo,
-    )
-    # Identical intro AND identical follow-up question.
-    assert passive_memo == mention_memo
+    # FR-CR-05-63 — the followup question for due_date is
+    # gone (deadline auto-defaults). With both flows landing
+    # title + owner=author, there's nothing for the followup
+    # loop to ask. Both paths are silent — same outcome,
+    # symmetry preserved.
+    assert passive_memo is None
+    assert mention_memo is None
 
 
 def test_both_paths_skip_owner_question_when_assumed(
@@ -142,10 +143,14 @@ def test_both_paths_skip_owner_question_when_assumed(
     )
     with SessionFactory() as s:
         draft = s.query(ActionDraft).one()
-        # Owner filled via author fallback → next missing is due_date.
+        # Owner filled via author fallback. FR-CR-05-63 — due_date
+        # no longer drives the followup loop (auto-defaults to
+        # today 18:00), so when title + owner are filled there's
+        # nothing left to ask: `awaiting_field` is None.
         assert draft.payload.get("owner_user_id") == "U-author"
         assert draft.payload.get("owner_assumed") is True
-        assert draft.awaiting_field == "due_date"
-    memo = _first_memo(sender) or ""
-    assert "назначаем" not in memo  # no owner prompt
-    assert "deadline" in memo.lower()
+        assert draft.awaiting_field is None
+    memo = _first_memo(sender)
+    # No follow-up «:memo:» prompt is sent — the bot only posts
+    # the live task card.
+    assert memo is None

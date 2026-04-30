@@ -26,13 +26,17 @@ def test_pick_next_missing_for_task_asks_owner_after_title():
     assert pick_next_missing("create_task", {"title": "x"}) == "owner"
 
 
-def test_pick_next_missing_for_task_asks_due_after_owner_filled():
+def test_pick_next_missing_for_task_returns_none_when_title_and_owner_filled():
+    """FR-CR-05-63 — `due_date` no longer drives the followup
+    loop. With title + owner filled, there's nothing left to
+    ask: the persistence layer auto-defaults the deadline to
+    today 18:00."""
     assert (
         pick_next_missing(
             "create_task",
             {"title": "x", "owner_user_id": "U1", "owner_assumed": False},
         )
-        == "due_date"
+        is None
     )
 
 

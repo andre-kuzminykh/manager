@@ -158,7 +158,11 @@ def test_fr_cr3_transition_to_same_state_raises(session):
 # =========================================================================== #
 
 
-def test_fr_cr3_task_without_due_date_starts_in_backlog(session):
+def test_fr_cr3_task_without_due_date_defaults_to_today_todo(session):
+    """FR-CR-05-63 — every task gets a default deadline of today
+    18:00 when the source doesn't specify one. With today's
+    date in `due_date`, the task lands in Todo (not Backlog —
+    the old assumption was deadline-less = Backlog)."""
     draft, snap = _mk_draft(session, payload={"title": "t"})
     t = create_task_from_draft(
         session,
@@ -167,8 +171,9 @@ def test_fr_cr3_task_without_due_date_starts_in_backlog(session):
         context_snapshot_id=snap.id,
         fallback_author_slack_id="U1",
     )
-    assert t.status == TaskStatus.backlog
-    assert t.is_current_week is False
+    assert t.due_date == date.today()
+    assert t.status == TaskStatus.todo
+    assert t.is_current_week is True
 
 
 def test_fr_cr3_task_with_near_due_date_starts_in_todo(session):
@@ -211,7 +216,9 @@ def test_fr_cr7_initial_history_row_recorded_on_create(session):
     history = session.query(TaskStatusHistory).filter_by(task_id=t.id).all()
     assert len(history) == 1
     assert history[0].from_status is None
-    assert history[0].to_status == TaskStatus.backlog
+    # FR-CR-05-63 — default due=today lands new tasks in Todo,
+    # not Backlog; the initial history row reflects that.
+    assert history[0].to_status == TaskStatus.todo
     assert history[0].reason == "created"
 
 

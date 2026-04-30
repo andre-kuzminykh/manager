@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -17,6 +17,22 @@ def _coerce_due(value: Any) -> date | None:
     if isinstance(value, str):
         try:
             return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce_due_time(value: Any) -> time | None:
+    """Parse an HH:MM string (or `time`) into a `datetime.time`.
+    Returns None on anything else — the caller falls back to the
+    18:00 default per FR-CR-05-63."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, time):
+        return value
+    if isinstance(value, str):
+        try:
+            return time.fromisoformat(value)
         except ValueError:
             return None
     return None
@@ -64,9 +80,21 @@ def create_task_from_draft(
             return v[:_MAX]
         return v
 
-    title = _cap((payload.get("title") or "").strip())
+    title = (payload.get("title") or "").strip()
     if not title:
         raise ValueError("Task title is required")
+    # FR-CR-05-63 — hard-cap title at 200 chars so a runaway LLM
+    # response (e.g. it dumped the full source message into the
+    # title field) doesn't make the card unreadable. The prompt
+    # already says ≤80 chars / 4-7 words, but the model isn't
+    # always disciplined on long forwards-with-screenshots.
+    # We trim at the last word boundary if possible and append «…».
+    if len(title) > 200:
+        cut = title[:200].rstrip()
+        last_ws = max(cut.rfind(" "), cut.rfind("\n"), cut.rfind("—"))
+        if last_ws > 100:
+            cut = cut[:last_ws].rstrip()
+        title = cut + "…"
 
     owner_user_id = _cap(payload.get("owner_user_id"))
     owner_display_name = _cap(payload.get("owner_display_name"))
@@ -83,6 +111,16 @@ def create_task_from_draft(
             owner_assumed = True
 
     due = _coerce_due(payload.get("due_date"))
+    # FR-CR-05-63 — default deadline = today 18:00 when the LLM
+    # didn't pull a date out of the source. Operator wants every
+    # captured task to have a deadline so the morning / evening
+    # digests can include it; «когда-нибудь» / «потом» tasks
+    # leak to nowhere otherwise.
+    if due is None:
+        due = date.today()
+    due_time = _coerce_due_time(payload.get("due_time"))
+    if due_time is None:
+        due_time = time(18, 0)
     status = _initial_status(due)
 
     # FR-CR-04-26: discriminate Slack vs Telegram tasks. Source dict
@@ -107,6 +145,7 @@ def create_task_from_draft(
         owner_display_name=_cap(payload.get("owner_display_name")),
         priority=_coerce_priority(payload.get("priority", "medium")),
         due_date=due,
+        due_time=due_time,
         status=status,
         is_current_week=(status == TaskStatus.todo),
         estimated_minutes=payload.get("estimated_minutes"),

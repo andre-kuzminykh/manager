@@ -49,9 +49,13 @@ def test_mention_with_short_text_synthesises_task_draft(
         assert tasks[0].title == "надо сделать бота для сбора задач"
 
 
-def test_mention_ack_message_includes_recorded_title(
+def test_mention_card_includes_recorded_title(
     patched_session_scope, services_silent, sender, ack, bolt_context, slack_client
 ):
+    """FR-CR-05-63 — the «:memo: Captured: …» followup is gone
+    (no more «when is this due?» nag). The recorded title still
+    has to surface somewhere — it's on the live task card the
+    bot posts in the source channel."""
     handle_app_mention(
         event={
             "ts": "2.0",
@@ -68,12 +72,22 @@ def test_mention_ack_message_includes_recorded_title(
         ack=ack,
     )
 
-    # The ack may not be at index 1 (finalize also DMs the owner a task
-    # card mirror). Find the message by its :memo: prefix.
-    ack_msg = next(
-        m for m in sender.posted if ":memo: Captured:" in m.get("text", "")
-    )
-    assert "допилить интеграцию" in ack_msg["text"]
+    # The task card is posted somewhere in the channel — find it
+    # by the title text. Slack blocks-format renders the title
+    # inside the first `section` block.
+    found = False
+    for m in sender.posted:
+        if "допилить интеграцию" in (m.get("text") or ""):
+            found = True
+            break
+        for blk in m.get("blocks") or []:
+            text = (blk.get("text") or {}).get("text") or ""
+            if "допилить интеграцию" in text:
+                found = True
+                break
+        if found:
+            break
+    assert found, sender.posted
 
 
 def test_mention_without_text_still_replies(
@@ -126,9 +140,12 @@ def test_mention_fallback_has_awaiting_field_set(
 
     with SessionFactory() as s:
         d = s.query(ActionDraft).one()
-        # With no due/owner known, the bot must queue a follow-up for the
-        # next missing field.
-        assert d.awaiting_field in ("due_date", "owner")
+        # FR-CR-05-63 — `due_date` is no longer in the followup
+        # field order (auto-defaults to today 18:00). With owner
+        # falling back to author + title set from the cleaned
+        # text, there's nothing left for the bot to ask: the
+        # awaiting_field is None.
+        assert d.awaiting_field is None
         assert d.card_channel == "C1"
         # card_ts is populated from Slack's post_message response; the
         # test RecordingSender omits ts, real Slack includes it.

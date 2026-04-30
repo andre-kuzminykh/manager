@@ -104,18 +104,18 @@ def test_fr_cr02_2_followup_question_posted_after_card(
         sender=sender,
         ack=ack,
     )
-    # CR-03: @mention posts a task-card (not a draft widget) + a
-    # follow-up question for the missing fields.
-    assert len(sender.posted) >= 2
+    # FR-CR-05-63 — @mention still posts a task card. The
+    # «:memo: Captured: …» follow-up question is gone now that
+    # `due_date` auto-defaults to today 18:00 — there's nothing
+    # to ask when title + owner-fallback are filled.
+    assert len(sender.posted) >= 1
     card_title_text = sender.posted[0]["blocks"][0]["text"]["text"]
     # Task card titles start with *#N*.
     assert card_title_text.startswith("*#") or ":star:" in card_title_text
-    # The follow-up carries the ack prefix and a question. It may not be
-    # at index 1 (finalize also DMs the owner a task-card mirror).
-    followup = next(
-        m for m in sender.posted if ":memo: Captured" in m.get("text", "")
+    # No legacy «:memo: Captured» follow-up.
+    assert not any(
+        ":memo: Captured" in m.get("text", "") for m in sender.posted
     )
-    assert "?" in followup["text"]
 
 
 # --------------------------------------------------------------------------- #

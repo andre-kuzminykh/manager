@@ -11,6 +11,8 @@ CR-03 split between the two auto-create flows:
 """
 from __future__ import annotations
 
+from datetime import date
+
 from app.models import (
     ActionDraft,
     ActionDraftState,
@@ -179,15 +181,22 @@ def test_mention_follow_up_reply_updates_task_and_refreshes_card(
         ack=ack,
     )
     # Locate the task that was created.
+    # FR-CR-05-63 — every task gets due_date=today by default, so
+    # the bot no longer asks for a deadline. The mention path
+    # creates the task and the followup loop has nothing to ask
+    # (title + owner already filled).
     with SessionFactory() as s:
         task = s.query(Task).one()
         draft = s.query(ActionDraft).one()
         assert draft.task_id == task.id
-        assert draft.awaiting_field == "due_date"
-        assert task.due_date is None
+        assert draft.awaiting_field is None
+        assert task.due_date == date.today()
         tid = task.id
 
-    # Now the user answers in thread with an ISO date.
+    # The user types an ISO date in thread anyway — without an
+    # `awaiting_field`, the message is treated as a fresh capture
+    # rather than a deadline reply. The original task's due_date
+    # stays unchanged. Operator can edit via the Edit button.
     handle_message(
         event={
             "ts": "11.0",
@@ -206,9 +215,8 @@ def test_mention_follow_up_reply_updates_task_and_refreshes_card(
     )
     with SessionFactory() as s:
         task = s.get(Task, tid)
-        assert task.due_date.isoformat() == "2026-05-12"
-    # chat.update was called with the refreshed card.
-    assert sender.updates, "task card should be refreshed via chat.update"
+        # Original task still has today's default deadline.
+        assert task.due_date == date.today()
 
 
 # --------------------------------------------------------------------------- #

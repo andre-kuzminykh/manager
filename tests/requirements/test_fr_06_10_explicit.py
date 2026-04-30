@@ -160,13 +160,16 @@ def test_fr6_mention_falls_back_to_synthetic_draft_when_llm_silent(
         sender=sender,
         ack=ack,
     )
-    # Task-card first, then the follow-up question.
-    assert len(sender.posted) >= 2
+    # FR-CR-05-63 — `due_date` no longer drives the followup
+    # loop, so a synthetic mention with title + author-fallback
+    # owner has nothing left to ask. The task card is posted
+    # but no «:memo: Captured:» follow-up fires anymore.
+    assert len(sender.posted) >= 1
     first_block = sender.posted[0]["blocks"][0]
     assert first_block["type"] == "section"
     assert first_block["text"]["text"].startswith("*#")
-    # And the first question is prefixed with :memo: Captured:.
-    assert any("Captured" in m.get("text", "") for m in sender.posted)
+    # No follow-up «Captured:» message — that path is gone.
+    assert not any("Captured" in m.get("text", "") for m in sender.posted)
 
 
 # =============================================================================

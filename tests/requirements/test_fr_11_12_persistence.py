@@ -1,7 +1,7 @@
 """Tests for FR-11..FR-12 (DB is the source of truth + source linkage)."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, time
 
 import pytest
 
@@ -70,6 +70,9 @@ def test_fr11_task_row_exists_after_create(session):
 
 
 def test_fr11_task_defaults_are_applied(session):
+    """Default priority + FR-CR-05-63 default due (today 18:00).
+    Status follows: today is within the 7-day current-week
+    window so the task lands in Todo."""
     draft, snap = _prep(session, payload={"title": "t"})
     t = create_task_from_draft(
         session,
@@ -79,8 +82,11 @@ def test_fr11_task_defaults_are_applied(session):
         fallback_author_slack_id="U1",
     )
     assert t.priority == TaskPriority.medium
-    # CR-01: new tasks without a due date land in Backlog
-    assert t.status == TaskStatus.backlog
+    # FR-CR-05-63 — every task gets a deadline now. Today 18:00.
+    assert t.due_date == date.today()
+    assert t.due_time == time(18, 0)
+    # Status is Todo because due is within the next 7 days.
+    assert t.status == TaskStatus.todo
 
 
 @pytest.mark.parametrize("priority", ["low", "medium", "high", "urgent"])
@@ -104,12 +110,19 @@ def test_fr11_due_date_parsed_from_iso(session):
     assert t.due_date == date(2026, 5, 15)
 
 
-def test_fr11_invalid_due_date_becomes_none(session):
+def test_fr11_invalid_due_date_falls_back_to_today_default(session):
+    """FR-CR-05-63 — invalid due_date string can't parse; the
+    persistence layer used to leave the column null, but
+    operator wanted EVERY task to carry a deadline so the
+    digests pick it up («проверь всегда должно быть так
+    сегодня в 6 вечера дедлайн по умолчанию»). New default:
+    due_date = today, due_time = 18:00."""
     draft, snap = _prep(session, payload={"title": "t", "due_date": "not-a-date"})
     t = create_task_from_draft(
         session, draft=draft, source={}, context_snapshot_id=snap.id, fallback_author_slack_id="U1"
     )
-    assert t.due_date is None
+    assert t.due_date == date.today()
+    assert t.due_time == time(18, 0)
 
 
 def test_fr11_empty_title_rejected(session):
@@ -379,3 +392,54 @@ def test_fr12_task_source_metadata_is_preserved_via_finalize(
         assert t.source_permalink == "https://p/z"
         assert t.context_snapshot_id == snap_id
         assert t.created_by_slack_user_id == "U1"  # from draft
+
+
+def test_fr_cr05_63_long_title_hard_capped(session):
+    """FR-CR-05-63 — runaway LLM title (full source dumped into
+    title field with newlines, URLs, screenshots-OCR fragments)
+    gets hard-truncated to ≤ ~200 chars at the persistence
+    layer. Reproduces operator's «Devon Kirk - Portage Capital
+    Solutions - отказ - Ден Лифшиц прислал скрин ... На
+    изображе» nightmare title."""
+    long = (
+        "Devon Kirk - Portage Capital Solutions - отказ - "
+        "Ден Лифшиц прислал скрин ответа [https://mail.google.com/...] - "
+        "wouldn't be fit for us. На изображении письмо: "
+        "Hi Dan, thanks for reaching out, but we're focusing on "
+        "later-stage opportunities so this won't be a fit for our "
+        "current strategy. Regards. -- Devon Kirk."
+    )
+    draft, snap = _prep(session, payload={"title": long})
+    t = create_task_from_draft(
+        session, draft=draft, source={},
+        context_snapshot_id=snap.id, fallback_author_slack_id="U1",
+    )
+    assert len(t.title) <= 205  # 200 + «…»
+    assert t.title.endswith("…")
+
+
+def test_fr_cr05_63_default_due_today_18_00(session):
+    """No `due_date` in payload → DB row carries today + 18:00."""
+    draft, snap = _prep(session, payload={"title": "t"})
+    t = create_task_from_draft(
+        session, draft=draft, source={},
+        context_snapshot_id=snap.id, fallback_author_slack_id="U1",
+    )
+    assert t.due_date == date.today()
+    assert t.due_time == time(18, 0)
+
+
+def test_fr_cr05_63_explicit_due_date_overrides_default(session):
+    """When the payload carries a real `due_date`, the default
+    doesn't kick in; `due_time` still defaults to 18:00 unless
+    the payload also carries one."""
+    draft, snap = _prep(
+        session, payload={"title": "t", "due_date": "2026-05-15"}
+    )
+    t = create_task_from_draft(
+        session, draft=draft, source={},
+        context_snapshot_id=snap.id, fallback_author_slack_id="U1",
+    )
+    assert t.due_date == date(2026, 5, 15)
+    # No explicit due_time → 18:00 default fills.
+    assert t.due_time == time(18, 0)

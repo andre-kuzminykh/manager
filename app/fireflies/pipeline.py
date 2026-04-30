@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -423,6 +423,7 @@ class FirefliesPipeline:
                     owner_display_name=owner_display_name,
                     priority=TaskPriority(priority) if priority in {p.value for p in TaskPriority} else TaskPriority.medium,
                     due_date=today,  # FR-CR-05-39: meeting tasks default to today
+                    due_time=time(18, 0),  # FR-CR-05-63: default 18:00 deadline
                     status=task_status,
                     is_current_week=True,
                     source_kind=TaskSourceKind.fireflies,

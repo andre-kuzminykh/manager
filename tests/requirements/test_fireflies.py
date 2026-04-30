@@ -460,3 +460,210 @@ def test_truncate_caps_at_limit():
 def test_truncate_passthrough_when_short():
     text = "короткий"
     assert _truncate(text, limit=2000) == text
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-57/58/59 — owner routing + DM cards + doc sharing
+# --------------------------------------------------------------------------- #
+
+
+def test_task_extraction_prompt_pins_role_notes_and_assistant_routing():
+    """FR-CR-05-57 — Fireflies task extraction prompt teaches
+    the LLM to route tasks via role / notes / assistant rules,
+    not just by spoken name. Without this the LLM picks the
+    «AI Lead» row for routine prep work because the speaker
+    (Артём) is mentioned, leaving the actual operator
+    (Ирина — Артём's assistant per his notes) idle."""
+    from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
+
+    blob = TASK_EXTRACTION_SYSTEM
+    # Role / notes used as source of truth.
+    assert "ROLE / NOTES" in blob or "role / notes" in blob.lower()
+    # Assistant routing rule pinned.
+    assert "ассистент" in blob.lower() or "assistant" in blob.lower()
+    assert "только стратегические" in blob.lower() or "only strategic" in blob.lower()
+    # AI-Lead anti-default is pinned (regression: 4-task batch
+    # all landed on Lead AI).
+    assert "AI Lead" in blob or "Lead AI" in blob
+    # Worked example pinned.
+    assert "Артём" in blob and "Ирина" in blob
+    # Speaker ≠ assignee rule pinned.
+    assert "speaker" in blob.lower() or "SPEAKER" in blob
+
+
+def test_pipeline_posts_tg_card_per_extracted_task(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-58 — every Fireflies-created task gets a DM
+    card posted to the admin (and owner if different) so the
+    operator sees them in TG, not just in the Sheet."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        def fake_transcribe(**kw):
+            return "talked through everything in the meeting"
+
+        monkeypatch.setattr(
+            "app.services.transcription.transcribe_bytes", fake_transcribe
+        )
+        settings = _settings_with_audio_dir()
+        client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-cards")])
+        llm = _FakeLLM(
+            tasks=[
+                {"title": "first task", "owner": "777"},
+                {"title": "second task", "owner": "777"},
+            ]
+        )
+        sender = _FakeSender()
+        pipeline = FirefliesPipeline(
+            settings=settings,
+            client=client,
+            llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(),
+            sender=sender,
+        )
+        with SessionFactory() as s:
+            s.add(
+                TeamMember(
+                    real_name="Admin",
+                    telegram_user_id=777,
+                    active=True,
+                )
+            )
+            s.flush()
+            t = client.list_transcripts(limit=1)[0]
+            report = pipeline.process_one(s, t)
+            s.commit()
+
+        assert report.tasks_created == 2
+        # Two DMs went to chat_id=777 with task-card-shaped text
+        # (look for the body markers `📝` description / due
+        # icons that build_task_card_text produces).
+        admin_cards = [
+            m for m in sender.sent
+            if m["chat_id"] == 777
+            and ("first task" in m["text"] or "second task" in m["text"])
+        ]
+        assert len(admin_cards) == 2
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_docs_export_share_anyone_with_link():
+    """FR-CR-05-59 — `export_summary` shares the new doc as
+    anyone-with-link writer by default so the Telegram link in
+    the short summary is openable by every teammate without a
+    per-person share dance."""
+    from app.sync.docs import DocsExportService
+
+    class _FakeFiles:
+        def __init__(self):
+            self.create_calls: list[dict] = []
+            self.permission_calls: list[dict] = []
+
+        def create(self, **kw):
+            self.create_calls.append(kw)
+            class _Exec:
+                def execute(self_):
+                    return {"id": "doc-xyz"}
+            return _Exec()
+
+    class _FakePermissions:
+        def __init__(self, files):
+            self._files = files
+
+        def create(self, **kw):
+            self._files.permission_calls.append(kw)
+            class _Exec:
+                def execute(self_):
+                    return {"id": "perm-1"}
+            return _Exec()
+
+    files = _FakeFiles()
+    perms = _FakePermissions(files)
+
+    class _FakeDriveBuild:
+        def files(self):
+            return files
+
+        def permissions(self):
+            return perms
+
+    class _FakeDocsBuild:
+        def documents(self):
+            class _D:
+                def batchUpdate(self_, **kw):
+                    class _E:
+                        def execute(self__):
+                            return {}
+                    return _E()
+            return _D()
+
+    svc = DocsExportService.__new__(DocsExportService)
+    svc._docs = _FakeDocsBuild()
+    svc._drive = _FakeDriveBuild()
+
+    doc_id, url = svc.export_summary(
+        title="x",
+        body="some text",
+        parent_folder_id="folder-123",
+    )
+    assert doc_id == "doc-xyz"
+    assert url == "https://docs.google.com/document/d/doc-xyz/edit"
+    # Doc was created inside the Shared Drive folder.
+    assert files.create_calls[0]["body"]["parents"] == ["folder-123"]
+    assert files.create_calls[0]["supportsAllDrives"] is True
+    # Permission was created: anyone, writer.
+    assert files.permission_calls
+    perm_body = files.permission_calls[0]["body"]
+    assert perm_body == {"type": "anyone", "role": "writer"}
+    assert files.permission_calls[0]["supportsAllDrives"] is True
+
+
+def test_docs_export_skip_share_when_role_none():
+    """`share_role=None` skips the permissions.create call."""
+    from app.sync.docs import DocsExportService
+
+    class _FakeFiles:
+        def __init__(self):
+            self.create_calls: list[dict] = []
+
+        def create(self, **kw):
+            self.create_calls.append(kw)
+            class _E:
+                def execute(self_):
+                    return {"id": "doc-y"}
+            return _E()
+
+    class _FakeDrive:
+        def __init__(self, f):
+            self._f = f
+
+        def files(self):
+            return self._f
+
+        def permissions(self):
+            raise RuntimeError("should not be called")
+
+    files = _FakeFiles()
+
+    class _FakeDocsBuild:
+        def documents(self):
+            class _D:
+                def batchUpdate(self_, **kw):
+                    class _E:
+                        def execute(self__):
+                            return {}
+                    return _E()
+            return _D()
+
+    svc = DocsExportService.__new__(DocsExportService)
+    svc._docs = _FakeDocsBuild()
+    svc._drive = _FakeDrive(files)
+    doc_id, _ = svc.export_summary(
+        title="x", body="y", parent_folder_id="f",
+        share_role=None,
+    )
+    assert doc_id == "doc-y"

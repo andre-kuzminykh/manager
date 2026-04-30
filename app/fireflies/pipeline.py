@@ -451,6 +451,31 @@ class FirefliesPipeline:
                 from app.sync.task_sync import schedule_sync_task
 
                 schedule_sync_task(session, task.id)
+                # FR-CR-05-58 — post a TG card per task so the
+                # owner / admins see them in their DM with the
+                # bot. Without this, Fireflies tasks lived only
+                # in the DB + Sheet — invisible until the next
+                # morning digest. The card carries the same
+                # interactive keyboard as live cards (Start /
+                # Edit / Mark done / Subscribe).
+                if self._sender is not None and getattr(self._sender, "enabled", False):
+                    try:
+                        from app.telegram_bot.cards import post_initial_card
+
+                        post_initial_card(
+                            sender=self._sender,
+                            session=session,
+                            task=task,
+                            chat_id=0,  # ignored — DM-only delivery
+                            reply_to_message_id=None,
+                            author_user_id=admin_uid,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.info(
+                            "fireflies_task_card_post_failed",
+                            task_id=task.id,
+                            error=str(e),
+                        )
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "fireflies_task_create_failed",

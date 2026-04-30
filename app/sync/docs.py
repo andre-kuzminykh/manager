@@ -162,15 +162,42 @@ class DocsExportService:
             supportsAllDrives=True,
         ).execute()
 
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+        retry=retry_if_exception_type(HttpError),
+    )
+    def _share_anyone_with_link(self, doc_id: str, *, role: str) -> None:
+        """FR-CR-05-59 — make the doc readable / editable by
+        anyone with the link. The Fireflies short summary in
+        Telegram carries the doc URL, and the operator wants
+        teammates to be able to open it without a per-person
+        share dance.
+
+        `role` is `'reader'` / `'writer'` / `'commenter'`.
+        Default the caller passes is `'writer'` so the doc is
+        fully editable in place — Telegram users tap the link
+        and can immediately fix typos / annotate.
+        """
+        self._drive.permissions().create(
+            fileId=doc_id,
+            body={"type": "anyone", "role": role},
+            supportsAllDrives=True,
+            sendNotificationEmail=False,
+        ).execute()
+
     def export_summary(
         self,
         *,
         title: str,
         body: str,
         parent_folder_id: str = "",
+        share_role: str | None = "writer",
     ) -> tuple[str, str]:
         """Create a doc with `title`, write `body`, optionally
-        in the configured Drive folder. Returns
+        in the configured Drive folder, and (by default) share
+        it as anyone-with-link **writer**. Returns
         ``(doc_id, share_url)``.
 
         FR-CR-05-55 — when `parent_folder_id` is provided, the
@@ -179,6 +206,11 @@ class DocsExportService:
         for service accounts in non-Workspace projects (they
         have no storage quota of their own and `documents.
         create` 403s with «caller does not have permission»).
+
+        FR-CR-05-59 — `share_role` defaults to `'writer'` so
+        the doc is openly editable for everyone the URL is
+        shared with. Pass None to skip sharing (doc keeps the
+        Shared Drive's default permissions).
 
         Share URL format is the standard
         ``https://docs.google.com/document/d/<id>/edit``."""
@@ -197,6 +229,16 @@ class DocsExportService:
                 log.warning(
                     "docs_insert_text_failed",
                     doc_id=doc_id,
+                    error=str(e),
+                )
+        if share_role:
+            try:
+                self._share_anyone_with_link(doc_id, role=share_role)
+            except HttpError as e:
+                log.warning(
+                    "docs_share_anyone_with_link_failed",
+                    doc_id=doc_id,
+                    role=share_role,
                     error=str(e),
                 )
         url = f"https://docs.google.com/document/d/{doc_id}/edit"

@@ -723,6 +723,152 @@ the transaction has committed. This prevents the
 "`Draft N not found`" race where a nested `session_scope()` couldn't
 see the uncommitted draft.
 
+#### FR-CR-05-59 — Fireflies docs shared as anyone-with-link writer
+
+`DocsExportService.export_summary` now defaults to creating
+the doc in the Shared Drive folder AND immediately calling
+`drive.permissions().create({"type": "anyone", "role":
+"writer"})` so the doc URL embedded in the short Telegram
+summary is openable + editable by every teammate without a
+per-person share dance. Pass `share_role=None` to skip.
+
+`supportsAllDrives=True` is mandatory on the permissions
+call — without it Drive treats the file as personal-Drive
+and 404s. Same flag added to `_create_doc_in_folder` and
+`_move_to_folder` (FR-CR-05-56).
+
+#### FR-CR-05-58 — Fireflies-extracted tasks post TG cards
+
+Operator: «почему задачи из этой встречи не вычленяются,
+сначала саммери с гиперссылкой, а потом список задач».
+
+Pre-fix: Fireflies tasks landed in DB + Sheet but no TG
+card was posted, so the operator only saw them next morning
+in the digest. The «summary first, then tasks» UX needed
+the tasks visible inline in the bot DM straight after the
+short summary.
+
+Fix: in `_step_extract_tasks` after each successful Task
+insert, call `post_initial_card(sender, session, task,
+…)`. The helper's `source_kind == telegram` early-return
+was relaxed to `source_kind == slack` (skip Slack only) so
+Fireflies tasks now flow through the TG card path. Author
+attribution = the admin uid (so the card's button-permission
+model still works).
+
+Order of TG messages per Fireflies meeting becomes:
+  1. Short summary DM (with Google Doc URL)
+  2. One task card per extracted task (with Start / Edit /
+     Mark done / Subscribe keyboard)
+
+#### FR-CR-05-57 — Fireflies task extraction: role/notes routing
+
+Operator: «4 задачи на Кузьминых стоят если тот Lead AI,
+проверь что используются роли и ноутс в контексте для
+выбора ответственного».
+
+Root cause: `TASK_EXTRACTION_SYSTEM` only referenced
+FR-CR-05-31 (role/notes) and FR-CR-05-52 (assistant routing)
+by NAME, didn't inline the rules. The Fireflies LLM call
+saw `known_employees` with role/notes columns but had no
+explicit guidance to:
+
+  - Route work to assistants when principal's notes say so
+    («только стратегические задачи», «assistant: Ирина»);
+  - NEVER pick the «Lead AI» row for routine business work;
+  - Treat the speaker (e.g. Артём talking through next
+    steps) as DELEGATING, not assigning to themselves.
+
+Net result was every routine task in a meeting Артём ran
+fell back to the admin (Кузьминых = «Lead AI»). New
+TASK_EXTRACTION_SYSTEM ships with all four rules inlined +
+a worked example: routine prep work mentioning Артём → goes
+to Ирина (his assistant), NOT Андрей (Lead AI).
+
+#### FR-CR-05-56 — Drive API supportsAllDrives parameter
+
+When the operator's Workspace uses Shared Drives, every
+Drive API call that touches Shared-Drive content needs
+`supportsAllDrives=True` — without it Drive treats the
+folder ID as a personal-Drive ID and 404s. Added to
+`_create_doc_in_folder`, `_move_to_folder`, and the
+permissions-share call from FR-CR-05-59.
+
+#### FR-CR-05-55 — Fireflies docs created inside the folder, not SA's Drive
+
+Service accounts in non-Workspace projects have ZERO
+personal Drive storage quota — `documents.create` 403s
+with «caller does not have permission». Workaround:
+`drive.files().create({mimeType: 'application/vnd.google-
+apps.document', parents: [folder]})` lands the doc in the
+folder directly. When the folder lives in a Shared Drive
+(operator action: create one in Workspace, share with SA
+as Content manager), the doc is owned by the drive — pooled
+storage, no per-SA quota.
+
+`export_summary` branches: `parent_folder_id` set →
+create-in-folder via Drive API; empty → legacy
+`documents.create` (still works for Workspace SAs / OAuth
+user creds). `_move_to_folder` no longer called from the
+create-in-folder branch — doc is born in the right place.
+
+#### FR-CR-05-54 — Fireflies short summary: bigger + participants
+
+Operator: «короткое саммери побольше сделай и список
+участников укажи из встречи прям». `SHORT_SUMMARY_SYSTEM`
+target raised to 1500-3500 chars (hard cap 3800 — under
+Telegram's 4096 limit), new mandatory `👥 Участники`
+section listing every meeting attendee, optional
+«💬 Главные обсуждения» topic-by-topic block.
+`_step_short_summary` passes `participants` as a structured
+prompt block and bumps `_truncate` cap from 2000 → 3800.
+
+#### FR-CR-05-53 — Fireflies pipeline retries failed steps
+
+The early-return in `process_one` checked only
+`processed_at AND tasks_extracted`. After Docs API was
+disabled and `_step_doc_export` 403d, the rest of the
+pipeline still ran and `processed_at` was set — so a
+retry skipped the failed step instead of fixing it. The
+check now requires EVERY per-step flag, so partially-failed
+runs DO retry the failed step on the next pass.
+
+#### FR-CR-05-52 — Owner prompt routes routine work to assistant
+
+`OWNER_SYSTEM_PROMPT` gains an ASSISTANT / DELEGATION
+RULES section. NOTES are read for hints like «только
+стратегические», «assistant: <Имя>», «помощник: <Имя>». A
+named principal's routine work (operational reminders,
+follow-ups, scheduling) gets routed to the assistant whose
+NOTES name them back, while strategic / decision-making
+work stays on the principal. Worked example:
+«Артём, напомни Olayan про NDA» → owner = Ирина (his
+assistant), not Артём.
+
+#### FR-CR-05-51 — Listener doesn't backfill old messages on cold start
+
+Operator: «получай данные с сейчас, в старое не ходи».
+Both the Supabase TG-view poll and the Bot API getUpdates
+path used to grab the freshest N messages on first poll
+and create tasks for everything — replaying up to 24h of
+chatter after every cold start. Both paths now seed
+`_view_realtime_started_at` / `_bot_api_started_at` on
+first invocation and skip messages whose `sent_at` is
+strictly before that timestamp. New
+`ListenerReport.skipped_pre_startup` counter.
+
+#### FR-CR-05-50 — Task descriptions carry concrete context
+
+`SYSTEM_PROMPT` rule #7 rewritten to demand 1-3 sentence
+descriptions that include the SPECIFIC subject (which
+list / which client / which doc / which numbers — copied
+verbatim), names of people / projects mentioned IN the
+source, and the why-this only when the source carries it.
+Pinned worked example: bad title=«добавить в задачи» +
+desc=«Необходимо добавить текущие задачи в список» (no
+context) → corrected version naming the project / decision
+context from the source.
+
 #### FR-CR-05-49 — Overdue tasks badged with 🚨 in morning + evening
 
 Operator: «просроченные задачи тоже выводи с эмодзи аларм

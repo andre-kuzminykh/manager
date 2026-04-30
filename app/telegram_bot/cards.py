@@ -129,7 +129,12 @@ def post_initial_card(
     Defaults to ``task.created_by_slack_user_id`` (the field is
     overloaded — for TG tasks it holds the TG user id).
     """
-    if task.source_kind != TaskSourceKind.telegram or not sender.enabled:
+    # FR-CR-05-58 — Fireflies-extracted tasks get TG cards too
+    # (they don't have a Telegram source message, but they're
+    # delivered to the operator via the same DM channel as
+    # native TG captures). Slack-sourced tasks still skip — they
+    # have their own `slack_bot.cards` posting path.
+    if task.source_kind == TaskSourceKind.slack or not sender.enabled:
         return
 
     author = author_user_id or task.created_by_slack_user_id or ""

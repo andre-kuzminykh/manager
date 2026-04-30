@@ -119,20 +119,80 @@ For each task, emit:
 - description:  1-3 sentences in Russian explaining context —
                 what came up in the meeting, what's the
                 deliverable, any reference / number / project
-                mentioned. Same style as the regular task
-                extractor (FR-CR-05-22 rules apply: no
-                placeholder pronouns, no first-person plural,
-                concrete names from the transcript).
+                mentioned. Concrete: name people, projects,
+                clients, numbers verbatim from the transcript.
+                A bare «нужно сделать X» mirroring the title is
+                NOT a valid description (FR-CR-05-50).
 - owner:        slack_user_id of the person responsible. Pick
                 from the `known_employees` table provided in the
-                user prompt. Match on real_name / display_name
-                / role / notes — same DISAMBIGUATION rules as
-                the regular owner extractor (FR-CR-05-31).
+                user prompt — NEVER invent ids that aren't in the
+                table.
+                See OWNER SELECTION RULES below for the full
+                routing logic — this is the same logic the regular
+                owner extractor uses (FR-CR-05-31 + FR-CR-05-52).
                 Leave null when no row matches; downstream code
                 will fall back to the admin.
 - priority:     "low" | "medium" | "high" | "urgent". Use
                 «urgent» only when someone said «срочно» / «ASAP»
                 / «горит». Default «medium».
+
+OWNER SELECTION RULES (read carefully — operator-specific):
+
+1. ROLE / NOTES are the source of truth. The operator writes
+   short blurbs there describing what each teammate does. USE
+   THEM whenever the transcript talks about a domain
+   («продажи EMEA», «инвесторы», «контракты NDA», «AI / ML
+   лидер») without naming a person — pick the row whose role
+   or notes match that domain.
+
+2. ASSISTANT / DELEGATION:
+   - When a named person's NOTES say «только стратегические
+     задачи», «не назначать рутину», «assistant: <Имя>»,
+     «помощник: <Имя>», «routes through <Имя>» — and the task
+     is NOT clearly strategic — find that assistant's row in
+     `known_employees` (the assistant's NOTES will name the
+     principal back, e.g. «ассистент Артёма») and pick THE
+     ASSISTANT, not the principal.
+   - Strategic / decision-making work («согласовать стратегию»,
+     «принять решение», «утвердить условия сделки», interview
+     candidates): keep the principal even with «only strategic».
+   - Tie-break borderline cases towards the assistant —
+     operators write such notes precisely to filter routine.
+
+3. SPEAKER ≠ ASSIGNEE. The transcript shows who SAID what.
+   The person speaking is normally NOT the owner of the task
+   they describe — they're delegating it. Only put speaker as
+   owner when the transcript explicitly says they'll do it
+   themselves («я сделаю», «I'll handle»).
+
+4. NEVER pick the «AI Lead» / «Lead AI» row for non-AI work.
+   That role is for AI / ML deliverables specifically. Routine
+   business tasks (presentations, client follow-ups, contract
+   prep, scheduling) go to whoever owns the domain per their
+   role / notes — typically a CEO Office / project manager /
+   ops role; if such a row's NOTES name them as principal's
+   assistant, use rule 2.
+
+5. When NOBODY's role / notes match AND no name was uttered,
+   leave owner null. Downstream falls back to the admin uid;
+   the operator can reassign via the card's Edit button.
+
+Worked owner-selection example:
+    employees:
+      U1 — name «Артём», role «CEO», notes «только
+           стратегические задачи; ассистент — Ирина».
+      U2 — name «Ирина», role «CEO Office», notes «ведёт
+           оперативку, follow-ups, напоминания; ассистент Артёма».
+      U3 — name «Андрей», role «Lead AI», notes «AI / ML
+           продукты, технические демо».
+    transcript snippet: «Артём: нужно подготовить материалы
+    для презентации Mayfield, договориться о встрече с
+    клиентом».
+    → owner = U2 (Ирина) — it's routine prep / scheduling work,
+      Артём's notes say «только стратегические», Ирина's notes
+      name her the assistant for follow-ups.
+    NOT U1 (principal said «only strategic»).
+    NOT U3 — wrong role (AI-only).
 
 DO NOT extract:
 

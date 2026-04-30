@@ -138,6 +138,28 @@ def _split_audio_into_chunks(path: str, *, max_bytes: int) -> list[str]:
     return out
 
 
+_AUTO_STAMP_TITLE_RE = __import__("re").compile(
+    # FR-CR-05-117 — Fireflies auto-titles meetings
+    # «<Month> <DD>, <HH>:<MM> <AM|PM>» / «<Month> <DD> at
+    # <HH><AM|PM>». Detect → derive a real topic from
+    # transcript / participants instead.
+    r"^\s*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)"
+    r"[a-z]*\s+\d{1,2}\b",
+    flags=__import__("re").IGNORECASE,
+)
+
+
+def _looks_like_auto_stamp_title(title: str | None) -> bool:
+    """FR-CR-05-117 — return True when `title` matches
+    Fireflies' default auto-timestamp («Apr 30, 03:32 PM»,
+    «May 5 at 5pm», etc.). Such titles carry zero semantic
+    value — the pipeline derives a real one from the
+    transcript later."""
+    if not title:
+        return True
+    return _AUTO_STAMP_TITLE_RE.match(title.strip()) is not None
+
+
 def _truncate(text: str | None, *, limit: int) -> str:
     """Trim `text` to `limit` chars without breaking mid-word
     when we can avoid it. Used to enforce the 2000-char Telegram
@@ -321,6 +343,25 @@ class FirefliesPipeline:
         if not row.transcript_text:
             row.last_error = "no transcript for detailed summary"
             return False
+        # FR-CR-05-117 — replace Fireflies' auto-stamp title
+        # («Apr 30, 03:32 PM») with one derived from the
+        # transcript before we feed everything into the LLM.
+        if _looks_like_auto_stamp_title(row.title):
+            try:
+                derived = self._derive_topic_title(row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "fireflies_topic_title_derivation_failed",
+                    fireflies_id=row.fireflies_id, error=str(e),
+                )
+                derived = None
+            if derived:
+                log.info(
+                    "fireflies_topic_title_derived",
+                    fireflies_id=row.fireflies_id,
+                    old=row.title, new=derived,
+                )
+                row.title = derived
         meta_lines = [
             f"Заголовок: {row.title or '(без названия)'}",
             f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}",
@@ -348,6 +389,41 @@ class FirefliesPipeline:
         row.detailed_summarised = True
         row.last_error = None
         return True
+
+    def _derive_topic_title(self, row: MeetingRecording) -> str | None:
+        """FR-CR-05-117 — call the LLM to extract a 1-line
+        meeting topic suitable as a Google Doc title. Returns
+        None on any failure; caller then keeps the original
+        auto-stamp."""
+        participants = ", ".join(row.participants or [])
+        prompt = (
+            "Determine a SHORT (≤60 chars) meeting topic in "
+            "Russian for the transcript below. Prefer the "
+            "external company / client name if any (ADNOC, "
+            "Bosch, Goldman Sachs). Otherwise pick the main "
+            "subject (раунд, проект, кандидат). Drop fluff. "
+            "Output ONLY the topic, no quotes or extra text.\n\n"
+            f"Участники: {participants}\n\n"
+            f"Транскрипт (первые 6000 chars):\n"
+            f"{(row.transcript_text or '')[:6000]}"
+        )
+        try:
+            text = self._llm.complete_text(  # type: ignore[attr-defined]
+                system_prompt=(
+                    "You output ONE short Russian meeting topic "
+                    "phrase. ≤60 chars. No quotes."
+                ),
+                user_prompt=prompt,
+                model=self._settings.fireflies_short_summary_model,
+                temperature=0.2,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        text = (text or "").strip().strip("«»\"' ").splitlines()[0:1]
+        if not text:
+            return None
+        topic = text[0][:60].rstrip("., ")
+        return topic or None
 
     # --- step 4: Google Doc export ----------------------------
 

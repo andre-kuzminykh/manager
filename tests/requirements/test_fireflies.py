@@ -22,7 +22,11 @@ import pytest
 
 from app.config import Settings
 from app.fireflies.client import FirefliesClient, FirefliesTranscript
-from app.fireflies.pipeline import FirefliesPipeline, _truncate
+from app.fireflies.pipeline import (
+    FirefliesPipeline,
+    _looks_like_auto_stamp_title,
+    _truncate,
+)
 from app.models import MeetingRecording, Task, TaskSourceKind, TeamMember
 
 
@@ -582,6 +586,71 @@ def test_truncate_caps_at_limit():
 def test_truncate_passthrough_when_short():
     text = "короткий"
     assert _truncate(text, limit=2000) == text
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-117 — short summary format + auto-stamp title derivation
+# --------------------------------------------------------------------------- #
+
+
+def test_looks_like_auto_stamp_title_detects_fireflies_defaults():
+    """FR-CR-05-117 — Fireflies stamps untitled meetings as
+    «Apr 30, 03:32 PM» / «May 5 at 5pm». The pipeline replaces
+    those with an LLM-derived business topic before the LLM
+    summary call. The detector must catch every variant the
+    operator has reported."""
+    assert _looks_like_auto_stamp_title("Apr 30, 03:32 PM") is True
+    assert _looks_like_auto_stamp_title("May 5 at 5pm") is True
+    assert _looks_like_auto_stamp_title("september 12, 11:00 AM") is True
+    assert _looks_like_auto_stamp_title("Dec 1") is True
+    assert _looks_like_auto_stamp_title("  Jan 3, 09:00 AM  ") is True
+    # Empty / None counts too — no title is just as bad.
+    assert _looks_like_auto_stamp_title("") is True
+    assert _looks_like_auto_stamp_title(None) is True
+    # Real business titles must NOT match.
+    assert _looks_like_auto_stamp_title("ADNOC partnership call") is False
+    assert _looks_like_auto_stamp_title("Раунд Humanoid") is False
+    assert _looks_like_auto_stamp_title("Goldman Sachs intro") is False
+    assert _looks_like_auto_stamp_title("Mayfield prep") is False
+
+
+def test_short_summary_prompt_pins_operator_format():
+    """FR-CR-05-117 — operator pinned the ADNOC layout as the
+    canonical short-summary shape:
+
+        <Тема> — DD.MM.YYYY | NN мин
+
+        Их сторона: …
+        Наша сторона: …
+
+        Суть: <2-4 sentences>
+
+        To-Do:
+        1) …
+        2) …
+
+    The system prompt must reference every section so the LLM
+    sticks to the format. This test is the regression guard for
+    the «🎙 Apr 30, 03:32 PM / 0 мин / без раздела «Их сторона»»
+    output we shipped before."""
+    from app.fireflies.prompts import SHORT_SUMMARY_SYSTEM
+
+    blob = SHORT_SUMMARY_SYSTEM
+    # Header shape pinned.
+    assert "DD.MM.YYYY" in blob
+    assert "NN мин" in blob
+    # Two-sided participant split.
+    assert "Их сторона" in blob
+    assert "Наша сторона" in blob
+    # «Суть» + «To-Do» sections pinned.
+    assert "Суть" in blob
+    assert "To-Do" in blob
+    # Worked ADNOC example pinned (canonical shape).
+    assert "ADNOC" in blob
+    # Anti-regression: explicit ban on Fireflies auto-stamps in
+    # the output.
+    assert "auto-stamp" in blob.lower() or "auto-timestamp" in blob.lower() or \
+           "auto-stamp" in blob or "Apr 30" in blob
 
 
 # --------------------------------------------------------------------------- #

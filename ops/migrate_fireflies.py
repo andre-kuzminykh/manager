@@ -53,6 +53,21 @@ def _parse_args() -> argparse.Namespace:
             "the top."
         ),
     )
+    p.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "FR-CR-05-117 — re-run pipeline on the latest "
+            "recordings even if they're already processed. "
+            "Resets all step flags + last_error + "
+            "tasks_extracted_count + transcript / summary / "
+            "doc text on existing rows so each step runs again. "
+            "Use after prompt updates or to refresh stale "
+            "summaries. Existing Tasks extracted from those "
+            "recordings are NOT deleted (operator's responsibility "
+            "via wipe_tasks if needed)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -108,7 +123,43 @@ def main() -> int:
         "fireflies_migration_starting",
         seen=len(transcripts),
         limit=args.limit,
+        rerun=args.rerun,
     )
+
+    # FR-CR-05-117 — `--rerun` resets the step flags + step
+    # outputs on already-processed recordings so the pipeline
+    # re-executes every step. Used after prompt updates to
+    # refresh existing summaries.
+    if args.rerun and transcripts:
+        from app.models import MeetingRecording
+
+        ids = [t.id for t in transcripts]
+        with session_scope() as session:
+            rows = (
+                session.query(MeetingRecording)
+                .filter(MeetingRecording.fireflies_id.in_(ids))
+                .all()
+            )
+            for r in rows:
+                r.audio_downloaded = False
+                r.transcribed = False
+                r.detailed_summarised = False
+                r.short_summary_sent = False
+                r.doc_exported = False
+                r.tasks_extracted = False
+                r.transcript_text = None
+                r.detailed_summary = None
+                r.short_summary = None
+                r.google_doc_id = None
+                r.google_doc_url = None
+                r.tasks_extracted_count = None
+                r.last_error = None
+                r.processed_at = None
+            log.info(
+                "fireflies_rerun_reset",
+                count=len(rows),
+                ids=[r.fireflies_id for r in rows],
+            )
 
     processed = 0
     skipped = 0

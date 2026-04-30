@@ -127,6 +127,22 @@ Return ``is_task=false`` for:
   нее и Артема» reads like a request for approval from
   someone else — that's not the AUTHOR's task, that's a
   qualifier. is_task=false.
+- *Third-party future-intent reports* (FR-CR-05-95 — operator
+  regression). Sentences like:
+    «Они сами отправят ссылку»          (3rd party will do it)
+    «Артем сам пришлёт»                  (3rd party will do it)
+    «Ира потом перешлет»                 (3rd party will do it)
+    «They will send the link themselves» (3rd party will do it)
+  describe what someone ELSE plans to do — there's no work
+  owed by anyone the author is delegating to. is_task=false.
+- *Emotional / chat outbursts* (FR-CR-05-95). Sentences with
+  no concrete deliverable, just emotional commentary:
+    «Очень важный день. Надо помолиться или что ты делаешь
+     в таких случаях»  (rhetorical chat noise)
+    «Жду с нетерпением!»
+    «Вот это да, неожиданно»
+    «Wow, that's intense»
+  even when they look question-shaped, are NOT tasks.
 - *Pure quoted artefacts* — when the message is essentially a
   template / blurb / email body / screenshot transcript without
   an imperative wrapper («Блерб для отправки Abundance: Hi

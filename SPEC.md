@@ -833,6 +833,55 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-95 — Title hard cap 80; third-party intent / chat outbursts; synonym-verb dedup
+
+Operator pack:
+
+  1. «вообще никогда названий длинных быть не может, все в
+     описании! спека + тесты».
+  2. «🟡 Они сами отправят ссылку» — third party will send
+     it; no work owed.
+  3. «🟡 Очень важный день. Надо помолиться или что ты
+     делаешь в таких случаях» — chat outburst, not a task.
+  4. «🟡 Подтвердить время с ADNOC» vs «🟡 Согласовать время
+     с ADNOC» — duplicates (synonym verbs, same client).
+  5. «🟡 Добавить в звонок с Йоханом» vs «🟡 Познакомиться с
+     Йоханом» — duplicates (different verbs, same end-state
+     of meeting Йохан).
+  6. «🟡 Узнать о переносе звонка по Сингапуру» owner=Ирина
+     vs owner=Женя — duplicates (same external call; the
+     internal-team owner attribution doesn't matter).
+
+Three layered fixes:
+
+  - **`normalize_task_title` cap tightened: 100 → 80 chars.**
+    Operator's hard rule «никогда не может быть длинных».
+    The clause-break loop adds `?, ! ,` to the separator
+    list so question/exclamation-marked fragments cut early.
+    Word-boundary backstop also at 80 instead of 100.
+
+  - **`detect_prompt.py` — Third-party future-intent block.**
+    «Они сами отправят», «Артем сам пришлёт», «They will
+    send the link themselves» = no_action. The author
+    REPORTS what someone else plans to do, not delegating.
+    Plus **Emotional / chat-outbursts block**: rhetorical
+    sentences without a concrete deliverable («Очень важный
+    день. Надо помолиться …», «Жду с нетерпением!») =
+    no_action even when they look question-shaped.
+
+  - **`task_dedup.py` — SYNONYM-VERBS + SAME SPECIFIC
+    SUBJECT block.** Verb synonyms that share the same
+    direct object are the same task: подтвердить ≈
+    согласовать ≈ утвердить; узнать ≈ уточнить ≈ выяснить;
+    познакомиться ≈ представить ≈ соединить; confirm ≈
+    approve ≈ sign off; ask ≈ check ≈ verify. When the
+    SUBJECT names a specific external entity / event
+    (ADNOC, Singapore call, Йохан) the internal team-owner
+    is NOT a discriminator — treat as duplicate when
+    verb-synonyms align. The «отчёт Ирине ≠ отчёт Артёму»
+    audience-discriminator from FR-CR-05-78 still holds:
+    different EXTERNAL audience = different task.
+
 #### FR-CR-05-94 — Five operator regressions in one go
 
 Operator pack:
@@ -4189,6 +4238,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-95  | `test_intent_pipeline.py::test_detect_prompt_rejects_third_party_future_intent` («Они сами отправят», «Артем сам пришлёт», «They will send the link themselves» pinned); `::test_detect_prompt_rejects_emotional_chat_outbursts` («Очень важный день», «помолиться» pinned); `::test_dedup_prompt_pins_synonym_verbs_and_same_subject` (3 regression pairs + synonym families pinned); `::test_normalize_task_title_caps_at_80_chars` (hard cap 80, clause-break uses `. ` for the «Очень важный день. …» split) |
 | FR-CR-05-94  | `test_intent_pipeline.py::test_detect_prompt_rejects_opinion_qualifier_statements` (Singapore/HK 250-char regression + «По X я не против, но Y» / «Они у Алины в задачах есть» / «Мне кажется» / «I think we should» fragments + FR-CR-05-94 pinned); `::test_date_prompt_status_as_of_is_not_a_deadline` («статус на 26/02» pattern + 2027-02-23 BAD-output + status-update framing); manual verification: drafts now show ≤101-char titles via `normalize_task_title` in `prepare_drafts`; `_resolve_uids_in_text` resolves bare 9-15 digit tokens to `team_members.real_name`; edit prompt accepts `current_user_id` + `current_user_label` so «на меня» resolves to the editor's uid; `ops/wipe_tasks.py --also-wipe-sheet` calls `values().clear(A2:V)`. |
 | FR-CR-05-93  | `test_intent_pipeline.py::test_detect_prompt_rejects_uzhe_completed_recap_as_no_action` («уже / already» prefix + «уже написала» / «уже отправила» / «Уже написала на почту» / «и инвайт отправила» fragments + FR-CR-05-93 pinned) |
 | FR-CR-05-92  | `test_task_dedup.py::test_dedup_prompt_pins_transliteration_rule` (TRANSLITERATION block + James Morgon / Джеймсу Моргану / Olayan / Олаян / Артем / Артём / Artem / Petya / Петя fragments + FR-CR-05-92 pinned) |

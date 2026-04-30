@@ -159,6 +159,41 @@ Worked counter-example:
   → true (same person James Morgan / Джеймс Морган, same
     verb «предложить слоты», same recipient assistant Ирина,
     same deadline 2026-04-30)
+
+SYNONYM-VERBS + SAME SPECIFIC SUBJECT (FR-CR-05-95). Operator
+regressions:
+  «Подтвердить время с ADNOC» vs «Согласовать время с ADNOC»
+    → duplicate (подтвердить ≈ согласовать; same client; same
+      deadline)
+  «Добавить в звонок с Йоханом» vs «Познакомиться с Йоханом»
+    → duplicate (operator goal: meet Йохан on the same call;
+      different verbs but the END-STATE is one introduction)
+  «Узнать о переносе звонка по Сингапуру» (owner=Ирина) vs
+  «Узнать о переносе звонка по Сингапуру» (owner=Женя)
+    → duplicate (same call, same question; the internal-team
+      owner attribution doesn't matter — the WORK is one
+      external ask, not two).
+
+Rules:
+- VERB SYNONYMS that share the same direct object are the
+  same task: подтвердить ≈ согласовать ≈ утвердить;
+  узнать ≈ уточнить ≈ выяснить; познакомиться ≈ представить
+  ≈ соединить; отправить ≈ выслать ≈ переслать; confirm ≈
+  approve ≈ sign off; ask ≈ check ≈ find out ≈ verify.
+- SAME SPECIFIC SUBJECT is the discriminator. «отчёт Ирине»
+  vs «отчёт Артёму» = two different reports with two
+  different audiences — DIFFERENT (FR-CR-05-78 still holds).
+  But «звонок по Сингапуру», «встреча с ADNOC», «звонок с
+  Йоханом» — these are EXTERNAL events with one fixed
+  audience; whoever inside the team handles them, the work
+  is one. When the SUBJECT names a specific external entity
+  / event, the internal owner is NOT a discriminator —
+  treat as duplicate when verb-synonyms align.
+
+Worked counter-example:
+  candidate: «Подтвердить время с ADNOC» (owner=Genia)
+  existing:  «Согласовать время с ADNOC» (owner=Genia)
+  → true (синонимные глаголы; ADNOC = same external event)
 """
 
 

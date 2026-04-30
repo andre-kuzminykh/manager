@@ -9,21 +9,26 @@ from app.models import ActionDraft, ActionDraftState, Task, TaskStatusHistory
 from app.models.task import TaskPriority, TaskStatus
 
 
+_TITLE_HARD_CAP = 80
+
+
 def normalize_task_title(raw: Any) -> str:
-    """FR-CR-05-72 / -75 / -89 — produce a one-glance title.
+    """FR-CR-05-72 / -75 / -89 / -95 — produce a one-glance title.
 
     Pipeline:
       1. Strip whitespace; raise on empty.
       2. Capitalize the first character (works for Cyrillic).
       3. If multi-line, keep the FIRST line only.
-      4. If still ≥100 chars, trim at the first strong break
-         (`: `, ` — `, ` - `, `; `, `. `) sitting between offset 8
-         and 100 — usually ends the action-verb clause.
-      5. Fallback: word-boundary cut at 100 + ellipsis. This is
-         the FR-CR-05-89 backstop — without it, a long sentence
-         that has no early strong-break (operator's «Это что?
-         На изображении показано электронное письмо …»)
-         escaped the cap and shipped a 200-char title.
+      4. If still ≥80 chars, trim at the first strong break
+         (`: `, ` — `, ` - `, `; `, `. `, `? `, `! `, `, `)
+         sitting between offset 8 and 80 — usually ends the
+         action-verb clause.
+      5. Fallback: word-boundary cut at 80 + ellipsis. This is
+         the FR-CR-05-95 backstop — operator's hard rule
+         «никогда названий длинных быть не может, все в
+         описании!». 80 is tighter than the previous 100 so
+         even a screenshot-transcript dump leaves room for
+         the bullet emoji + space in the rendered widget.
 
     Reused from `ops.resync_sheet` to retro-cap legacy rows.
     """
@@ -34,16 +39,17 @@ def normalize_task_title(raw: Any) -> str:
         title = title[0].upper() + title[1:]
     if "\n" in title:
         title = title.split("\n", 1)[0].strip()
-    if len(title) > 100:
-        for sep in (": ", " — ", " - ", "; ", ". "):
+    cap = _TITLE_HARD_CAP
+    if len(title) > cap:
+        for sep in (": ", " — ", " - ", "; ", ". ", "? ", "! ", ", "):
             idx = title.find(sep)
-            if 8 <= idx <= 100:
-                title = title[:idx].rstrip()
+            if 8 <= idx <= cap:
+                title = title[:idx].rstrip(",.!?;: ")
                 break
-    if len(title) > 100:
-        cut = title[:100].rstrip()
+    if len(title) > cap:
+        cut = title[:cap].rstrip()
         last_ws = max(cut.rfind(" "), cut.rfind("—"), cut.rfind("-"))
-        if last_ws > 60:
+        if last_ws > 50:
             cut = cut[:last_ws].rstrip()
         title = cut + "…"
     return title

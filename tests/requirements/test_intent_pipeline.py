@@ -640,6 +640,78 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "temporal anchor" in blob.lower() or "к 5" in blob
 
 
+def test_detect_prompt_rejects_third_party_future_intent():
+    """FR-CR-05-95 — operator regression: «Они сами отправят
+    ссылку» landed as a task. The author is REPORTING what
+    others will do — not delegating. is_task=false."""
+    blob = DETECT_SYSTEM_PROMPT
+    assert "Third-party future-intent" in blob
+    assert "FR-CR-05-95" in blob
+    for fragment in (
+        "Они сами отправят ссылку",
+        "Артем сам пришлёт",
+        "They will send the link themselves",
+    ):
+        assert fragment in blob, f"{fragment!r} should be pinned"
+
+
+def test_detect_prompt_rejects_emotional_chat_outbursts():
+    """FR-CR-05-95 — operator regression: «Очень важный день.
+    Надо помолиться или что ты делаешь в таких случаях» landed
+    as a task. Rhetorical chat noise without a concrete
+    deliverable is not a task."""
+    blob = DETECT_SYSTEM_PROMPT
+    assert "Emotional / chat outbursts" in blob
+    # The exact regression case pinned.
+    assert "Очень важный день" in blob
+    assert "помолиться" in blob
+
+
+def test_dedup_prompt_pins_synonym_verbs_and_same_subject():
+    """FR-CR-05-95 — synonym verbs (подтвердить ≈ согласовать)
+    on the same external subject (ADNOC, Singapore call,
+    Йохан) are duplicates regardless of internal owner
+    attribution."""
+    from app.services.task_dedup import _SYSTEM_PROMPT
+
+    blob = _SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+    assert "FR-CR-05-95" in blob
+    assert "SYNONYM-VERBS" in blob
+    # The three regression pairs pinned.
+    for fragment in (
+        "Подтвердить время с ADNOC",
+        "Согласовать время с ADNOC",
+        "Добавить в звонок с Йоханом",
+        "Познакомиться с Йоханом",
+        "Узнать о переносе звонка по Сингапуру",
+    ):
+        assert fragment in blob, f"{fragment!r} should be pinned"
+    # Synonym families spelled out.
+    for family in (
+        "подтвердить ≈ согласовать",
+        "узнать ≈ уточнить",
+        "познакомиться ≈ представить",
+    ):
+        assert family in flat
+
+
+def test_normalize_task_title_caps_at_80_chars():
+    """FR-CR-05-95 — operator: «никогда названий длинных быть
+    не может, все в описании!». Hard cap is now 80 (was 100)."""
+    from app.persistence.tasks import normalize_task_title
+
+    long = (
+        "Очень важный день. Надо помолиться или что ты делаешь "
+        "в таких случаях интересно мне будет узнать"
+    )
+    out = normalize_task_title(long)
+    assert len(out) <= 81  # 80 + ellipsis when no early break
+    # «Очень важный день» (16 chars) ends in `. ` so the clause-
+    # break path keeps the first sentence.
+    assert out == "Очень важный день"
+
+
 def test_detect_prompt_rejects_opinion_qualifier_statements():
     """FR-CR-05-94 — operator regression: «По Сингапуру и
     Гонконгу я не против, но у нас Алина — Chief of Investment

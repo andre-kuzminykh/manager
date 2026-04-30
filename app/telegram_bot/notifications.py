@@ -817,11 +817,59 @@ def send_thread_reminders(
 # --------------------------------------------------------------------------- #
 
 
+def _fmt_task_block(task: Task, *, session: Session | None = None) -> str:
+    """FR-CR-05-81 — operator-readable per-task block:
+
+        🟡 Title here
+        👤 Owner Name · 🛠️ in_progress · 📅 2026-05-01
+
+    Used by `send_admin_watchlist`. Replaces the legacy
+    single-line bullet that crammed id / status / priority /
+    raw uid into one concatenated string the operator hated.
+    """
+    pri_em = PRIORITY_EMOJI.get(task.priority.value, "🟡")
+    title_line = f"{pri_em} <b>{(task.title or '')[:200]}</b>"
+    meta: list[str] = []
+    # Owner name from team registry where possible.
+    owner_label: str | None = None
+    if task.owner_user_id and session is not None:
+        try:
+            from app.services.team_members import find_by_telegram_user_id
+            from app.services.team_members import find_by_slack_user_id
+
+            uid = str(task.owner_user_id)
+            row = None
+            if uid.lstrip("-").isdigit():
+                row = find_by_telegram_user_id(session, int(uid))
+            else:
+                row = find_by_slack_user_id(session, uid)
+            if row is not None:
+                owner_label = row.real_name or row.telegram_username or uid
+        except Exception:  # noqa: BLE001
+            pass
+    if owner_label is None and task.owner_display_name:
+        owner_label = task.owner_display_name
+    if owner_label is None and task.owner_user_id:
+        owner_label = task.owner_user_id
+    if owner_label:
+        meta.append(f"👤 {owner_label}")
+    status_em = STATUS_EMOJI.get(task.status.value, "")
+    meta.append(f"{status_em} {task.status.value.replace('_', ' ')}")
+    if task.due_date:
+        due_str = task.due_date.isoformat()
+        if task.due_time:
+            due_str += f" · {task.due_time.strftime('%H:%M')}"
+        meta.append(f"📅 {due_str}")
+    second_line = " · ".join(meta)
+    return f"{title_line}\n{second_line}"
+
+
 def send_admin_watchlist(
     session: Session,
     *,
     sender: TelegramSender,
     today: date | None = None,
+    stale_threshold_days: int = 30,
 ) -> TelegramDigestReport:
     today = today or date.today()
     report = TelegramDigestReport()
@@ -830,13 +878,21 @@ def send_admin_watchlist(
     if not admins:
         return report
 
+    # FR-CR-05-81 — drop tasks older than `stale_threshold_days`
+    # (default 30) so the watchlist doesn't drown the operator
+    # in residual test / dev rows from weeks ago. Operator can
+    # tweak via the `stale_threshold_days` arg when calling
+    # programmatically.
+    stale_cutoff = today - timedelta(days=stale_threshold_days)
+
     in_progress = (
         session.query(Task)
         .filter(
             Task.status == TaskStatus.in_progress,
             Task.deleted_at.is_(None),
+            (Task.due_date.is_(None)) | (Task.due_date >= stale_cutoff),
         )
-        .order_by(Task.id)
+        .order_by(Task.due_date.asc().nullslast(), Task.id)
         .all()
     )
     overdue = (
@@ -846,6 +902,7 @@ def send_admin_watchlist(
             Task.deleted_at.is_(None),
             Task.due_date.isnot(None),
             Task.due_date < today,
+            Task.due_date >= stale_cutoff,
         )
         .order_by(Task.due_date)
         .all()
@@ -861,14 +918,23 @@ def send_admin_watchlist(
         ):
             report.skipped_idempotent += 1
             continue
+        # FR-CR-05-81 — operator-readable two-line-per-task
+        # blocks separated by an empty line, owner names
+        # resolved through team_members (no raw uids).
+        ip_lines = (
+            "\n\n".join(_fmt_task_block(t, session=session) for t in in_progress)
+            or "<i>(none)</i>"
+        )
+        ov_lines = (
+            "\n\n".join(_fmt_task_block(t, session=session) for t in overdue)
+            or "<i>(none)</i>"
+        )
         body = (
-            f"*👀 Watch-list — {today.isoformat()}*\n\n"
-            f"*In progress* ({len(in_progress)})\n"
-            + ("\n".join(_fmt_task_line(t) for t in in_progress) or "_(none)_")
-            + "\n\n*Overdue* ("
-            + str(len(overdue))
-            + ")\n"
-            + ("\n".join(_fmt_task_line(t) for t in overdue) or "_(none)_")
+            f"<b>👀 Watch-list — {today.isoformat()}</b>\n\n"
+            f"<b>🚀 In progress ({len(in_progress)})</b>\n\n"
+            + ip_lines
+            + f"\n\n<b>🚨 Overdue ({len(overdue)})</b>\n\n"
+            + ov_lines
         )
         try:
             sender.send_message(chat_id=int(admin_id), text=body)

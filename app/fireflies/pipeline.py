@@ -614,12 +614,28 @@ class FirefliesPipeline:
                     description, valid_ids
                 )
             priority = t.get("priority") or "medium"
-            owner_user_id = (t.get("owner") or "").strip() or None
+            llm_owner_raw = (t.get("owner") or "").strip() or None
+            owner_user_id = llm_owner_raw
+            owner_resolution = "llm"
             if owner_user_id and known_employees and owner_user_id not in valid_ids:
                 # LLM hallucinated a uid — null it.
                 owner_user_id = None
+                owner_resolution = "hallucinated_uid_dropped"
             if not owner_user_id and admin_uid:
                 owner_user_id = admin_uid
+                owner_resolution = (
+                    "admin_fallback_null_owner"
+                    if llm_owner_raw is None
+                    else owner_resolution + "_then_admin_fallback"
+                )
+            log.info(
+                "fireflies_task_owner_resolved",
+                fireflies_id=row.fireflies_id,
+                title=title[:80],
+                llm_owner=llm_owner_raw,
+                final_owner=owner_user_id,
+                resolution=owner_resolution,
+            )
             owner_display_name = None
             if owner_user_id and known_employees:
                 for e in known_employees:

@@ -232,6 +232,19 @@ OWNER SELECTION RULES (read carefully — operator-specific):
    leave owner null. Downstream falls back to the admin uid;
    the operator can reassign via the card's Edit button.
 
+6. NEVER pick the operator (admin) row as the owner just
+   because no other match is obvious. Leaving owner null is
+   STRICTLY BETTER than defaulting to the admin / AI Lead —
+   the operator gets a card with «owner not set» and routes it
+   manually, which is far less noise than them silently being
+   assigned tasks they shouldn't own. The admin row in
+   `known_employees` is for context only; do not pick it
+   unless the transcript explicitly addresses them by name
+   («Андрей, сделай X», «Andre, you'll handle Y»). Routine
+   ops / scheduling / follow-up work goes to whoever owns
+   that domain per role / notes (rule 1) or to their assistant
+   (rule 2), NOT to the admin.
+
 Worked owner-selection example:
     employees:
       U1 — name «Артём», role «CEO», notes «только

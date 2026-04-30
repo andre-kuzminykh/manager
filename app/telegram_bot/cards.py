@@ -201,7 +201,7 @@ def refresh_card(
     `(chat_id, message_id)` pair regardless of who triggered the
     refresh.
     """
-    if task.source_kind != TaskSourceKind.telegram or not sender.enabled:
+    if task.source_kind == TaskSourceKind.slack or not sender.enabled:
         return
     cards = _stored_cards(task)
     if not cards:
@@ -252,7 +252,7 @@ def replace_card_for_viewer(
     state, so they're refreshed via the same in-place mechanism
     `refresh_card` uses.
     """
-    if task.source_kind != TaskSourceKind.telegram or not sender.enabled:
+    if task.source_kind == TaskSourceKind.slack or not sender.enabled:
         return
     cards = _stored_cards(task)
     text = build_task_card_text(task, session=session)
@@ -390,12 +390,12 @@ def render_tombstone(
 ) -> None:
     """Replace every delivered card with a tombstone line.
 
-    FR-CR-05-33 — when ``session`` is provided, the actor uid is
-    resolved to a human-readable name via the team / chat-members
-    registry; otherwise we fall back to the raw uid the way we
-    always did.
+    FR-CR-05-65 — same source-kind relaxation as
+    `post_initial_card`: telegram-source AND fireflies-source
+    tasks both go through this path. Slack tasks have their
+    own `slack_bot.cards` tombstone, so we skip them here.
     """
-    if task.source_kind != TaskSourceKind.telegram or not sender.enabled:
+    if task.source_kind == TaskSourceKind.slack or not sender.enabled:
         return
     cards = _stored_cards(task)
     if not cards:

@@ -716,3 +716,45 @@ def test_replace_card_for_viewer_swallows_delete_failures(session):
     # New card still posted, stored list still updated.
     assert sender.sent and sender.sent[0]["chat_id"] == 222
     assert t.card_ts == "500"
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-65 — Fireflies tasks render tombstone too
+# --------------------------------------------------------------------------- #
+
+
+def test_render_tombstone_works_for_fireflies_source(session):
+    """Operator: «нажимаю Delete и она не удаляется визуально».
+    Repro: Fireflies-source task gets a card via FR-CR-05-58
+    but `render_tombstone` had `source_kind != telegram` early-
+    return, so Delete touched the DB but never updated the
+    card → UI stuck. Fixed by relaxing the check to skip only
+    Slack tasks (they have their own slack_bot tombstone)."""
+    from app.telegram_bot.cards import render_tombstone
+
+    t = _mk_task(session, source_kind=TaskSourceKind.fireflies)
+    t.extra = {"telegram_cards": [{"chat_id": 222, "message_id": 100}]}
+    session.flush()
+
+    sender = _RecordingSender()
+    render_tombstone(sender=sender, task=t, actor="999", session=session)
+
+    assert len(sender.updated) == 1
+    body = sender.updated[0]["text"]
+    assert "deleted" in body.lower()
+    assert sender.updated[0]["reply_markup"] == {"inline_keyboard": []}
+
+
+def test_refresh_card_works_for_fireflies_source(session):
+    """Same source_kind relaxation for `refresh_card` — the
+    Fireflies task card needs to refresh in place when status
+    changes (e.g. operator marks done from another channel)."""
+    from app.telegram_bot.cards import refresh_card
+
+    t = _mk_task(session, source_kind=TaskSourceKind.fireflies)
+    t.extra = {"telegram_cards": [{"chat_id": 222, "message_id": 100}]}
+    session.flush()
+
+    sender = _RecordingSender()
+    refresh_card(sender=sender, session=session, task=t)
+    assert len(sender.updated) == 1

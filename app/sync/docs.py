@@ -75,15 +75,25 @@ class DocsExportService:
     def _create_doc_in_folder(
         self, *, title: str, parent_folder_id: str
     ) -> dict[str, Any]:
-        """FR-CR-05-55 — create the Google Doc directly inside
-        `parent_folder_id` via the Drive API. This sidesteps the
-        SA-without-storage-quota issue: the doc inherits the
-        folder's storage (owned by a real user) instead of being
-        charged to the service account.
+        """FR-CR-05-55/56 — create the Google Doc directly
+        inside `parent_folder_id` via the Drive API. Two
+        scenarios this is correct for:
 
-        Returns the same shape as `_create_doc` (with
-        `documentId`) so downstream code doesn't care which
-        path created it.
+        - **Workspace + Shared Drive (Team Drive)**: the folder
+          lives in a Shared Drive. The created file is owned by
+          the SHARED DRIVE, not the SA — pooled storage, no
+          per-SA quota. `supportsAllDrives=True` is mandatory
+          for any Drive call that touches Shared Drive content.
+        - **Workspace + DWD impersonation**: SA acts as a real
+          user. The doc is owned by that user.
+
+        Personal Google accounts WITHOUT Workspace will 403
+        with `storageQuotaExceeded` here regardless — service
+        accounts in personal-account contexts have zero Drive
+        quota and there's no «pooled» drive to use. Operator
+        should create a Shared Drive in their Workspace,
+        create the folder there, and share it with the SA as
+        Editor.
         """
         file = (
             self._drive.files()
@@ -94,6 +104,7 @@ class DocsExportService:
                     "parents": [parent_folder_id],
                 },
                 fields="id",
+                supportsAllDrives=True,
             )
             .execute()
         )
@@ -131,9 +142,15 @@ class DocsExportService:
     def _move_to_folder(self, doc_id: str, folder_id: str) -> None:
         # Find the doc's current parents to remove them, then add
         # the configured folder as the new parent.
+        # `supportsAllDrives=True` so the call works for files
+        # that live in a Shared Drive.
         meta = (
             self._drive.files()
-            .get(fileId=doc_id, fields="parents")
+            .get(
+                fileId=doc_id,
+                fields="parents",
+                supportsAllDrives=True,
+            )
             .execute()
         )
         prev = ",".join(meta.get("parents") or [])
@@ -142,6 +159,7 @@ class DocsExportService:
             addParents=folder_id,
             removeParents=prev,
             fields="id, parents",
+            supportsAllDrives=True,
         ).execute()
 
     def export_summary(

@@ -825,6 +825,44 @@ def test_detect_prompt_rejects_transcription_dumps_as_no_action():
     assert "ОТПРАВЬ" in blob or "imperative" in flat.lower()
 
 
+def test_strip_chat_prefix_to_imperative_handles_operator_regression():
+    """FR-CR-05-103 — operator regression: «@IrinaMorato
+    подскажи, пожалуйста, отправить фоллоу-ап Neuberger ?»
+    landed verbatim as the title. The Python post-process
+    strips leading @-mention + politeness verb + softener +
+    trailing `?` to leave the imperative."""
+    from app.persistence.tasks import strip_chat_prefix_to_imperative
+
+    f = strip_chat_prefix_to_imperative
+    # The exact regression case.
+    assert f(
+        "@IrinaMorato подскажи, пожалуйста, отправить фоллоу-ап Neuberger ?"
+    ) == "Отправить фоллоу-ап Neuberger"
+    # Variants.
+    assert f("@andrew, скажи, нужно ли отправлять отчёт?") == "Нужно ли отправлять отчёт"
+    assert f("@bob, please send the invoice?") == "Send the invoice"
+    # «пожалуйста» without a politeness verb still strips.
+    assert f("пожалуйста, отправить отчёт") == "Отправить отчёт"
+    # Multi @-mentions.
+    assert f("@a @b скажи, отправить?") == "Отправить"
+    # No politeness wrapper → unchanged.
+    assert f("Подготовить отчёт") == "Подготовить отчёт"
+    # Pure-wrapper input → naked-verb result; the
+    # `is_naked_verb_title` check downstream drops it.
+    assert f("@a, подскажи?") == "Подскажи"
+
+
+def test_title_prompt_pins_chat_question_to_imperative_rule():
+    """FR-CR-05-103 — the title prompt teaches the LLM to
+    strip @-mention + politeness + `?` and emit imperative."""
+    blob = TITLE_SYSTEM_PROMPT
+    assert "CHAT-QUESTION REQUESTS" in blob
+    assert "FR-CR-05-103" in blob
+    # The exact regression case + expected rewrite are pinned.
+    assert "@IrinaMorato подскажи" in blob
+    assert "Отправить фоллоу-ап Neuberger" in blob
+
+
 def test_title_prompt_converts_first_person_to_imperative():
     """FR-CR-05-100 — operator regression: «Я тебе сейчас
     пришлю драфт письма по Артему Барсукову» landed as the

@@ -177,6 +177,78 @@ def strip_first_person_prefix(title: str) -> str:
     return norm
 
 
+def strip_chat_prefix_to_imperative(title: str) -> str:
+    """FR-CR-05-103 — operator regression: «@IrinaMorato
+    подскажи, пожалуйста, отправить фоллоу-ап Neuberger ?»
+    landed verbatim as the title. The source is a chat
+    question pointed at someone, with the actual action verb
+    («отправить фоллоу-ап Neuberger») buried in the middle.
+
+    Strip in this order:
+      1. Leading `@handle,?` mention(s) (one or more,
+         comma-separated).
+      2. Leading «<Name>,» / «<Имя>,» when the second word
+         is a politeness verb (otherwise leave as-is, since
+         «Андрей сделай» means Андрей is the assignee).
+      3. Politeness verb + «,»: «подскажи», «скажи»,
+         «напомни», «уточни», «расскажи», «помоги»,
+         «ответь», «реши» — Russian; «tell me», «remind
+         me», «let me know», «help me» — English.
+      4. «пожалуйста» / «please» softener.
+      5. Trailing punctuation (`? ! . , ; :`).
+
+    Returns the cleaned title. If the result is empty (the
+    source was pure greeting / politeness with no verb),
+    returns the input unchanged so the naked-verb /
+    `normalize_task_title` checks downstream can still act.
+    """
+    if not title:
+        return title
+    import re
+
+    out = title.strip()
+
+    # 1. Leading @mentions.
+    out = re.sub(
+        r"^(?:@\w+\s*,?\s*)+",
+        "",
+        out,
+        flags=re.UNICODE,
+    )
+
+    # 3. Politeness verbs + 4. «пожалуйста».
+    out = re.sub(
+        r"^(?:подскажи|скажи|напомни|уточни|расскажи|помоги|ответь|реши|"
+        r"tell\s+me|remind\s+me|let\s+me\s+know|help\s+me)\s*,?\s*"
+        r"(?:пожалуйста|please)?\s*,?\s+",
+        "",
+        out,
+        flags=re.IGNORECASE | re.UNICODE,
+    )
+    # Strip a stand-alone «пожалуйста» / «please» softener
+    # that wasn't preceded by a politeness verb (with or
+    # without a trailing comma).
+    out = re.sub(
+        r"^(?:пожалуйста|please)\s*,?\s+",
+        "",
+        out,
+        flags=re.IGNORECASE | re.UNICODE,
+    )
+
+    # 5. Trailing punctuation.
+    out = out.rstrip(" ?!.,;:—-«»\"'")
+    out = out.strip()
+
+    if not out:
+        return title  # fall through unchanged
+
+    # Capitalise first letter (`normalize_task_title` runs next
+    # and would do this anyway, but we set it here so the
+    # naked-verb check below sees the canonical form).
+    out = out[0].upper() + out[1:] if out else out
+    return out
+
+
 def normalize_task_title(raw: Any) -> str:
     """FR-CR-05-72 / -75 / -89 / -95 — produce a one-glance title.
 

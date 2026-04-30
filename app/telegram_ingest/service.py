@@ -809,10 +809,19 @@ class TelegramIngestService:
                 from app.persistence.tasks import (
                     is_naked_verb_title,
                     normalize_task_title,
+                    strip_chat_prefix_to_imperative,
                     strip_first_person_prefix,
                 )
 
                 raw_title = (payload.get("title") or "").strip()
+                # FR-CR-05-103 — strip «@handle, подскажи,
+                # пожалуйста, X?» chat-question wrappers FIRST.
+                # Operator regression: «@IrinaMorato подскажи,
+                # пожалуйста, отправить фоллоу-ап Neuberger ?»
+                # landed verbatim — strip leading mentions +
+                # politeness verbs + softener + trailing «?».
+                if raw_title:
+                    raw_title = strip_chat_prefix_to_imperative(raw_title)
                 # FR-CR-05-101 — convert «Я тебе сейчас пришлю X»
                 # → «Прислать X» BEFORE checking naked-verb /
                 # capping. The LLM is told to do this in the

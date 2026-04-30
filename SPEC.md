@@ -833,6 +833,45 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-103 — Strip @-mention + politeness wrappers from chat-question titles
+
+Operator: «"@IrinaMorato подскажи, пожалуйста, отправить
+фоллоу-ап Neuberger ?" — да как блять такое происходит, почему
+такой формат сука!!! Здесь должно быть название задачи что
+сделать, далее описание более подробное».
+
+Source is a chat question pointed at someone — starts with
+`@handle`, contains a politeness verb («подскажи»), ends
+with `?`. The action verb («отправить фоллоу-ап Neuberger»)
+is buried in the middle. The LLM kept emitting the source
+verbatim as the title.
+
+Two-layer fix:
+
+  - **Python post-process `strip_chat_prefix_to_imperative`**
+    in `app/persistence/tasks.py`. Runs in `prepare_drafts`
+    BEFORE `strip_first_person_prefix` / naked-verb check /
+    `normalize_task_title`. Strips, in order:
+      1. Leading `@handle,?` mentions (one or more).
+      2. Politeness verb + comma: «подскажи / скажи /
+         напомни / уточни / расскажи / помоги / ответь /
+         реши»; «tell me / remind me / let me know / help
+         me».
+      3. Standalone «пожалуйста» / «please» softener (with
+         or without trailing comma).
+      4. Trailing `? ! . , ; :` punctuation.
+    Result is capitalised. If after stripping the title is
+    a naked verb («подскажи» on its own), the downstream
+    `is_naked_verb_title` check drops the draft.
+
+  - **Title prompt — CHAT-QUESTION REQUESTS block.** Teaches
+    the LLM to recognise the pattern and emit the imperative
+    plus a description naming WHO asked WHOM about WHAT. The
+    Neuberger regression pinned with «Отправить фоллоу-ап
+    Neuberger» as the worked rewrite + description shape
+    «Игорь спрашивает, нужно ли отправить … Обсуждается в
+    чате CEO Office».
+
 #### FR-CR-05-102 — Dedup call upgraded to gpt-4o (away from gpt-4o-mini)
 
 Operator: «надо смотреть в описание и с LLM сравнивать как я
@@ -4496,6 +4535,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-103 | `test_intent_pipeline.py::test_strip_chat_prefix_to_imperative_handles_operator_regression` (Neuberger «@IrinaMorato подскажи, пожалуйста, отправить фоллоу-ап Neuberger ?» → «Отправить фоллоу-ап Neuberger»; multi-mention; English variant; пожалуйста-only; pure-wrapper falls to naked verb downstream); `::test_title_prompt_pins_chat_question_to_imperative_rule` (CHAT-QUESTION REQUESTS block + worked rewrite pinned in TITLE_SYSTEM_PROMPT) |
 | FR-CR-05-102 | `test_task_dedup.py::test_dedup_call_uses_strong_model` (dedup `call_tool` invoked with `model="gpt-4o"`, not the default mini); existing `::test_dedup_dispatches_to_llm_with_full_descriptions` still pins the ≤1500-char description feed |
 | FR-CR-05-101 | `test_task_dedup.py::test_dedup_prompt_is_minimal_focused_classifier` (≤700-char final form: 10-existing framing + «compare descriptions» + output schema); `test_intent_pipeline.py::test_dedup_prompt_minimal_no_legacy_blocks` (legacy synonym/family blocks gone); `test_intent_graph.py::test_date_node_does_not_fall_back_when_llm_intentionally_null` (LLM null + reasoning → no fallback); `::test_date_node_falls_back_when_llm_silent_no_reasoning` (still falls back when call genuinely failed) |
 | FR-CR-05-100 | `test_intent_pipeline.py::test_title_prompt_converts_first_person_to_imperative` (FIRST-PERSON COMMITMENTS block + Артём Барсуков regression «Я тебе сейчас пришлю драфт письма» → «прислать драфт письма по Артему Барсукову» rewrite + «Я отправлю» / «I'll send» / «сейчас скину» fragments pinned); `test_task_dedup.py::test_dedup_dispatches_to_llm_with_full_descriptions` (no deterministic gate; LLM sees up to 1500 chars of description for both candidate and existing); `::test_dedup_prompt_is_minimal_focused_classifier` (≤2500-char prompt + «look at the descriptions, not just the titles» framing) |

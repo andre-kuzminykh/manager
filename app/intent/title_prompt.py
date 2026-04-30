@@ -351,6 +351,26 @@ the trace isn't lost:
       → title: "prepare Y"
         description: "asked by Petya"
 
+CHAT-QUESTION REQUESTS → IMPERATIVE (FR-CR-05-103). When the
+source is a chat question pointed at someone — starts with
+`@handle` or a name + comma, contains «подскажи /
+напомни / уточни / скажи / расскажи / помоги», and ends
+with `?` — extract the action-verb-phrase and emit it as
+imperative. The «подскажи» / «tell me» wrapper is
+politeness, not the actual ask.
+
+Operator regression: «@IrinaMorato подскажи, пожалуйста,
+отправить фоллоу-ап Neuberger ?» landed verbatim as the
+title. Correct rewrite:
+  title: «Отправить фоллоу-ап Neuberger»
+  description: «Игорь спрашивает, нужно ли отправить
+                фоллоу-ап Neuberger. Обсуждается в чате
+                CEO Office.»
+
+The address phrase («@IrinaMorato», «Андрей,») is the
+ASSIGNEE, not part of the title — strip and let the
+downstream owner-resolution layer pick them up.
+
 FIRST-PERSON COMMITMENTS → THIRD-PERSON IMPERATIVE (FR-CR-05-100).
 When the source is the author saying what THEY will do («Я
 пришлю X», «Я отправлю Y», «I'll send Z», «прикреплю файл»,

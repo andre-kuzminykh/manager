@@ -205,7 +205,7 @@ def post_initial_card(
         log.info("telegram_post_initial_card_no_recipients", task_id=task.id)
         return
 
-    text = build_task_card_text(task, header="✨ New task from this message", session=session)
+    text = build_task_card_text(task, session=session)
     cards: list[dict[str, int]] = []
     for uid in recipients:
         try:

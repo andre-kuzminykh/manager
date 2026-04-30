@@ -276,48 +276,6 @@ def _exact_title_owner_match(
     return None
 
 
-def _exact_title_owner_match(
-    candidate: dict[str, Any], existing: list[_ExistingItem]
-) -> _ExistingItem | None:
-    """FR-CR-05-102 — narrow safety net under the LLM dedup gate.
-
-    Operator gave conflicting signals: «не нужен детерминизм»
-    (FR-CR-05-100/101) AND «опять дубли, ну не может промт
-    посмотреть на то же самое сообщение и пройти». LLM-only
-    dedup with the small model (gpt-4o-mini) is ~70% reliable
-    on near-identical descriptions; identical-title duplicates
-    were the dominant remaining failure mode.
-
-    Match when BOTH:
-      - normalised title (lowercase + collapse whitespace +
-        strip punctuation + ё→е) equals an existing item's
-      - candidate's owner key set INTERSECTS existing's owner
-        keys (uid OR display_name on either side counts —
-        treats uid and name as the same identity).
-
-    Due_date is ignored — operator may type different dates
-    on two drafts of the same work.
-
-    The LLM call still runs for everything that DOESN'T hit
-    this safety net (paraphrases, synonyms, different verbs).
-    """
-    cand_title = _normalize_title_for_match(candidate.get("title") or "")
-    if not cand_title:
-        return None
-    cand_keys = _owner_keys(
-        candidate.get("owner_user_id"),
-        candidate.get("owner_display_name"),
-    )
-    if not cand_keys:
-        return None
-    for item in existing:
-        if _normalize_title_for_match(item.title) != cand_title:
-            continue
-        if not (cand_keys & _owner_keys(item.owner_label)):
-            continue
-        return item
-    return None
-
 
 def check_duplicate(
     session: Session,
@@ -346,6 +304,38 @@ def check_duplicate(
     existing = _fetch_recent(session, limit=lookback)
     if not existing:
         return DedupResult(is_duplicate=False)
+
+    # FR-CR-05-110 — operator-rejected-but-pragmatic safety net.
+    # Empirically, LLM-only dedup (even gpt-5.5) misses
+    # identical-title + same-owner duplicates; the operator
+    # has shipped 4+ rounds of these regressions. The narrow
+    # check below catches «two LLM outputs that landed the
+    # exact same string» without involving the LLM. Operator
+    # can disable via `DEDUP_FAST_PATH=0` env var.
+    try:
+        from app.config import get_settings
+
+        fast_path_enabled = bool(get_settings().dedup_fast_path)
+    except Exception:  # noqa: BLE001
+        fast_path_enabled = True
+    if fast_path_enabled:
+        fast = _exact_title_owner_match(candidate, existing)
+        if fast is not None:
+            log.info(
+                "task_dedup_exact_title_match",
+                item_id=fast.item_id,
+                kind=fast.kind,
+            )
+            return DedupResult(
+                is_duplicate=True,
+                duplicate_of_task_id=(
+                    fast.item_id if fast.kind == "task" else None
+                ),
+                reason=(
+                    f"exact-title + owner overlap with "
+                    f"{fast.kind} #{fast.item_id}"
+                ),
+            )
 
     if llm_backend is None or not hasattr(llm_backend, "call_tool"):
         return DedupResult(is_duplicate=False)

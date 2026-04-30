@@ -227,16 +227,18 @@ def test_listener_tick_processes_updates_and_advances_offset(
     report = listener.tick()
     assert report.updates_seen == 2
     assert report.messages_processed == 2
-    # FR-CR-05-102 — pure LLM dedup; this test's classifier
-    # stub doesn't carry an LLM backend, so dedup short-
-    # circuits to «not duplicate» and both tasks land.
-    assert report.tasks_created == 2
+    # FR-CR-05-110 — exact-title + owner overlap fast path
+    # short-circuits the second task (same title="x" / same
+    # owner). Only ONE Task lands.
+    assert report.tasks_created == 1
 
     with SessionFactory() as s:
         state = s.get(TelegramListenerState, 1)
         assert state is not None
         assert state.last_update_id == 101
-        assert s.query(Task).count() == 2
+        # FR-CR-05-110 — second update was deduped against the
+        # first via the exact-title fast path.
+        assert s.query(Task).count() == 1
         rows = s.query(ProcessedTelegramMessage).all()
         assert {(r.chat_id, r.message_id) for r in rows} == {(7, 1), (7, 2)}
         for t in s.query(Task).all():

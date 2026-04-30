@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
     openai_date_model: str = Field(default="gpt-5.5", alias="OPENAI_DATE_MODEL")
     openai_dedup_model: str = Field(default="gpt-5.5", alias="OPENAI_DEDUP_MODEL")
+    # FR-CR-05-110 — narrow Python safety net under the LLM
+    # dedup gate: when candidate's normalized title +
+    # owner-key set overlaps an existing item, mark
+    # duplicate without an LLM call. Empirical: LLM-only
+    # dedup (even gpt-5.5) missed identical-title +
+    # same-owner cases through 4 rounds of operator
+    # regressions. Set to 0 to disable.
+    dedup_fast_path: bool = Field(default=True, alias="DEDUP_FAST_PATH")
 
     # Google
     google_client_id: str = Field(default="", alias="GOOGLE_CLIENT_ID")

@@ -153,7 +153,10 @@ def test_dedup_dispatches_to_llm_with_full_descriptions(session):
     out = check_duplicate(
         session,
         candidate={
-            "title": "Взять обратную связь по PALADIN у Goldman Sachs",
+            # FR-CR-05-110 — paraphrased title so the
+            # exact-title fast path doesn't fire and the LLM
+            # IS called with full descriptions.
+            "title": "Уточнить обратную связь по PALADIN у Goldman Sachs",
             "description": (
                 "По просьбе Артёма нужно получить обратную связь "
                 "от Goldman Sachs по проекту PALADIN. Упомянуто, что "

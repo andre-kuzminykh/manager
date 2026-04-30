@@ -833,6 +833,25 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-107 — gpt-5.5 also rejects `temperature=0`
+
+Operator deployed FR-CR-05-106 fix and date_node hit a new
+400: «Unsupported value: 'temperature' does not support 0
+with this model. Only the default (1) value is supported.».
+gpt-5.x / o-series reasoning models accept ONLY the
+default temperature (1).
+
+`OpenAIBackend.call_tool` and `OpenAIBackend.complete_text`
+now:
+  - Omit the `temperature` kwarg entirely when
+    `_model_uses_completion_tokens(model)` is True
+    (server uses default 1).
+  - Keep `temperature=0` (call_tool) and
+    `temperature=temperature` (complete_text) for
+    gpt-4o-family.
+  - On 400 «temperature ... unsupported», retry once
+    without the kwarg as a safety net.
+
 #### FR-CR-05-106 — gpt-5.5 wants `max_completion_tokens`, not `max_tokens`
 
 Operator deployed gpt-5.5 (FR-CR-05-104) and the date_node
@@ -4638,6 +4657,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-107 | `test_llm_backends.py::test_openai_call_uses_completion_tokens_for_gpt5` (also asserts `temperature` not in kwargs); `::test_openai_call_uses_max_tokens_for_gpt4o` (asserts `temperature=0` survives for gpt-4o); `::test_openai_complete_text_drops_temperature_for_gpt5`; `::test_openai_complete_text_keeps_temperature_for_gpt4o` |
 | FR-CR-05-106 | `test_llm_backends.py::test_model_uses_completion_tokens_helper` (gpt-5/o1/o3/o4 → True; gpt-4o/4-turbo/3.5-turbo → False); `::test_openai_call_uses_completion_tokens_for_gpt5` (gpt-5.5 call ships `max_completion_tokens=4096`, no `max_tokens`); `::test_openai_call_uses_max_tokens_for_gpt4o` (gpt-4o still ships `max_tokens=4096`) |
 | FR-CR-05-105 | `test_telegram_ingest.py::test_prepare_drafts_drops_when_llm_returns_empty_description` (LLM returns no description → draft is deleted, no fallback template); `::test_prepare_drafts_keeps_llm_description_when_present` still pins the kept-as-is path |
 | FR-CR-05-104 | `test_intent_pipeline.py::test_detect_prompt_rejects_chat_opener_retrospective_recap` (Chat-opener + retrospective recap block + GP Morgan regression + Russian/English fillers pinned); `::test_default_models_use_gpt_5_5_everywhere` (all six model fields default to gpt-5.5); `test_llm_backends.py::test_settings_defaults_for_openai_model` (asserts gpt-5.5 default); `test_task_dedup.py::test_dedup_call_uses_strong_model` (asserts dedup call passes `model=gpt-5.5`) |

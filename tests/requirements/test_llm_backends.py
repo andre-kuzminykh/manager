@@ -414,6 +414,9 @@ def test_openai_call_uses_completion_tokens_for_gpt5(monkeypatch):
     assert "max_completion_tokens" in captured
     assert "max_tokens" not in captured
     assert captured["max_completion_tokens"] == 4096
+    # FR-CR-05-107 — gpt-5.x rejects custom temperature; we
+    # omit the kwarg entirely (server uses default 1).
+    assert "temperature" not in captured
 
 
 def test_openai_call_uses_max_tokens_for_gpt4o(monkeypatch):
@@ -450,6 +453,71 @@ def test_openai_call_uses_max_tokens_for_gpt4o(monkeypatch):
     )
     assert "max_tokens" in captured
     assert "max_completion_tokens" not in captured
+    # gpt-4o still accepts temperature=0 for deterministic output.
+    assert captured.get("temperature") == 0
+
+
+def test_openai_complete_text_drops_temperature_for_gpt5(monkeypatch):
+    """FR-CR-05-107 — Fireflies summariser uses `complete_text`.
+    gpt-5.x rejects custom temperature; the kwarg must be
+    omitted for those models."""
+    from app.intent.llm_backends import OpenAIBackend
+
+    captured: dict = {}
+
+    class _StubChoices:
+        message = type("M", (), {"content": "summary text"})()
+
+    class _StubResp:
+        choices = [_StubChoices()]
+
+    class _StubCompletions:
+        def create(self, **kw):
+            captured.update(kw)
+            return _StubResp()
+
+    class _StubChat:
+        completions = _StubCompletions()
+
+    class _StubClient:
+        chat = _StubChat()
+
+    backend = OpenAIBackend(_StubClient(), "gpt-5.5")
+    out = backend.complete_text(
+        system_prompt="s", user_prompt="u", temperature=0.2,
+    )
+    assert out == "summary text"
+    assert "temperature" not in captured
+
+
+def test_openai_complete_text_keeps_temperature_for_gpt4o():
+    """FR-CR-05-107 — gpt-4o-family still accepts temperature."""
+    from app.intent.llm_backends import OpenAIBackend
+
+    captured: dict = {}
+
+    class _StubChoices:
+        message = type("M", (), {"content": "x"})()
+
+    class _StubResp:
+        choices = [_StubChoices()]
+
+    class _StubCompletions:
+        def create(self, **kw):
+            captured.update(kw)
+            return _StubResp()
+
+    class _StubChat:
+        completions = _StubCompletions()
+
+    class _StubClient:
+        chat = _StubChat()
+
+    backend = OpenAIBackend(_StubClient(), "gpt-4o-mini")
+    backend.complete_text(
+        system_prompt="s", user_prompt="u", temperature=0.2,
+    )
+    assert captured.get("temperature") == 0.2
 
 
 def test_settings_openai_api_key_field_is_empty_by_default():

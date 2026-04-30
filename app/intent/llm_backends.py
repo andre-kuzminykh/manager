@@ -264,16 +264,27 @@ class OpenAIBackend:
                 "type": "function",
                 "function": {"name": tool_name},
             },
-            temperature=0,
         )
+        # FR-CR-05-106 / -107 — gpt-5.x and o-series reasoning
+        # models reject `max_tokens` (must be `max_completion_
+        # tokens`) AND `temperature=0` (only default 1
+        # supported). Older gpt-4o-family accepts both. Branch
+        # on the model name + retry-on-error as a safety net.
         if _model_uses_completion_tokens(eff_model):
             kwargs["max_completion_tokens"] = 4096
+            # No temperature → defaults to 1 server-side.
         else:
             kwargs["max_tokens"] = 4096
+            kwargs["temperature"] = 0
+
+        def _try(call_kwargs: dict[str, Any]):
+            return self._client.chat.completions.create(**call_kwargs)
+
         try:
-            response = self._client.chat.completions.create(**kwargs)
+            response = _try(kwargs)
         except Exception as e:  # noqa: BLE001
             msg = str(e)
+            # max_tokens / max_completion_tokens swap.
             if (
                 "max_tokens" in msg
                 and "max_completion_tokens" in msg
@@ -281,7 +292,8 @@ class OpenAIBackend:
             ):
                 kwargs.pop("max_tokens", None)
                 kwargs["max_completion_tokens"] = 4096
-                response = self._client.chat.completions.create(**kwargs)
+                kwargs.pop("temperature", None)
+                response = _try(kwargs)
             elif (
                 "max_completion_tokens" in msg
                 and "Unsupported" in msg
@@ -289,7 +301,16 @@ class OpenAIBackend:
             ):
                 kwargs.pop("max_completion_tokens", None)
                 kwargs["max_tokens"] = 4096
-                response = self._client.chat.completions.create(**kwargs)
+                kwargs.setdefault("temperature", 0)
+                response = _try(kwargs)
+            elif (
+                "temperature" in msg
+                and ("Unsupported" in msg or "unsupported" in msg)
+                and "temperature" in kwargs
+            ):
+                # Reasoning model rejecting temperature=0.
+                kwargs.pop("temperature", None)
+                response = _try(kwargs)
             else:
                 raise
         return _extract_openai_tool_input(response)
@@ -311,20 +332,36 @@ class OpenAIBackend:
         model: str | None = None,
         temperature: float = 0.2,
     ) -> str:
-        """FR-CR-05-39 — plain-text completion for the Fireflies
-        summariser. Returns the model's text response, or empty
-        string on failure."""
+        """FR-CR-05-39 / -107 — plain-text completion for the
+        Fireflies summariser. Returns the model's text response,
+        or empty string on failure. Reasoning models (gpt-5.x /
+        o-series) reject custom temperature; we drop the kwarg
+        for them."""
+        eff_model = model or self._model
+        kwargs: dict[str, Any] = dict(
+            model=eff_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        if not _model_uses_completion_tokens(eff_model):
+            kwargs["temperature"] = temperature
         try:
-            resp = self._client.chat.completions.create(
-                model=model or self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=temperature,
-            )
-        except Exception:  # noqa: BLE001
-            return ""
+            resp = self._client.chat.completions.create(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            # Reasoning model rejected temperature; retry without.
+            if (
+                "temperature" in str(e)
+                and "temperature" in kwargs
+            ):
+                kwargs.pop("temperature", None)
+                try:
+                    resp = self._client.chat.completions.create(**kwargs)
+                except Exception:  # noqa: BLE001
+                    return ""
+            else:
+                return ""
         try:
             return resp.choices[0].message.content or ""
         except (AttributeError, IndexError):

@@ -153,6 +153,15 @@ Rules:
       - «обсудить с командой результаты квартала»  — the
         quarter (Q1, Q2 …) is a context window, not a
         deadline. Emit null.
+      - «статус на DD.MM» / «status as of DD.MM» / «as of
+        Feb 26» (FR-CR-05-94 — operator regression). This
+        is the date a status update was last reported, NOT
+        a deadline. Pattern: «статус на 26/02 — ждём
+        ответа» = «as of Feb 26 we're still waiting» —
+        emit null. Operator regression: «Узнать статус
+        контакта … статус на 26/02 — ждем» landed as
+        `due_date=2027-02-23` (year hallucinated AND date
+        is a status-as-of-marker, not a deadline).
 
     If unsure whether the date modifies the verb of the task
     or another entity in the same sentence, EMIT NULL. The

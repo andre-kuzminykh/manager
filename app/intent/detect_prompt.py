@@ -47,7 +47,13 @@ Return ``is_task=false`` for:
 - *Completed* status reports — work that's already done, in any
   voice / tense:
     - active past: «отправил», «сделал», «закрыл», «позвонил»,
-      «написал», «написала»
+      «написал», «написала», «случайно отправила», «случайно
+      сделал» (the «случайно» / «accidentally» modifier still
+      reports past completion — FR-CR-05-94 regression: «Да,
+      Юля случайно отправила» landed as a task; should be
+      no_action). A leading «Да, » / «Yes, » CONFIRMS the
+      preceding question and the past-tense verb that follows
+      reports what happened — still completion recap.
     - already-prefix (FR-CR-05-93 — operator regression): any
       verb prefixed with «уже» / «already» reports completion,
       not new work — «уже написала», «уже отправила», «уже
@@ -103,6 +109,24 @@ Return ``is_task=false`` for:
   A polite-ask imperative («can you send the deck?», «отправите
   отчёт?») IS a task — distinguish by whether the answer
   requires WORK or just YES / NO.
+- *Opinion / qualifier statements without a clear imperative*
+  (FR-CR-05-94 — operator regression). Sentences like:
+    «По X я не против, но Y»  (qualified consent)
+    «Они у Алины в задачах есть»  (status info — task is
+        elsewhere)
+    «Мне кажется, это надо обсудить»  (opinion)
+    «I think we should look at X»  (opinion)
+    «Они уже работают над этим»  (status info)
+  describe the author's POSITION on something or report
+  someone else's status — they are not delegating new work.
+  Operator regression: «По Сингапуру и Гонконгу я не против,
+  но у нас Алина — Chief of Investment Relations, я как
+  Project Manager — координирую задачи, поэтому нужен апрув
+  от нее и Артема на фонды в Гонконге и Сингапуре» landed as
+  a 250-char title with no description. The «нужен апрув от
+  нее и Артема» reads like a request for approval from
+  someone else — that's not the AUTHOR's task, that's a
+  qualifier. is_task=false.
 - *Pure quoted artefacts* — when the message is essentially a
   template / blurb / email body / screenshot transcript without
   an imperative wrapper («Блерб для отправки Abundance: Hi

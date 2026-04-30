@@ -833,6 +833,77 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-94 — Five operator regressions in one go
+
+Operator pack:
+
+  1. «🟡 По Сингапуру и Гонконгу я не против, но у нас Алина —
+     Chief of Investment Relations…» — 250-char opinion
+     statement landed as a task title with no description.
+  2. «🟡 Они у Алины в задачах есть» — status info, not work.
+  3. «🟡 Узнать статус контакта … 📅 2027-02-23» — date
+     hallucinated from «статус на 26/02» (status-as-of marker,
+     not deadline).
+  4. «📝 По переписке с 6660151534» — raw numeric Telegram uid
+     leaked into the description.
+  5. «при редактировании "переложи на меня" — то есть я хочу на
+     себя задачу повесить, в контексте надо держать кто сейчас
+     пользователь».
+
+Five layered fixes, plus one infrastructure plumbing issue:
+
+  - **`detect_prompt.py` — opinion / qualifier rejection.**
+    New is_task=false trigger: «По X я не против, но Y» /
+    «Они у Алины в задачах есть» / «Мне кажется» / «I think
+    we should». Operator's Singapore / HK case pinned as the
+    worked failure-mode example.
+
+  - **`date_prompt.py` — status-as-of-date is not a deadline.**
+    Pattern: «статус на DD.MM» / «status as of DD.MM». The
+    date marks WHEN the status was last reported, not WHEN
+    the task is due. Emit null. The «статус на 26/02 →
+    `2027-02-23`» regression pinned.
+
+  - **`telegram_ingest/service.py::prepare_drafts` runs full
+    title-cap on the draft.** Previous code only did simple
+    first-letter capitalisation; the FR-CR-05-72/89
+    `normalize_task_title` (≤100 chars + word-boundary
+    ellipsis) was only applied at `create_task_from_draft`
+    time. Drafts now show capped titles in the widget,
+    matching the post-Accept Task.
+
+  - **`prepare_drafts` resolves stray Telegram uids in
+    `description` to display names.** New `_resolve_uids_in_
+    text(session, text)` helper finds standalone 9-15 digit
+    tokens, looks them up in `team_members.telegram_user_id
+    → real_name`, replaces when matched. Operator regression
+    «По переписке с 6660151534» → «По переписке с Андреем»
+    (or whoever 6660151534 is in the registry).
+
+  - **`ops/wipe_tasks.py --also-wipe-sheet`.** Clears every
+    row past the header in the Google Sheet via Sheets API
+    `values().clear(range=A2:V)`. Operator regression: the
+    DB wipe was complete but stale rows remained in the
+    sheet. Header row preserved.
+
+  - **`detect_prompt.py` — «случайно X» / «Да, X сделал»
+    counter-example.** Operator's «Да, Юля случайно
+    отправила» landed as a task. The «случайно» modifier
+    doesn't change the past-tense completion semantics; the
+    leading «Да, » confirms a question and the verb that
+    follows reports what happened. Pinned in the active-
+    past-tense list.
+
+  - **Edit prompt knows the current user.**
+    `_build_edit_user_prompt` / `parse_edit_with_llm` /
+    `parse_draft_edit_with_llm` accept `current_user_id` +
+    `current_user_label`; `apply_edit_reply_ex` resolves
+    `actor` to a real_name via `_resolve_owner_link_target`
+    and threads it through. New prompt block teaches: «на
+    меня» / «мне» / «assign to me» / «to me» / «to myself»
+    / «переложи на меня» / «assign to myself» / «передай
+    мне» = `owner=<current_user_id>`.
+
 #### FR-CR-05-93 — Detect: «уже X» / «already X» = completion recap, not a task
 
 Operator: «"🟡 Уже написала на почту ему тоже / ну ничего) и
@@ -4118,6 +4189,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-94  | `test_intent_pipeline.py::test_detect_prompt_rejects_opinion_qualifier_statements` (Singapore/HK 250-char regression + «По X я не против, но Y» / «Они у Алины в задачах есть» / «Мне кажется» / «I think we should» fragments + FR-CR-05-94 pinned); `::test_date_prompt_status_as_of_is_not_a_deadline` («статус на 26/02» pattern + 2027-02-23 BAD-output + status-update framing); manual verification: drafts now show ≤101-char titles via `normalize_task_title` in `prepare_drafts`; `_resolve_uids_in_text` resolves bare 9-15 digit tokens to `team_members.real_name`; edit prompt accepts `current_user_id` + `current_user_label` so «на меня» resolves to the editor's uid; `ops/wipe_tasks.py --also-wipe-sheet` calls `values().clear(A2:V)`. |
 | FR-CR-05-93  | `test_intent_pipeline.py::test_detect_prompt_rejects_uzhe_completed_recap_as_no_action` («уже / already» prefix + «уже написала» / «уже отправила» / «Уже написала на почту» / «и инвайт отправила» fragments + FR-CR-05-93 pinned) |
 | FR-CR-05-92  | `test_task_dedup.py::test_dedup_prompt_pins_transliteration_rule` (TRANSLITERATION block + James Morgon / Джеймсу Моргану / Olayan / Олаян / Артем / Артём / Artem / Petya / Петя fragments + FR-CR-05-92 pinned) |
 | FR-CR-05-91  | `test_wipe_tasks_cli.py::test_wipe_dry_run_keeps_all_rows`; `::test_wipe_without_yes_flag_is_dry_run` (no `--yes` → no deletion); `::test_wipe_with_yes_clears_task_data_keeps_team_registry` (tasks/drafts/history/subs/sheets-sync/audit gone, team_members + telegram_chat_members preserved); `test_evening_status.py::test_evening_tomorrow_plan_drops_owner_badge_when_recipient_is_owner`; `::test_evening_admin_tomorrow_plan_groups_per_person` (per-person sections with `👤 <Name>` headers + counts); `::test_evening_admin_audit_payload_carries_per_person_plan_task_ids` (audit row carries `{uid: [task_id]}` for morning diff); `test_morning_cards.py::test_morning_admin_diff_renders_added_and_done_per_person` (✅ done + 🗑 deleted + ➕ added classification); `::test_morning_admin_diff_returns_none_with_no_changes`; `::test_morning_admin_diff_returns_none_when_no_prior_plan` |

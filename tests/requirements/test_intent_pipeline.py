@@ -640,6 +640,50 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "temporal anchor" in blob.lower() or "к 5" in blob
 
 
+def test_detect_prompt_rejects_opinion_qualifier_statements():
+    """FR-CR-05-94 — operator regression: «По Сингапуру и
+    Гонконгу я не против, но у нас Алина — Chief of Investment
+    Relations …» landed as a 250-char title with no description.
+    Opinion / qualifier statements without a clear imperative
+    must be `is_task=false`."""
+    blob = DETECT_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "FR-CR-05-94" in blob
+    assert "Opinion / qualifier" in blob or "qualifier statements" in flat
+    # The Singapore/HK regression pinned.
+    assert "По Сингапуру и Гонконгу" in blob
+    assert "Project Manager" in blob
+    # Other listed patterns.
+    for fragment in (
+        "По X я не против, но Y",
+        "Они у Алины в задачах есть",
+        "Мне кажется",
+        "I think we should",
+    ):
+        assert fragment in blob, f"{fragment!r} should be pinned"
+
+
+def test_date_prompt_status_as_of_is_not_a_deadline():
+    """FR-CR-05-94 — operator regression: «Узнать статус
+    контакта … статус на 26/02 — ждем» landed as `due_date=
+    2027-02-23` (year hallucinated AND date is a status-as-of
+    marker, not a deadline). The date prompt must teach:
+    «статус на DD.MM» / «as of DD.MM» = the date the status
+    was reported, not a deadline → emit null."""
+    from app.intent.date_prompt import DATE_SYSTEM_PROMPT
+
+    blob = DATE_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "FR-CR-05-94" in blob
+    # Pattern + concrete operator regression pinned.
+    assert "статус на 26/02" in blob or "status as of" in flat.lower()
+    assert "2027-02-23" in blob
+    # «status was last reported» framing.
+    assert "status update" in flat.lower() or "status was" in flat.lower()
+
+
 def test_detect_prompt_rejects_uzhe_completed_recap_as_no_action():
     """FR-CR-05-93 — operator regression: «Уже написала на
     почту ему тоже / ну ничего) и инвайт отправила» landed as

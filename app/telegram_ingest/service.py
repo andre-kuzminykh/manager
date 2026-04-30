@@ -242,6 +242,54 @@ def _resolve_owner(
         )
 
 
+def _resolve_uids_in_text(session: "Session", text: str) -> str:
+    """FR-CR-05-94 — operator regression: «По переписке с
+    6660151534» where the LLM left a raw numeric Telegram uid
+    in the description because it appeared verbatim in the
+    source/context.
+
+    Find every standalone 9-15 digit token and try to resolve
+    via `team_members.telegram_user_id → real_name`. Replace
+    the digits with the name when there's a hit. Leave
+    untouched when nothing matches (could be an order number,
+    contract id, etc.).
+
+    Bounded by the same digit-length window used elsewhere in
+    the project so we don't flag short numbers («5», «23») as
+    user ids.
+    """
+    import re
+    from app.models import TeamMember
+
+    # 9-15 digit tokens preceded/followed by non-digit (or
+    # start/end). Telegram uids are typically 9-12 digits.
+    pattern = re.compile(r"(?<!\d)(\d{9,15})(?!\d)")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return text
+
+    # Batch lookup so we hit the DB once per unique candidate.
+    uids = {int(m.group(1)) for m in matches}
+    rows = (
+        session.query(TeamMember)
+        .filter(TeamMember.telegram_user_id.in_(uids))
+        .all()
+    )
+    by_id: dict[int, str] = {}
+    for r in rows:
+        if r.telegram_user_id and r.real_name:
+            by_id[int(r.telegram_user_id)] = r.real_name
+
+    if not by_id:
+        return text
+
+    def _replace(m: "re.Match[str]") -> str:
+        uid = int(m.group(1))
+        return by_id.get(uid, m.group(1))
+
+    return pattern.sub(_replace, text)
+
+
 def _fallback_description(message: TelegramSourceMessage) -> str:
     """FR-CR-05-10 — deterministic stand-in description for drafts
     where the LLM had no meaningful context to summarise. Better
@@ -751,19 +799,40 @@ class TelegramIngestService:
                     slack_message_ts=str(message.message_id),
                 )
                 payload = dict(draft.payload or {})
-                # FR-CR-05-75 / 63 / 74 — apply the same
+                # FR-CR-05-75 / 63 / 74 / 94 — apply the SAME
                 # cosmetic + default fixes the persist layer
                 # applies, so the draft widget the operator sees
                 # already matches what the post-Accept Task
-                # will look like (capitalized title, default
-                # deadline today 18:00 if LLM didn't extract).
-                t = (payload.get("title") or "").strip()
-                if t and not t[0].isupper():
-                    payload["title"] = t[0].upper() + t[1:]
+                # will look like (FR-CR-05-72/89 title cap +
+                # capitalized first letter + default deadline
+                # today 18:00 if LLM didn't extract).
+                from app.persistence.tasks import normalize_task_title
+
+                raw_title = (payload.get("title") or "").strip()
+                if raw_title:
+                    try:
+                        payload["title"] = normalize_task_title(raw_title)
+                    except ValueError:
+                        # `normalize_task_title` raises on empty
+                        # title; we already early-returned above
+                        # via the strip + truthy check, but stay
+                        # defensive.
+                        pass
                 if not (payload.get("due_date") or "").strip():
                     payload["due_date"] = date.today().isoformat()
                 if not (payload.get("due_time") or "").strip():
                     payload["due_time"] = "18:00"
+                # FR-CR-05-94 — operator regression: «По
+                # переписке с 6660151534» — LLM left the raw
+                # numeric Telegram uid in the description.
+                # Resolve to the human-readable name from
+                # team_members so the operator never sees a
+                # bare uid.
+                desc = payload.get("description")
+                if isinstance(desc, str) and desc:
+                    payload["description"] = _resolve_uids_in_text(
+                        session, desc
+                    )
                 payload["_pending"] = {
                     "source_kind": "telegram",
                     "conversation_id": str(message.chat_id),

@@ -92,7 +92,49 @@ def _parse_args() -> argparse.Namespace:
         default=True,
         help="(default) also wipe daily_plan_items.",
     )
+    p.add_argument(
+        "--also-wipe-sheet",
+        action="store_true",
+        help=(
+            "Also clear every row past the header in the Google Sheet "
+            "(FR-CR-05-94 — operator: «почему предыдущие задачи есть в "
+            "google sheet, я думал все снести»). Header row is preserved."
+        ),
+    )
     return p.parse_args()
+
+
+def _wipe_sheet_data(*, log_) -> int:
+    """FR-CR-05-94 — clear every row past the header in the
+    Google Sheet. Returns 0 on success / no-op (no creds), >0
+    on failure. Header row stays — the bot rewrites it on next
+    sync via `_ensure_headers`."""
+    from app.config import get_settings
+    from app.sync.factories import build_sheets_factory
+    from app.sync.sheets import _HEADER_ROW, _col_letter
+
+    settings = get_settings()
+    factory = build_sheets_factory(settings)
+    if factory is None:
+        log_.warning("wipe_sheet_skipped_no_factory")
+        return 0
+    svc = factory()
+    if svc is None:
+        log_.warning("wipe_sheet_skipped_no_credentials")
+        return 0
+    try:
+        end_col = _col_letter(len(_HEADER_ROW))
+        rng = f"{svc._sheet_name}!A2:{end_col}"
+        svc._service.spreadsheets().values().clear(
+            spreadsheetId=svc._spreadsheet_id,
+            range=rng,
+            body={},
+        ).execute()
+        log_.info("wipe_sheet_cleared", range=rng)
+        return 0
+    except Exception as e:  # noqa: BLE001
+        log_.error("wipe_sheet_failed", error=str(e))
+        return 1
 
 
 def main() -> int:
@@ -149,8 +191,12 @@ def main() -> int:
             delete(AuditLog).where(AuditLog.category.in_(_WIPED_AUDIT_CATEGORIES))
         )
         # session_scope commits on exit
-    log.info("wipe_tasks_done", **counts)
-    return 0
+
+    sheet_rc = 0
+    if args.also_wipe_sheet:
+        sheet_rc = _wipe_sheet_data(log_=log)
+    log.info("wipe_tasks_done", sheet_clear_rc=sheet_rc, **counts)
+    return sheet_rc
 
 
 if __name__ == "__main__":

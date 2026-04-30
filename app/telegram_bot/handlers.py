@@ -478,6 +478,8 @@ def _build_edit_user_prompt(
     current: dict[str, str],
     reply_text: str,
     known_employees: list[dict] | None = None,
+    current_user_id: str | None = None,
+    current_user_label: str | None = None,
 ) -> str:
     """Build the user-side prompt for the Edit LLM call.
 
@@ -486,6 +488,13 @@ def _build_edit_user_prompt(
     the user types «ответственный Андрей Кузьминых» the LLM picks
     the matching row and round-trips the registry's id, so the
     downstream apply step can DM the new owner directly.
+
+    `current_user_id` / `current_user_label` (FR-CR-05-94 — operator
+    regression: «при редактировании "переложи на меня" — то есть я
+    хочу на себя задачу повесить, в контексте надо держать кто
+    сейчас пользователь»). The LLM needs to know who's editing
+    so that «на меня» / «assign to me» / «мне» / «to me» resolves
+    to that user's id.
     """
     today = date.today().isoformat()
     cur_lines = "\n".join(f"  {k}={v}" for k, v in current.items())
@@ -505,6 +514,17 @@ def _build_edit_user_prompt(
             "known_employees (assignable owners — pick a "
             "slack_user_id from this table when the user names "
             "someone):\n" + "\n".join(rows) + "\n\n"
+        )
+    current_user_block = ""
+    if current_user_id:
+        label_part = f" ({current_user_label})" if current_user_label else ""
+        current_user_block = (
+            f"current_user (the person editing this task right now)"
+            f": id={current_user_id}{label_part}\n"
+            f"When the user says «на меня» / «мне» / «assign to me» / "
+            f"«to me» / «to myself», emit `owner={current_user_id}`. "
+            f"Treat «переложи на меня» / «assign to myself» / «передай "
+            f"мне» as explicit self-assignment.\n\n"
         )
     return (
         "You are editing an existing task. Read the user's reply "
@@ -547,6 +567,7 @@ def _build_edit_user_prompt(
         "- To clear a field, set it to an empty string.\n"
         "- Don't invent values. If unsure, omit the key.\n\n"
         f"{employees_block}"
+        f"{current_user_block}"
         f"Current task values:\n{cur_lines}\n\n"
         f"User reply:\n{reply_text}"
     )
@@ -558,6 +579,8 @@ def parse_edit_with_llm(
     reply_text: str,
     backend: Any | None,
     known_employees: list[dict] | None = None,
+    current_user_id: str | None = None,
+    current_user_label: str | None = None,
 ) -> dict[str, str]:
     """LLM-driven parse of a free-form Edit reply. Falls back to the
     structured `key=value` parser when no backend is available, when
@@ -599,6 +622,8 @@ def parse_edit_with_llm(
         current=current,
         reply_text=text,
         known_employees=known_employees,
+        current_user_id=current_user_id,
+        current_user_label=current_user_label,
     )
     try:
         result = backend.call_tool(
@@ -796,12 +821,26 @@ def apply_edit_reply_ex(
     except Exception as e:  # noqa: BLE001
         log.info("telegram_edit_team_registry_unavailable", error=str(e))
 
+    # FR-CR-05-94 — resolve `actor` to a human label so the
+    # LLM's «на меня» branch knows who's editing.
+    current_user_label = None
+    try:
+        from app.telegram_bot.sender import _resolve_owner_link_target
+
+        _tg_id, _tg_handle, real_name = _resolve_owner_link_target(
+            session, actor, None
+        )
+        current_user_label = real_name
+    except Exception:  # noqa: BLE001
+        pass
     if llm_backend is not None:
         payload = parse_edit_with_llm(
             task=task,
             reply_text=reply_text,
             backend=llm_backend,
             known_employees=known_employees,
+            current_user_id=actor,
+            current_user_label=current_user_label,
         )
     else:
         payload = parse_edit_payload(reply_text)
@@ -1058,6 +1097,8 @@ def parse_draft_edit_with_llm(
     reply_text: str,
     backend: Any | None,
     known_employees: list[dict] | None = None,
+    current_user_id: str | None = None,
+    current_user_label: str | None = None,
 ) -> dict[str, str]:
     """Free-form parse for Edit-on-draft. Mirrors
     :func:`parse_edit_with_llm` but reads the «current values» from
@@ -1093,6 +1134,8 @@ def parse_draft_edit_with_llm(
         current=current,
         reply_text=text,
         known_employees=known_employees,
+        current_user_id=current_user_id,
+        current_user_label=current_user_label,
     )
     try:
         result = backend.call_tool(

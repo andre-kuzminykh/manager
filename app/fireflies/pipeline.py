@@ -275,12 +275,19 @@ class FirefliesPipeline:
         if not row.detailed_summary:
             row.last_error = "no detailed summary as short-summary input"
             return False
+        # FR-CR-05-54 — participants get their own block in the
+        # user prompt so the LLM doesn't have to re-derive the
+        # list from the transcript. One per line, falsy entries
+        # dropped.
+        participants_block = "\n".join(
+            f"  - {p}" for p in (row.participants or []) if p
+        ) or "  (нет данных)"
         meta_line = (
             f"meeting_title: {row.title or ''}\n"
             f"meeting_date: {row.meeting_date.isoformat() if row.meeting_date else ''}\n"
             f"duration_min: {row.duration_seconds // 60 if row.duration_seconds else ''}\n"
-            f"participants: {', '.join(row.participants or [])}\n"
-            f"google_doc_url: {row.google_doc_url or ''}\n\n"
+            f"google_doc_url: {row.google_doc_url or ''}\n"
+            f"\nparticipants:\n{participants_block}\n\n"
         )
         user_prompt = meta_line + "Подробный отчёт:\n" + row.detailed_summary
         try:
@@ -295,9 +302,11 @@ class FirefliesPipeline:
         if not text:
             row.last_error = "short summary LLM returned empty"
             return False
-        # Hard-cap to 2000 chars per spec, even if the LLM
-        # blew past it.
-        row.short_summary = _truncate(text, limit=2000)
+        # FR-CR-05-54 — hard cap raised to 3800 chars (~10%
+        # under the 4096-char Telegram per-message limit) so
+        # the «Участники» + «Главные обсуждения» blocks added
+        # to the prompt actually fit.
+        row.short_summary = _truncate(text, limit=3800)
         row.last_error = None
         return True
 

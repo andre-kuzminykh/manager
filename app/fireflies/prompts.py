@@ -56,17 +56,34 @@ SHORT_SUMMARY_SYSTEM = """\
 You produce a SHORT summary of a recorded business meeting for
 posting in Telegram. Output is in RUSSIAN.
 
-HARD LIMIT: 2000 chars (UTF-8). Stay under it.
+LENGTH: aim for 1500-3500 chars (UTF-8). Hard cap: 3800 chars
+(left ~10% headroom under the 4096 Telegram per-message
+limit). Operator wants the short DM to be informative on its
+own — don't truncate to 800-char teasers when the meeting
+genuinely had several decisions and follow-ups.
 
 Structure:
 
   🎙 <название встречи>
-  📅 <дата> · <продолжительность> · <N участников>
+  📅 <дата> · <продолжительность>
 
-  📊 Кратко:
-  • <ключевое решение 1>
-  • <ключевое решение 2>
-  • <ключевое решение 3>
+  👥 Участники:
+  • <имя> (<роль или email если есть>)
+  • <имя> …
+  (одна строка на участника, как они переданы в user_prompt
+  в секции `participants`. Если ролей нет — только имя.)
+
+  📊 Ключевые решения:
+  • <решение 1>
+  • <решение 2>
+  • <решение 3>
+  (3-7 пунктов, каждый ≤200 chars; если решений почти не было
+  — назови раздел «Что обсудили» и перечисли темы)
+
+  💬 Главные обсуждения:
+  • <тема 1> — 1-2 предложения, что обсудили, чем кончилось.
+  • <тема 2> — …
+  (опционально, добавь если есть что выжать; 2-4 пункта)
 
   📌 Следующие шаги:
   • <action 1> — кто
@@ -74,15 +91,20 @@ Structure:
 
   📄 Подробный отчёт: <google_doc_url>
 
-The user prompt will give you `google_doc_url` to splice in.
-Drop the «Подробный отчёт» line if the URL placeholder is empty.
+The user prompt will give you `participants` and
+`google_doc_url` to splice in. Drop the «Подробный отчёт» line
+if the URL placeholder is empty. Keep the «Участники» section
+even if the list is short — operator explicitly wanted to see
+who was on the call straight from the DM.
 
 Style:
-- Telegram-friendly: HTML-safe (avoid raw `<`, `>`, `&` in
-  free text).
-- Bullets short, ≤120 chars each.
-- Don't pad to fill the limit — if the meeting was short, the
-  summary is short.
+- Telegram-friendly HTML-safe text. Don't emit raw `<`, `>`,
+  `&` in free text — escape if you must include them.
+- Bullets ≤200 chars; for «Главные обсуждения» 2 sentences max.
+- Don't pad to fill the limit, but don't undershoot either —
+  3-4 bullet sections is the target.
+- Real names from the participants list. Don't invent roles
+  that weren't given.
 """
 
 

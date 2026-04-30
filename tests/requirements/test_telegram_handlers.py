@@ -16,7 +16,7 @@ Tests cover:
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as _time, timedelta, timezone
 
 import pytest
 
@@ -88,6 +88,22 @@ def test_handle_start_stranger_rejected_when_owner_present(session):
     tid = _mk(session, status=TaskStatus.todo, owner_user_id="11")
     with pytest.raises(h.NotAuthorised):
         h.handle_start(session, task_id=tid, actor="99")
+
+
+def test_handle_start_snaps_start_date_and_time_to_now(session):
+    """FR-CR-05-69 — pressing Start sets `start_date` to today
+    and `start_time` to the current time. The planning pair
+    reflects when the work actually started, not whatever was
+    pre-filled on the card."""
+    from datetime import date as _date
+
+    tid = _mk(session, status=TaskStatus.todo, owner_user_id="11")
+    task = h.handle_start(session, task_id=tid, actor="11")
+    assert task is not None
+    assert task.start_date == _date.today()
+    assert task.start_time is not None
+    # 00:00 (default Time()) would mean we forgot to set it.
+    assert task.start_time != _time(0, 0)
 
 
 # --------------------------------------------------------------------------- #

@@ -746,3 +746,26 @@ def test_non_admin_non_owner_blocked(session, monkeypatch):
             h._ensure_can_edit(task, "555")
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_edit_prompt_pins_title_vs_description_distinction():
+    """FR-CR-05-68 — operator: «нажал Edit и ввёл вообще другое
+    описание задачи, бот поменял только название, а само
+    описание нет». LLM was treating any free-form text as a
+    title change. The prompt now teaches: short imperative
+    (≤80 chars, 4-7 words) ⇒ title; longer / multi-sentence ⇒
+    description."""
+    from app.telegram_bot.handlers import _build_edit_user_prompt
+
+    out = _build_edit_user_prompt(
+        current={"title": "x", "description": "old"},
+        reply_text="some reply",
+        known_employees=None,
+    )
+    blob = out.lower()
+    # Both kinds of guidance are present.
+    assert "title" in blob and "description" in blob
+    # The exact regression pattern is pinned.
+    assert "title" in out  # case-sensitive marker for the rule label
+    assert "longer" in blob or "multi-sentence" in blob or "multiple sentences" in blob
+    assert "≤80" in out or "<=80" in out or "80 chars" in out

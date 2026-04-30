@@ -95,7 +95,17 @@ def _ensure_can_edit(task: Task, actor: str | None) -> None:
 
 
 def handle_start(session: Session, *, task_id: int, actor: str) -> Task | None:
-    """*Start* button: backlog/todo → in_progress."""
+    """*Start* button: backlog/todo → in_progress.
+
+    FR-CR-05-69 — pressing Start ALSO snaps `start_date` /
+    `start_time` to «now» so the planning fields reflect when
+    the work actually began. Operator: «сделай так чтобы start
+    жмёт когда-то потом — это было как дата и время старта,
+    тоже сразу обновлялось». `started_at` (CR-01 lifecycle)
+    stays the canonical «moment the transition fired»; the
+    planning pair we're updating here is what the digests +
+    morning-cards selectors read from.
+    """
     task = session.get(Task, task_id)
     if task is None or task.deleted_at is not None:
         return None
@@ -116,6 +126,12 @@ def handle_start(session: Session, *, task_id: int, actor: str) -> Task | None:
     except InvalidTransition as e:
         log.info("telegram_start_invalid_transition", task_id=task_id, err=str(e))
         return task
+    # FR-CR-05-69 — snap the planning start_date/start_time to NOW.
+    from datetime import datetime as _dt
+
+    now = _dt.now()
+    task.start_date = now.date()
+    task.start_time = now.time().replace(microsecond=0)
     _schedule_sync_task(session, task_id)
     return task
 
@@ -487,6 +503,14 @@ def _build_edit_user_prompt(
         f"Today is {today}.\n\n"
         "Rules:\n"
         "- Output a field only if the user actually mentioned it.\n"
+        "- TITLE vs DESCRIPTION: title is a SHORT imperative verb "
+        "phrase (≤80 chars, ideally 4-7 words: «отправить отчёт», "
+        "«согласовать срок»). When the user types a LONGER "
+        "sentence (or multiple sentences) without explicit prefix, "
+        "treat it as the new `description`, NOT title. Operator "
+        "regression: «изменил описание задачи, бот поменял только "
+        "title». Multi-line / multi-sentence / >80-char reply ⇒ "
+        "description. A 1-3 word terse imperative ⇒ title.\n"
         "- If the user wrote nothing but a date / time phrase "
         "('завтра', 'tomorrow', 'next Friday', '15 мая в 18:00'), "
         "default it to the `due` field (and `due_time` if a time "

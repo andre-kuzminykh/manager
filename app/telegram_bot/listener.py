@@ -334,7 +334,7 @@ class TelegramListener:
         # toggle pattern as the TG view poll above.
         self._fireflies_pipeline = None  # set via wire_fireflies()
         self._fireflies_realtime_enabled = False
-        self._fireflies_poll_interval = 30
+        self._fireflies_poll_interval = 60
         self._fireflies_poll_batch = 20
         self._last_fireflies_poll_at = 0.0
         # FR-CR-05-51 — same «from-now» cutoff as the TG view
@@ -344,6 +344,16 @@ class TelegramListener:
         # via `ops.migrate_fireflies --newest --limit N` when
         # actually needed.
         self._fireflies_started_at: datetime | None = None
+        # FR-CR-05-118 — same scaffolding for Zoom Cloud
+        # Recordings. Wired via `wire_zoom()` from
+        # `ops/telegram_listener.py`. Off until the operator sets
+        # `ZOOM_REALTIME_ENABLED=true` in `.env`.
+        self._zoom_pipeline = None
+        self._zoom_realtime_enabled = False
+        self._zoom_poll_interval = 60
+        self._zoom_poll_batch = 10
+        self._last_zoom_poll_at = 0.0
+        self._zoom_started_at: datetime | None = None
         # FR-CR-05-61 — periodic Google Tasks pull. Wired via
         # `wire_google_tasks_pull()`; off until then so the
         # listener stays usable without Google Tasks configured.
@@ -383,6 +393,23 @@ class TelegramListener:
         self._fireflies_realtime_enabled = bool(enabled)
         self._fireflies_poll_interval = max(0, int(poll_interval_seconds))
         self._fireflies_poll_batch = max(1, int(poll_batch_size))
+
+    def wire_zoom(
+        self,
+        *,
+        pipeline,
+        enabled: bool,
+        poll_interval_seconds: int,
+        poll_batch_size: int,
+    ) -> None:
+        """FR-CR-05-118 — symmetric with `wire_fireflies`. Hooks
+        the configured ZoomPipeline + toggle into the listener
+        so realtime polling can pick up new Cloud Recordings on
+        the same tick cadence."""
+        self._zoom_pipeline = pipeline
+        self._zoom_realtime_enabled = bool(enabled)
+        self._zoom_poll_interval = max(0, int(poll_interval_seconds))
+        self._zoom_poll_batch = max(1, int(poll_batch_size))
 
     @property
     def enabled(self) -> bool:
@@ -645,6 +672,79 @@ class TelegramListener:
                 errors=errors,
             )
 
+    def _maybe_poll_zoom(self) -> None:
+        """FR-CR-05-118 — periodic poll for new Zoom Cloud
+        Recordings. Symmetric to `_maybe_poll_fireflies`:
+        throttled by `_zoom_poll_interval`, off until
+        `wire_zoom()` was called with `enabled=True`, idempotent
+        (already-processed `zoom_id`s short-circuit on per-step
+        flags inside `ZoomPipeline.process_one`).
+
+        Recordings whose `meeting_date` is older than the
+        listener's startup time are skipped so a fresh deploy
+        doesn't backfill stale meetings — same FR-CR-05-51
+        cutoff used for Fireflies."""
+        if not self._zoom_realtime_enabled:
+            return
+        if self._zoom_poll_interval <= 0:
+            return
+        if self._zoom_pipeline is None:
+            return
+        now = time.time()
+        if now - self._last_zoom_poll_at < self._zoom_poll_interval:
+            return
+        self._last_zoom_poll_at = now
+
+        if self._zoom_started_at is None:
+            self._zoom_started_at = datetime.now(timezone.utc)
+        try:
+            metas = self._zoom_pipeline._client.list_recordings(  # noqa: SLF001
+                limit=self._zoom_poll_batch
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("listener_zoom_poll_list_failed", error=str(e))
+            return
+        if not metas:
+            return
+        processed = 0
+        skipped = 0
+        skipped_old = 0
+        errors = 0
+        tasks_total = 0
+        cutoff = self._zoom_started_at
+        for m in metas:
+            mt = getattr(m, "meeting_date", None)
+            if mt is not None:
+                if mt.tzinfo is None:
+                    mt = mt.replace(tzinfo=timezone.utc)
+                if cutoff is not None and mt < cutoff:
+                    skipped_old += 1
+                    continue
+            try:
+                with session_scope() as session:
+                    report = self._zoom_pipeline.process_one(session, m)
+                if report.skipped_reason:
+                    skipped += 1
+                else:
+                    processed += 1
+                    tasks_total += report.tasks_created
+            except Exception as e:  # noqa: BLE001
+                errors += 1
+                log.warning(
+                    "listener_zoom_poll_recording_failed",
+                    zoom_id=m.id,
+                    error=str(e),
+                )
+        if processed or errors:
+            log.info(
+                "listener_zoom_poll_done",
+                seen=len(metas),
+                processed=processed,
+                skipped=skipped,
+                tasks_created=tasks_total,
+                errors=errors,
+            )
+
     def _maybe_poll_source_view(self) -> None:
         """FR-CR-05-35 / FR-CR-05-36 — periodically pull the
         freshest messages from the Supabase TG view and run them
@@ -770,6 +870,8 @@ class TelegramListener:
         self._maybe_poll_source_view()
         # FR-CR-05-39 — Fireflies poll on the same tick.
         self._maybe_poll_fireflies()
+        # FR-CR-05-118 — Zoom poll on the same tick.
+        self._maybe_poll_zoom()
         # FR-CR-05-61 — Google Tasks pull on the same tick
         # (also throttled internally).
         self._maybe_pull_google_tasks()

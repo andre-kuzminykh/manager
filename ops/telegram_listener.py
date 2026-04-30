@@ -132,6 +132,43 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             log.warning("tg_listener_fireflies_setup_failed", error=str(e))
 
+    # FR-CR-05-118 — same scaffolding for Zoom Cloud Recordings.
+    # Disabled unless ZOOM_ACCOUNT_ID/CLIENT_ID/SECRET trio is
+    # set; ZOOM_REALTIME_ENABLED then decides whether the
+    # listener polls in real time.
+    if (
+        settings.zoom_account_id
+        and settings.zoom_client_id
+        and settings.zoom_client_secret
+    ):
+        try:
+            from app.sync.factories import build_docs_factory
+            from app.zoom.client import ZoomClient
+            from app.zoom.pipeline import ZoomPipeline
+
+            zm_client = ZoomClient(
+                account_id=settings.zoom_account_id,
+                client_id=settings.zoom_client_id,
+                client_secret=settings.zoom_client_secret,
+                api_base=settings.zoom_api_base,
+                oauth_url=settings.zoom_oauth_url,
+            )
+            zm_pipeline = ZoomPipeline(
+                settings=settings,
+                client=zm_client,
+                llm_backend=backend,
+                docs_factory=build_docs_factory(settings),
+                sender=listener._sender,  # noqa: SLF001 — same process
+            )
+            listener.wire_zoom(
+                pipeline=zm_pipeline,
+                enabled=settings.zoom_realtime_enabled,
+                poll_interval_seconds=settings.zoom_poll_interval_seconds,
+                poll_batch_size=settings.zoom_poll_batch_size,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("tg_listener_zoom_setup_failed", error=str(e))
+
     # FR-CR-04-23 / FR-CR-04-26 — register the active TaskSyncer so
     # every persistence call from the Telegram process (initial
     # `create_task_from_draft` sync, button-driven `sync_task` calls

@@ -167,7 +167,7 @@ class Settings(BaseSettings):
         default=False, alias="FIREFLIES_REALTIME_ENABLED"
     )
     fireflies_poll_interval_seconds: int = Field(
-        default=30, alias="FIREFLIES_POLL_INTERVAL_SECONDS"
+        default=60, alias="FIREFLIES_POLL_INTERVAL_SECONDS"
     )
     fireflies_poll_batch_size: int = Field(
         default=20, alias="FIREFLIES_POLL_BATCH_SIZE"
@@ -209,6 +209,19 @@ class Settings(BaseSettings):
     )
     zoom_audio_max_bytes: int = Field(
         default=200 * 1024 * 1024, alias="ZOOM_AUDIO_MAX_BYTES"
+    )
+    # FR-CR-05-118 — listener-side periodic poll for Zoom Cloud
+    # Recordings, mirrors `FIREFLIES_REALTIME_ENABLED`. Idempotent:
+    # ZoomPipeline.process_one short-circuits already-processed
+    # rows on the per-step bookmark flags.
+    zoom_realtime_enabled: bool = Field(
+        default=False, alias="ZOOM_REALTIME_ENABLED"
+    )
+    zoom_poll_interval_seconds: int = Field(
+        default=60, alias="ZOOM_POLL_INTERVAL_SECONDS"
+    )
+    zoom_poll_batch_size: int = Field(
+        default=10, alias="ZOOM_POLL_BATCH_SIZE"
     )
 
     # Intent policy

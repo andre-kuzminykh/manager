@@ -357,3 +357,191 @@ def test_zoom_pipeline_idempotent_when_already_processed(
     # No new tasks.
     with SessionFactory() as s:
         assert s.query(Task).count() == 0
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-118 — listener-side periodic Zoom poll
+# --------------------------------------------------------------------------- #
+
+
+class _StubZoomClient:
+    def __init__(self, metas):
+        self._metas = metas
+        self.calls = 0
+
+    def list_recordings(self, *, limit):
+        self.calls += 1
+        return list(self._metas)
+
+
+class _StubZoomPipeline:
+    def __init__(self, metas, *, raise_on=None):
+        self._client = _StubZoomClient(metas)
+        self.processed: list[str] = []
+        self._raise_on = raise_on or set()
+
+    def process_one(self, session, m):
+        if m.id in self._raise_on:
+            raise RuntimeError("boom")
+        self.processed.append(m.id)
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            skipped_reason=None,
+            tasks_created=2,
+            errors=[],
+        )
+
+
+def _zoom_listener_for_poll():
+    """Minimal `TelegramListener` instance suitable for invoking
+    `_maybe_poll_zoom` in isolation. The ingest dependency is
+    stubbed because it isn't exercised by the poll path."""
+    from app.config import Settings
+    from app.orchestrator import Orchestrator
+    from app.telegram_ingest.service import TelegramIngestService
+    from app.telegram_bot.listener import TelegramListener
+
+    class _NoopClassifier:
+        def classify(self, *a, **k):  # noqa: D401
+            from app.intent.types import IntentClassification, IntentType
+
+            return IntentClassification(intent=IntentType.unknown, confidence=0.0)
+
+    ingest = TelegramIngestService(
+        classifier=_NoopClassifier(),
+        orchestrator=Orchestrator(Settings()),
+    )
+    return TelegramListener(token="", ingest=ingest)
+
+
+def _zoom_poll_meta(zoom_id="zm-poll-1"):
+    from datetime import datetime, timezone
+
+    from app.zoom.client import ZoomRecordingMeta
+
+    return ZoomRecordingMeta(
+        id=zoom_id,
+        meeting_id=None,
+        title="Sync " + zoom_id,
+        meeting_date=datetime.now(timezone.utc),
+        duration_seconds=600,
+        participants=[],
+        audio_url="https://zoom.us/x.m4a",
+        share_url="https://zoom.us/share/x",
+    )
+
+
+def test_zoom_listener_poll_off_by_default(patched_session_scope, SessionFactory):
+    """`_maybe_poll_zoom` is a no-op until `wire_zoom(enabled=True)`
+    is called. Mirror of `_maybe_poll_fireflies` gating."""
+    listener = _zoom_listener_for_poll()
+    pipe = _StubZoomPipeline(metas=[_zoom_poll_meta("zm-A")])
+    # Wire but DISABLED.
+    listener.wire_zoom(
+        pipeline=pipe, enabled=False,
+        poll_interval_seconds=60, poll_batch_size=10,
+    )
+    listener._maybe_poll_zoom()
+    assert pipe._client.calls == 0
+    assert pipe.processed == []
+
+
+def test_zoom_listener_poll_pulls_when_enabled(
+    patched_session_scope, SessionFactory
+):
+    listener = _zoom_listener_for_poll()
+    pipe = _StubZoomPipeline(metas=[_zoom_poll_meta("zm-B")])
+    listener.wire_zoom(
+        pipeline=pipe, enabled=True,
+        poll_interval_seconds=60, poll_batch_size=10,
+    )
+    # Bypass the «from-now» cutoff so the test meta isn't dropped
+    # as ancient relative to listener startup.
+    from datetime import datetime as _dt, timezone as _tz
+
+    listener._zoom_started_at = _dt(1970, 1, 1, tzinfo=_tz.utc)
+    listener._maybe_poll_zoom()
+    assert pipe._client.calls == 1
+    assert pipe.processed == ["zm-B"]
+
+
+def test_zoom_listener_poll_throttled_within_interval(
+    patched_session_scope, SessionFactory
+):
+    """Repeat ticks inside the throttle window must NOT re-pull
+    the API. Same protection the Fireflies path has."""
+    listener = _zoom_listener_for_poll()
+    pipe = _StubZoomPipeline(metas=[_zoom_poll_meta("zm-C")])
+    listener.wire_zoom(
+        pipeline=pipe, enabled=True,
+        poll_interval_seconds=60, poll_batch_size=10,
+    )
+    from datetime import datetime as _dt, timezone as _tz
+
+    listener._zoom_started_at = _dt(1970, 1, 1, tzinfo=_tz.utc)
+    listener._maybe_poll_zoom()
+    listener._maybe_poll_zoom()  # immediate second call
+    listener._maybe_poll_zoom()
+    assert pipe._client.calls == 1
+
+
+def test_zoom_listener_poll_swallows_pipeline_errors(
+    patched_session_scope, SessionFactory
+):
+    """If `process_one` blows up on one recording the listener
+    keeps going for the others — same resilience contract as
+    the Fireflies path."""
+    listener = _zoom_listener_for_poll()
+    pipe = _StubZoomPipeline(
+        metas=[_zoom_poll_meta("zm-ok-1"), _zoom_poll_meta("zm-bad"),
+               _zoom_poll_meta("zm-ok-2")],
+        raise_on={"zm-bad"},
+    )
+    listener.wire_zoom(
+        pipeline=pipe, enabled=True,
+        poll_interval_seconds=60, poll_batch_size=10,
+    )
+    from datetime import datetime as _dt, timezone as _tz
+
+    listener._zoom_started_at = _dt(1970, 1, 1, tzinfo=_tz.utc)
+    listener._maybe_poll_zoom()
+    assert pipe.processed == ["zm-ok-1", "zm-ok-2"]
+
+
+def test_zoom_listener_poll_skips_recordings_before_startup(
+    patched_session_scope, SessionFactory
+):
+    """`_zoom_started_at` cutoff drops recordings finished before
+    listener startup so a fresh deploy doesn't backfill stale
+    meetings — symmetric with FR-CR-05-51."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    listener = _zoom_listener_for_poll()
+    old = _zoom_poll_meta("zm-old")
+    old.meeting_date = _dt(2000, 1, 1, tzinfo=_tz.utc)
+    fresh = _zoom_poll_meta("zm-fresh")
+    pipe = _StubZoomPipeline(metas=[old, fresh])
+    listener.wire_zoom(
+        pipeline=pipe, enabled=True,
+        poll_interval_seconds=60, poll_batch_size=10,
+    )
+    # Set the cutoff in the past so the fresh meeting (date =
+    # «now» at construction time) is treated as new.
+    listener._zoom_started_at = _dt(2020, 1, 1, tzinfo=_tz.utc)
+    fresh.meeting_date = _dt(2030, 1, 1, tzinfo=_tz.utc)
+    listener._maybe_poll_zoom()
+    assert pipe.processed == ["zm-fresh"]
+
+
+def test_settings_zoom_polling_defaults():
+    """Settings ship with the operator-friendly defaults: realtime
+    OFF (must be opted in), 60s interval, 10-item batch. The
+    Fireflies counterpart now also defaults to 60s for parity."""
+    from app.config import Settings
+
+    s = Settings()
+    assert s.zoom_realtime_enabled is False
+    assert s.zoom_poll_interval_seconds == 60
+    assert s.zoom_poll_batch_size == 10
+    assert s.fireflies_poll_interval_seconds == 60

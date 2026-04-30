@@ -55,19 +55,126 @@ _BARE_VERB_TITLES: frozenset[str] = frozenset(
 
 
 def is_naked_verb_title(title: str) -> bool:
-    """FR-CR-05-99 — return True when `title` is a bare action
-    verb with no object / addressee / topic. Used by
-    `prepare_drafts` to drop such drafts at intake — the LLM
-    occasionally emits «Встретиться» / «Организовать» with no
-    complement, and the operator can't act on those.
+    """FR-CR-05-99 / -101 — return True when `title` is a bare
+    action verb with no object / addressee / topic.
+
+    Used by `prepare_drafts` to drop such drafts at intake.
+    Two heuristics:
+
+      1. The title (lowercased, punctuation-stripped) is in the
+         curated `_BARE_VERB_TITLES` set.
+      2. FR-CR-05-101 — the title is a SINGLE Russian word
+         ending in an infinitive suffix (`-ться`, `-ть`, `-ти`)
+         AND ≥6 chars (skip short noise like «нет», «пить»).
+         This catches «Забежать» / «Заглянуть» / «Уточниться»
+         that aren't in the curated list but are equally
+         actionless.
+
+    Real one-word titles (proper nouns, ticket numbers, brand
+    names) don't end in those suffixes, so the check is safe.
     """
     if not title:
         return False
     norm = title.strip().lower().rstrip(".!?,;:—-«»\"' ")
-    # Single-word OR a 2-word ending like «follow up» / «follow-up».
     if norm in _BARE_VERB_TITLES:
         return True
+    # FR-CR-05-101 — single Russian infinitive verb.
+    words = norm.split()
+    if len(words) == 1 and len(words[0]) >= 6:
+        suffix_match = any(
+            words[0].endswith(s) for s in ("ться", "ть", "ти")
+        )
+        if suffix_match:
+            return True
     return False
+
+
+_FIRST_PERSON_VERB_TO_INFINITIVE: dict[str, str] = {
+    # Russian present/future first-person → infinitive.
+    "пришлю": "прислать",
+    "отправлю": "отправить",
+    "скину": "скинуть",
+    "перешлю": "переслать",
+    "напишу": "написать",
+    "позвоню": "позвонить",
+    "позову": "позвать",
+    "сделаю": "сделать",
+    "проверю": "проверить",
+    "уточню": "уточнить",
+    "напомню": "напомнить",
+    "запишу": "записать",
+    "забегу": "забежать",
+    "загляну": "заглянуть",
+    "доделаю": "доделать",
+    "отвечу": "ответить",
+    "разберусь": "разобраться",
+    "соберу": "собрать",
+    "согласую": "согласовать",
+    "подготовлю": "подготовить",
+    "прикреплю": "прикрепить",
+    "сообщу": "сообщить",
+    "созвонюсь": "созвониться",
+    "встречусь": "встретиться",
+    "договорюсь": "договориться",
+}
+
+
+def strip_first_person_prefix(title: str) -> str:
+    """FR-CR-05-101 — operator regression: «Я тебе сейчас пришлю
+    драфт письма по Артему Барсукову» landed verbatim as the
+    title. The LLM was told to convert first-person commitments
+    to imperative form (FR-CR-05-100 prompt rule) but didn't.
+    This Python post-process runs AFTER the LLM and forcibly
+    rewrites:
+
+      «Я (тебе/вам) (сейчас/скоро/потом/быстро) <conj-verb> X»
+        → «<infinitive-of-conj-verb> X»
+
+      «I'll <verb> X» / «I will <verb> X»
+        → «<verb> X»
+
+    Returns the rewritten title, or the input unchanged when no
+    pattern matches.
+    """
+    if not title:
+        return title
+    import re
+
+    norm = title.strip()
+
+    # Russian: «Я … <verb> rest»
+    ru = re.match(
+        r"^я\s+"
+        r"(?:тебе\s+|вам\s+|вам\s+всем\s+|им\s+|нам\s+|мне\s+)?"
+        r"(?:сейчас\s+|скоро\s+|потом\s+|сегодня\s+|"
+        r"быстро\s+|пока\s+|уже\s+|всё[её]\s+)*"
+        r"(\w+)(?:\s+(.*))?$",
+        norm,
+        flags=re.IGNORECASE | re.UNICODE,
+    )
+    if ru is not None:
+        conj = ru.group(1).lower()
+        rest = (ru.group(2) or "").strip()
+        infinitive = _FIRST_PERSON_VERB_TO_INFINITIVE.get(conj)
+        if infinitive:
+            out = (infinitive + " " + rest).strip()
+            out = out.rstrip(".!?,;: ")
+            # Capitalise first letter for cosmetic parity with
+            # `normalize_task_title`'s cap step (which runs next).
+            return out[0].upper() + out[1:] if out else out
+
+    # English: «I'll send X» / «I will send X» / «I'm going to send X»
+    en = re.match(
+        r"^(?:i'?ll|i\s+will|i\s+am\s+going\s+to|i'?m\s+going\s+to)"
+        r"\s+(.+)$",
+        norm,
+        flags=re.IGNORECASE,
+    )
+    if en is not None:
+        out = en.group(1).strip().rstrip(".!?,;: ")
+        return out[0].upper() + out[1:] if out else out
+
+    return norm
 
 
 def normalize_task_title(raw: Any) -> str:

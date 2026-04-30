@@ -83,53 +83,20 @@ _DEDUP_TOOL_PARAMETERS: dict[str, Any] = {
 
 
 _SYSTEM_PROMPT = """\
-You are a binary duplicate-detection classifier for newly
-proposed tasks.
+You decide if a new task duplicates any of up to 10 existing
+tasks from the same backlog.
 
-You receive ONE candidate task and up to 10 existing open
-tasks (or pending drafts) from the same backlog. EACH item
-includes its title, owner, due, and full DESCRIPTION. Read
-all of them. Decide whether the candidate's title +
-description describes the SAME WORK as any existing item's
-title + description. Yes or no.
+You receive: candidate (title + description) and a list of
+existing items (title + description, plus owner / due for
+context).
 
-THE RULE — collapse when the candidate and an existing item
-describe the same end-state. Look at the descriptions, not
-just the titles. Two tasks are the same when:
-  - the action (verb / verb-family — confirm, ask, send,
-    organize a meeting, intro, follow up, prep, …) overlaps
-  - AND the specific subject (named external entity, event,
-    deliverable, project — ADNOC, Bosch deal, Ryan Gariepy
-    meeting, the Q2 report, the Atuwatse Okorodudu intro)
-    overlaps.
+Compare descriptions, not just titles. If the candidate's
+description describes the same work as any existing item's
+description, return is_duplicate=true and the id of that
+item. Otherwise return false.
 
-If the descriptions describe the same situation (same
-external party, same ask, same context), they are duplicates
-even if the titles differ slightly («Подтвердить» vs
-«Закрепить», «Запланировать» vs «Организовать») and even if
-the description wordings differ slightly («необходимо» vs
-«нужно»).
-
-Owner does NOT have to match — internal team attribution
-drifts between drafts. Due date does NOT have to match —
-operator may set different dates on two drafts of the same
-work.
-
-Different EXTERNAL audience IS a discriminator: «отчёт
-Ирине» ≠ «отчёт Артёму» (two reports going to two
-different audiences). But internal-team attribution
-between team members for ONE external piece of work is NOT.
-
-Default to FALSE only when descriptions truly describe
-different work. When the descriptions clearly describe the
-same situation, return TRUE.
-
-Output:
-  is_duplicate: bool
-  duplicate_of_task_id: integer task id of the matched item
-                        (only when is_duplicate=true; null
-                        otherwise)
-  reason: one short sentence quoting the overlap.
+Output: is_duplicate (bool), duplicate_of_task_id (int|null),
+reason (one short sentence).
 """
 
 
@@ -238,20 +205,11 @@ def _fmt_candidate(payload: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-# FR-CR-05-100 — the deterministic Python pre-check that lived
-# here (FR-CR-05-97/99/100) was operator-rejected: «да не нужен
-# никакой детерминистический матч, то есть просто по описанию
-# задачи надо!». The LLM call below sees title + full
-# description for both candidate and existing items and decides.
-# Helper kept solely for tests that probe normalisation of the
-# fed-to-LLM strings.
-
-
 def _normalize_title_for_match(title: str) -> str:
     """Lowercase + collapse whitespace + strip Cyrillic/Latin
-    punctuation + ё→е. Used to render the candidate / existing
-    strings consistently into the LLM prompt; not used as a
-    deterministic match gate any more."""
+    punctuation + ё→е. Used both for rendering into the LLM
+    prompt AND for the FR-CR-05-101 exact-title backstop
+    below."""
     if not title:
         return ""
     import re
@@ -261,6 +219,61 @@ def _normalize_title_for_match(title: str) -> str:
     out = out.strip(".!?,;:—-«»\"' ")
     out = out.replace("ё", "е")
     return out
+
+
+def _owner_keys(*values: Any) -> set[str]:
+    """Lowercased non-empty owner identifiers (uid, display
+    name, real name, …) as a set, used to test for owner
+    overlap with set intersection."""
+    out: set[str] = set()
+    for v in values:
+        if v is None:
+            continue
+        s = str(v).strip().lower()
+        if s and s not in {"?", "none", ""}:
+            out.add(s)
+    return out
+
+
+def _exact_title_owner_match(
+    candidate: dict[str, Any], existing: list[_ExistingItem]
+) -> _ExistingItem | None:
+    """FR-CR-05-101 — narrow deterministic backstop.
+
+    Operator: «не нужен детерминистический матч, по описанию
+    задачи надо». But two LLM outputs that land on the
+    LITERALLY-identical title with the same owner kept
+    slipping through the LLM dedup gate (Atuwatse Okorodudu
+    × 2; PALADIN Goldman Sachs × 2). Reinstating the
+    narrowest possible deterministic check — same normalised
+    title AND any overlap on owner identifiers — purely as a
+    safety net under the LLM. The LLM still runs for
+    paraphrases / synonyms / different-but-related work.
+
+    Match when BOTH:
+      - `_normalize_title_for_match(title)` is equal
+      - candidate's owner key set INTERSECTS with the
+        existing item's (uid or display_name on either side)
+
+    Due_date is NOT part of the match — operator may type
+    different dates on two drafts of the same work.
+    """
+    cand_title = _normalize_title_for_match(candidate.get("title") or "")
+    if not cand_title:
+        return None
+    cand_keys = _owner_keys(
+        candidate.get("owner_user_id"),
+        candidate.get("owner_display_name"),
+    )
+    if not cand_keys:
+        return None
+    for item in existing:
+        if _normalize_title_for_match(item.title) != cand_title:
+            continue
+        if not (cand_keys & _owner_keys(item.owner_label)):
+            continue
+        return item
+    return None
 
 
 def check_duplicate(

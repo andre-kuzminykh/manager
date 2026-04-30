@@ -354,8 +354,29 @@ def node_date(state: IntentState) -> dict[str, Any]:
 
     source_used = "llm"
     if picked is None:
-        picked = resolve_due_date(source_text, today)
-        source_used = "python_fallback" if picked else "none"
+        # FR-CR-05-101 — when the LLM call succeeded with an
+        # explicit null + reasoning, TRUST it. Operator
+        # regression: the LLM correctly judged «8 мая» as a
+        # meeting-slot date (not the task's deadline) and
+        # returned null with reasoning, but the Python
+        # fallback re-extracted «8 мая» from the source text
+        # and emitted 2026-05-08, undoing the FR-CR-05-87/89
+        # filtering. Same pattern hallucinated 2027-04-30
+        # for sources mentioning «30 апреля» (today). Skip
+        # fallback whenever the LLM provided ANY reasoning —
+        # that means the call succeeded and the null is
+        # intentional, not an infrastructure error.
+        llm_was_intentional = (
+            llm_iso is None
+            and rejected is None
+            and isinstance(llm_reasoning, str)
+            and llm_reasoning.strip()
+        )
+        if not llm_was_intentional:
+            picked = resolve_due_date(source_text, today)
+            source_used = "python_fallback" if picked else "none"
+        else:
+            source_used = "llm_null"
 
     log.info(
         "date_node_result",

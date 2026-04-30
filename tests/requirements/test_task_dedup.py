@@ -44,33 +44,24 @@ def _mk(session, **kw) -> int:
 
 
 def test_dedup_prompt_is_minimal_focused_classifier():
-    """FR-CR-05-99 — operator: «не надо ничего усложнять,
-    бери новую задачу и 10 предыдущих в контексте, да/нет».
-    The prompt was rewritten from ~3000 chars of synonym
-    families and worked examples to ~500 chars of focused
-    binary-classifier guidance. Pin the new contract."""
+    """FR-CR-05-101 — operator: «нужно сравнить описание новой
+    задачи с контекстом из 10 предыдущих задач и спросить это
+    дублирует хоть что-то из этих задач? просто без множества
+    усложнений». Final form: ≤700 chars, no synonym families,
+    no worked examples, no rules — just a clean binary
+    classifier framing."""
     from app.services.task_dedup import _SYSTEM_PROMPT
 
     blob = _SYSTEM_PROMPT
     flat = " ".join(blob.split())
 
-    # The prompt is now tight (≤2500 chars; was ~3000 with all
-    # the synonym blocks and worked examples).
-    assert len(blob) <= 2500
-    # Classifier framing.
-    assert "binary duplicate-detection" in blob
-    # Same-end-state rule + verb + subject overlap.
-    assert "end-state" in blob
-    # The FR-CR-05-78 audience discriminator survives.
-    assert "EXTERNAL audience" in blob or "external audience" in flat.lower()
-    # «Different external audience = different task». The
-    # prompt may wrap «отчёт» across lines, so check the
-    # whitespace-collapsed form.
-    assert "отчёт Ирине" in flat and "отчёт Артёму" in flat
-    # Internal team-owner attribution does NOT discriminate.
-    assert "internal-team attribution" in flat.lower() or "internal team-owner" in flat.lower() or "internal team attribution" in flat.lower()
-    # Default to FALSE when unsure.
-    assert "Default to FALSE" in blob
+    assert len(blob) <= 700
+    # Compare descriptions, not just titles.
+    assert "Compare descriptions" in blob or "compare descriptions" in flat.lower()
+    # 10 items framing.
+    assert "10 existing" in blob
+    # Output schema.
+    assert "is_duplicate" in blob and "duplicate_of_task_id" in blob
 
 
 def test_normalize_title_for_match_collapses_whitespace_case_yo_e():
@@ -358,17 +349,23 @@ def test_dedup_invented_id_dropped_when_drafts_in_lookback(session):
     assert out.duplicate_of_task_id is None
 
 
-def test_dedup_prompt_keeps_different_audience_distinct():
-    """FR-CR-05-78 / -99 — «отчёт Ирине» vs «отчёт Артёму»:
-    different EXTERNAL audience = different task. The
-    minimal-prompt rewrite (FR-CR-05-99) preserves this rule
-    even after stripping the synonym blocks."""
+def test_dedup_prompt_short_and_focused():
+    """FR-CR-05-101 — operator wanted the prompt minimal.
+    The «отчёт Ирине ≠ отчёт Артёму» rule from FR-CR-05-78 was
+    stripped along with all other worked examples; the LLM is
+    expected to handle it via the «compare descriptions» rule
+    on its own. This test pins that the prompt stays minimal."""
     from app.services.task_dedup import _SYSTEM_PROMPT
 
     blob = _SYSTEM_PROMPT
-    # Default to FALSE survives.
-    assert "Default to FALSE" in blob
-    # External audience discriminator survives.
-    assert "EXTERNAL audience" in blob
-    # The exact regression case is pinned.
-    assert "Ирине" in blob and "Артёму" in blob
+    # Minimal: compare descriptions framing present.
+    assert "descriptions" in blob.lower()
+    # No synonym families anymore.
+    for legacy in (
+        "confirm-family",
+        "meeting-family",
+        "TRANSLITERATION",
+        "ONE-EVENT COLLAPSE",
+        "SYNONYM-VERBS",
+    ):
+        assert legacy not in blob, f"{legacy!r} should be gone in the minimal prompt"

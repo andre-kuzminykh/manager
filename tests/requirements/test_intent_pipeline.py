@@ -693,17 +693,21 @@ def test_is_naked_verb_title_catches_bare_verbs():
     assert f("Встретиться!") is True
 
 
-def test_dedup_prompt_keeps_verb_family_and_subject_overlap_rule():
-    """FR-CR-05-99 — rewritten minimal prompt keeps the «verb
-    family + subject overlap = same task» rule. The detailed
-    synonym-family lists were stripped; the LLM now decides
-    based on a tight binary classifier."""
+def test_dedup_prompt_minimal_no_legacy_blocks():
+    """FR-CR-05-101 — the dedup prompt has been stripped to
+    its minimum form. Any legacy synonym-family / worked-
+    example block from FR-CR-05-92/95/96/98 must be gone."""
     from app.services.task_dedup import _SYSTEM_PROMPT
 
     blob = _SYSTEM_PROMPT
-    # Verb-family / subject overlap rule still in.
-    assert "verb-family" in blob.lower() or "verb / verb-family" in blob
-    assert "specific subject" in blob.lower()
+    for legacy in (
+        "verb-family",
+        "TRANSLITERATION",
+        "ONE-EVENT COLLAPSE",
+        "SYNONYM-VERBS",
+        "confirm-family",
+    ):
+        assert legacy not in blob, f"{legacy!r} should be removed"
 
 
 def test_normalize_task_title_caps_at_80_chars():

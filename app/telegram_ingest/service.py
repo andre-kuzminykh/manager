@@ -809,15 +809,21 @@ class TelegramIngestService:
                 from app.persistence.tasks import (
                     is_naked_verb_title,
                     normalize_task_title,
+                    strip_first_person_prefix,
                 )
 
                 raw_title = (payload.get("title") or "").strip()
+                # FR-CR-05-101 — convert «Я тебе сейчас пришлю X»
+                # → «Прислать X» BEFORE checking naked-verb /
+                # capping. The LLM is told to do this in the
+                # title prompt (FR-CR-05-100), but doesn't
+                # always; this Python post-process is the
+                # safety net.
+                if raw_title:
+                    raw_title = strip_first_person_prefix(raw_title)
                 # FR-CR-05-99 — drop drafts whose title is a
-                # bare verb («Встретиться», «Организовать»)
-                # with no object/addressee. Operator: «таких
-                # тем тоже быть не должно». The drafts list
-                # filter at the end of this loop will skip
-                # them; mark for skip via a sentinel.
+                # bare verb («Встретиться», «Забежать»,
+                # «Организовать») with no object/addressee.
                 if raw_title and is_naked_verb_title(raw_title):
                     log.info(
                         "telegram_ingest_drop_naked_verb_title",

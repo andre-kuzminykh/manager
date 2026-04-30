@@ -128,12 +128,44 @@ def test_date_node_uses_llm_answer_when_future_iso():
 # -------- Date node: LLM null → Python fallback fills in ------------------ #
 
 
-def test_date_node_falls_back_to_resolver_when_llm_returns_null():
+def test_date_node_does_not_fall_back_when_llm_intentionally_null():
+    """FR-CR-05-101 — operator regression: LLM correctly judged
+    a context date as not-a-deadline (FR-CR-05-87/89), returned
+    null + reasoning, but the Python fallback re-extracted the
+    same date from source text and overrode the null. The
+    pipeline now SKIPS the fallback whenever the LLM gave a
+    non-empty reasoning (signal that the null is intentional,
+    not an infrastructure error)."""
     backend = _StubBackend(
         detect={"is_task": True, "confidence": 0.9},
         title={"title": "t"},
         owner={"reasoning": "no", "display_name": None},
-        date_={"due_date": None, "reasoning": "no date"},
+        date_={
+            "due_date": None,
+            "reasoning": "no explicit deadline; «к понедельнику» is …",
+        },
+    )
+    out = run_pipeline(
+        backend=backend,
+        source_text="надо сделать к понедельнику",
+        context_messages=[],
+        author_user_id="U",
+        today=TODAY,
+    )
+    # LLM intentionally said null with reasoning → no fallback.
+    assert out.task.due_date is None
+
+
+def test_date_node_falls_back_when_llm_silent_no_reasoning():
+    """FR-CR-05-101 — fallback still runs when the LLM was
+    silent (no reasoning either) — that suggests the call
+    failed or returned malformed data, not an intentional
+    null."""
+    backend = _StubBackend(
+        detect={"is_task": True, "confidence": 0.9},
+        title={"title": "t"},
+        owner={"reasoning": "no", "display_name": None},
+        date_={"due_date": None, "reasoning": ""},
     )
     out = run_pipeline(
         backend=backend,

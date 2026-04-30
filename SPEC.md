@@ -833,6 +833,59 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-101 — Final dedup form, first-person→imperative post-process, suffix-naked-verb, no-fallback for intentional null
+
+Operator: «нужно сравнить описание новой задачи с контекстом
+из 10 предыдущих задач и спросить это дублирует хоть что-то
+из этих задач? просто без множества усложнений. Если "да", то
+не отправляем — все». Plus regressions:
+
+  1. «Я тебе сейчас пришлю драфт письма по Артему Барсукову»
+     STILL landing verbatim despite FR-CR-05-100 prompt rule.
+  2. «Забежать» as a naked-verb title (not in
+     FR-CR-05-99 curated list).
+  3. Date `2027-04-30` from python_fallback when LLM
+     correctly returned null + reasoning.
+
+Four layered fixes:
+
+  - **`task_dedup._SYSTEM_PROMPT` → minimal final form
+    (≤700 chars).** All synonym families, worked examples,
+    audience-discriminator, default-FALSE rules stripped.
+    Six sentences total: «receive candidate + 10 existing,
+    compare descriptions not titles, return is_duplicate
+    + duplicate_of_task_id + reason». Trust the LLM
+    completely.
+
+  - **First-person → imperative Python post-process.** New
+    `strip_first_person_prefix(title)` in
+    `app/persistence/tasks.py` runs in `prepare_drafts`
+    BEFORE `is_naked_verb_title` / `normalize_task_title`.
+    Russian: «Я (тебе/вам) (сейчас/скоро/быстро) пришлю X»
+    → «Прислать X» via a curated 24-entry conjugated→
+    infinitive map (пришлю→прислать, отправлю→отправить,
+    скину→скинуть, забегу→забежать, …). English:
+    «I'll send X» → «send X». The LLM still gets the
+    FR-CR-05-100 prompt rule; this is the determinstic
+    safety net for when it disobeys.
+
+  - **Suffix-based naked-verb detection.**
+    `is_naked_verb_title` now also flags any single
+    Russian word ≥6 chars ending in `-ться`, `-ть`, `-ти`
+    as a naked verb. Catches «Забежать», «Заглянуть»,
+    «Уточниться» without needing them in the curated set.
+
+  - **No Python date fallback when LLM intentionally
+    returned null.** `pipeline.py::date_node` now skips the
+    `resolve_due_date` fallback when the LLM call succeeded
+    with `due_date=null AND reasoning != ""`. Operator
+    regression: LLM correctly judged «8 мая»/«26/02»/«30
+    апреля» as context dates (not task deadlines per
+    FR-CR-05-87/89), but Python fallback re-extracted them
+    and emitted `2026-05-08` / `2027-04-30`. Fallback now
+    only fires when the call genuinely failed (no
+    reasoning emitted).
+
 #### FR-CR-05-100 — LLM-only dedup over full descriptions; first-person → imperative title rewrite
 
 Operator three-pack:
@@ -4412,6 +4465,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-101 | `test_task_dedup.py::test_dedup_prompt_is_minimal_focused_classifier` (≤700-char final form: 10-existing framing + «compare descriptions» + output schema); `test_intent_pipeline.py::test_dedup_prompt_minimal_no_legacy_blocks` (legacy synonym/family blocks gone); `test_intent_graph.py::test_date_node_does_not_fall_back_when_llm_intentionally_null` (LLM null + reasoning → no fallback); `::test_date_node_falls_back_when_llm_silent_no_reasoning` (still falls back when call genuinely failed) |
 | FR-CR-05-100 | `test_intent_pipeline.py::test_title_prompt_converts_first_person_to_imperative` (FIRST-PERSON COMMITMENTS block + Артём Барсуков regression «Я тебе сейчас пришлю драфт письма» → «прислать драфт письма по Артему Барсукову» rewrite + «Я отправлю» / «I'll send» / «сейчас скину» fragments pinned); `test_task_dedup.py::test_dedup_dispatches_to_llm_with_full_descriptions` (no deterministic gate; LLM sees up to 1500 chars of description for both candidate and existing); `::test_dedup_prompt_is_minimal_focused_classifier` (≤2500-char prompt + «look at the descriptions, not just the titles» framing) |
 | FR-CR-05-99  | `test_task_dedup.py::test_dedup_prompt_is_minimal_focused_classifier` (≤1700-char tight binary-classifier prompt with verb-family + specific-subject + EXTERNAL-audience-discriminator + Default-to-FALSE rules); `::test_dedup_prompt_keeps_different_audience_distinct` («отчёт Ирине ≠ отчёт Артёму» rule survives the minimal-prompt rewrite); `test_intent_pipeline.py::test_is_naked_verb_title_catches_bare_verbs` (Russian + English bare-verb list; trailing punctuation stripping; verb-with-object passes through); `test_telegram_listener.py::test_listener_tick_processes_updates_and_advances_offset` updated for dedup behaviour (2 same-title updates → 1 Task created via deterministic dedup, both bookmarked) |
 | FR-CR-05-98  | `test_task_dedup.py::test_dedup_prompt_pins_one_event_collapse_rule` (ONE-EVENT COLLAPSE block + Ryan Gariepy «Организовать» vs «Пригласить Йохана» worked counter-example + «single named external event» discriminator + «distinct deliverable» escape hatch all pinned) |

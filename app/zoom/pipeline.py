@@ -309,13 +309,20 @@ class ZoomPipeline:
         if not row.detailed_summary:
             row.last_error = "no detailed summary for short summary"
             return False
-        meta_lines = [
-            f"Заголовок: {row.title or '(без названия)'}",
-            f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}",
-        ]
-        if row.participants:
-            meta_lines.append("Участники: " + ", ".join(row.participants))
-        body = "\n".join(meta_lines) + "\n\nПодробный отчёт:\n" + row.detailed_summary
+        # FR-CR-05-117 — feed the prompt the same field shape as
+        # the Fireflies path so the canonical header/participants
+        # layout stays consistent across sources.
+        participants_block = "\n".join(
+            f"  - {p}" for p in (row.participants or []) if p
+        ) or "  (нет данных)"
+        meta_line = (
+            f"meeting_title: {row.title or ''}\n"
+            f"meeting_date: {row.meeting_date.isoformat() if row.meeting_date else ''}\n"
+            f"duration_min: {row.duration_seconds // 60 if row.duration_seconds else ''}\n"
+            f"google_doc_url: {row.google_doc_url or ''}\n"
+            f"\nparticipants:\n{participants_block}\n\n"
+        )
+        body = meta_line + "Подробный отчёт:\n" + row.detailed_summary
         try:
             text = self._llm.complete_text(  # type: ignore[attr-defined]
                 system_prompt=MEETING_SHORT_SUMMARY_PROMPT,

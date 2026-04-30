@@ -109,6 +109,24 @@ Return ``is_task=false`` for:
   A polite-ask imperative («can you send the deck?», «отправите
   отчёт?») IS a task — distinguish by whether the answer
   requires WORK or just YES / NO.
+- *Chat-opener + retrospective recap* (FR-CR-05-104 —
+  operator regression). Sentences that begin with a
+  conversational filler («Смотри, ...», «слушай, ...»,
+  «короче, ...», «вот, ...», «эй, ...», «look, ...»,
+  «hey, ...») and then describe a past conversation in
+  past tense («я вчера с X переписывалась», «мы обсудили
+  с Y», «говорил с Z») are CHAT, not delegations. Even
+  when they end with an incomplete clause («я у него…»,
+  «он сказал…») — the trailing «…» is not a signal of
+  hidden imperative, it's the author trailing off in
+  conversation. is_task=false.
+
+  Operator regression (FR-CR-05-104): «Смотри, по GP
+  Morgan, я вчера с Артёмом просто переписывалась, я у
+  него…» landed as a task with verbatim title and a
+  fallback description. Should be is_task=false — chat
+  opener + past-tense recap + trailing «…».
+
 - *Opinion / qualifier statements without a clear imperative*
   (FR-CR-05-94 — operator regression). Sentences like:
     «По X я не против, но Y»  (qualified consent)

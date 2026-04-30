@@ -114,8 +114,9 @@ def test_dedup_call_uses_strong_model(session, monkeypatch):
         )
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
-    # The dedup call passes `model=gpt-4o`, not the default mini.
-    assert captured["model"] == "gpt-4o"
+    # The dedup call passes `model=gpt-5.5` (FR-CR-05-104
+    # default; was gpt-4o per FR-CR-05-102).
+    assert captured["model"] == "gpt-5.5"
 
 
 def test_dedup_dispatches_to_llm_with_full_descriptions(session):

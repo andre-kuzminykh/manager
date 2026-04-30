@@ -353,7 +353,10 @@ def test_settings_default_provider_is_auto():
 
 
 def test_settings_defaults_for_openai_model():
-    assert Settings().openai_model == "gpt-4o-mini"
+    # FR-CR-05-104 — promoted from gpt-4o-mini → gpt-5.5
+    # (operator choice; rolled back via OPENAI_MODEL env var
+    # if the key doesn't have access).
+    assert Settings().openai_model == "gpt-5.5"
 
 
 def test_settings_openai_api_key_field_is_empty_by_default():

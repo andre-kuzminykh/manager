@@ -33,15 +33,13 @@ class Settings(BaseSettings):
     anthropic_model: str = Field(default="claude-sonnet-4-6", alias="ANTHROPIC_MODEL")
 
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
-    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
-    # CR-04: stronger model dedicated to the date node, which gpt-4o-mini
-    # cannot handle reliably on relative phrases. Defaults to gpt-4o; set
-    # to empty string to fall back to openai_model.
-    openai_date_model: str = Field(default="gpt-4o", alias="OPENAI_DATE_MODEL")
-    # FR-CR-05-102 — dedup compares long-form Russian
-    # descriptions; gpt-4o-mini missed near-identical cases. Set
-    # to empty string to fall back to `openai_model`.
-    openai_dedup_model: str = Field(default="gpt-4o", alias="OPENAI_DEDUP_MODEL")
+    # FR-CR-05-104 — operator chose gpt-5.5 (released
+    # 2026-Q1, https://openai.com/index/introducing-gpt-5-5/).
+    # Override via OPENAI_MODEL=gpt-4o if the key doesn't
+    # have access yet.
+    openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
+    openai_date_model: str = Field(default="gpt-5.5", alias="OPENAI_DATE_MODEL")
+    openai_dedup_model: str = Field(default="gpt-5.5", alias="OPENAI_DEDUP_MODEL")
 
     # Google
     google_client_id: str = Field(default="", alias="GOOGLE_CLIENT_ID")
@@ -141,13 +139,16 @@ class Settings(BaseSettings):
     )
     # Models — the user can override per cost / quality.
     fireflies_summary_model: str = Field(
-        default="gpt-4o", alias="FIREFLIES_SUMMARY_MODEL"
+        default="gpt-5.5", alias="FIREFLIES_SUMMARY_MODEL"
     )
+    # FR-CR-05-104 — bumped to gpt-5.5 alongside the main
+    # model for accuracy on Russian transcript summarisation
+    # + task extraction.
     fireflies_short_summary_model: str = Field(
-        default="gpt-4o-mini", alias="FIREFLIES_SHORT_SUMMARY_MODEL"
+        default="gpt-5.5", alias="FIREFLIES_SHORT_SUMMARY_MODEL"
     )
     fireflies_tasks_model: str = Field(
-        default="gpt-4o-mini", alias="FIREFLIES_TASKS_MODEL"
+        default="gpt-5.5", alias="FIREFLIES_TASKS_MODEL"
     )
     fireflies_whisper_model: str = Field(
         default="whisper-1", alias="FIREFLIES_WHISPER_MODEL"

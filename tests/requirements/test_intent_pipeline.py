@@ -640,6 +640,50 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "temporal anchor" in blob.lower() or "к 5" in blob
 
 
+def test_detect_prompt_rejects_chat_opener_retrospective_recap():
+    """FR-CR-05-104 — operator regression: «Смотри, по GP
+    Morgan, я вчера с Артёмом просто переписывалась, я у
+    него…» landed verbatim as a task. Chat-opener
+    («Смотри») + retrospective recap («я вчера переписывалась»)
+    + trailing «…» = chat, not delegation. is_task=false."""
+    blob = DETECT_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "Chat-opener + retrospective recap" in blob
+    assert "FR-CR-05-104" in blob
+    # The exact regression case is pinned (whitespace-collapsed
+    # because the prompt may wrap across lines).
+    assert "Смотри, по GP Morgan" in flat
+    # The conversational fillers + retrospective markers + trailing-dots rule.
+    for fragment in (
+        "Смотри",
+        "слушай",
+        "короче",
+        "look,",
+        "hey,",
+    ):
+        assert fragment in blob, f"{fragment!r} should be pinned"
+
+
+def test_default_models_use_gpt_5_5_everywhere():
+    """FR-CR-05-104 — operator: «давай поставим gpt-5.5
+    везде». GPT-5.5 launched 2026-Q1 (operator-cited
+    https://openai.com/index/introducing-gpt-5-5/). All six
+    model defaults — main, date, dedup, fireflies (summary,
+    short-summary, tasks) — bumped to gpt-5.5. Operators
+    whose key doesn't have access yet override via the
+    matching env var (OPENAI_MODEL=gpt-4o etc.)."""
+    from app.config import Settings
+
+    s = Settings()
+    assert s.openai_model == "gpt-5.5"
+    assert s.openai_date_model == "gpt-5.5"
+    assert s.openai_dedup_model == "gpt-5.5"
+    assert s.fireflies_summary_model == "gpt-5.5"
+    assert s.fireflies_short_summary_model == "gpt-5.5"
+    assert s.fireflies_tasks_model == "gpt-5.5"
+
+
 def test_detect_prompt_rejects_third_party_future_intent():
     """FR-CR-05-95 — operator regression: «Они сами отправят
     ссылку» landed as a task. The author is REPORTING what

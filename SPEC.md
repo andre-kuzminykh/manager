@@ -833,6 +833,39 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-104 — Chat-opener + retrospective recap rejection; gpt-5.5 everywhere
+
+Operator regression: «Смотри, по GP Morgan, я вчера с Артёмом
+просто переписывалась, я у него…» landed as a task with
+verbatim title and a fallback description. Plus operator
+direction: «давай поставим gpt-5.5 везде».
+
+Two fixes:
+
+  - **`detect_prompt.py` — Chat-opener + retrospective recap
+    block.** Sentences starting with conversational fillers
+    («Смотри, ...», «слушай, ...», «короче, ...», «вот,
+    ...», «эй, ...», «look, ...», «hey, ...») followed by
+    past-tense recap of a prior conversation («я вчера с X
+    переписывалась», «мы обсудили», «говорил с Y») are
+    chat, not delegations — even when they trail off with
+    «…» (the dots are conversational, not a hidden
+    imperative). is_task=false. The exact GP Morgan
+    regression pinned as a worked counter-example.
+
+  - **All model defaults bumped to `gpt-5.5`.** Operator-
+    cited release: <https://openai.com/index/introducing-
+    gpt-5-5/>. Six fields in `app/config.py`:
+      `openai_model` — gpt-4o-mini → gpt-5.5
+      `openai_date_model` — gpt-4o → gpt-5.5
+      `openai_dedup_model` — gpt-4o → gpt-5.5
+      `fireflies_summary_model` — gpt-4o → gpt-5.5
+      `fireflies_short_summary_model` — gpt-4o-mini → gpt-5.5
+      `fireflies_tasks_model` — gpt-4o-mini → gpt-5.5
+    Whisper transcription model unchanged. Operators whose
+    key doesn't have GPT-5.5 access yet override via the
+    matching env vars (`OPENAI_MODEL=gpt-4o` etc.).
+
 #### FR-CR-05-103 — Strip @-mention + politeness wrappers from chat-question titles
 
 Operator: «"@IrinaMorato подскажи, пожалуйста, отправить
@@ -4535,6 +4568,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-104 | `test_intent_pipeline.py::test_detect_prompt_rejects_chat_opener_retrospective_recap` (Chat-opener + retrospective recap block + GP Morgan regression + Russian/English fillers pinned); `::test_default_models_use_gpt_5_5_everywhere` (all six model fields default to gpt-5.5); `test_llm_backends.py::test_settings_defaults_for_openai_model` (asserts gpt-5.5 default); `test_task_dedup.py::test_dedup_call_uses_strong_model` (asserts dedup call passes `model=gpt-5.5`) |
 | FR-CR-05-103 | `test_intent_pipeline.py::test_strip_chat_prefix_to_imperative_handles_operator_regression` (Neuberger «@IrinaMorato подскажи, пожалуйста, отправить фоллоу-ап Neuberger ?» → «Отправить фоллоу-ап Neuberger»; multi-mention; English variant; пожалуйста-only; pure-wrapper falls to naked verb downstream); `::test_title_prompt_pins_chat_question_to_imperative_rule` (CHAT-QUESTION REQUESTS block + worked rewrite pinned in TITLE_SYSTEM_PROMPT) |
 | FR-CR-05-102 | `test_task_dedup.py::test_dedup_call_uses_strong_model` (dedup `call_tool` invoked with `model="gpt-4o"`, not the default mini); existing `::test_dedup_dispatches_to_llm_with_full_descriptions` still pins the ≤1500-char description feed |
 | FR-CR-05-101 | `test_task_dedup.py::test_dedup_prompt_is_minimal_focused_classifier` (≤700-char final form: 10-existing framing + «compare descriptions» + output schema); `test_intent_pipeline.py::test_dedup_prompt_minimal_no_legacy_blocks` (legacy synonym/family blocks gone); `test_intent_graph.py::test_date_node_does_not_fall_back_when_llm_intentionally_null` (LLM null + reasoning → no fallback); `::test_date_node_falls_back_when_llm_silent_no_reasoning` (still falls back when call genuinely failed) |

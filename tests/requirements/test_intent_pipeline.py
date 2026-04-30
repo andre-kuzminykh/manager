@@ -562,3 +562,24 @@ def test_owner_prompt_routes_routine_work_to_assistant_named_in_notes():
     # Decision/strategic cases stay with the principal — pinned
     # so we don't end up routing EVERYTHING to the assistant.
     assert "strategic" in blob.lower() or "стратеги" in blob.lower()
+
+
+def test_intent_prompt_demands_rich_3_to_6_sentence_descriptions():
+    """FR-CR-05-62 — description rule rewritten to demand 3-6
+    sentences with explicit context-message pulling. Pinned
+    after the operator showed «🟡 отправить инвайт Олаяна / 📝
+    Необходимо отправить инвайт Олаяна на встречу в 14:00» —
+    the LLM was producing 80-char paraphrases that re-stated
+    the title instead of summarising the surrounding chat."""
+    from app.intent.prompts import SYSTEM_PROMPT
+
+    blob = SYSTEM_PROMPT
+    # Length target raised.
+    assert "3-6 sentences" in blob or "3-6 предложений" in blob.lower()
+    # Context-message pulling is explicit.
+    assert "context_messages" in blob.lower()
+    # The exact regression case is pinned as a failure example.
+    assert "Олаяна" in blob and "Юля" in blob
+    # «BAD desc» / «GOOD desc» worked example.
+    assert "BAD desc" in blob
+    assert "GOOD desc" in blob

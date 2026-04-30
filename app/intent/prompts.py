@@ -101,33 +101,67 @@ Rules:
    downstream layer will fall back to the source-message author and
    label the task as "предположительно ты" in the UI so the human can
    reassign.
-7. Description must carry CONCRETE CONTEXT. The title is the
-   imperative one-liner; the description is where the human
-   reading the card later figures out what the task actually
-   is about WITHOUT going back to the source chat. Required
-   contents (when the source carries any of these — never
-   invent):
-     - The specific subject (which report? which list? which
-       client? which doc?). Example BAD title+desc:
-         title: «добавить в задачи»
-         desc:  «необходимо добавить текущие задачи в список»
-       — recipient sees both lines and still doesn't know
-       WHICH list or which tasks. Required GOOD form:
-         title: «добавить в общий план задачи по Mayfield»
-         desc:  «По итогам обсуждения с Артёмом — две задачи
-                по Mayfield (контрольный звонок 5 мая, deck
-                на этой неделе) надо завести в общий план,
-                чтобы их видел Сот».
-     - Names of people / projects / clients that were
-       mentioned IN the source.
-     - Numerical / factual constraints (dates, amounts,
-       counts, references) — copy them verbatim.
-     - Why this needs to be done — only when the source
-       message says it; don't speculate.
-   Aim for 1-3 sentences. A bare «нужно сделать X» mirroring
-   the title is NOT a valid description — if you can't say
-   anything beyond the title, leave description null and let
-   the deterministic fallback («обсуждалось в …») fill it.
+7. Description must carry CONCRETE, RICH CONTEXT — aim for
+   3-6 sentences. The title is the imperative one-liner; the
+   description is where the recipient figures out the FULL
+   story WITHOUT going back to the source chat. Required
+   contents (when the source / context carry any of these —
+   never invent):
+
+   (a) THE SPECIFIC SUBJECT. Which report? which list? which
+       client / fund / project? which document? which event?
+       Always name them.
+
+   (b) WHO IS INVOLVED. Names of people / clients / fund
+       names mentioned IN the source AND in the
+       `context_messages` block right above the source. Pull
+       names liberally from the surrounding conversation —
+       they're the «whose request is this», «who's the
+       audience», «who else was tagged». BAD: «отправить
+       инвайт Олаяна. Просьба от Юли». GOOD: «По просьбе
+       Юли (CEO Office) — отправить Олаяну приглашение на
+       встречу 30 апреля в 14:00 МСК через Google Calendar.
+       Олаян ранее выражал интерес к раунду; meeting agenda
+       прислала Юля выше в чате».
+
+   (c) ALL FACTS / NUMBERS / DEADLINES copied verbatim from
+       source — dates, times, amounts, fund sizes, valuations,
+       check sizes, contract numbers, document names,
+       URLs.
+
+   (d) WHY THIS NEEDS TO BE DONE — only when the source
+       describes it: «к 14:00 потому что это слот клиента»,
+       «до пятницы потому что в понедельник demo». Don't
+       speculate.
+
+   (e) BACKGROUND from `context_messages`. The conversation
+       leading up to the source message often carries the
+       reasoning, the prior asks, the unresolved questions —
+       weave that in.
+
+   The output is a self-contained paragraph the recipient can
+   act on cold. A bare «необходимо сделать X» mirroring the
+   title is NOT acceptable — that's a signal you didn't read
+   the surrounding context. If the source genuinely has zero
+   context (one-line capture with no preceding discussion),
+   leave description null and the deterministic fallback
+   («обсуждалось в …») will fill it.
+
+   Worked failure-mode example:
+       source: «Юля: отправь инвайт Олаяна на встречу в 14:00»
+       context_messages (preceding):
+         - [11:32] Юля: ребят, утвердили слот с Олаяном — 30 апреля
+                  в 14:00 МСК, его помощник просит инвайт через Google
+                  Calendar
+         - [11:33] Юля: agenda прикреплена в drive
+       BAD desc:  «Необходимо отправить инвайт Олаяна на встречу в
+                   14:00. Это просьба от Юли»  (~80 chars)
+       GOOD desc: «По просьбе Юли — отправить Олаяну инвайт на
+                   встречу 30 апреля в 14:00 МСК через Google
+                   Calendar. Слот утверждён с его помощником;
+                   agenda Юля приложила в Drive выше в чате.
+                   Нужно отправить ДО следующего рабочего дня
+                   чтобы Олаян успел подтвердить.» (~280 chars)
    Same rule applies to meetings → notes.
 8. Respond with a single JSON object matching the provided schema.
 """

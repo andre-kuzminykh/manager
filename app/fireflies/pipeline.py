@@ -601,6 +601,18 @@ class FirefliesPipeline:
             if not title:
                 continue
             description = (t.get("description") or "").strip() or None
+            if description:
+                # FR-CR-05-117 — defensively strip «Name (uid)»
+                # leaks from the description. Prompt forbids this
+                # but the LLM occasionally still copies a
+                # slack_user_id from the known_employees table
+                # into prose. Only strip parenthesised values
+                # that match an actual employee uid so we don't
+                # eat legit «(2025)» / «($300k)» / «(Q2)»
+                # parentheses.
+                description = _strip_uid_suffixes(
+                    description, valid_ids
+                )
             priority = t.get("priority") or "medium"
             owner_user_id = (t.get("owner") or "").strip() or None
             if owner_user_id and known_employees and owner_user_id not in valid_ids:
@@ -786,6 +798,26 @@ def _render_known_employees_table(employees: list[dict]) -> str:
             f"  {sid:<22} | {dn:<19} | {rn:<30} | {role:<26} | {notes}"
         )
     return "\n".join(lines)
+
+
+def _strip_uid_suffixes(text: str, valid_ids: set[str | None]) -> str:
+    """FR-CR-05-117 — remove «Name (462156243)»-style uid leaks
+    from a task description. Only strips parenthesised tokens
+    that match a real `slack_user_id` from `known_employees`,
+    preserving legitimate parentheses like «(Q2)», «($300k)»,
+    «(2025)»."""
+    real_ids = {str(v) for v in valid_ids if v}
+    if not real_ids or not text:
+        return text
+    import re
+
+    def _drop(match: __import__("re").Match[str]) -> str:
+        token = match.group(1)
+        if token in real_ids:
+            return ""
+        return match.group(0)
+
+    return re.sub(r"\s*\(([A-Za-z0-9_]+)\)", _drop, text).strip()
 
 
 def _admin_fallback_owner_id() -> str | None:

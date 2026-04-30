@@ -25,6 +25,7 @@ from app.fireflies.client import FirefliesClient, FirefliesTranscript
 from app.fireflies.pipeline import (
     FirefliesPipeline,
     _looks_like_auto_stamp_title,
+    _strip_uid_suffixes,
     _truncate,
 )
 from app.models import MeetingRecording, Task, TaskSourceKind, TeamMember
@@ -612,6 +613,52 @@ def test_looks_like_auto_stamp_title_detects_fireflies_defaults():
     assert _looks_like_auto_stamp_title("Раунд Humanoid") is False
     assert _looks_like_auto_stamp_title("Goldman Sachs intro") is False
     assert _looks_like_auto_stamp_title("Mayfield prep") is False
+
+
+def test_strip_uid_suffixes_removes_employee_uids_only():
+    """FR-CR-05-117 — operator regression: the LLM occasionally
+    copied slack_user_id values from the known_employees table
+    into the task description as «Валентина (462156243) и Irina
+    Shipilova (700469400)». The post-processor strips those
+    suffixes when the parenthesised token matches a real uid,
+    while leaving legitimate parentheses untouched."""
+    valid_ids = {"462156243", "700469400", "U02XPPN2BTC"}
+
+    # Numeric TG uids stripped.
+    out = _strip_uid_suffixes(
+        "Участники — Валентина (462156243) и Irina Shipilova "
+        "(700469400). Нужно уточнить срок.",
+        valid_ids,
+    )
+    assert "(462156243)" not in out
+    assert "(700469400)" not in out
+    assert "Валентина" in out
+    assert "Irina Shipilova" in out
+
+    # Slack-style uid stripped too.
+    out = _strip_uid_suffixes("Спросить Андрея (U02XPPN2BTC).", valid_ids)
+    assert "(U02XPPN2BTC)" not in out
+    assert "Андрея" in out
+
+    # Legitimate parentheses preserved.
+    preserved = "Закрыть раунд в Q2 (2025) на $300k (вторая часть)."
+    assert _strip_uid_suffixes(preserved, valid_ids) == preserved
+
+    # Empty / no employees → no-op.
+    assert _strip_uid_suffixes("", valid_ids) == ""
+    assert _strip_uid_suffixes("Текст (123).", set()) == "Текст (123)."
+
+
+def test_task_extraction_prompt_forbids_uid_in_description():
+    """FR-CR-05-117 — prompt rule pinned. The LLM must not copy
+    slack_user_id values into the description prose."""
+    from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
+
+    blob = TASK_EXTRACTION_SYSTEM
+    assert "NEVER copy slack_user_id" in blob
+    # Worked example pinned in the prompt to make the rule
+    # concrete (operator's regression).
+    assert "462156243" in blob
 
 
 def test_short_summary_prompt_pins_operator_format():

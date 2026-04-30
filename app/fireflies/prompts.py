@@ -170,6 +170,14 @@ For each task, emit:
                 clients, numbers verbatim from the transcript.
                 A bare «нужно сделать X» mirroring the title is
                 NOT a valid description (FR-CR-05-50).
+                NEVER copy slack_user_id values from the
+                `known_employees` table into the description —
+                those numbers («462156243», «700469400», «U02XX»)
+                are internal identifiers for the `owner` field
+                only. Reference people by their human name only:
+                «Валентина и Ирина Шипилова», NOT «Валентина
+                (462156243) и Irina Shipilova (700469400)»
+                (FR-CR-05-117).
 - owner:        slack_user_id of the person responsible. Pick
                 from the `known_employees` table provided in the
                 user prompt — NEVER invent ids that aren't in the

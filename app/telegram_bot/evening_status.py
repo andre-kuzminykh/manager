@@ -688,14 +688,31 @@ def _render_admin_tomorrow_plan_per_person(
     for k in by_owner:
         by_owner[k] = _sort_for_tomorrow_plan(by_owner[k], today=today)
 
-    # Resolve each owner's display name once.
+    # Resolve each owner's display name + Telegram link target once.
     def _label_for(owner_uid: str) -> str:
         if owner_uid == "_unassigned_":
             return "Не назначено"
-        tg_id, tg_handle, real_name = _resolve_owner_link_target(
+        _tg_id, _tg_handle, real_name = _resolve_owner_link_target(
             session, owner_uid, None
         )
         return real_name or owner_uid
+
+    def _owner_header_html(owner_uid: str) -> str:
+        """FR-CR-05-114 — admin per-person section header is a
+        hyperlinked owner badge (same shape as the per-user
+        plan owner badges) so the operator can tap to open the
+        person's DM."""
+        if owner_uid == "_unassigned_":
+            return "👤 <b>Не назначено</b>"
+        tg_id, tg_handle, real_name = _resolve_owner_link_target(
+            session, owner_uid, None
+        )
+        label = real_name or owner_uid
+        eff_handle = tg_handle or _handle_from_display(label)
+        link = _owner_html_link(
+            owner_uid, label, tg_user_id=tg_id, tg_handle=eff_handle,
+        )
+        return f"👤 <b>{link}</b>"
 
     # Order owner sections: alphabetical by display name, with
     # «Не назначено» pinned to the bottom.
@@ -718,9 +735,19 @@ def _render_admin_tomorrow_plan_per_person(
     for owner_uid in owner_keys:
         tasks = by_owner[owner_uid]
         per_person_ids[owner_uid] = [t.id for t in tasks]
+        try:
+            recipient_chat_id = (
+                int(owner_uid) if owner_uid.lstrip("-").isdigit() else None
+            )
+        except (TypeError, ValueError):
+            recipient_chat_id = None
+        # FR-CR-05-114 — section header carries the owner
+        # hyperlink + task count. Blank line above it for
+        # visible separation between people.
         section_lines = [
-            f"\n👤 <b>{_escape_html(_label_for(owner_uid))}</b>"
-            f" — {len(tasks)} task{'s' if len(tasks) != 1 else ''}"
+            "",
+            f"{_owner_header_html(owner_uid)}"
+            f" — {len(tasks)} task{'s' if len(tasks) != 1 else ''}",
         ]
         for t in tasks:
             if _is_overdue(t, today=today):
@@ -728,7 +755,21 @@ def _render_admin_tomorrow_plan_per_person(
             else:
                 bullet = PRIORITY_EMOJI.get(t.priority.value, "🟡")
             safe_title = _escape_html(t.title or "")
-            section_lines.append(f"  {bullet} {safe_title}")
+            # FR-CR-05-114 — title hyperlink to the BOT'S task
+            # card (FR-CR-05-48), same as the per-user plan.
+            url = _task_card_url(
+                t,
+                recipient_chat_id=recipient_chat_id,
+                bot_user_id=bot_user_id,
+            )
+            if url:
+                title_html = (
+                    f'<a href="{_escape_html(url)}">'
+                    f"<b>{safe_title}</b></a>"
+                )
+            else:
+                title_html = f"<b>{safe_title}</b>"
+            section_lines.append(f"  {bullet} {title_html}")
             if t.due_date:
                 due_str = t.due_date.isoformat()
                 if t.due_time:
@@ -880,7 +921,12 @@ def _split_groups_into_messages(
     sub-header on continuation messages so the operator knows it's
     the same report). Returns at least one message even when
     `groups` is empty (the «nothing today» case is handled by the
-    caller and never reaches here)."""
+    caller and never reaches here).
+
+    FR-CR-05-114 — operator: «добавляй отступы». Each task
+    line gets a blank line above it so individual tasks
+    visually separate inside a section.
+    """
     messages: list[str] = []
     current = header
     for g in groups:
@@ -890,10 +936,11 @@ def _split_groups_into_messages(
             current = "(continued)"
         current += section_header
         for line in g.lines:
-            chunk = "\n" + line
+            # FR-CR-05-114 — blank line between tasks for readability.
+            chunk = "\n\n" + line
             if len(current) + len(chunk) > cap and current.strip():
                 messages.append(current)
-                current = "(continued)\n" + line
+                current = "(continued)\n\n" + line
             else:
                 current += chunk
     if current.strip():

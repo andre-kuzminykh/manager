@@ -7,8 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential libpq-dev \
+    && apt-get install -y --no-install-recommends \
+        build-essential libpq-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
+# FR-CR-05-115 — ffmpeg + ffprobe required for splitting
+# meeting audio into ≤24 MB chunks for Whisper.
 
 WORKDIR /app
 

@@ -211,6 +211,49 @@ class FirefliesClient:
             )
         return out
 
+    def fetch_transcript_text(self, fireflies_id: str) -> str:
+        """FR-CR-05-115 — fall back to Fireflies' GraphQL
+        `sentences` field when the audio file exceeds the
+        Whisper 25 MB cap. Returns the joined sentence text
+        (or empty string on any failure).
+
+        Operator regression: 26 MB meeting audio failed Whisper;
+        Fireflies already provides per-sentence transcript via
+        their API, so we don't NEED Whisper for those — pull
+        the transcript directly.
+        """
+        if not self.enabled or not fireflies_id:
+            return ""
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        query = (
+            "query Sentences($id: String!) { transcript(id: $id) "
+            "{ sentences { text } } }"
+        )
+        body = {"query": query, "variables": {"id": fireflies_id}}
+        try:
+            payload = self._request_func(self._endpoint, headers, body)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "fireflies_fetch_transcript_failed",
+                fireflies_id=fireflies_id,
+                error=str(e),
+            )
+            return ""
+        data = (payload or {}).get("data") or {}
+        tx = data.get("transcript") or {}
+        sentences = tx.get("sentences") or []
+        chunks: list[str] = []
+        for s in sentences:
+            if not isinstance(s, dict):
+                continue
+            t = (s.get("text") or "").strip()
+            if t:
+                chunks.append(t)
+        return "\n".join(chunks)
+
     def download_audio(
         self,
         *,

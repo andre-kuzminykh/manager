@@ -17,7 +17,10 @@ near-no-op (each step skips when the flag is set).
 """
 from __future__ import annotations
 
+import math
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from typing import Any
@@ -59,6 +62,80 @@ class PipelineReport:
     def __post_init__(self) -> None:
         if self.errors is None:
             self.errors = []
+
+
+def _ffprobe_duration_seconds(path: str) -> float:
+    """FR-CR-05-115 — return audio duration in seconds via
+    `ffprobe`. Raises `RuntimeError` if ffprobe isn't on PATH
+    or fails to parse the file."""
+    if shutil.which("ffprobe") is None:
+        raise RuntimeError("ffprobe not on PATH (install ffmpeg)")
+    proc = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries",
+            "format=duration", "-of",
+            "default=noprint_wrappers=1:nokey=1", path,
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"ffprobe failed: rc={proc.returncode} err={proc.stderr.strip()}"
+        )
+    try:
+        return float(proc.stdout.strip())
+    except ValueError as e:
+        raise RuntimeError(f"ffprobe output unparseable: {proc.stdout!r}") from e
+
+
+def _split_audio_into_chunks(path: str, *, max_bytes: int) -> list[str]:
+    """FR-CR-05-115 — split `path` (an mp3 file) into chunks
+    each ≤ `max_bytes`, using `ffmpeg -c copy` so we don't
+    re-encode (preserves the audio bitrate). Returns the list
+    of chunk file paths in order. The original file stays
+    untouched.
+
+    Strategy: use the duration / bytes ratio to compute a
+    target chunk duration that should produce ≤ max_bytes
+    chunks, then slice every `chunk_seconds` seconds. Round
+    up the chunk count so we never under-split.
+    """
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg not on PATH")
+    size = os.path.getsize(path)
+    if size <= max_bytes:
+        return [path]
+    duration = _ffprobe_duration_seconds(path)
+    if duration <= 0:
+        raise RuntimeError(f"audio duration non-positive: {duration}")
+    # +5% safety margin so we don't sit right at max_bytes.
+    n_chunks = max(2, math.ceil(size * 1.05 / max_bytes))
+    chunk_seconds = duration / n_chunks
+    base = path.rsplit(".", 1)[0]
+    out: list[str] = []
+    for i in range(n_chunks):
+        start = i * chunk_seconds
+        chunk_path = f"{base}.chunk{i:02d}.mp3"
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-ss", f"{start:.3f}",
+                "-t", f"{chunk_seconds:.3f}",
+                "-i", path,
+                "-c", "copy",
+                chunk_path,
+            ],
+            capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg chunk {i} failed: rc={proc.returncode} "
+                f"err={proc.stderr.strip()}"
+            )
+        if not os.path.exists(chunk_path):
+            raise RuntimeError(f"ffmpeg produced no output for chunk {i}")
+        out.append(chunk_path)
+    return out
 
 
 def _truncate(text: str | None, *, limit: int) -> str:
@@ -173,24 +250,64 @@ class FirefliesPipeline:
         if not api_key:
             row.last_error = "OPENAI_API_KEY not set"
             return False
-        try:
-            with open(row.audio_path, "rb") as f:
-                audio_bytes = f.read()
-        except OSError as e:
-            row.last_error = f"audio read failed: {e}"
-            return False
         from app.services.transcription import transcribe_bytes
 
-        transcript = transcribe_bytes(
-            audio_bytes=audio_bytes,
-            mimetype="audio/mpeg",
-            filename=os.path.basename(row.audio_path),
-            openai_api_key=api_key,
-            model=self._settings.fireflies_whisper_model,
-        )
+        size = os.path.getsize(row.audio_path)
+        # FR-CR-05-115 — Whisper hard-limits at 25 MB. Operator:
+        # «значит мне надо резать файл по 24 мб, отдельно их
+        # прогонять в whisper, а потом склеивать». Chunk via
+        # ffmpeg into ≤24 MB pieces, transcribe each, join.
+        whisper_max = 24 * 1024 * 1024
+        if size <= whisper_max:
+            audio_paths = [row.audio_path]
+        else:
+            try:
+                audio_paths = _split_audio_into_chunks(
+                    row.audio_path, max_bytes=whisper_max
+                )
+            except Exception as e:  # noqa: BLE001
+                row.last_error = f"audio chunking failed: {e}"
+                return False
+            log.info(
+                "fireflies_audio_chunked_for_whisper",
+                fireflies_id=row.fireflies_id,
+                size=size,
+                chunks=len(audio_paths),
+            )
+        transcript_parts: list[str] = []
+        for i, p in enumerate(audio_paths):
+            try:
+                with open(p, "rb") as f:
+                    audio_bytes = f.read()
+            except OSError as e:
+                row.last_error = f"audio chunk read failed [{i}]: {e}"
+                return False
+            chunk_text = transcribe_bytes(
+                audio_bytes=audio_bytes,
+                mimetype="audio/mpeg",
+                filename=os.path.basename(p),
+                openai_api_key=api_key,
+                model=self._settings.fireflies_whisper_model,
+            )
+            if not chunk_text:
+                row.last_error = (
+                    f"Whisper returned empty transcript on chunk {i+1}/"
+                    f"{len(audio_paths)}"
+                )
+                return False
+            transcript_parts.append(chunk_text)
+        transcript = "\n".join(transcript_parts).strip()
         if not transcript:
             row.last_error = "Whisper returned empty transcript"
             return False
+        # Cleanup temp chunks if we made any.
+        if len(audio_paths) > 1:
+            for p in audio_paths:
+                if p != row.audio_path:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
         row.transcript_text = transcript
         row.transcribed = True
         row.last_error = None

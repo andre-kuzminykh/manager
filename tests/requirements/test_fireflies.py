@@ -125,21 +125,58 @@ class _FakeFirefliesClient:
     """Stub `FirefliesClient` that returns canned transcripts and
     fakes the audio download by writing a sentinel byte string."""
 
-    def __init__(self, *, transcripts=None, audio_bytes=b"FAKE-MP3"):
+    _UNSET = object()
+
+    def __init__(
+        self,
+        *,
+        transcripts=None,
+        audio_bytes=b"FAKE-MP3",
+        download_returns=_UNSET,  # FR-CR-05-115 — explicit None
+                                  # = simulate cap-exceeded
+        graphql_transcript_text="",
+    ):
         self.enabled = True
         self._transcripts = transcripts or []
         self._audio_bytes = audio_bytes
+        self._download_returns_explicit = (
+            download_returns is not self._UNSET
+        )
+        self._download_returns = (
+            None
+            if download_returns is self._UNSET
+            else download_returns
+        )
+        self._graphql_transcript_text = graphql_transcript_text
         self.download_calls = 0
+        self.transcript_text_calls: list[str] = []
 
     def list_transcripts(self, *, limit, skip=0):
         return list(self._transcripts[:limit])
 
     def download_audio(self, *, url, dest_path, max_bytes=25 * 1024 * 1024):
         self.download_calls += 1
+        # `download_returns=None` simulates cap-exceeded /
+        # network failure when the test passes it explicitly.
+        # Otherwise default (no explicit value) writes the
+        # canned bytes and returns their length.
+        if self._download_returns_explicit is False:
+            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+            with open(dest_path, "wb") as f:
+                f.write(self._audio_bytes)
+            return len(self._audio_bytes)
+        if self._download_returns is None:
+            return None
         os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         with open(dest_path, "wb") as f:
             f.write(self._audio_bytes)
-        return len(self._audio_bytes)
+        return self._download_returns
+
+    def fetch_transcript_text(self, fireflies_id):
+        """FR-CR-05-115 — GraphQL fallback used when audio
+        is too big for Whisper."""
+        self.transcript_text_calls.append(fireflies_id)
+        return self._graphql_transcript_text
 
 
 class _FakeDocs:
@@ -272,6 +309,91 @@ def test_pipeline_process_one_runs_every_step(
             assert tasks[0].due_date == date.today()
             assert tasks[0].owner_user_id == "777"
             assert tasks[0].source_conversation_id == "trans-1"
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_pipeline_chunks_oversize_audio_and_concatenates_transcripts(
+    patched_session_scope, SessionFactory, monkeypatch, tmp_path
+):
+    """FR-CR-05-115 — operator: «значит мне надо резать файл по
+    24 мб, отдельно их прогонять в whisper, а потом склеивать,
+    никаких фолбеков в транскрипт FF». When the downloaded
+    audio exceeds 24 MB, pipeline splits via ffmpeg into
+    ≤24 MB chunks, transcribes each, joins. No Fireflies-side
+    transcript fallback."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        settings = _settings_with_audio_dir()
+        # Simulate a 30 MB audio file.
+        big_bytes = b"X" * (30 * 1024 * 1024)
+        client = _FakeFirefliesClient(
+            transcripts=[_fake_transcript("trans-big")],
+            audio_bytes=big_bytes,
+            download_returns=len(big_bytes),
+        )
+        # Stub out the chunker so we don't actually shell out
+        # to ffmpeg. Two fake chunks.
+        chunk_paths: list[str] = []
+
+        def fake_split(path, *, max_bytes):
+            for i in range(2):
+                cp = f"{path}.chunk{i:02d}.mp3"
+                with open(cp, "wb") as f:
+                    f.write(b"chunk-" + str(i).encode())
+                chunk_paths.append(cp)
+            return list(chunk_paths)
+
+        monkeypatch.setattr(
+            "app.fireflies.pipeline._split_audio_into_chunks", fake_split
+        )
+
+        # Whisper stub: returns chunk-specific text so we can
+        # assert concatenation order.
+        call_log: list[str] = []
+
+        def fake_transcribe(**kw):
+            call_log.append(kw["filename"])
+            if "chunk00" in kw["filename"]:
+                return "часть 1: говорили о Beta"
+            if "chunk01" in kw["filename"]:
+                return "часть 2: договорились на четверг"
+            return "(unexpected chunk)"
+
+        monkeypatch.setattr(
+            "app.services.transcription.transcribe_bytes", fake_transcribe
+        )
+        llm = _FakeLLM(tasks=[])
+        pipeline = FirefliesPipeline(
+            settings=settings,
+            client=client,
+            llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(),
+            sender=_FakeSender(),
+        )
+        with SessionFactory() as s:
+            pipeline.process_one(s, _fake_transcript("trans-big"))
+            s.commit()
+
+        with SessionFactory() as s:
+            from app.models import MeetingRecording
+
+            row = s.query(MeetingRecording).one()
+            assert row.audio_downloaded is True
+            assert row.transcribed is True
+            # Both chunks landed in the joined transcript, in order.
+            assert "часть 1: говорили о Beta" in (row.transcript_text or "")
+            assert "часть 2: договорились на четверг" in (row.transcript_text or "")
+            idx_a = row.transcript_text.index("часть 1")
+            idx_b = row.transcript_text.index("часть 2")
+            assert idx_a < idx_b
+        # Both chunks went through Whisper, and Fireflies-side
+        # transcript fallback was NOT called.
+        assert len(call_log) == 2
+        assert client.transcript_text_calls == []
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 

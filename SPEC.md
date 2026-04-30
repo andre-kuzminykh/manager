@@ -833,6 +833,62 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-115 — Audio chunking via ffmpeg for Whisper 25 MB cap
+
+Operator: «значит мне надо резать файл по 24 мб, отдельно их
+прогонять в whisper, а потом склеивать, никаких фолбеков в
+транскрипт FF».
+
+A 26 MB Fireflies recording exceeded the Whisper 25 MB hard
+limit and `_step_download_audio` returned «audio download
+failed or exceeded cap». Operator wants the pipeline to split
+the file into ≤24 MB pieces, transcribe each, and concatenate
+the transcripts.
+
+`app/fireflies/pipeline.py`:
+  - `_ffprobe_duration_seconds(path)` — uses `ffprobe` to read
+    the file's audio duration. Raises `RuntimeError` if
+    ffprobe isn't on PATH.
+  - `_split_audio_into_chunks(path, max_bytes=…)` — calls
+    `ffmpeg -y -ss <start> -t <chunk_seconds> -i <path>
+    -c copy <chunk_path>`. Computes chunk count from the
+    bytes/duration ratio with a 5% safety margin. Returns
+    the ordered list of chunk paths.
+  - `_step_transcribe` — when audio file size exceeds 24 MB,
+    runs `_split_audio_into_chunks`, transcribes each chunk
+    via `transcribe_bytes` separately, joins with newlines.
+    Removes temp chunk files when done. Both
+    `audio_downloaded` AND `transcribed` flip True only after
+    all chunks succeeded.
+
+`app/config.py` — `fireflies_audio_max_bytes` default raised
+from 25 MB → **200 MB**. The cap now bounds the on-disk
+download attempt; Whisper-side splitting handles anything
+above 24 MB.
+
+`Dockerfile` — `apt-get install ffmpeg` added so `ffprobe` /
+`ffmpeg` are on PATH inside the container.
+
+#### FR-CR-05-114 — Hyperlinks + spacing in evening admin per-person tomorrow plan and team summary
+
+Operator complaint on the FR-CR-05-91 admin per-person
+tomorrow plan output:
+  «тут почему-то нет гиперссылок на людей и задачи как в
+  саммари»
+  «добавляй отступы»
+
+Two fixes in `app/telegram_bot/evening_status.py`:
+
+  - `_render_admin_tomorrow_plan_per_person` now wraps the
+    section header owner name in `_owner_html_link` (`tg://
+    user?id=…` / `t.me/<handle>`), and each task title in
+    `<a href="<bot card url>"><b>…</b></a>` (FR-CR-05-48
+    bot-card-deep-link). Owner section header gets a
+    leading blank line for visible separation.
+  - `_split_groups_into_messages` (used by the team summary
+    digest) now inserts a blank line between consecutive
+    task lines inside a section. Same `cap` accounting.
+
 #### FR-CR-05-113 — Owner-detection on task card uses team_members set-intersection
 
 Operator: «пропала кнопка запустить задачу когда она на мне (и
@@ -4848,6 +4904,8 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-115 | `test_fireflies.py::test_pipeline_chunks_oversize_audio_and_concatenates_transcripts` (30 MB audio → 2 chunks via stub `_split_audio_into_chunks`; both go through Whisper; joined transcript preserves order; no Fireflies-side fallback called) |
+| FR-CR-05-114 | manual: `_render_admin_tomorrow_plan_per_person` emits `_owner_html_link` for section headers and `<a href=tg://openmessage…>` for titles; `_split_groups_into_messages` inserts a blank line between tasks inside each section |
 | FR-CR-05-113 | `test_telegram_cards.py::test_viewer_is_owner_matches_via_team_member_uid_handle_realname` (case A: direct uid match; case B: owner=@handle, viewer=uid; case C: owner=real_name; negative: different person → False) |
 | FR-CR-05-112 | `test_intent_pipeline.py::test_has_explicit_temporal_anchor_helper` (Russian + English deadline anchors → True; meeting-slot dates без «к/до/by» → False; empty / None safe). Manual: `node_date` drops LLM-picked due_date when no anchor in source; logged as `date_node_dropped_no_temporal_anchor`. |
 | FR-CR-05-111 | `test_task_dedup.py::test_dedup_similar_description_safety_net_skips_llm` (Beta-Jared Zoom-ID dup → similarity≥0.70 fast path catches it without LLM call); `::test_dedup_similarity_does_not_match_unrelated_descriptions` (different work → similarity gate doesn't fire, LLM still called) |

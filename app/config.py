@@ -176,8 +176,14 @@ class Settings(BaseSettings):
     # (Whisper API has a 25 MB request cap; meetings can run
     # longer than that as a single mp3 — we'd need to chunk in
     # that case, which is not yet implemented).
+    # FR-CR-05-115 — operator: «а если 100 mb или больше,
+    # поставь 200». Whisper itself still hard-limits at 25 MB
+    # but FirefliesPipeline now falls back to Fireflies'
+    # GraphQL `sentences` transcript when Whisper can't take
+    # the file, so the cap here just bounds the on-disk
+    # download attempt.
     fireflies_audio_max_bytes: int = Field(
-        default=25 * 1024 * 1024,
+        default=200 * 1024 * 1024,
         alias="FIREFLIES_AUDIO_MAX_BYTES",
     )
 

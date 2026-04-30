@@ -385,7 +385,7 @@ class FirefliesPipeline:
         if not text:
             row.last_error = "detailed summary LLM returned empty"
             return False
-        row.detailed_summary = text
+        row.detailed_summary = _strip_markdown_emphasis(text)
         row.detailed_summarised = True
         row.last_error = None
         return True
@@ -814,6 +814,32 @@ def _render_known_employees_table(employees: list[dict]) -> str:
             f"  {sid:<22} | {dn:<19} | {rn:<30} | {role:<26} | {notes}"
         )
     return "\n".join(lines)
+
+
+def _strip_markdown_emphasis(text: str) -> str:
+    """FR-CR-05-117 — strip markdown emphasis markers from the
+    detailed summary so it pastes cleanly into Google Docs.
+    Google Docs renders `**bold**` as literal asterisks. Same
+    deal for `__bold__`, `*italic*`, `_italic_`, and inline
+    `` `code` ``. Preserves the inner text, just drops the
+    surrounding markers. Conservative: only strips paired
+    markers that wrap a non-empty span, leaves literal
+    asterisks (e.g. multiplication «3 * 5») alone."""
+    if not text:
+        return text
+    import re
+
+    # **bold** / __bold__ — paired double markers.
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"__(.+?)__", r"\1", text, flags=re.DOTALL)
+    # *italic* / _italic_ — single markers; conservative match
+    # (no whitespace right inside the markers, no markers around
+    # an empty span). Avoids eating «3 * 5».
+    text = re.sub(r"(?<!\*)\*(\S(?:.*?\S)?)\*(?!\*)", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"(?<!_)_(\S(?:.*?\S)?)_(?!_)", r"\1", text, flags=re.DOTALL)
+    # Inline `code`.
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    return text
 
 
 def _strip_uid_suffixes(text: str, valid_ids: set[str | None]) -> str:

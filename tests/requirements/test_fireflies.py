@@ -25,6 +25,7 @@ from app.fireflies.client import FirefliesClient, FirefliesTranscript
 from app.fireflies.pipeline import (
     FirefliesPipeline,
     _looks_like_auto_stamp_title,
+    _strip_markdown_emphasis,
     _strip_uid_suffixes,
     _truncate,
 )
@@ -613,6 +614,57 @@ def test_looks_like_auto_stamp_title_detects_fireflies_defaults():
     assert _looks_like_auto_stamp_title("Раунд Humanoid") is False
     assert _looks_like_auto_stamp_title("Goldman Sachs intro") is False
     assert _looks_like_auto_stamp_title("Mayfield prep") is False
+
+
+def test_strip_markdown_emphasis_removes_paired_markers():
+    """FR-CR-05-117 — Google Docs renders the detailed summary
+    as plain text, so `**bold**` etc. show up as literal
+    asterisks. The pipeline strips paired markdown emphasis
+    markers before saving the body to the row / Doc."""
+    # **bold** / __bold__
+    assert (
+        _strip_markdown_emphasis("Это **важно** сегодня.")
+        == "Это важно сегодня."
+    )
+    assert (
+        _strip_markdown_emphasis("__Решение__ принято.")
+        == "Решение принято."
+    )
+    # *italic* / _italic_
+    assert (
+        _strip_markdown_emphasis("Слово *курсивом* в строке.")
+        == "Слово курсивом в строке."
+    )
+    assert (
+        _strip_markdown_emphasis("Слово _курсивом_ в строке.")
+        == "Слово курсивом в строке."
+    )
+    # Inline `code`.
+    assert _strip_markdown_emphasis("Запусти `make`.") == "Запусти make."
+    # Multiline bold preserved across newlines.
+    assert (
+        _strip_markdown_emphasis("**Линия 1\nЛиния 2**")
+        == "Линия 1\nЛиния 2"
+    )
+    # Literal asterisk in math NOT eaten («3 * 5»).
+    assert _strip_markdown_emphasis("Формула: 3 * 5 = 15.") == (
+        "Формула: 3 * 5 = 15."
+    )
+    # Empty / None safe.
+    assert _strip_markdown_emphasis("") == ""
+    assert _strip_markdown_emphasis(None) is None  # type: ignore[arg-type]
+
+
+def test_detailed_summary_prompt_forbids_markdown():
+    """FR-CR-05-117 — prompt rule pinned. Operator pastes the
+    summary into Google Docs which renders `**bold**` as literal
+    asterisks."""
+    from app.fireflies.prompts import DETAILED_SUMMARY_SYSTEM
+
+    blob = DETAILED_SUMMARY_SYSTEM
+    assert "PLAIN TEXT ONLY" in blob or "plain text only" in blob.lower()
+    assert "NO MARKDOWN" in blob or "markdown" in blob.lower()
+    assert "**" in blob  # the literal forbidden marker is named
 
 
 def test_strip_uid_suffixes_removes_employee_uids_only():

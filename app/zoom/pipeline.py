@@ -258,7 +258,9 @@ class ZoomPipeline:
         if not text:
             row.last_error = "detailed summary returned empty"
             return False
-        row.detailed_summary = text
+        from app.fireflies.pipeline import _strip_markdown_emphasis
+
+        row.detailed_summary = _strip_markdown_emphasis(text)
         row.detailed_summarised = True
         row.last_error = None
         return True

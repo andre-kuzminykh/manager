@@ -752,3 +752,80 @@ def test_upsert_from_sheet_rows_merges_duplicates_by_unique_column(session):
     assert survivor.telegram_user_id == 222968032
     assert survivor.slack_user_id == "U09LH2FGALC"
     assert survivor.role == "AI Lead"
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-60 — soft-deactivate rows removed from the sheet
+# --------------------------------------------------------------------------- #
+
+
+def test_upsert_from_sheet_rows_soft_deactivates_missing(session):
+    """Operator removes a row from the Sheet — the next pull
+    must set `active=False` on the corresponding DB row so the
+    LLM owner picker stops suggesting them.
+
+    Reproduces the production bug: «Aisala Kambekova» was
+    deleted from the Team Sheet but stayed `active=True` in DB
+    and kept landing as the assignee on extracted tasks."""
+    # Seed two team members.
+    session.add_all([
+        TeamMember(
+            real_name="Aisala", telegram_user_id=111,
+            telegram_username="aisala", active=True,
+            role="something",
+        ),
+        TeamMember(
+            real_name="Юля", telegram_user_id=222,
+            telegram_username="yulia", active=True,
+            role="Time management coordinator",
+            notes="согласует встречи, планирует календарь",
+        ),
+    ])
+    session.flush()
+    assert len(list_active(session)) == 2
+
+    # Operator removes Aisala from the sheet — only Юля remains.
+    # Pull payload reflects the new sheet state.
+    yulia = find_by_telegram_user_id(session, 222)
+    assert yulia is not None
+    rows = [
+        [
+            str(yulia.id), "Юля", "222", "yulia", "",
+            "Time management coordinator", "", "true",
+            "согласует встречи, планирует календарь",
+        ],
+    ]
+    updated, inserted = upsert_from_sheet_rows(session, rows)
+    # Юля refreshed (no real change) + Aisala soft-deactivated.
+    assert inserted == 0
+    assert updated >= 1  # at least the deactivation
+
+    # Aisala is no longer surfaced via list_active.
+    actives = list_active(session)
+    assert len(actives) == 1
+    assert actives[0].real_name == "Юля"
+
+    # Aisala still exists in DB but flagged inactive.
+    aisala = find_by_telegram_user_id(session, 111)
+    assert aisala is not None  # not hard-deleted
+    assert aisala.active is False
+
+
+def test_upsert_from_sheet_rows_does_not_deactivate_when_pull_empty(session):
+    """Defence-in-depth: if the pull returns NO rows (sheet was
+    cleared by accident or returned an empty range), DON'T
+    deactivate everyone. The seen-set guard requires at least
+    one row to anchor the «what counts as missing» logic."""
+    session.add(
+        TeamMember(
+            real_name="Andre", telegram_user_id=42,
+            telegram_username="andre", active=True,
+        )
+    )
+    session.flush()
+
+    updated, inserted = upsert_from_sheet_rows(session, [])
+    assert (updated, inserted) == (0, 0)
+    actives = list_active(session)
+    assert len(actives) == 1
+    assert actives[0].real_name == "Andre"

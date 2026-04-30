@@ -510,9 +510,18 @@ def upsert_from_sheet_rows(
     Slack-only row for the same teammate). The orphan row is
     deleted so the merge lands instead of crashing on
     ``UniqueViolation``.
+
+    FR-CR-05-60 — rows that USED to be in the sheet but are now
+    missing get `active=False` (soft-deactivated). This stops
+    the LLM owner picker from suggesting people the operator
+    just removed from the team. The seen-id set is built across
+    every match strategy so a row matched by `id`, by
+    `telegram_user_id`, or by `slack_user_id` all count as
+    «still in sheet».
     """
     updated = 0
     inserted = 0
+    seen_team_ids: set[int] = set()
     now = datetime.now(timezone.utc)
     for row in rows:
         cells = list(row) + [""] * (len(SHEET_HEADERS) - len(row))
@@ -571,9 +580,13 @@ def upsert_from_sheet_rows(
                 session.flush()
 
         if target is None:
-            session.add(TeamMember(**new_values))
+            new_member = TeamMember(**new_values)
+            session.add(new_member)
+            session.flush()
+            seen_team_ids.add(new_member.id)
             inserted += 1
         else:
+            seen_team_ids.add(target.id)
             # FR-CR-05-30 — only count + write when an actual data
             # field changed. Without this guard the listener's
             # 60-second poll wrote `last_synced_at=now` to all 54
@@ -591,6 +604,24 @@ def upsert_from_sheet_rows(
             if real_diff:
                 target.last_synced_at = now
                 updated += 1
+
+    # FR-CR-05-60 — soft-deactivate every team member that we
+    # didn't see in this pull. Operator removed them from the
+    # sheet → they shouldn't appear in `known_employees` anymore.
+    # We DON'T hard-delete: historical task rows still reference
+    # them via `owner_user_id`, and an inactive member can be
+    # re-activated by adding the row back to the sheet.
+    if seen_team_ids:
+        deactivated_q = (
+            session.query(TeamMember)
+            .filter(TeamMember.active.is_(True))
+            .filter(~TeamMember.id.in_(seen_team_ids))
+        )
+        for stale in deactivated_q.all():
+            stale.active = False
+            stale.last_synced_at = now
+            updated += 1
+
     if inserted or updated:
         session.flush()
     return updated, inserted

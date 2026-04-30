@@ -640,6 +640,39 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "temporal anchor" in blob.lower() or "к 5" in blob
 
 
+def test_has_explicit_temporal_anchor_helper():
+    """FR-CR-05-112 — operator: «либо в описание добавляй
+    пруф либо сегодня». Helper distinguishes deadline anchors
+    («к понедельнику», «до 5 мая», «by Friday») from
+    meeting-slot dates («встреча в понедельник»)."""
+    from app.intent.pipeline import _has_explicit_temporal_anchor
+
+    f = _has_explicit_temporal_anchor
+    # Russian deadline anchors → True.
+    assert f("отчёт к пятнице") is True
+    assert f("сделать к 5 мая") is True
+    assert f("прислать до понедельника") is True
+    assert f("дедлайн завтра") is True
+    assert f("крайний срок до 15 числа") is True
+    # English deadline anchors → True.
+    assert f("send the report by Friday") is True
+    assert f("due by May 5") is True
+    assert f("before Wednesday") is True
+    assert f("deadline tomorrow") is True
+    # «сегодня» / «завтра» / «послезавтра» themselves → True.
+    assert f("надо сделать сегодня") is True
+    assert f("отправь завтра") is True
+    # Meeting-slot dates without deadline anchor → False.
+    assert f("встреча в понедельник или вторник") is False
+    assert f("Артем попросил организовать встречу с участием Джарада в понедельник") is False
+    assert f("meeting on Tuesday at 1pm") is False
+    assert f("слот 5 мая 18-21") is False
+    # Pure status / no dates → False.
+    assert f("подготовить отчёт по продажам") is False
+    assert f("") is False
+    assert f(None) is False
+
+
 def test_detect_node_python_guard_rejects_transcript_prefix_sources():
     """FR-CR-05-108 — operator: gpt-5.5 keeps emitting
     is_task=true for screenshot/chat-dump messages despite

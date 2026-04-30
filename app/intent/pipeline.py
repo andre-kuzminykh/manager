@@ -392,6 +392,46 @@ def _name_present(
     return False
 
 
+_TEMPORAL_ANCHOR_RE = __import__("re").compile(
+    # FR-CR-05-112 — operator: «либо в описание добавляй пруф,
+    # либо сегодня». An LLM-extracted due_date is accepted
+    # only when the source text contains an explicit temporal
+    # anchor near the date phrase. Otherwise the «date» is
+    # likely a meeting/event time, not a task deadline (e.g.
+    # «встреча в понедельник» — Monday is the meeting slot,
+    # not the deadline for setting up the meeting).
+    r"(?:^|[\s,.])"
+    r"("
+    # Russian deadline anchors
+    r"к\s+\d|к\s+(?:понедельник|вторник|сред|четверг|пятниц|субботе|воскресенье|концу)|"
+    r"до\s+\d|до\s+(?:понедельник|вторник|сред|четверг|пятниц|субботе|воскресенье|конца)|"
+    r"к\s+(?:января|феврал|март|апрел|мая|июн|июл|август|сентябр|октябр|ноябр|декабр)|"
+    r"до\s+(?:января|феврал|март|апрел|мая|июн|июл|август|сентябр|октябр|ноябр|декабр)|"
+    r"дедлайн|"
+    r"крайн[ие]й\s+срок|"
+    r"срок\s+до|"
+    r"завтра|послезавтра|сегодня|"
+    # English deadline anchors
+    r"by\s+\d|by\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|end\s+of)|"
+    r"by\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)|"
+    r"before\s+\d|before\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|"
+    r"deadline|due\s+(?:by|on)|tomorrow|today"
+    r")",
+    flags=__import__("re").IGNORECASE | __import__("re").UNICODE,
+)
+
+
+def _has_explicit_temporal_anchor(source_text: str) -> bool:
+    """FR-CR-05-112 — return True when the source text contains
+    a deadline-shaped temporal anchor («к понедельнику», «до
+    5 мая», «by Friday», «дедлайн», «завтра», etc.). When
+    False, an LLM-extracted due_date is likely a meeting-slot
+    date and gets dropped."""
+    if not source_text:
+        return False
+    return _TEMPORAL_ANCHOR_RE.search(source_text) is not None
+
+
 def node_date(state: IntentState) -> dict[str, Any]:
     """Dedicated date extractor.
 
@@ -433,6 +473,24 @@ def node_date(state: IntentState) -> dict[str, Any]:
             picked = parsed
         else:
             rejected = llm_iso
+
+    # FR-CR-05-112 — operator: «либо в описание добавляй
+    # пруф либо сегодня». Drop the LLM-picked date when the
+    # source text doesn't contain an explicit temporal anchor
+    # («к понедельнику», «до 5 мая», «by Friday», «дедлайн»,
+    # «завтра», etc.). Without an anchor, the date the LLM
+    # extracted is almost always a meeting/event slot
+    # (operator regression: «понедельник или вторник» = slot
+    # for the meeting being set up, not the deadline for
+    # setting it up).
+    if picked is not None and not _has_explicit_temporal_anchor(source_text):
+        log.info(
+            "date_node_dropped_no_temporal_anchor",
+            picked=picked.isoformat(),
+            source_excerpt=(source_text or "")[:200],
+        )
+        rejected = picked.isoformat()
+        picked = None
 
     source_used = "llm"
     if picked is None:

@@ -833,6 +833,38 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-112 — Drop LLM-picked due_date when source has no temporal anchor
+
+Operator regression: «🟡 Поставить встречу по Бете с
+Джарадом / 📅 2026-05-05» — the date is the «вторник» from
+«понедельник или вторник» in the description, but that's
+the MEETING SLOT, not the task's deadline. Operator policy
+(FR-CR-05-89/-94): «либо в описание добавляй пруф либо
+сегодня».
+
+`pipeline.py::node_date` adds a Python post-LLM gate: when
+the source text doesn't contain an explicit temporal anchor
+(«к понедельнику» / «до 5 мая» / «by Friday» / «дедлайн» /
+«завтра» / «сегодня»), drop the LLM-extracted due_date.
+Downstream then defaults to «today 18:00» per FR-CR-05-63.
+
+Implementation:
+  - `_TEMPORAL_ANCHOR_RE` — regex over Russian + English
+    deadline phrases. Captures: «к + day/month», «до + …»,
+    «by + …», «before + …», «дедлайн», «крайний срок»,
+    «срок до», «deadline», «due by/on», «tomorrow»,
+    «завтра», «сегодня», «послезавтра».
+  - `_has_explicit_temporal_anchor(source_text)` — returns
+    True iff the regex matches.
+  - When False, `node_date` logs `date_node_dropped_no_
+    temporal_anchor`, sets `rejected=<llm_iso>`, and
+    `picked=None`.
+
+The LLM-correctly-null + intentional-reasoning path
+(FR-CR-05-101) still wins over the Python fallback. The
+new check fires AFTER LLM-picked-date is parsed but
+BEFORE the source_used flag is decided.
+
 #### FR-CR-05-111 — Description similarity safety net under LLM dedup
 
 Operator regression: «Поставить встречу по Бете с Джарадом»
@@ -4789,6 +4821,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-112 | `test_intent_pipeline.py::test_has_explicit_temporal_anchor_helper` (Russian + English deadline anchors → True; meeting-slot dates без «к/до/by» → False; empty / None safe). Manual: `node_date` drops LLM-picked due_date when no anchor in source; logged as `date_node_dropped_no_temporal_anchor`. |
 | FR-CR-05-111 | `test_task_dedup.py::test_dedup_similar_description_safety_net_skips_llm` (Beta-Jared Zoom-ID dup → similarity≥0.70 fast path catches it without LLM call); `::test_dedup_similarity_does_not_match_unrelated_descriptions` (different work → similarity gate doesn't fire, LLM still called) |
 | FR-CR-05-110 | `test_task_dedup.py::test_dedup_dispatches_to_llm_with_full_descriptions` updated for the FR-CR-05-110/111 fast-path bypass; existing dedup tests still hold; `Settings.dedup_fast_path` config flag wired to enable/disable the safety net |
 | FR-CR-05-109 | Existing `test_intent_pipeline.py::test_detect_node_python_guard_rejects_transcript_prefix_sources` still pins the guard but extended with reflection patterns; manual: `_resolve_uids_in_text` now emits «Name (uid)» format; `_annotate_uids` runs in `prepare_drafts` before `_build_window` |

@@ -833,6 +833,54 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-111 — Description similarity safety net under LLM dedup
+
+Operator regression: «Поставить встречу по Бете с Джарадом»
+vs «Назначить встречу по Бете с Джарадом» landed as 2 tasks.
+Different titles (synonym verbs «поставить» / «назначить»)
+so FR-CR-05-110 exact-title path didn't fire. But descriptions
+were ≈ 95% identical (same Zoom ID 91444990696, same password
+197584, same 13:00-13:45 slot). LLM dedup still missed.
+
+`task_dedup.py` adds a SECOND tier in the `dedup_fast_path`
+block:
+
+  1. Exact-title + owner overlap (FR-CR-05-110) — fires first.
+  2. NEW: Description `SequenceMatcher` ratio ≥ 0.70 + owner
+     overlap (FR-CR-05-111). Catches the «synonym title +
+     near-identical description» case the LLM keeps missing.
+
+Implementation:
+  - `_description_similarity(a, b)` — `difflib.SequenceMatcher`
+    ratio over lowercased + whitespace-collapsed inputs.
+  - `_similar_description_owner_match(candidate, existing,
+    threshold=0.70)` — return first existing item whose
+    owner-key overlaps AND similarity ≥ threshold. Skips
+    items with descriptions <50 chars.
+  - On match, `is_duplicate=True`, reason mentions «description
+    similarity ≥0.70», LLM call skipped. Logged as
+    `task_dedup_similar_description_match`.
+  - Threshold 0.70 tuned conservative.
+
+#### FR-CR-05-110 — Narrow exact-title + owner safety net under LLM dedup
+
+Operator: «слушай, дубль 1 в 1, это из-за чего». Even gpt-5.5
+LLM-only dedup keeps missing identical-title + same-owner
+duplicates (Atuwatse Okorodudu × 2, PALADIN Goldman Sachs ×
+2, Mohammad Farhan × 2). Operator earlier rejected
+deterministic dedup, but empirically LLM-only ships dups.
+
+`check_duplicate` now runs `_exact_title_owner_match` BEFORE
+the LLM call:
+  - normalised title (lowercase + whitespace-collapse +
+    punctuation-strip + ё→е) equality
+  - candidate's owner-key set INTERSECTS existing's
+    (uid OR display_name on either side)
+
+Match → `is_duplicate=True`, LLM not called. Operator can
+disable via `DEDUP_FAST_PATH=0` env var (new
+`Settings.dedup_fast_path` config field).
+
 #### FR-CR-05-109 — Reflection / observation rejection; resolve uid → «Name (uid)» in pipeline context
 
 Two operator regressions in one commit:
@@ -4741,6 +4789,8 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-111 | `test_task_dedup.py::test_dedup_similar_description_safety_net_skips_llm` (Beta-Jared Zoom-ID dup → similarity≥0.70 fast path catches it without LLM call); `::test_dedup_similarity_does_not_match_unrelated_descriptions` (different work → similarity gate doesn't fire, LLM still called) |
+| FR-CR-05-110 | `test_task_dedup.py::test_dedup_dispatches_to_llm_with_full_descriptions` updated for the FR-CR-05-110/111 fast-path bypass; existing dedup tests still hold; `Settings.dedup_fast_path` config flag wired to enable/disable the safety net |
 | FR-CR-05-109 | Existing `test_intent_pipeline.py::test_detect_node_python_guard_rejects_transcript_prefix_sources` still pins the guard but extended with reflection patterns; manual: `_resolve_uids_in_text` now emits «Name (uid)» format; `_annotate_uids` runs in `prepare_drafts` before `_build_window` |
 | FR-CR-05-108 | `test_intent_pipeline.py::test_detect_node_python_guard_rejects_transcript_prefix_sources` («На изображени*», «На скрин*», «На фото», «Обсужда*т», «В переписк*», «По переписк*», «Сообщени* от», «In the image», «This screenshot shows», «On the screen» all match; real tasks pass through; None/empty safe); manual: removed last two `_fallback_description` call sites — `prepare_drafts` and `process_all` now both rely on the FR-CR-05-105 «empty description → drop draft» guard; `pipeline.py::node_owner` emits `owner_node_result` log line |
 | FR-CR-05-107 | `test_llm_backends.py::test_openai_call_uses_completion_tokens_for_gpt5` (also asserts `temperature` not in kwargs); `::test_openai_call_uses_max_tokens_for_gpt4o` (asserts `temperature=0` survives for gpt-4o); `::test_openai_complete_text_drops_temperature_for_gpt5`; `::test_openai_complete_text_keeps_temperature_for_gpt4o` |

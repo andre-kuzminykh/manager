@@ -79,6 +79,89 @@ def test_normalize_title_for_match_collapses_whitespace_case_yo_e():
     assert f("Подтвердить тёщу") == f("Подтвердить тещу")
 
 
+def test_dedup_similar_description_safety_net_skips_llm(session):
+    """FR-CR-05-111 — operator regression: «Поставить встречу
+    по Бете с Джарадом» vs «Назначить встречу по Бете с
+    Джарадом» landed as 2 tasks. Different titles (synonym
+    verbs «поставить» / «назначить») → exact-title fast path
+    didn't fire. But descriptions were ≈ 95% identical (same
+    Zoom ID, password, slot). The description-similarity
+    fast path now catches this."""
+    from app.services.task_dedup import check_duplicate
+
+    shared_desc = (
+        "Артем попросил организовать встречу по проекту Beta "
+        "с участием Джарада в понедельник или вторник. Встреча "
+        "запланирована с 13:00 до 13:45, организатор — Артем "
+        "Соколов. Указан ID Zoom совещания 91444990696 и пароль "
+        "197584. Нужно подтвердить, подходит ли этот слот"
+    )
+    paraphrased = (
+        "Артем попросил назначить встречу по проекту Beta с "
+        "участием Джарада в понедельник или вторник. Встреча "
+        "запланирована с 13:00 до 13:45, организатор — Артем "
+        "Соколов, ID Zoom 91444990696, пароль 197584. Нужно "
+        "подтвердить, подходит ли этот слот"
+    )
+    existing_id = _mk(
+        session,
+        title="Поставить встречу по Бете с Джарадом",
+        description=shared_desc,
+        owner_user_id="111",
+    )
+    session.commit()
+    backend = _FakeBackend({"is_duplicate": False})  # would say no
+    out = check_duplicate(
+        session,
+        candidate={
+            "title": "Назначить встречу по Бете с Джарадом",
+            "description": paraphrased,
+            "owner_user_id": "111",
+        },
+        llm_backend=backend,
+    )
+    assert out.is_duplicate is True
+    assert out.duplicate_of_task_id == existing_id
+    # The LLM was never called — similarity safety net caught it.
+    assert backend.calls == 0
+    assert "similarity" in (out.reason or "")
+
+
+def test_dedup_similarity_does_not_match_unrelated_descriptions(session):
+    """FR-CR-05-111 — guardrail: when the candidate's
+    description is genuinely different from existing items,
+    the similarity gate doesn't fire and the LLM is called."""
+    from app.services.task_dedup import check_duplicate
+
+    _mk(
+        session,
+        title="Подготовить отчёт по продажам",
+        description=(
+            "Необходимо собрать данные по продажам Q2 и "
+            "подготовить отчёт для совета директоров"
+        ),
+        owner_user_id="111",
+    )
+    session.commit()
+    backend = _FakeBackend({"is_duplicate": False})
+    out = check_duplicate(
+        session,
+        candidate={
+            "title": "Запланировать встречу с Bosch",
+            "description": (
+                "Договориться с командой Bosch о встрече по "
+                "массовому производству и подписать NDA"
+            ),
+            "owner_user_id": "111",
+        },
+        llm_backend=backend,
+    )
+    # Descriptions are unrelated → similarity gate didn't fire
+    # → LLM was called and said no.
+    assert out.is_duplicate is False
+    assert backend.calls == 1
+
+
 def test_dedup_call_uses_strong_model(session, monkeypatch):
     """FR-CR-05-102 — operator: «надо смотреть в описание и с
     LLM сравнивать». gpt-4o-mini was missing near-identical
@@ -153,16 +236,17 @@ def test_dedup_dispatches_to_llm_with_full_descriptions(session):
     out = check_duplicate(
         session,
         candidate={
-            # FR-CR-05-110 — paraphrased title so the
-            # exact-title fast path doesn't fire and the LLM
-            # IS called with full descriptions.
-            "title": "Уточнить обратную связь по PALADIN у Goldman Sachs",
+            # FR-CR-05-110/111 — paraphrased title and
+            # rewritten description so neither exact-title
+            # nor similarity fast paths fire — the LLM IS
+            # called with full descriptions for the test to
+            # exercise that path.
+            "title": "Связаться с Goldman Sachs",
             "description": (
-                "По просьбе Артёма нужно получить обратную связь "
-                "от Goldman Sachs по проекту PALADIN. Упомянуто, что "
-                "сообщение могло попасть в спам, и важно выяснить, "
-                "что происходит с их ответом. Это связано с "
-                "обсуждением в дата руме, где они проявили интерес"
+                "Поговорить с Goldman Sachs по PALADIN-сделке: "
+                "они заинтересованы, обсуждались параметры "
+                "финансирования, нужно подтвердить готовность "
+                "продолжать переговоры"
             ),
             "owner_user_id": "111",
         },

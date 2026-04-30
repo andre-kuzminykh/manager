@@ -235,6 +235,63 @@ def _owner_keys(*values: Any) -> set[str]:
     return out
 
 
+def _description_similarity(a: str, b: str) -> float:
+    """FR-CR-05-111 — return SequenceMatcher ratio for two
+    descriptions, lowercased + whitespace-collapsed. 0.0 ≤ r
+    ≤ 1.0; ≥0.7 indicates near-identical text the LLM dedup
+    keeps missing.
+    """
+    import difflib
+    import re
+
+    if not a or not b:
+        return 0.0
+    na = re.sub(r"\s+", " ", a.lower()).strip()
+    nb = re.sub(r"\s+", " ", b.lower()).strip()
+    if not na or not nb:
+        return 0.0
+    return difflib.SequenceMatcher(None, na, nb).ratio()
+
+
+def _similar_description_owner_match(
+    candidate: dict[str, Any],
+    existing: list[_ExistingItem],
+    threshold: float = 0.70,
+) -> _ExistingItem | None:
+    """FR-CR-05-111 — narrow safety net for the «synonym verbs
+    + same external event» case the LLM dedup keeps missing.
+    Operator regression: «Поставить встречу по Бете с
+    Джарадом» vs «Назначить встречу по Бете с Джарадом» —
+    titles differ on synonym verbs, descriptions ≈ 95%
+    identical (same Zoom ID, password, slot). Match when:
+      - candidate's owner-key set INTERSECTS existing's
+      - description SequenceMatcher ratio ≥ `threshold`
+
+    Skips the LLM call when triggered. Tuned threshold 0.70
+    to be conservative — false-positives merge unrelated
+    work; false-negatives ship dups (less bad here, the LLM
+    still runs).
+    """
+    cand_desc = (candidate.get("description") or "").strip()
+    if len(cand_desc) < 50:
+        return None  # too short to similarity-compare reliably
+    cand_keys = _owner_keys(
+        candidate.get("owner_user_id"),
+        candidate.get("owner_display_name"),
+    )
+    if not cand_keys:
+        return None
+    for item in existing:
+        if not (cand_keys & _owner_keys(item.owner_label)):
+            continue
+        if not item.description or len(item.description) < 50:
+            continue
+        ratio = _description_similarity(cand_desc, item.description)
+        if ratio >= threshold:
+            return item
+    return None
+
+
 def _exact_title_owner_match(
     candidate: dict[str, Any], existing: list[_ExistingItem]
 ) -> _ExistingItem | None:
@@ -334,6 +391,28 @@ def check_duplicate(
                 reason=(
                     f"exact-title + owner overlap with "
                     f"{fast.kind} #{fast.item_id}"
+                ),
+            )
+        # FR-CR-05-111 — second tier: description similarity
+        # ≥ 0.70 + owner overlap. Catches «Поставить встречу
+        # по Бете с Джарадом» × «Назначить встречу по Бете с
+        # Джарадом» where titles differ on synonym verbs but
+        # descriptions are ≈ 95% identical.
+        sim = _similar_description_owner_match(candidate, existing)
+        if sim is not None:
+            log.info(
+                "task_dedup_similar_description_match",
+                item_id=sim.item_id,
+                kind=sim.kind,
+            )
+            return DedupResult(
+                is_duplicate=True,
+                duplicate_of_task_id=(
+                    sim.item_id if sim.kind == "task" else None
+                ),
+                reason=(
+                    f"description similarity ≥0.70 + owner "
+                    f"overlap with {sim.kind} #{sim.item_id}"
                 ),
             )
 

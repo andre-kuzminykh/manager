@@ -227,16 +227,24 @@ def test_listener_tick_processes_updates_and_advances_offset(
     report = listener.tick()
     assert report.updates_seen == 2
     assert report.messages_processed == 2
-    assert report.tasks_created == 2
+    # FR-CR-05-97/99 — both updates yield the same classification
+    # `TaskDraft(title="x")` from this test's stub. The
+    # deterministic dedup gate (same title + same owner) kills
+    # the second one, so only one Task lands. The pre-FR-CR-05-97
+    # behaviour (no dedup) returned 2.
+    assert report.tasks_created == 1
 
     with SessionFactory() as s:
         state = s.get(TelegramListenerState, 1)
         assert state is not None
         assert state.last_update_id == 101
-        assert s.query(Task).count() == 2
+        # FR-CR-05-97/99 — same-title dedup; only ONE Task survives.
+        assert s.query(Task).count() == 1
         rows = s.query(ProcessedTelegramMessage).all()
+        # Both messages still bookmarked even though the second
+        # was deduped — bookmark prevents re-processing.
         assert {(r.chat_id, r.message_id) for r in rows} == {(7, 1), (7, 2)}
-        # Both tasks are flagged as Telegram-sourced.
+        # The created task is flagged as Telegram-sourced.
         for t in s.query(Task).all():
             assert t.source_kind == TaskSourceKind.telegram
 

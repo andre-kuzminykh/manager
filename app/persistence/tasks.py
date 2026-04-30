@@ -12,6 +12,64 @@ from app.models.task import TaskPriority, TaskStatus
 _TITLE_HARD_CAP = 80
 
 
+# FR-CR-05-99 — operator: «таких тем тоже быть не должно,
+# встретиться с кем-то и тд». Bare verbs without an object /
+# addressee leave no actionable signal — the operator can't
+# tell with whom / about what. Reject at the draft-prep step.
+_BARE_VERB_TITLES: frozenset[str] = frozenset(
+    {
+        # Russian — meeting / contact verbs that demand an object
+        "встретиться",
+        "созвониться",
+        "пообщаться",
+        "обсудить",
+        "поговорить",
+        "позвонить",
+        "написать",
+        # Russian — work verbs that demand a deliverable
+        "организовать",
+        "подготовить",
+        "сделать",
+        "доделать",
+        "отправить",
+        "проверить",
+        "уточнить",
+        "узнать",
+        "напомнить",
+        "ответить",
+        # English equivalents
+        "meet",
+        "discuss",
+        "call",
+        "schedule",
+        "organize",
+        "prepare",
+        "send",
+        "check",
+        "clarify",
+        "remind",
+        "follow up",
+        "follow-up",
+    }
+)
+
+
+def is_naked_verb_title(title: str) -> bool:
+    """FR-CR-05-99 — return True when `title` is a bare action
+    verb with no object / addressee / topic. Used by
+    `prepare_drafts` to drop such drafts at intake — the LLM
+    occasionally emits «Встретиться» / «Организовать» with no
+    complement, and the operator can't act on those.
+    """
+    if not title:
+        return False
+    norm = title.strip().lower().rstrip(".!?,;:—-«»\"' ")
+    # Single-word OR a 2-word ending like «follow up» / «follow-up».
+    if norm in _BARE_VERB_TITLES:
+        return True
+    return False
+
+
 def normalize_task_title(raw: Any) -> str:
     """FR-CR-05-72 / -75 / -89 / -95 — produce a one-glance title.
 

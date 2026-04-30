@@ -806,9 +806,27 @@ class TelegramIngestService:
                 # will look like (FR-CR-05-72/89 title cap +
                 # capitalized first letter + default deadline
                 # today 18:00 if LLM didn't extract).
-                from app.persistence.tasks import normalize_task_title
+                from app.persistence.tasks import (
+                    is_naked_verb_title,
+                    normalize_task_title,
+                )
 
                 raw_title = (payload.get("title") or "").strip()
+                # FR-CR-05-99 — drop drafts whose title is a
+                # bare verb («Встретиться», «Организовать»)
+                # with no object/addressee. Operator: «таких
+                # тем тоже быть не должно». The drafts list
+                # filter at the end of this loop will skip
+                # them; mark for skip via a sentinel.
+                if raw_title and is_naked_verb_title(raw_title):
+                    log.info(
+                        "telegram_ingest_drop_naked_verb_title",
+                        chat_id=message.chat_id,
+                        message_id=message.message_id,
+                        title=raw_title,
+                    )
+                    session.delete(draft)
+                    continue
                 if raw_title:
                     try:
                         payload["title"] = normalize_task_title(raw_title)

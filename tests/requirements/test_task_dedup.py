@@ -43,27 +43,32 @@ def _mk(session, **kw) -> int:
     return t.id
 
 
-def test_dedup_prompt_pins_one_event_collapse_rule():
-    """FR-CR-05-98 — operator regression: «Организовать
-    встречу с Ryan Gariepy» vs «Пригласить Йохана на встречу
-    с Ryan Gariepy» landed as 2 tasks. Different verbs but
-    one external event. The prompt's ONE-EVENT COLLAPSE rule
-    must teach: when both tasks orbit the same named meeting,
-    collapse even if verbs are far apart."""
+def test_dedup_prompt_is_minimal_focused_classifier():
+    """FR-CR-05-99 — operator: «не надо ничего усложнять,
+    бери новую задачу и 10 предыдущих в контексте, да/нет».
+    The prompt was rewritten from ~3000 chars of synonym
+    families and worked examples to ~500 chars of focused
+    binary-classifier guidance. Pin the new contract."""
     from app.services.task_dedup import _SYSTEM_PROMPT
 
     blob = _SYSTEM_PROMPT
     flat = " ".join(blob.split())
 
-    assert "ONE-EVENT COLLAPSE" in blob
-    assert "FR-CR-05-98" in blob
-    # The Ryan Gariepy regression pinned as a worked example.
-    assert "Пригласить Йохана на встречу с Ryan Gariepy" in blob
-    assert "Организовать встречу с Ryan Gariepy" in blob
-    # The «one event both orbit» discriminator phrasing.
-    assert "single named external event" in flat or "one event" in flat.lower()
-    # The escape hatch: distinct deliverables stay separate.
-    assert "distinct deliverable" in blob
+    # The prompt is now tight (≤1700 chars; was ~3000 with all
+    # the synonym blocks and worked examples).
+    assert len(blob) <= 1700
+    # Classifier framing.
+    assert "binary duplicate-detection" in blob
+    # Same-end-state rule + verb + subject overlap.
+    assert "end-state" in blob
+    # The FR-CR-05-78 audience discriminator survives.
+    assert "EXTERNAL audience" in blob or "external audience" in flat.lower()
+    # «Different external audience = different task».
+    assert "отчёт Ирине" in blob and "отчёт Артёму" in blob
+    # Internal team-owner attribution does NOT discriminate.
+    assert "internal-team attribution" in blob.lower() or "internal team-owner" in blob.lower()
+    # Default to FALSE when unsure.
+    assert "Default to FALSE" in blob
 
 
 def test_normalize_title_for_match_collapses_whitespace_case_yo_e():
@@ -169,69 +174,6 @@ def test_dedup_deterministic_does_not_match_when_owner_differs(session):
     # negative answer wins.
     assert result.is_duplicate is False
     assert backend.calls == 1
-
-
-def test_dedup_prompt_pins_meeting_family_and_confirm_family():
-    """FR-CR-05-96 — operator regression: 4 separate tasks for
-    the same Jared+Thomas meeting; «Подтвердить» / «Закрепить»
-    Bosch deal landed twice. Dedup prompt now spells out
-    confirm-family + meeting-family + intro-family + ask-
-    family + send-family with the operator's worked
-    counter-examples."""
-    from app.services.task_dedup import _SYSTEM_PROMPT
-
-    blob = _SYSTEM_PROMPT
-    flat = " ".join(blob.split())
-
-    assert "FR-CR-05-96" in blob
-    # Curated synonym families pinned.
-    for fragment in (
-        "confirm-family",
-        "meeting-family",
-        "intro-family",
-        "ask-family",
-        "send-family",
-    ):
-        assert fragment in flat, f"family {fragment!r} should be pinned"
-
-    # Specific synonym pairs from regressions.
-    for pair in (
-        "закрепить",
-        "зафиксировать",
-        "финализировать",
-        "пообщаться",
-        "встретиться",
-        "созвониться",
-        "организовать 1-1",
-    ):
-        assert pair in blob, f"synonym {pair!r} should be pinned"
-
-    # Worked counter-examples for the operator regressions.
-    assert "Закрепить детали партнёрства с Bosch" in blob
-    assert "Подтвердить детали партнёрства с Bosch" in blob
-    assert "Пообщаться с Джарадом и Томасом" in blob
-    assert "Организовать 1-1 с Джарадом и Томасом" in blob
-
-
-def test_dedup_prompt_pins_transliteration_rule():
-    """FR-CR-05-92 — operator regression: «Предложить слоты для
-    созвона с James Morgon» and «Предложить слоты Джеймсу
-    Моргану» landed as TWO tasks. Same person, just one in
-    English transliteration. Prompt must teach name-variant
-    matching."""
-    from app.services.task_dedup import _SYSTEM_PROMPT
-
-    blob = _SYSTEM_PROMPT
-    assert "TRANSLITERATION" in blob
-    assert "FR-CR-05-92" in blob
-    # Both regression spellings pinned.
-    assert "James Morgon" in blob
-    assert "Джеймсу Моргану" in blob
-    # Other paired examples to anchor the rule.
-    for fragment in ("Olayan", "Олаян", "Артем", "Артём", "Artem"):
-        assert fragment in blob, f"name-variant {fragment!r} should be pinned"
-    # Diminutives covered.
-    assert "Petya" in blob or "Петя" in blob
 
 
 def test_dedup_returns_not_duplicate_when_no_recent_tasks(session):
@@ -451,19 +393,17 @@ def test_dedup_invented_id_dropped_when_drafts_in_lookback(session):
     assert out.duplicate_of_task_id is None
 
 
-def test_dedup_prompt_pins_different_recipient_rule():
-    """FR-CR-05-78 — operator: «подготовить отчёт Ирине
-    послезавтра» got killed as duplicate of «подготовить
-    отчёт Артёму завтра». Different recipient + different
-    deadline = different work, never duplicates. The prompt
-    now spells this out explicitly with the exact regression
-    case as a worked example."""
+def test_dedup_prompt_keeps_different_audience_distinct():
+    """FR-CR-05-78 / -99 — «отчёт Ирине» vs «отчёт Артёму»:
+    different EXTERNAL audience = different task. The
+    minimal-prompt rewrite (FR-CR-05-99) preserves this rule
+    even after stripping the synonym blocks."""
     from app.services.task_dedup import _SYSTEM_PROMPT
 
     blob = _SYSTEM_PROMPT
-    # Default is «not duplicate».
-    assert "DEFAULT TO" in blob and "false" in blob.lower()
-    # Different recipient = not duplicate.
-    assert "DIFFERENT RECIPIENT" in blob or "different recipient" in blob.lower()
-    # The exact failure mode is pinned.
+    # Default to FALSE survives.
+    assert "Default to FALSE" in blob
+    # External audience discriminator survives.
+    assert "EXTERNAL audience" in blob
+    # The exact regression case is pinned.
     assert "Ирине" in blob and "Артёму" in blob

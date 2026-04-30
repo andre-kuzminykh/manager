@@ -833,6 +833,42 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-99 — Minimal dedup prompt + naked-verb rejection + title-only deterministic match
+
+Operator: «давай промт более хороший сделаем уже раз и
+навсегда, ну бред каждые синонимы добавлять, просто бери новую
+задачу и 10 предыдущих задач в контексте и да/нет есть ли
+дублирующие, не надо ничего усложнять» plus «таких тем тоже
+быть не должно, встретиться с кем-то и тд».
+
+Three layered fixes consolidate FR-CR-05-92/95/96/97/98:
+
+  - **Minimal dedup prompt.** `_SYSTEM_PROMPT` rewritten from
+    ~3000 chars (synonym families + worked examples) to ~1700
+    chars of focused binary-classifier guidance. Single rule:
+    «collapse when verb-family + specific subject overlap»;
+    «default to FALSE when in doubt»; «different EXTERNAL
+    audience IS a discriminator, internal-team attribution is
+    NOT». No more curated synonym lists — trust the LLM.
+
+  - **Title-only deterministic match.** `_deterministic_
+    duplicate(candidate, existing)` now matches on
+    `(normalized_title, owner_key)` only, dropping the
+    due_date check. Operator regression: «Запланировать
+    встречу с Atuwatse Okorodudu» on 2026-04-30 vs 2026-05-04
+    — same work, different operator-typed dates. The Python
+    fast-path now catches this before the LLM call.
+
+  - **Naked-verb title rejection at intake.** New
+    `is_naked_verb_title(title)` helper in `app/persistence/
+    tasks.py` flags single-word verbs without object: Russian
+    («Встретиться», «Организовать», «Подготовить», «Обсудить»,
+    «Позвонить», «Написать», …) plus English («Meet»,
+    «Discuss», «Schedule», «Send», «Follow up», …). Drafts
+    whose title is on the list get DELETED from the session
+    in `prepare_drafts` and skipped from the widget queue —
+    operator: «таких тем тоже быть не должно».
+
 #### FR-CR-05-98 — One-event collapse rule for dedup
 
 Operator: «надо чуть строже их отбирать, чуть свободнее промт,
@@ -4333,6 +4369,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-99  | `test_task_dedup.py::test_dedup_prompt_is_minimal_focused_classifier` (≤1700-char tight binary-classifier prompt with verb-family + specific-subject + EXTERNAL-audience-discriminator + Default-to-FALSE rules); `::test_dedup_prompt_keeps_different_audience_distinct` («отчёт Ирине ≠ отчёт Артёму» rule survives the minimal-prompt rewrite); `test_intent_pipeline.py::test_is_naked_verb_title_catches_bare_verbs` (Russian + English bare-verb list; trailing punctuation stripping; verb-with-object passes through); `test_telegram_listener.py::test_listener_tick_processes_updates_and_advances_offset` updated for dedup behaviour (2 same-title updates → 1 Task created via deterministic dedup, both bookmarked) |
 | FR-CR-05-98  | `test_task_dedup.py::test_dedup_prompt_pins_one_event_collapse_rule` (ONE-EVENT COLLAPSE block + Ryan Gariepy «Организовать» vs «Пригласить Йохана» worked counter-example + «single named external event» discriminator + «distinct deliverable» escape hatch all pinned) |
 | FR-CR-05-97  | `test_task_dedup.py::test_normalize_title_for_match_collapses_whitespace_case_yo_e` (case + whitespace + leading-trailing-punctuation + ё↔е); `::test_dedup_deterministic_match_skips_llm` (Atuwatse Okorodudu regression: identical title triple-match → is_duplicate=true, LLM never called); `::test_dedup_deterministic_match_normalises_case_and_punctuation` («  подтвердить  ВСТРЕЧУ.  » matches «Подтвердить встречу»); `::test_dedup_deterministic_does_not_match_when_owner_differs` (different owner → falls through to LLM) |
 | FR-CR-05-96  | `test_task_dedup.py::test_dedup_prompt_pins_meeting_family_and_confirm_family` (5 family names + 7 individual synonyms + 4 worked counter-examples pinned) |

@@ -761,7 +761,7 @@ def test_prepare_drafts_stashes_source_text_for_quote_fallback(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="написать"),
+        task=TaskDraft(title="написать письмо клиенту"),
         reasoning="...",
     )
     service = _make_service(classification)

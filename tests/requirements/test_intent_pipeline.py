@@ -667,33 +667,43 @@ def test_detect_prompt_rejects_emotional_chat_outbursts():
     assert "помолиться" in blob
 
 
-def test_dedup_prompt_pins_synonym_verbs_and_same_subject():
-    """FR-CR-05-95 — synonym verbs (подтвердить ≈ согласовать)
-    on the same external subject (ADNOC, Singapore call,
-    Йохан) are duplicates regardless of internal owner
-    attribution."""
+def test_is_naked_verb_title_catches_bare_verbs():
+    """FR-CR-05-99 — operator: «таких тем тоже быть не должно,
+    встретиться с кем-то и тд». A draft whose title is a bare
+    verb (no object/addressee) is dropped at intake."""
+    from app.persistence.tasks import is_naked_verb_title
+
+    f = is_naked_verb_title
+    # Russian bare verbs.
+    for v in ("Встретиться", "встретиться", "Организовать", "Подготовить",
+              "Обсудить", "Позвонить", "Написать", "Ответить"):
+        assert f(v) is True, f"{v!r} should be a naked verb"
+    # Russian verbs with an object → fine.
+    for v in ("Встретиться с Марко", "Подготовить отчёт",
+              "Обсудить контракт с ADNOC"):
+        assert f(v) is False, f"{v!r} should NOT be a naked verb"
+    # English bare verbs.
+    for v in ("Meet", "Discuss", "Schedule", "Send", "Follow up", "Follow-up"):
+        assert f(v) is True
+    # English with object.
+    assert f("Meet with John") is False
+    assert f("Send the report") is False
+    # Trailing punctuation gets stripped.
+    assert f("Встретиться.") is True
+    assert f("Встретиться!") is True
+
+
+def test_dedup_prompt_keeps_verb_family_and_subject_overlap_rule():
+    """FR-CR-05-99 — rewritten minimal prompt keeps the «verb
+    family + subject overlap = same task» rule. The detailed
+    synonym-family lists were stripped; the LLM now decides
+    based on a tight binary classifier."""
     from app.services.task_dedup import _SYSTEM_PROMPT
 
     blob = _SYSTEM_PROMPT
-    flat = " ".join(blob.split())
-    assert "FR-CR-05-95" in blob
-    assert "SYNONYM-VERBS" in blob
-    # The three regression pairs pinned.
-    for fragment in (
-        "Подтвердить время с ADNOC",
-        "Согласовать время с ADNOC",
-        "Добавить в звонок с Йоханом",
-        "Познакомиться с Йоханом",
-        "Узнать о переносе звонка по Сингапуру",
-    ):
-        assert fragment in blob, f"{fragment!r} should be pinned"
-    # Synonym families spelled out.
-    for family in (
-        "подтвердить ≈ согласовать",
-        "узнать ≈ уточнить",
-        "познакомиться ≈ представить",
-    ):
-        assert family in flat
+    # Verb-family / subject overlap rule still in.
+    assert "verb-family" in blob.lower() or "verb / verb-family" in blob
+    assert "specific subject" in blob.lower()
 
 
 def test_normalize_task_title_caps_at_80_chars():

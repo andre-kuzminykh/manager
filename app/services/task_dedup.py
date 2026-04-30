@@ -83,197 +83,43 @@ _DEDUP_TOOL_PARAMETERS: dict[str, Any] = {
 
 
 _SYSTEM_PROMPT = """\
-You decide whether a new task DUPLICATES an existing one.
+You are a binary duplicate-detection classifier for newly
+proposed tasks.
 
-Two tasks duplicate ONLY when they describe the SAME piece of
-work — same deliverable AND same target AND same goal. Just
-sharing a generic verb («подготовить отчёт») is NOT enough —
-the SUBJECT, RECIPIENT, and DEADLINE all matter.
+You receive ONE candidate task and up to 10 existing open tasks
+(or pending drafts) from the same backlog. Decide whether the
+candidate describes the SAME WORK as any one of them. Yes or no.
 
-DEFAULT TO `is_duplicate=false`. Better to have one extra task
-the operator manually merges than to silently drop a real one.
-Operator regression: «подготовить отчёт Ирине послезавтра»
-was killed as duplicate of «подготовить отчёт Артёму завтра» —
-WRONG. Different recipient + different deadline = different
-work.
+THE RULE — collapse when the candidate and an existing item
+describe the same end-state. Two tasks are the same when they
+overlap on:
+  - the action (verb / verb-family — confirm, ask, send,
+    organize a meeting, intro, follow up, prep, …), AND
+  - the specific subject (named external entity, event,
+    deliverable, project — ADNOC, Bosch deal, Ryan Gariepy
+    meeting, the Q2 report, the Atuwatse Okorodudu intro).
 
-NOT duplicates (operator's «отчёт Ирине ≠ отчёт Артёму» rule):
-- DIFFERENT RECIPIENT / AUDIENCE — «отчёт Ирине» vs «отчёт
-  Артёму» are TWO different tasks; even if the verb and noun
-  overlap, the recipient is the discriminator.
-- DIFFERENT DEADLINE — «отчёт к завтра» vs «отчёт к пятнице»
-  may be two milestones of the same work, but treat them
-  as separate. The operator can merge if needed.
-- DIFFERENT DELIVERABLE — deck vs report on the same
-  project, contract vs NDA on the same client.
-- DIFFERENT SPECIFIC SUBJECT — «отчёт по продажам» vs
-  «отчёт по клиентам».
+The candidate's owner does NOT have to match — internal
+team-owner attribution drifts between drafts. Due date does NOT
+have to match — operator may set 18:00 today on one and tomorrow
+on another for the same work.
 
-Duplicates (rare):
-- SAME deliverable, SAME recipient, SAME deadline — just
-  different wording. «подготовить отчёт по продажам Ирине
-  завтра» ≈ «сделать sales-отчёт для Ирины к завтра».
-- One has more context, the other less, but the core is
-  identical (same project, same person, same date).
+Different EXTERNAL audience IS a discriminator: «отчёт Ирине»
+≠ «отчёт Артёму» (two reports going to two different audiences).
+But internal-team attribution between team members for ONE
+external piece of work is NOT.
 
-Return ``is_duplicate=true`` ONLY when ALL of subject /
-recipient / deadline overlap AND the candidate adds no new
-information. Otherwise return false. Set
-``duplicate_of_task_id`` to the existing task's id only when
-true.
+Default to FALSE when in doubt. Better one extra task the
+operator merges than silently dropping real work. But when the
+candidate clearly orbits the same external entity / event as
+an existing item, return TRUE.
 
-Worked examples:
-  candidate: «отчёт Ирине послезавтра»
-  existing:  «отчёт Артёму завтра»
-  → false (different recipient AND different deadline)
-
-  candidate: «отчёт по продажам Q2»
-  existing:  «отчёт по клиентам Q2»
-  → false (different specific subject)
-
-  candidate: «подготовить sales-deck к пятнице»
-  existing:  «сделать презу по продажам к пятнице»
-  → true (same deliverable, same deadline, paraphrase)
-
-TRANSLITERATION & NAME-VARIANTS (FR-CR-05-92). Operator
-regression: «Предложить слоты для созвона с James Morgon» and
-«Предложить слоты Джеймсу Моргану» landed as TWO tasks. Same
-person, just one mentions the name in English transliteration
-and the other in Russian. Treat as DUPLICATE.
-
-Rules:
-- An English / Latin spelling of a person and a Russian /
-  Cyrillic spelling of phonetically the same person ARE THE
-  SAME PERSON: «James Morgon» = «Джеймс Морган»; «Olayan»
-  = «Олаян»; «Ryan Gariepy» = «Райан Гариепи». Apply the same
-  matching rule to companies / funds / projects.
-- Diminutives / short-forms are the same person: «Артем» =
-  «Артём» = «Artem»; «Ира» = «Ирина» = «Irina»; «Petya» =
-  «Петя» = «Пётр».
-- Title paraphrases that swap one name-variant for another
-  but keep verb + recipient + deadline = duplicate.
-
-Worked counter-example:
-  candidate: «Предложить слоты для созвона с James Morgon»
-  existing:  «Предложить слоты Джеймсу Моргану»
-  → true (same person James Morgan / Джеймс Морган, same
-    verb «предложить слоты», same recipient assistant Ирина,
-    same deadline 2026-04-30)
-
-SYNONYM-VERBS + SAME SPECIFIC SUBJECT (FR-CR-05-95). Operator
-regressions:
-  «Подтвердить время с ADNOC» vs «Согласовать время с ADNOC»
-    → duplicate (подтвердить ≈ согласовать; same client; same
-      deadline)
-  «Добавить в звонок с Йоханом» vs «Познакомиться с Йоханом»
-    → duplicate (operator goal: meet Йохан on the same call;
-      different verbs but the END-STATE is one introduction)
-  «Узнать о переносе звонка по Сингапуру» (owner=Ирина) vs
-  «Узнать о переносе звонка по Сингапуру» (owner=Женя)
-    → duplicate (same call, same question; the internal-team
-      owner attribution doesn't matter — the WORK is one
-      external ask, not two).
-
-Rules:
-- VERB SYNONYMS that share the same direct object are the
-  same task. Curated families (FR-CR-05-95 / -96):
-    confirm-family: подтвердить ≈ согласовать ≈ утвердить ≈
-                    закрепить ≈ зафиксировать ≈ финализировать
-                    ≈ окончательно решить ≈ confirm ≈ approve
-                    ≈ sign off ≈ lock in ≈ finalize ≈ pin down
-    ask-family:     узнать ≈ уточнить ≈ выяснить ≈ спросить ≈
-                    проверить ≈ ask ≈ check ≈ find out ≈
-                    verify ≈ clarify
-    intro-family:   познакомиться ≈ представить ≈ соединить ≈
-                    свести ≈ интро ≈ introduce ≈ connect ≈
-                    set up an intro
-    send-family:    отправить ≈ выслать ≈ переслать ≈ скинуть
-                    ≈ send ≈ forward ≈ share
-    meeting-family (FR-CR-05-96): организовать встречу ≈
-                    пообщаться ≈ встретиться ≈ собраться ≈
-                    созвониться ≈ запланировать звонок ≈
-                    организовать 1-1 ≈ catch up ≈ have a call
-                    ≈ schedule a meeting ≈ set up a 1:1.
-                    Different framings of «set up a sync»
-                    collapse to one task when participants
-                    overlap.
-  Additional rule: «обсудить X» / «discuss X» on the same
-  topic as a meeting-family task = the SAME meeting (you
-  have to have it before you can discuss in it).
-- SAME SPECIFIC SUBJECT is the discriminator. «отчёт Ирине»
-  vs «отчёт Артёму» = two different reports with two
-  different audiences — DIFFERENT (FR-CR-05-78 still holds).
-  But «звонок по Сингапуру», «встреча с ADNOC», «звонок с
-  Йоханом» — these are EXTERNAL events with one fixed
-  audience; whoever inside the team handles them, the work
-  is one. When the SUBJECT names a specific external entity
-  / event, the internal owner is NOT a discriminator —
-  treat as duplicate when verb-synonyms align.
-
-Worked counter-example:
-  candidate: «Подтвердить время с ADNOC» (owner=Genia)
-  existing:  «Согласовать время с ADNOC» (owner=Genia)
-  → true (синонимные глаголы; ADNOC = same external event)
-
-Worked counter-examples (FR-CR-05-96):
-  candidate: «Закрепить детали партнёрства с Bosch»
-  existing:  «Подтвердить детали партнёрства с Bosch»
-    → true (закрепить ∈ confirm-family; same noun phrase
-      «детали партнёрства с Bosch»; same external partner)
-
-  candidate: «Закрепить детали партнёрства с Bosch» (Игорь)
-  existing:  «Закрепить детали партнёрства с Bosch» (Ирина)
-    → true (identical title; internal owner attribution
-      doesn't discriminate when the SUBJECT names a specific
-      external partner — same SAME-SPECIFIC-SUBJECT rule)
-
-  candidate: «Пообщаться с Джарадом и Томасом»
-  existing:  «Организовать 1-1 с Джарадом и Томасом»
-    → true (both meeting-family; same participants Джарад +
-      Томас)
-
-  candidate: «Встретиться и обсудить партнёрство»
-  existing:  «Организовать встречу» (same context: Джарад,
-                 Томас, partnership discussion)
-    → true (meeting-family; «обсудить партнёрство» is what
-      will happen IN the meeting, not a separate task)
-
-  candidate: «Подготовить 1-1 с Джарадом и Томасом»
-  existing:  «Пообщаться с Джарадом и Томасом»
-    → true (meeting-family; same participants; «подготовить»
-      here means «set it up», not «prep materials FOR the
-      already-scheduled meeting»)
-
-When in doubt about meeting-family overlap: ask «is this
-about THE SAME meeting / call / sync as the existing one?»
-If yes → duplicate. The operator can split into a separate
-prep task by hand if needed; better to err on collapsing
-than to spam 5 widgets for one meeting.
-
-ONE-EVENT COLLAPSE (FR-CR-05-98). Operator: «надо чуть
-строже их отбирать, чуть свободнее промт, но не сильно».
-When BOTH candidate and existing name the SAME external
-upcoming meeting / call / event (by participant or topic),
-collapse them as duplicates EVEN IF the verbs are far apart
-(«организовать» vs «пригласить» vs «подготовить агенду» vs
-«обсудить»). All of «schedule the X meeting», «invite Y to
-the X meeting», «prep agenda for the X meeting», «follow up
-after the X meeting» revolve around ONE event — the operator
-gets one card, splits into sub-tasks by hand if they want.
-
-The discriminator: «is there a single named external event
-both tasks orbit?» If yes → duplicate. If the second task
-has its OWN distinct deliverable that doesn't dissolve into
-the first («подготовить slide deck для встречи» — a
-separate artefact owed regardless of whether the meeting
-happens), keep them separate.
-
-Worked counter-example (FR-CR-05-98):
-  candidate: «Пригласить Йохана на встречу с Ryan Gariepy»
-  existing:  «Организовать встречу с Ryan Gariepy»
-    → true (one event «встреча с Ryan Gariepy»; «invite Y»
-      is a sub-step of «organize the meeting», not its own
-      deliverable)
+Output:
+  is_duplicate: bool
+  duplicate_of_task_id: integer task id of the matched item
+                        (only when is_duplicate=true; null
+                        otherwise)
+  reason: one short sentence quoting the overlap.
 """
 
 
@@ -417,14 +263,19 @@ def _existing_owner_key(item: _ExistingItem) -> str:
 def _deterministic_duplicate(
     candidate: dict[str, Any], existing: list[_ExistingItem]
 ) -> _ExistingItem | None:
-    """FR-CR-05-97 — fast-path duplicate check that skips the
-    LLM entirely.
+    """FR-CR-05-97 / -99 — fast-path duplicate check that skips
+    the LLM entirely.
 
-    Match when ALL three are equal:
+    Match when BOTH:
       - `_normalize_title_for_match(title)` (case + whitespace
-        + ё/е normalised)
-      - owner key (uid or display_name, lowercased)
-      - due_date string
+        + ё/е normalised) is equal
+      - owner key (uid or display_name, lowercased) is equal
+
+    Due date is NOT part of the match — operator may set
+    different dates on two drafts for the same work (FR-CR-05-99
+    regression: «Запланировать встречу с Atuwatse Okorodudu» on
+    2026-04-30 vs 2026-05-04 — same work, drift in operator's
+    date estimate).
 
     Returns the matched `_ExistingItem` or `None`. Used as a
     pre-LLM gate in `check_duplicate`. The LLM still runs for
@@ -435,14 +286,11 @@ def _deterministic_duplicate(
     if not cand_title:
         return None
     cand_owner = _candidate_owner_uid(candidate)
-    cand_due = (str(candidate.get("due_date") or "")).strip()
 
     for item in existing:
         if _normalize_title_for_match(item.title) != cand_title:
             continue
         if _existing_owner_key(item) != cand_owner:
-            continue
-        if (item.due_date or "").strip() != cand_due:
             continue
         return item
     return None

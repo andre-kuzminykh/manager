@@ -833,6 +833,43 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-90 — Retroactive anyone-with-link writer share for legacy meeting docs
+
+Operator: «сделай так чтобы отчеты которые генерируются в
+google doc были сразу доступны для редактирования всем у
+кого есть ссылка».
+
+The behaviour was already implemented as FR-CR-05-59 — the
+Fireflies pipeline calls `DocsExportService.export_summary`
+without overriding `share_role`, so the default `'writer'`
+kicks in and `_share_anyone_with_link` runs
+`permissions().create({"type":"anyone","role":"writer"})`
+on every newly-created doc. New invariant test
+(`test_fireflies_pipeline_calls_export_summary_with_writer_default`)
+pins the call signature so a refactor can't silently
+revert all new docs to private.
+
+For LEGACY docs created BEFORE FR-CR-05-59 was deployed
+(or where the share call silently 4xx'd), new
+`ops/retro_share_docs.py` CLI walks every
+`meeting_recordings.google_doc_id` row and re-issues the
+permission. Idempotent (the Drive API treats a duplicate
+`type=anyone` permission as a no-op). Flags:
+
+  - `--dry-run` — list doc ids without touching the API.
+  - `--role {reader|writer|commenter}` — override the
+    default `writer`.
+
+Operator command:
+
+```
+sudo docker exec slack-task-bot python -m ops.retro_share_docs
+```
+
+Exit codes: 0 = all shared, 1 = at least one per-doc
+failure (others still shared), 2 = bad config (missing
+Drive credentials).
+
 #### FR-CR-05-89 — Bulk-resync CLI + transcript dumps as no_action + naked-verb / proof-quote rules
 
 Operator: «давай я все задачи дропнул в шит, перезальем
@@ -3958,6 +3995,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-90  | `test_retro_share_docs_cli.py::test_retro_share_dry_run_skips_api_calls` (--dry-run never calls `_share_anyone_with_link`); `::test_retro_share_invokes_share_with_writer_role_by_default` (one call per recording, role=writer); `::test_retro_share_role_flag_overrides_default` (--role reader → reader); `::test_retro_share_skips_recordings_without_google_doc_id` (null doc_id excluded by SQL filter); `::test_retro_share_continues_on_per_doc_failure` (per-doc 4xx doesn't abort, exit=1); `::test_retro_share_returns_2_when_credentials_unavailable` (bad config → exit 2); `::test_fireflies_pipeline_calls_export_summary_with_writer_default` (invariant — pipeline does NOT pass `share_role=` to export_summary, default 'writer' wins) |
 | FR-CR-05-89  | `test_resync_sheet_cli.py::test_normalize_task_title_caps_long_no_break_paragraph` (200-char paragraph with no early break → 100+ellipsis word-boundary cut); `::test_normalize_task_title_first_clause_break_wins_over_hard_cut` («Поговорил с Fortuna: …» kept first clause); `::test_normalize_task_title_preserves_short_titles_unchanged` (no rewriting on short input); `::test_resync_sheet_dry_run_reports_capped_titles_without_writing`; `::test_resync_sheet_caps_titles_resets_row_id_and_resyncs` (title normalised in DB, row_id cleared, sheets.sync invoked); `::test_resync_sheet_include_deleted_flag_pushes_tombstones`; `::test_resync_sheet_returns_exit_code_2_when_no_credentials`; `test_intent_pipeline.py::test_detect_prompt_rejects_transcription_dumps_as_no_action` (TRANSCRIPTION DUMP HARD RULE + «На изображении» / «Обсуждают» / «Это что?» worked failure-modes pinned); `::test_title_prompt_forbids_naked_verb_titles` («Встретиться» counter-example + (уточнить детали) fallback); `::test_title_prompt_pins_truncated_date_range_failure» («Ryan будет в Лондоне с 4 по» half-range example); `::test_date_prompt_requires_proof_quote_or_null` (PROOF QUOTE OR NULL rule + MGX «до конца мая» counter-example + «либо в описание добавляй пруф либо сегодня» literal phrase pinned) |
 | FR-CR-05-83  | `test_evening_status.py::test_evening_tomorrow_plan_lists_tasks_for_next_day` (status digest + second message naming tomorrow's tasks; `tg://openmessage` hyperlink lands on the title); `::test_evening_tomorrow_plan_includes_overdue_today` (🚨 bullet on overdue lines + «Rolling over from today: 1» count); `::test_evening_tomorrow_plan_skipped_when_no_tasks` (no second DM when nothing scheduled, `tomorrow_plans_sent=0`); `::test_evening_tomorrow_plan_long_list_splits_into_multiple_messages` (80-task list splits at task boundaries, every chunk ≤4096 chars, `(continued)` marker on follow-ups); `::test_evening_status_groups_done_in_progress_todo` updated to assert 2 DMs (status + plan) |
 | FR-CR-05-84  | `test_morning_cards.py::test_morning_cards_records_card_messages_in_audit_payload` (audit row carries `[{chat_id,message_id}…]` for intro + every card); `::test_morning_cards_deletes_yesterdays_cards_before_posting_today` (day-2 run calls `deleteMessage` on every prior-day card BEFORE posting today's intro; `prior_cards_deleted=2`); `::test_morning_cards_no_prior_audit_row_means_no_delete_calls` (first-ever run = no deletes); `::test_morning_cards_delete_failures_dont_abort_today_post` (Telegram-refuses-to-delete failures swallowed, today's posting continues) |

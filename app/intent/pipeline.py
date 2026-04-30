@@ -132,15 +132,15 @@ def _safe_call_tool(
 
 
 _TRANSCRIPT_PREFIX_RE = __import__("re").compile(
-    # FR-CR-05-108 — operator regression after FR-CR-05-89/104:
-    # gpt-5.5 keeps marking transcript dumps as is_task=true
-    # despite the detect prompt's explicit rejection rule.
-    # This is the single Python guard that runs BEFORE the LLM
-    # call — sources that start with one of these transcript-
-    # describing phrases are forced to is_task=false. Operator
-    # took 3+ hours of regressions on this exact pattern; this
-    # is a deliberate safety belt.
+    # FR-CR-05-108/109 — operator regression after
+    # FR-CR-05-89/94/104: gpt-5.5 keeps marking transcript
+    # dumps + reflection statements as is_task=true despite
+    # the detect prompt's explicit rejection rules. This is
+    # the deliberate Python guard that runs BEFORE the LLM
+    # call — sources matching these head-of-message patterns
+    # are forced to is_task=false.
     r"^\s*("
+    # Transcription dumps (FR-CR-05-108).
     r"на\s+(?:изображени|скрин|фото|картинк)|"
     r"обсужда[еюя]т[ьс]?|"
     r"в\s+(?:переписк|треде|диалог|чате)|"
@@ -148,7 +148,19 @@ _TRANSCRIPT_PREFIX_RE = __import__("re").compile(
     r"сообщени[ея]\s+от\s+|"
     r"in\s+the\s+(?:image|screenshot|chat|thread)|"
     r"this\s+(?:image|screenshot)\s+(?:shows?|depicts?)|"
-    r"on\s+the\s+screen"
+    r"on\s+the\s+screen|"
+    # Reflection / observation / confusion (FR-CR-05-109).
+    r"только\s+я\s+не\s+(?:понял|понимаю|уверен)|"
+    r"я\s+не\s+(?:понял|понимаю|уверен)|"
+    r"мне\s+(?:кажется|показалось)|"
+    r"возможно[,.]|"
+    r"странно[,.]?\s+что|"
+    r"интересно[,.]?\s+что|"
+    r"видимо[,.]|"
+    r"i\s+(?:don'?t|didn'?t|do\s+not)\s+(?:get|understand|know)|"
+    r"i'?m\s+not\s+sure|"
+    r"i\s+think\s+(?:we|they|maybe|perhaps)|"
+    r"it\s+seems\s+(?:like|that)"
     r")",
     flags=__import__("re").IGNORECASE | __import__("re").UNICODE,
 )

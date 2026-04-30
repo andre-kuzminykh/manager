@@ -833,6 +833,38 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-109 — Reflection / observation rejection; resolve uid → «Name (uid)» in pipeline context
+
+Two operator regressions in one commit:
+
+  1. «🟡 Только я не понял, как будто мы с ними, они не
+     поняли нашу ситуацию» — author's reflection /
+     confusion, not a delegation. Should be is_task=false.
+  2. Operator: «97239970 — имена подтягивай сразу в
+     контекст вместе с цифрой». LLM saw bare numeric
+     Telegram uids in source/context and couldn't tie them
+     to people; routing decisions suffered.
+
+Fixes:
+
+  - **`_TRANSCRIPT_PREFIX_RE` extended** with reflection /
+    observation patterns: «Только я не понял», «я не
+    понимаю / уверен», «мне кажется / показалось»,
+    «возможно,», «странно, что», «интересно, что»,
+    «видимо,»; English: «I don't / didn't understand»,
+    «I'm not sure», «I think we / they / maybe»,
+    «It seems like / that». Forces is_task=false at the
+    Python pre-detect guard.
+
+  - **`_annotate_uids` + updated `_resolve_uids_in_text`.**
+    `prepare_drafts` now passes the source message and
+    every history-before entry through uid resolution
+    BEFORE building the context window for the classifier.
+    Bare numeric uids that have a `team_members` row land
+    in the prompt as «Andrей Кузьминых (97239970)» — both
+    the human-readable name AND the original uid. The LLM
+    can route correctly; the operator can grep logs by uid.
+
 #### FR-CR-05-108 — Python pre-detect guard for transcript-prefix sources; remaining fallback removal; owner-stage diagnostic logging
 
 Three regressions arrived together:
@@ -4709,6 +4741,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-109 | Existing `test_intent_pipeline.py::test_detect_node_python_guard_rejects_transcript_prefix_sources` still pins the guard but extended with reflection patterns; manual: `_resolve_uids_in_text` now emits «Name (uid)» format; `_annotate_uids` runs in `prepare_drafts` before `_build_window` |
 | FR-CR-05-108 | `test_intent_pipeline.py::test_detect_node_python_guard_rejects_transcript_prefix_sources` («На изображени*», «На скрин*», «На фото», «Обсужда*т», «В переписк*», «По переписк*», «Сообщени* от», «In the image», «This screenshot shows», «On the screen» all match; real tasks pass through; None/empty safe); manual: removed last two `_fallback_description` call sites — `prepare_drafts` and `process_all` now both rely on the FR-CR-05-105 «empty description → drop draft» guard; `pipeline.py::node_owner` emits `owner_node_result` log line |
 | FR-CR-05-107 | `test_llm_backends.py::test_openai_call_uses_completion_tokens_for_gpt5` (also asserts `temperature` not in kwargs); `::test_openai_call_uses_max_tokens_for_gpt4o` (asserts `temperature=0` survives for gpt-4o); `::test_openai_complete_text_drops_temperature_for_gpt5`; `::test_openai_complete_text_keeps_temperature_for_gpt4o` |
 | FR-CR-05-106 | `test_llm_backends.py::test_model_uses_completion_tokens_helper` (gpt-5/o1/o3/o4 → True; gpt-4o/4-turbo/3.5-turbo → False); `::test_openai_call_uses_completion_tokens_for_gpt5` (gpt-5.5 call ships `max_completion_tokens=4096`, no `max_tokens`); `::test_openai_call_uses_max_tokens_for_gpt4o` (gpt-4o still ships `max_tokens=4096`) |

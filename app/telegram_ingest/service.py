@@ -285,9 +285,40 @@ def _resolve_uids_in_text(session: "Session", text: str) -> str:
 
     def _replace(m: "re.Match[str]") -> str:
         uid = int(m.group(1))
-        return by_id.get(uid, m.group(1))
+        name = by_id.get(uid)
+        if not name:
+            return m.group(1)
+        # FR-CR-05-109 — preserve the original uid alongside
+        # the resolved name so the LLM has both signals (and
+        # the operator can grep logs by uid). Format:
+        # «Андрей Кузьминых (97239970)».
+        return f"{name} ({uid})"
 
     return pattern.sub(_replace, text)
+
+
+def _annotate_uids(
+    session: "Session", message: TelegramSourceMessage
+) -> TelegramSourceMessage:
+    """FR-CR-05-109 — return a shallow copy of `message` with
+    its `text` field passed through `_resolve_uids_in_text` so
+    every standalone numeric Telegram uid in the source is
+    swapped for the matching `team_members.real_name`.
+
+    The pipeline downstream (`build_window`, classify, etc.)
+    sees «Андрей (97239970)» instead of «97239970». LLM-side
+    routing decisions improve because the model understands
+    who's involved.
+    """
+    text = message.text or ""
+    annotated = _resolve_uids_in_text(session, text)
+    if annotated == text:
+        return message
+    # `TelegramSourceMessage` is a frozen dataclass; rebuild with
+    # the new text.
+    import dataclasses
+
+    return dataclasses.replace(message, text=annotated)
 
 
 def _fallback_description(message: TelegramSourceMessage) -> str:
@@ -496,6 +527,19 @@ class TelegramIngestService:
                 chat_id=message.chat_id,
                 before_message_id=message.message_id,
             )
+            # FR-CR-05-109 — operator: «имена подтягивай сразу в
+            # контекст вместе с цифрой». Resolve numeric uids in
+            # the source text + every history message via
+            # team_members so the LLM sees «Андрей (97239970)»
+            # instead of a bare digit string. Same _resolve_uids
+            # _in_text helper used for description post-processing
+            # (FR-CR-05-94), now applied at the prompt-input
+            # level too.
+            message = _annotate_uids(session, message)
+            history_before = [
+                {**h, "text": _resolve_uids_in_text(session, h.get("text") or "")}
+                for h in history_before
+            ]
             window = _build_window(message, history_before=history_before)
             classification = self._classifier.classify(
                 context=window,

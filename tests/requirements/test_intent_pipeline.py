@@ -627,3 +627,21 @@ def test_owner_prompt_pins_dative_audience_rule():
     assert "AUDIENCE" in blob
     # Vocative + verb is the canonical assignment signal.
     assert "сделай" in blob
+
+
+def test_owner_prompt_pins_requester_not_doer_rule():
+    """FR-CR-05-79 — operator: «Артём попросил посмотреть
+    письмо свежим взглядом» landed on Артём as owner. WRONG —
+    «попросил» means Артём is the REQUESTER, not the doer.
+    Same trap as the dative case but with explicit
+    request-verbs. Prompt now teaches: requester ≠ owner;
+    the doer is typically the assistant (per FR-CR-05-52
+    routing) or the message author."""
+    from app.intent.owner_prompt import OWNER_SYSTEM_PROMPT
+
+    blob = OWNER_SYSTEM_PROMPT
+    assert "REQUESTER" in blob
+    assert "попросил" in blob
+    assert "attribution" in blob.lower()
+    # The exact regression case is pinned.
+    assert "посмотреть письмо" in blob.lower()

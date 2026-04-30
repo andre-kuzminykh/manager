@@ -833,6 +833,71 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-79 — Owner prompt: requester ≠ doer + role-pair assistant inference
+
+Operator: «"Артём попросил посмотреть письмо свежим взглядом"
+— почему повесил на Артёма? Это его ассистент Ирина должна
+делать».
+
+Two layered fixes on `OWNER_SYSTEM_PROMPT`:
+
+  - **Requester ≠ doer.** «попросил» / «asked» /
+    «requested» / «sent us to do X» means the named person
+    is the REQUESTER, not the assignee. Pinned with the
+    «Артём попросил посмотреть письмо» worked
+    counter-example. Default behaviour: pick the
+    requester's assistant (per the routing rule below) or
+    leave null.
+  - **Role-pair assistant inference.** The FR-CR-05-52
+    rule required the assistant's NOTES to explicitly name
+    the principal («ассистент Артёма»). Operator-curated
+    rows in production didn't always — Ирина's role is
+    «Ассистент CEO» but notes describe her duties without
+    «Артёма» by name. New rule: when principal's role is
+    «CEO» AND another row's role is «Ассистент CEO» /
+    «CEO Office» / «Chief of Staff», that row IS the
+    assistant — no name match required. Same for «Founder»
+    + «Founder's Office», «Head of X» + «X Office».
+
+#### FR-CR-05-78 — Dedup: different recipient/deadline = different task
+
+Operator: «ввёл текстом "подготовить отчет Ирине
+послезавтра" и ничего не произошло». Listener log showed
+the LLM dedup gate killed it as duplicate of «Подготовить
+отчёт Артёму завтра» on the basis of shared verb +
+noun.
+
+Rewrote `_SYSTEM_PROMPT` in `app/services/task_dedup.py`:
+
+  - Default to `is_duplicate=false` — better one extra task
+    the operator merges than silently dropped real work.
+  - Different recipient OR different deadline OR different
+    deliverable / specific subject = different task.
+  - Duplicates require ALL of subject / recipient /
+    deadline to overlap.
+  - Pinned the regression case as a worked example.
+
+#### FR-CR-05-77 — Owner prompt: dative case = audience, not assignment
+
+Operator: «"подготовить отчёт Артёму завтра" повесил на
+Артёма, надо на меня». Russian dative is ambiguous —
+«отчёт Артёму» can mean either «assigned to Artem» (rare)
+or «report for Artem» (audience, most common). The LLM was
+defaulting to the assignment reading.
+
+`OWNER_SYSTEM_PROMPT` rule «Do NOT pick — name as
+reference» rewritten: dative without an explicit doer-verb
+is AUDIENCE; «for X» / «to X» in English same. Assignment
+requires:
+
+  - vocative + verb («Артём, сделай»),
+  - passive-construction («сделает Артём»),
+  - explicit «assign to» / «pусть» phrase,
+  - or `<@…>` mention.
+
+Otherwise null owner; downstream falls back to the
+message author (who's typically the doer).
+
 #### FR-CR-05-52 — Owner prompt routes routine work to assistant
 
 `OWNER_SYSTEM_PROMPT` gains an ASSISTANT / DELEGATION

@@ -60,6 +60,37 @@ two «Алина»s, two «Pety»s):
     in the recent context messages, not someone with a similar
     first name from elsewhere.
 
+REQUESTER ≠ DOER — operator regression: source said «Артём
+попросил проверить письмо» and the LLM picked Артём as
+owner. WRONG. «попросил» / «asked» / «requested» / «sent
+us to do X» means the named person is the REQUESTER. The
+DOER is whoever they asked — typically:
+  - their assistant (per ASSISTANT routing rule below);
+  - or the message author (Иван writes «Артём попросил
+    подготовить отчёт» — Иван is reporting Артём's
+    request, so Иван is the doer, NOT Артём);
+  - or null when neither applies (downstream falls back to
+    the source-message author).
+
+NEVER name the requester as the owner just because they're
+the most-mentioned person in the source. «Артём попросил»
+on its own carries ZERO assignment — it's attribution.
+
+Worked counter-example:
+    employees:
+      U1 — «Артём», role «CEO», notes «только стратегические
+           задачи; ассистент — Ирина».
+      U2 — «Ирина», role «CEO Office», notes «ассистент
+           Артёма».
+    source: «Артём попросил посмотреть письмо свежим
+             взглядом перед отправкой».
+    BAD output:  slack_user_id=U1 (Артём is requester, not
+                 doer)
+    GOOD output: slack_user_id=U2 (Ирина — Артём's
+                 assistant per the ASSISTANT routing rule
+                 below; the work is operational «look at a
+                 letter», not strategic).
+
 ASSISTANT / DELEGATION RULES — read NOTES carefully for hints
 about who SHOULDN'T directly own routine work:
 
@@ -67,9 +98,19 @@ about who SHOULDN'T directly own routine work:
     «не назначать рутину», «не оперативка», «assistant: <Имя>»,
     «помощник: <Имя>», «routes through <Имя>» — and the source is
     NOT clearly strategic — find that assistant's row in
-    `known_employees` (NOTES will name them, OR another row's
-    NOTES/role will say «ассистент <Принципала>» / «assistant of
-    <Principal>») and pick THE ASSISTANT, not the principal.
+    `known_employees`. The link can be EXPLICIT (the assistant's
+    NOTES name the principal back: «ассистент Артёма» /
+    «assistant of <Principal>») OR INFERRED FROM ROLE-PAIR
+    MATCHING:
+      - principal role «CEO» + assistant role
+        «Ассистент CEO» / «Assistant CEO» / «CEO Office» /
+        «Chief of Staff»
+      - principal role «Founder» + assistant role
+        «Founder's Office» / «Ассистент фаундера»
+      - principal role «Head of <X>» + assistant role
+        «<X> Office» / «Ассистент <X>»
+    The role pair is enough — DON'T require a name match in
+    notes. Pick THE ASSISTANT, not the principal.
   - When NOTES on row A say «ассистент Артёма» and the source
     delegates an OPERATIONAL action to Артём («напомни Артёму
     про…», «Артём, отправь invoice»), pick A. The assistant is

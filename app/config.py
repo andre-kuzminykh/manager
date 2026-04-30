@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     google_tasks_default_tasklist_id: str = Field(
         default="@default", alias="GOOGLE_TASKS_DEFAULT_TASKLIST_ID"
     )
+    # FR-CR-05-61 — listener pulls Google Tasks (edits + deletes
+    # made in the Google Tasks UI) every N seconds and writes
+    # them back to DB + refreshes the TG card. Default 60s.
+    google_tasks_pull_interval_seconds: int = Field(
+        default=60, alias="GOOGLE_TASKS_PULL_INTERVAL_SECONDS"
+    )
     # FR-CR-05-28 — listener polls both Sheets (Tasks + Team)
     # every N seconds and applies operator edits to the DB. 60s
     # default keeps the operator-edit-to-DB delay below a minute

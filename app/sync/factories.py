@@ -162,3 +162,25 @@ def build_google_tasks_factory(
         )
 
     return factory
+
+
+def build_google_tasks_pull_factory(
+    settings: Settings,
+) -> Callable[[], "GoogleTasksPullService | None"] | None:
+    """FR-CR-05-61 — pull side of the Google Tasks sync. Same
+    credentials + tasklist as the push factory above. Returns
+    None when no tasklist id is configured."""
+    if not settings.google_tasks_default_tasklist_id:
+        return None
+    from app.sync.tasks_pull import GoogleTasksPullService
+
+    def factory() -> "GoogleTasksPullService | None":
+        creds = _resolve_credentials(GOOGLE_SCOPES_TASKS)
+        if creds is None:
+            return None
+        return GoogleTasksPullService(
+            credentials=creds,
+            tasklist_id=settings.google_tasks_default_tasklist_id,
+        )
+
+    return factory

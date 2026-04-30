@@ -154,6 +154,22 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         log.warning("tg_listener_syncer_setup_failed", error=str(e))
 
+    # FR-CR-05-61 — wire the Google Tasks pull-side service so the
+    # listener picks up edits / deletes the operator made directly
+    # in Google Tasks UI and propagates them back to DB + the live
+    # TG card. Off when `GOOGLE_TASKS_DEFAULT_TASKLIST_ID` is empty.
+    try:
+        from app.sync.factories import build_google_tasks_pull_factory
+
+        gt_pull_factory = build_google_tasks_pull_factory(settings)
+        if gt_pull_factory is not None:
+            listener.wire_google_tasks_pull(
+                factory=gt_pull_factory,
+                poll_interval_seconds=settings.google_tasks_pull_interval_seconds,
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("tg_listener_google_tasks_pull_setup_failed", error=str(e))
+
     # FR-CR-05-02 — register the cross-channel subscriber dispatcher
     # so transitions / edits triggered from Telegram buttons fan out
     # DMs to both Slack subscribers (via a fresh WebClient — only

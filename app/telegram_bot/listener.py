@@ -30,7 +30,7 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from sqlalchemy.orm import Session
 
@@ -343,6 +343,29 @@ class TelegramListener:
         # via `ops.migrate_fireflies --newest --limit N` when
         # actually needed.
         self._fireflies_started_at: datetime | None = None
+        # FR-CR-05-61 — periodic Google Tasks pull. Wired via
+        # `wire_google_tasks_pull()`; off until then so the
+        # listener stays usable without Google Tasks configured.
+        self._google_tasks_pull_factory: (
+            Callable[[], "GoogleTasksPullService | None"] | None
+        ) = None
+        self._google_tasks_pull_interval = 60
+        self._last_google_tasks_pull_at = 0.0
+
+    def wire_google_tasks_pull(
+        self,
+        *,
+        factory,
+        poll_interval_seconds: int = 60,
+    ) -> None:
+        """FR-CR-05-61 — register the Google Tasks pull factory.
+        Called once at startup from `ops/telegram_listener.py`.
+
+        Pulls run on the same per-tick cadence as the other
+        polls, throttled to `poll_interval_seconds` (default 60).
+        No-op when factory is None."""
+        self._google_tasks_pull_factory = factory
+        self._google_tasks_pull_interval = max(0, int(poll_interval_seconds))
 
     def wire_fireflies(
         self,
@@ -469,6 +492,86 @@ class TelegramListener:
         return list(data.get("result") or [])
 
     # ---- one tick ---------------------------------------------------------
+
+    def _maybe_pull_google_tasks(self) -> None:
+        """FR-CR-05-61 — periodically pull edits / deletes from
+        Google Tasks back into the DB.
+
+        On each pull cycle: every active task in the configured
+        tasklist is fetched; title / notes / due / status are
+        diffed against the matching DB row and written; deletes
+        (rows in DB with `google_tasks_id` set but absent from
+        the API list) flip `Task.deleted_at = now` and write a
+        cancellation history row. After each change the task's
+        TG card is refreshed so the operator sees fresh state in
+        Telegram without leaving the bot.
+
+        No-op until `wire_google_tasks_pull()` registers a
+        factory (which itself only runs when
+        `GOOGLE_TASKS_DEFAULT_TASKLIST_ID` is configured)."""
+        if self._google_tasks_pull_factory is None:
+            return
+        if self._google_tasks_pull_interval <= 0:
+            return
+        now = time.time()
+        if now - self._last_google_tasks_pull_at < self._google_tasks_pull_interval:
+            return
+        self._last_google_tasks_pull_at = now
+
+        try:
+            service = self._google_tasks_pull_factory()
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "listener_google_tasks_pull_factory_failed", error=str(e)
+            )
+            return
+        if service is None:
+            return
+
+        # Build a closure that refreshes the editor's TG card —
+        # used by the pull service after each apply / delete.
+        def _refresh(task: Task) -> None:
+            from app.telegram_bot.cards import refresh_card, render_tombstone
+
+            if task.deleted_at is not None:
+                render_tombstone(
+                    sender=self._sender,
+                    task=task,
+                    actor=None,
+                    session=None,
+                )
+            else:
+                # `refresh_card` opens its own session-aware
+                # rendering; pass our current session via
+                # closure scope by re-grabbing one. The pull
+                # service holds a session for diffs but the TG
+                # card render layer expects a session for owner-
+                # link resolution — open a fresh one.
+                with session_scope() as s2:
+                    fresh = s2.get(Task, task.id)
+                    if fresh is not None:
+                        refresh_card(
+                            sender=self._sender,
+                            session=s2,
+                            task=fresh,
+                        )
+
+        try:
+            with session_scope() as session:
+                report = service.pull(session, refresh_card=_refresh)
+            if report.updated or report.deleted or report.errors:
+                log.info(
+                    "listener_google_tasks_pull_done",
+                    seen=report.seen,
+                    updated=report.updated,
+                    deleted=report.deleted,
+                    status_changed=report.status_changed,
+                    errors=report.errors,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "listener_google_tasks_pull_failed", error=str(e)
+            )
 
     def _maybe_poll_fireflies(self) -> None:
         """FR-CR-05-39 — periodically pull new recordings from
@@ -666,6 +769,9 @@ class TelegramListener:
         self._maybe_poll_source_view()
         # FR-CR-05-39 — Fireflies poll on the same tick.
         self._maybe_poll_fireflies()
+        # FR-CR-05-61 — Google Tasks pull on the same tick
+        # (also throttled internally).
+        self._maybe_pull_google_tasks()
 
         # FR-CR-05-51 — pin a «process from now» cutoff on first
         # tick. Bot API getUpdates can replay up to 24h of

@@ -833,6 +833,193 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-88 — Title never ends on a preposition; description never null with context
+
+Operator: «"🟡 Спросить слоты с / 📝 Необходимо уточнить
+доступные слоты для встречи с Марко…" — почему оборван
+тайтл задачи и все равно короткое описание (что за поездка
+и тд)» and «"🟡 Исправлено, отправлять? / 📝 обсуждалось в
+Artem/Alina/Irina · 2026-04-30 11:28" — тут тоже ничего
+непонятно по контексту».
+
+Two layered prompt fixes on `title_prompt.py::TITLE_SYSTEM_
+PROMPT`:
+
+  - **Title NEVER ends with a preposition.** Russian list:
+    с, со, в, во, на, от, к, ко, по, за, у, для, из, под,
+    над, о, об, про, при, через. English: with, to, for,
+    of, from, by, on, in, about, at, into, onto, under,
+    over, through. If the imperative ends on one, the
+    complement was cut — look at source + context to
+    recover it, or replace with a generic «(уточнить с
+    кем / с чем)» placeholder. The «Спросить слоты с» →
+    «Спросить у Марко слоты в календаре» rewrite is pinned
+    as the worked counter-example.
+
+  - **Description NEVER null when ≥1 context message
+    exists.** The deterministic fallback («обсуждалось в
+    <chat> · <date>») is the failure signal — operators
+    can't act on it. Required behaviour: ≥2 sentences
+    naming WHO said what and WHAT the work is, even when
+    the source line is cryptic («Исправлено, отправлять?»).
+    Names get pulled from context; the description
+    surfaces the prior thread the cryptic line belongs to.
+    The MGX-letter / Ирина-edits regression is pinned as
+    BAD/GOOD example.
+
+#### FR-CR-05-87 — Date must belong to the task action, not to a different entity in the sentence
+
+Operator: «"🟠 Отредактировать письмо для MGX … упомянуть
+что раунд нужно закрыть до конца мая. Это важно для
+успешного завершения переговоров с MGX … 📅 2026-05-31" —
+здесь раунд закрыть до 31 мая, но это не дедлайн по
+задаче».
+
+The «до конца мая» refers to the ROUND's close deadline —
+a business fact going INTO the email content the user is
+asking us to edit. It is NOT a deadline for the task
+itself. The LLM was treating any date phrase in source as
+the task's `due_date`.
+
+`date_prompt.py::DATE_SYSTEM_PROMPT` rule 10 added: the
+date must modify the TASK's verb. Discriminator: «which
+verb does the date modify?»
+
+  - «X к 5 мая» / «to do X by May 5» → date modifies X
+    (the task) → use it.
+  - «X — упомянуть, что Y до 5 мая» / «edit the email to
+    mention that the round closes by May 31» → date
+    modifies Y (the round, not the task) → emit null.
+
+Other patterns falling under this rule: «отчёт о встрече 5
+мая» (the meeting was on May 5; task is to write the
+report), «напомни про вчерашний разговор» («вчера» anchors
+the conversation, not the reminder), «материалы под раунд
+который закрываем до конца мая», «обсудить результаты
+квартала». Default when unsure: emit null and let the
+downstream FR-CR-05-63 default («today 18:00») fill in.
+
+The MGX worked counter-example with `due_date=2026-05-31`
+as BAD output is pinned in the prompt.
+
+#### FR-CR-05-86 — Sheets append/update range pinned to schema width
+
+Operator: «у меня щас в google sheet, новые задачи
+начинаются с Z листа, что делать».
+
+`SheetsSyncService._append` and `._update` both used
+`range="A:Z"` (26 cols) but `_HEADER_ROW` carries 22.
+Combined with leftover content in columns W-Z (the rolled-
+back legacy `dialogue` column from before FR-CR-05-15, or
+operator's stray edits), Google Sheets' append heuristic
+detected a wider-than-22 logical table and started placing
+new rows past the schema — task data landed in column
+W/X/… instead of A. Existing rows continued to render in
+A-V, the new ones drifted right.
+
+Fix: range is now `A:<col_letter(len(_HEADER_ROW))>` —
+currently `A:V` for the 22-column schema. The new helper
+`_col_letter(n)` handles 27+ columns (`AA`, `AB`, …) for
+future-proofing. `_ensure_headers` already used this idea;
+both `_append` and `_update` now share the helper.
+
+#### FR-CR-05-85 — `ops.telegram_digest` cron registry pinned in autotests
+
+Operator: «кроны проверь в автотестах все».
+
+`tests/requirements/test_telegram_digest_cron.py` now pins
+the contract that the operator's cron depends on:
+
+  - `_TYPES` registry contains every supported subtype
+    (`evening-status-report`, `morning-task-cards`, plus
+    the legacy plan-evening / plan-morning / weekly /
+    deadlines / starts-now / thread-reminders / admin-
+    watchlist / morning-digest entries).
+  - `evening-status-report` routes to `app.telegram_bot.
+    evening_status.send_evening_status_report`.
+  - `morning-task-cards` routes to `app.telegram_bot.
+    morning_cards.send_morning_task_cards`.
+  - `--date YYYY-MM-DD` parses to ISO and propagates as
+    `today=` to the called function for both subtypes
+    (so back-fill / replay commands hit the right audit
+    row).
+  - The LLM backend is built ONLY for evening-status-
+    report; the morning flow MUST NOT touch
+    `_build_llm_backend` (it renders deterministic card
+    bodies, no narrative needed).
+
+Renaming a flow function or dropping a subtype now trips a
+test instead of silently breaking the next-day digest.
+
+#### FR-CR-05-84 — Morning cards wipe yesterday's set before posting today's
+
+Operator: «утром мне отправляй просто список моих задач
+отдельными карточками, ты их как бы удаляй если они ранее
+были и создавай заново с утра + просроченные туда же».
+
+`send_morning_task_cards` now:
+
+  - Records every (chat_id, message_id) it posts (intro DM,
+    each task card, the «👀 Watching» separator) into
+    `audit_logs.payload.card_messages` for today's run.
+  - Before posting today's intro, looks up the most recent
+    PRIOR audit row for the recipient under
+    `category=telegram_morning_cards` and calls
+    `sender.delete_message` on every card listed in its
+    `card_messages` payload. Best-effort: per-message
+    failures (Telegram refuses deletes older than 48h) are
+    logged and skipped, never abort today's posting.
+  - New report counter `prior_cards_deleted` exposes the
+    cleanup so the cron log shows it happening.
+  - Idempotency unchanged: today's audit row gates a
+    re-run within the same day.
+
+The overdue-tasks-in-the-morning behaviour (FR-CR-05-49)
+already covered by `_owned_due_today`'s `due_date <
+today` clause — operator's «просроченные туда же» is a
+re-affirmation, not a new requirement.
+
+`_post_one_card` return type changed bool → `int | None`
+so the caller can persist the message_id. All call sites
+in this module updated.
+
+#### FR-CR-05-83 — Evening sends the tomorrow plan as a second message
+
+Operator: «вечером ты должен отправлять статусы (в 6) —
+это просто информационный дайджест и след сообщением
+пост со списком задач моих на завтра с гиперссылками на
+эти задачи в боте».
+
+`send_evening_status_report` now sends a SECOND message
+right after the status digest: a hyperlinked list of the
+recipient's open tasks scheduled for tomorrow.
+
+  - Selector `_owned_for_tomorrow`: same shape as the
+    morning's `_owned_due_today` but anchored to
+    `tomorrow=today+1`. Includes `due_date == tomorrow`,
+    `due_date < tomorrow` (overdue rolls forward — the
+    work is still owed), `status == in_progress`, and the
+    `is_current_week` no-due-date branch.
+  - Order: overdue first (🚨), then priority desc →
+    due_date asc nulls-last → due_time asc → id asc.
+  - Each line: priority bullet + `<a href="<bot card
+    url>"><b>title</b></a>` + meta line (📅 due / 👤
+    owner). The URL prefers the recipient's own
+    `task.extra.telegram_cards` deep-link
+    (`tg://openmessage`), falling back to `t.me/c/<chat>/
+    <msg>` for supergroup-hosted cards — same logic as
+    FR-CR-05-48.
+  - Long lists split at task boundaries; each chunk
+    stays ≤4096 chars, follow-ups carry a «(continued)»
+    marker.
+  - When the recipient has no tomorrow tasks, the second
+    message is skipped (no empty DMs).
+  - `EveningStatusReport.tomorrow_plans_sent` counter
+    exposes how many recipients got the addendum.
+
+Idempotency unchanged: today's audit row gates re-runs
+of the whole evening flow.
+
 #### FR-CR-05-82 — Description must carry every named entity; date prompt blocks implicit-Monday hallucination
 
 Operator: «"Обсудить возможность встречи или следующей чтобы
@@ -3697,6 +3884,12 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-83  | `test_evening_status.py::test_evening_tomorrow_plan_lists_tasks_for_next_day` (status digest + second message naming tomorrow's tasks; `tg://openmessage` hyperlink lands on the title); `::test_evening_tomorrow_plan_includes_overdue_today` (🚨 bullet on overdue lines + «Rolling over from today: 1» count); `::test_evening_tomorrow_plan_skipped_when_no_tasks` (no second DM when nothing scheduled, `tomorrow_plans_sent=0`); `::test_evening_tomorrow_plan_long_list_splits_into_multiple_messages` (80-task list splits at task boundaries, every chunk ≤4096 chars, `(continued)` marker on follow-ups); `::test_evening_status_groups_done_in_progress_todo` updated to assert 2 DMs (status + plan) |
+| FR-CR-05-84  | `test_morning_cards.py::test_morning_cards_records_card_messages_in_audit_payload` (audit row carries `[{chat_id,message_id}…]` for intro + every card); `::test_morning_cards_deletes_yesterdays_cards_before_posting_today` (day-2 run calls `deleteMessage` on every prior-day card BEFORE posting today's intro; `prior_cards_deleted=2`); `::test_morning_cards_no_prior_audit_row_means_no_delete_calls` (first-ever run = no deletes); `::test_morning_cards_delete_failures_dont_abort_today_post` (Telegram-refuses-to-delete failures swallowed, today's posting continues) |
+| FR-CR-05-85  | `test_telegram_digest_cron.py::test_cron_registry_includes_evening_and_morning_flows` (both subtypes present); `::test_cron_registry_evening_routes_to_send_evening_status_report` + `::test_cron_registry_morning_routes_to_send_morning_task_cards` (function identity pinned); `::test_cron_registry_lists_all_expected_subtypes` (full set); `::test_cron_main_passes_iso_date_through_to_evening` + `::test_cron_main_passes_iso_date_through_to_morning` (`--date` parses to ISO and reaches the called fn as `today=`); `::test_cron_main_only_builds_llm_backend_for_evening_flow` (morning never touches `_build_llm_backend`) |
+| FR-CR-05-86  | `test_sheets_sync_hooks.py::test_col_letter_helper_handles_az_and_aa_boundaries` (`_col_letter` 1→'A', 22→'V', 26→'Z', 27→'AA', 53→'BA'); `::test_append_uses_schema_width_range_not_a_z` (`range="Main!A:V"` not `A:Z`); `::test_update_uses_schema_width_range_not_a_z` (`A42:V42` not `A42:Z42`) |
+| FR-CR-05-87  | `test_intent_pipeline.py::test_date_prompt_requires_date_to_belong_to_task_action` (rule 10 + FR-CR-05-87 + the MGX «до конца мая» / `2026-05-31` BAD-output worked example pinned; «which verb does the date modify?» discriminator + «if unsure, EMIT NULL» fallback all enforced) |
+| FR-CR-05-88  | `test_intent_pipeline.py::test_title_prompt_forbids_titles_ending_in_preposition` (NEVER END A TITLE WITH A PREPOSITION block + «Спросить слоты с» worked counter-example + Russian + English preposition lists pinned); `::test_title_prompt_forbids_null_description_with_context_present` (NEVER RETURN NULL DESCRIPTION block + «Исправлено, отправлять?» / MGX letter / «Artem/Alina/Irina» fragments + «≥1 prior context message ⇒ ≥2 sentences» rule pinned) |
 | FR-CR-05-82  | `test_intent_pipeline.py::test_title_prompt_requires_named_entity_coverage` (NAMED-ENTITY COVERAGE block + Fubon / Ryan Gariepy / May 6 11:30 London / FR-CR-05-82 fragments pinned; entity classes spelled out); `::test_title_prompt_length_rule_targets_3_to_6_sentences` («3-6 sentences» replaces «1-3 SHORT sentences»); `::test_date_prompt_forbids_implicit_monday_inference` (NO HALLUCINATING DATES + four required literal triggers + multi-candidate-dates rule + 2026-05-04 BAD-output regression all pinned, «never pick the earliest» enforced) |
 | FR-CR-05-38  | manual visual verification — after an Edit reply the listener posts a fresh DM with the full rendered task card / widget body in context; the original card / widget is also edited in place by `refresh_card` / `refresh_draft_widgets` |
 | FR-CR-05-40  | `test_evening_status.py::test_evening_status_groups_done_in_progress_todo` (3 tasks → 3 sections + 1 LLM call each); `::test_evening_status_subscriber_only_user_still_gets_dm` (no owned tasks but subscribed → 👀 Подписки section); `::test_evening_status_skips_user_with_no_tasks` (no tasks → 0 recipients); `::test_compose_narrative_falls_back_when_llm_raises` + `::test_compose_narrative_falls_back_when_llm_returns_empty` (fail-open to deterministic fallback); `::test_compose_narrative_truncates_long_response` (LLM > 240 chars → trimmed + `…`); `::test_evening_status_works_without_llm` (`llm=None` still ships fallback); `::test_evening_status_renders_title_as_hyperlink` (`<a href=permalink><b>title</b></a>`); `::test_evening_status_idempotent_per_user_per_day` (re-run = no new DMs); `::test_evening_status_admin_gets_team_overview` (admin uid → «Сводка по команде» with ALL tasks); `::test_split_groups_packs_into_multiple_messages_under_cap` + `::test_split_groups_single_message_when_short` (helper unit tests); `::test_evening_status_splits_long_report_into_multiple_messages` (80 tasks + verbose narrative → ≥2 DMs, each ≤4096 chars) |

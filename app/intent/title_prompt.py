@@ -21,6 +21,32 @@ Produce three fields:
                 separate field. Use the imperative form
                 ("подготовить питчдек", "prepare pitch-deck").
 
+                NEVER END A TITLE WITH A PREPOSITION (FR-CR-05-88).
+                Russian prepositions to watch for: с, со, в, во,
+                на, от, к, ко, по, за, у, для, из, под, над, о,
+                об, про, при, через. English: with, to, for, of,
+                from, by, on, in, about, at, into, onto, under,
+                over, through. If the imperative ends with one,
+                you've cut the COMPLEMENT (the noun/person/topic
+                the verb acts upon). Look at the source AND
+                context_messages, find the missing complement,
+                and include it in the title. If the context
+                doesn't make the complement clear, REPLACE the
+                preposition + missing-noun phrase with a generic
+                clause «(уточнить с кем / с чем)» rather than
+                shipping the truncated head.
+
+                Worked counter-example (operator regression
+                FR-CR-05-88):
+                  source: «спросить слоты с Марко по календарю»
+                  context: prior messages name Марко and the
+                           travel discussion
+                  BAD title:  «Спросить слоты с»  (cuts on «с»,
+                              loses Марко — UNACCEPTABLE)
+                  GOOD title: «Спросить у Марко слоты в календаре»
+                              OR «Узнать слоты у Марко» — name
+                              the addressee, drop the orphan «с».
+
                 NEVER quote large fragments — no email bodies,
                 screenshot transcripts ("На изображении письмо…"),
                 templates ("Hi [Name], reaching out as a fellow…"),
@@ -173,11 +199,44 @@ Produce three fields:
                   - empty / null when there IS prior context to
                     summarise
 
-                When the source message + context genuinely have
-                no extractable detail (a one-liner with empty
-                history), the description MAY be null — caller
-                will substitute a deterministic fallback like
-                «обсуждалось в <chat> · <date>».
+                NEVER RETURN NULL DESCRIPTION WHEN ANY CONTEXT
+                EXISTS (FR-CR-05-88). Operator complaint:
+                «обсуждалось в Artem/Alina/Irina · 2026-04-30
+                11:28 — тут ничего непонятно по контексту». That
+                deterministic fallback IS the failure signal —
+                it means the LLM gave up.
+
+                Required behaviour:
+                  - With ≥1 prior `context` message: write at
+                    least 2 sentences naming WHO said what and
+                    WHAT the work is. Pull names from context
+                    even if the source line is cryptic
+                    («Исправлено, отправлять?»).
+                  - With zero prior context AND a source under
+                    20 chars («ок, сделаю»): the title prompt
+                    has the parroted-one-liner rules — emit a
+                    description that says «по уточнённому ранее
+                    запросу» plus whatever entity is named in
+                    the source. Still NOT null.
+                  - The ONLY case where null is acceptable: the
+                    source is a single sentence with NO prior
+                    context AND no named entity. That should be
+                    rare in practice; when in doubt, write
+                    «(детали в исходном сообщении)» plus any
+                    fragment from the source.
+
+                Worked failure (operator regression FR-CR-05-88):
+                  source: «Исправлено, отправлять?»
+                  context: «обсуждалось письмо для MGX, Ирина
+                           правит формулировку»
+                  BAD desc:  null  → fallback «обсуждалось в
+                             Artem/Alina/Irina · ...» — useless.
+                  GOOD desc: «Ирина закончила правки в письме
+                             для MGX (по обсуждению в чате
+                             Artem/Alina/Irina) и просит
+                             подтверждение перед отправкой.
+                             Нужно проверить и дать ОК / отбить
+                             замечания.»
 
                 Also use this field to capture the leading
                 project / context tag of a note-style input

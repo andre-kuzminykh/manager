@@ -170,13 +170,20 @@ def test_evening_status_groups_done_in_progress_todo(
     assert report.tasks_described == 3
     # One LLM call per task.
     assert len(llm.calls) == 3
-    # One DM (the report fits in <3800 chars).
-    assert len(sender.sent) == 1
+    # FR-CR-05-83 — two DMs now: the status digest + the
+    # tomorrow-plan follow-up. The status digest is the first
+    # message, then the plan is the second.
+    assert len(sender.sent) == 2
     body = sender.sent[0]["text"]
     assert "✅ Done today" in body
     assert "🚀 In progress" in body
     assert "📋 Todo" in body
     assert "closed today" in body and "in flight" in body and "planned" in body
+    # The tomorrow-plan follow-up names the same open tasks.
+    plan_body = sender.sent[1]["text"]
+    assert "Plan for tomorrow" in plan_body
+    assert "in flight" in plan_body and "planned" in plan_body
+    assert report.tomorrow_plans_sent == 1
 
 
 def test_evening_status_subscriber_only_user_still_gets_dm(
@@ -295,8 +302,10 @@ def test_evening_status_works_without_llm(
         )
         s.commit()
     assert report.recipients == 1
-    assert len(sender.sent) == 1
+    # FR-CR-05-83 — status digest + tomorrow plan = 2 DMs.
+    assert len(sender.sent) == 2
     assert "статус todo" in sender.sent[0]["text"]
+    assert "Plan for tomorrow" in sender.sent[1]["text"]
 
 
 # --------------------------------------------------------------------------- #
@@ -497,6 +506,130 @@ def test_evening_status_splits_long_report_into_multiple_messages(
     assert len(sender.sent) >= 2
     for m in sender.sent:
         assert len(m["text"]) <= 4096
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-83 — tomorrow plan as a second message
+# --------------------------------------------------------------------------- #
+
+
+def test_evening_tomorrow_plan_lists_tasks_for_next_day(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-83 — operator: «след сообщением пост со списком
+    задач моих на завтра с гиперссылками на эти задачи в боте».
+    The second evening message must list the user's open tasks
+    scheduled for tomorrow (due_date == tomorrow), with title
+    hyperlinks pointing at the BOT'S task cards."""
+    today = date(2026, 4, 29)
+    tomorrow = today + timedelta(days=1)
+    with SessionFactory() as s:
+        # Three tasks for tomorrow + one far-away (excluded).
+        t1 = _mk_task(s, title="ship demo", due_date=tomorrow)
+        t2 = _mk_task(s, title="review PR", due_date=tomorrow)
+        _mk_task(s, title="next month", due_date=tomorrow + timedelta(days=20))
+        # Hook a stored bot card so the title hyperlinks.
+        t1.extra = {"telegram_cards": [{"chat_id": 111, "message_id": 9001}]}
+        s.commit()
+        sender = _RecordingTGSender()
+        sender._token = "8675374199:secret"
+        report = send_evening_status_report(
+            s, sender=sender, llm=_StubLLM(reply="ok"),
+            today=today, include_admin_overview=False,
+        )
+        s.commit()
+
+    # 1 status digest + 1 tomorrow plan = 2 DMs.
+    assert len(sender.sent) == 2
+    plan_body = sender.sent[1]["text"]
+    assert f"Plan for tomorrow ({tomorrow.isoformat()})" in plan_body
+    assert "ship demo" in plan_body
+    assert "review PR" in plan_body
+    assert "next month" not in plan_body
+    # Hyperlink for the task with a stored bot card.
+    assert "tg://openmessage?user_id=8675374199&amp;message_id=9001" in plan_body
+    assert report.tomorrow_plans_sent == 1
+
+
+def test_evening_tomorrow_plan_includes_overdue_today(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-83 — overdue tasks (due_date < tomorrow,
+    status != done) roll forward into the tomorrow plan with
+    the 🚨 bullet, since they're work that didn't close
+    today."""
+    today = date(2026, 4, 29)
+    yesterday = today - timedelta(days=1)
+    with SessionFactory() as s:
+        _mk_task(s, title="rolling", due_date=yesterday)
+        s.commit()
+        sender = _RecordingTGSender()
+        send_evening_status_report(
+            s, sender=sender, llm=_StubLLM(reply="ok"),
+            today=today, include_admin_overview=False,
+        )
+        s.commit()
+    plan_body = sender.sent[1]["text"]
+    assert "rolling" in plan_body
+    # 🚨 bullet on the overdue line + count line at the top.
+    assert "🚨" in plan_body
+    assert "Rolling over from today: 1" in plan_body
+
+
+def test_evening_tomorrow_plan_skipped_when_no_tasks(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-83 — when the user has nothing for tomorrow, the
+    bot does NOT send a second empty message."""
+    today = date(2026, 4, 29)
+    far = today + timedelta(days=30)
+    with SessionFactory() as s:
+        # User 111 owns one far-future task (qualifies them as a
+        # recipient via _telegram_owner_ids → status digest sends),
+        # but the task does NOT match the tomorrow selector
+        # (due_date is too far, not in_progress, not
+        # is_current_week-with-no-due-date).
+        _mk_task(
+            s, title="next month", due_date=far, is_current_week=False,
+        )
+        s.commit()
+        sender = _RecordingTGSender()
+        report = send_evening_status_report(
+            s, sender=sender, llm=_StubLLM(reply="ok"),
+            today=today, include_admin_overview=False,
+        )
+        s.commit()
+    # Only the status digest, no tomorrow plan.
+    assert len(sender.sent) == 1
+    assert "Plan for tomorrow" not in sender.sent[0]["text"]
+    assert report.tomorrow_plans_sent == 0
+
+
+def test_evening_tomorrow_plan_long_list_splits_into_multiple_messages(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-83 — when an owner has too many tomorrow tasks
+    to fit under the 4096-char Telegram cap, the plan splits at
+    task boundaries. Every sent chunk stays ≤4096 chars and a
+    `(continued)` marker shows on follow-ups."""
+    today = date(2026, 4, 29)
+    tomorrow = today + timedelta(days=1)
+    with SessionFactory() as s:
+        for i in range(80):
+            _mk_task(s, title=f"task-{i:02d} " * 8, due_date=tomorrow)
+        s.commit()
+        sender = _RecordingTGSender()
+        send_evening_status_report(
+            s, sender=sender, llm=_StubLLM(reply="ok"),
+            today=today, include_admin_overview=False,
+        )
+        s.commit()
+    # All chunks (status digest + tomorrow plan) ≤4096 chars.
+    for m in sender.sent:
+        assert len(m["text"]) <= 4096
+    # At least one tomorrow-plan continuation appeared.
+    plan_chunks = [m for m in sender.sent if "Plan for tomorrow" in m["text"] or "(continued)" in m["text"]]
+    assert len(plan_chunks) >= 2
 
 
 # --------------------------------------------------------------------------- #

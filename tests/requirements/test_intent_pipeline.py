@@ -640,6 +640,87 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "temporal anchor" in blob.lower() or "к 5" in blob
 
 
+def test_title_prompt_forbids_titles_ending_in_preposition():
+    """FR-CR-05-88 — operator regression: title rendered as
+    «Спросить слоты с» — chopped on «с», losing «Марко». The
+    title prompt now teaches: never end on a preposition;
+    look at source + context to fill the complement, or fall
+    back to a «(уточнить с кем)» placeholder."""
+    blob = TITLE_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    # Rule + FR ID pinned.
+    assert "NEVER END A TITLE WITH A PREPOSITION" in blob
+    assert "FR-CR-05-88" in blob
+
+    # The exact regression case is pinned.
+    assert "Спросить слоты с" in blob
+    # Russian preposition list includes the operator's «с».
+    for prep in ("с", "в", "на", "от", "к", "по"):
+        assert prep in flat
+
+    # English prepositions also listed.
+    for prep in ("with", "to", "for", "from"):
+        assert prep in blob
+
+
+def test_title_prompt_forbids_null_description_with_context_present():
+    """FR-CR-05-88 — operator regression: title «Исправлено,
+    отправлять?» got description = null, which fell back to
+    «обсуждалось в Artem/Alina/Irina · 2026-04-30 11:28». The
+    operator can't act on that. New rule: when ≥1 context
+    message exists, the LLM MUST write at least 2 sentences."""
+    blob = TITLE_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "NEVER RETURN NULL DESCRIPTION WHEN ANY CONTEXT" in blob
+    # The regression's fallback string is pinned.
+    assert "Artem/Alina/Irina" in blob
+    # Both regression sources mentioned.
+    assert "Исправлено, отправлять?" in blob
+    assert "MGX" in blob
+    # The «with ≥1 prior context message: write ≥2 sentences» rule.
+    assert "≥1 prior" in blob or "at least 2 sentences" in flat.lower()
+
+
+def test_date_prompt_requires_date_to_belong_to_task_action():
+    """FR-CR-05-87 — operator regression: «Отредактировать
+    письмо для MGX — упомянуть, что раунд нужно закрыть до
+    конца мая» got `due_date=2026-05-31`. WRONG. The «до
+    конца мая» is the ROUND's close deadline (a business
+    fact going INTO the email content), not the task's
+    deadline.
+
+    The date prompt must teach the discriminator: which verb
+    does the date modify? If it modifies the task's verb,
+    use it. If it modifies another entity mentioned in the
+    same sentence (the round, the meeting, the project), the
+    date is description material — emit null."""
+    from app.intent.date_prompt import DATE_SYSTEM_PROMPT
+
+    blob = DATE_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    # FR ID and the title of the rule pinned.
+    assert "FR-CR-05-87" in blob
+    assert "TASK ACTION" in blob or "task action" in flat.lower()
+
+    # The MGX worked example fragments are pinned.
+    for fragment in (
+        "MGX",
+        "минимальный чек",
+        "до конца мая",
+        "2026-05-31",
+    ):
+        assert fragment in blob, f"{fragment!r} should be pinned in MGX example"
+
+    # The discriminator question is taught.
+    assert "which verb" in blob.lower() or "modifies" in blob.lower()
+
+    # The fallback rule («if unsure, emit null») is explicit.
+    assert "EMIT NULL" in blob or "emit null" in blob.lower()
+
+
 def test_date_prompt_forbids_implicit_monday_inference():
     """FR-CR-05-82 — operator regression: source had four
     explicit time-slot dates (May 5/6/8/9) and the LLM emitted

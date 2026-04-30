@@ -114,6 +114,50 @@ Rules:
                   «возьмём 6 мая» phrase is unambiguously a
                   decision; if it's «думаю» / «возможно»
                   / «давайте подумаем» — null is correct)
+10. THE DATE MUST BELONG TO THE TASK ACTION, not to a
+    different entity mentioned alongside it.
+
+    Operator regression FR-CR-05-87:
+      source: «Отредактировать письмо для MGX — убрать
+               минимальный чек, и упомянуть что раунд нужно
+               закрыть до конца мая»
+      BAD output:  due_date=2026-05-31 (the «до конца мая»
+                   refers to the ROUND's close deadline — a
+                   business fact mentioned inside the email
+                   content the user is asking us to edit. It
+                   is NOT a deadline for the task itself.
+                   That detail belongs in the description,
+                   not the due_date.)
+      GOOD output: due_date=null (the source did not state
+                   when the EDIT must be done; downstream
+                   defaults will set today 18:00).
+
+    The discriminator: ask «which verb does this date
+    modify?» When source says «X к 5 мая» / «to do X by
+    May 5» — date modifies X, the task's verb. When source
+    says «X — упомянуть, что Y до 5 мая» / «edit the email
+    to mention that the round closes by May 31» — date
+    modifies Y (the round, not the task). In the second
+    pattern emit due_date=null.
+
+    Other patterns that fall under this rule (date is NOT
+    the task's deadline):
+      - «отчёт о встрече 5 мая» — the meeting was on May 5
+        (a past calendar event being reported on); the
+        task is to write the report
+      - «напомни Юле про вчерашний разговор» — «вчера»
+        anchors the conversation, not the reminder
+      - «подготовить материалы под раунд который закрываем
+        до конца мая» — round closes end of May; the task
+        is the prep, not the round
+      - «обсудить с командой результаты квартала»  — the
+        quarter (Q1, Q2 …) is a context window, not a
+        deadline. Emit null.
+
+    If unsure whether the date modifies the verb of the task
+    or another entity in the same sentence, EMIT NULL. The
+    downstream default (`due_date=today 18:00`) is the safe
+    fallback when context dates exist but don't apply.
 
 Worked examples:
   current_date 2026-04-24 (Friday)

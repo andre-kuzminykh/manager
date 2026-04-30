@@ -223,6 +223,94 @@ def test_ensure_headers_writes_when_row1_empty():
     assert upd["body"]["values"][0] == _HEADER_ROW
 
 
+def test_col_letter_helper_handles_az_and_aa_boundaries():
+    """FR-CR-05-86 — `_col_letter` underpins every range string
+    we send to Sheets. 22 cols → 'V', 26 → 'Z', 27 → 'AA'."""
+    from app.sync.sheets import _col_letter
+
+    assert _col_letter(1) == "A"
+    assert _col_letter(22) == "V"
+    assert _col_letter(26) == "Z"
+    assert _col_letter(27) == "AA"
+    assert _col_letter(28) == "AB"
+    assert _col_letter(52) == "AZ"
+    assert _col_letter(53) == "BA"
+
+
+def test_append_uses_schema_width_range_not_a_z():
+    """FR-CR-05-86 — operator regression: new rows landed
+    shifted ~22 columns right because `range='A:Z'` (26 cols)
+    plus stray data in W-Z (the rolled-back legacy `dialogue`
+    column) made Google's append heuristic detect a
+    wider-than-22 «table» and place new rows past the schema.
+    The fix pins the range to EXACTLY `len(_HEADER_ROW)` cols."""
+    from app.sync.sheets import _HEADER_ROW, _col_letter
+
+    expected_end = _col_letter(len(_HEADER_ROW))
+    captured: dict = {}
+
+    class _FakeSvc:
+        def spreadsheets(self):
+            return self
+
+        def values(self):
+            return self
+
+        def append(self, *, spreadsheetId, range, valueInputOption, insertDataOption, body):  # noqa: N803
+            captured["range"] = range
+            captured["body"] = body
+            return self
+
+        def update(self, *, spreadsheetId, range, valueInputOption, body):  # noqa: N803
+            captured["update_range"] = range
+            return self
+
+        def execute(self):
+            return {"updates": {"updatedRange": f"Main!A100:{expected_end}100"}}
+
+    svc = _make_svc()
+    svc._service = _FakeSvc()
+    svc._headers_checked = True  # skip the get/update flow
+
+    row = ["v"] * len(_HEADER_ROW)
+    svc._append(row)
+    assert captured["range"] == f"Main!A:{expected_end}"
+    # Sanity: the legacy A:Z wide range MUST be gone.
+    assert "A:Z" not in captured["range"]
+
+
+def test_update_uses_schema_width_range_not_a_z():
+    """FR-CR-05-86 — same pin on the per-row update range so
+    operator edits don't bleed into stray columns past `V`."""
+    from app.sync.sheets import _HEADER_ROW, _col_letter
+
+    expected_end = _col_letter(len(_HEADER_ROW))
+    captured: dict = {}
+
+    class _FakeSvc:
+        def spreadsheets(self):
+            return self
+
+        def values(self):
+            return self
+
+        def update(self, *, spreadsheetId, range, valueInputOption, body):  # noqa: N803
+            captured["range"] = range
+            return self
+
+        def execute(self):
+            return {}
+
+    svc = _make_svc()
+    svc._service = _FakeSvc()
+    svc._headers_checked = True
+
+    row = ["v"] * len(_HEADER_ROW)
+    svc._update(42, row)
+    assert captured["range"] == f"Main!A42:{expected_end}42"
+    assert "A42:Z42" not in captured["range"]
+
+
 def test_ensure_headers_overwrites_when_row1_mismatches():
     """The user's manually-typed headers were a different schema; the
     bot must take over to keep column order in sync with `_task_row`."""

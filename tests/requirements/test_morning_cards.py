@@ -35,12 +35,20 @@ class _RecordingTGSender:
     def __init__(self):
         self.enabled = True
         self.sent: list[dict] = []
+        self.deleted: list[dict] = []
+        self.delete_should_raise: bool = False
 
     def send_message(self, *, chat_id, text, reply_markup=None, **kw):
         self.sent.append(
             {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
         )
         return {"message_id": len(self.sent)}
+
+    def delete_message(self, *, chat_id, message_id):
+        if self.delete_should_raise:
+            raise RuntimeError("Bad Request: message to delete not found")
+        self.deleted.append({"chat_id": chat_id, "message_id": message_id})
+        return {}
 
 
 def _mk_task(s, **kw) -> Task:
@@ -360,6 +368,127 @@ def test_morning_cards_no_alarm_for_done_overdue(
     assert "done-yesterday" not in bodies
     assert "OVERDUE" not in bodies
     assert "real task" in bodies
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-84 — delete yesterday's morning cards before posting today's
+# --------------------------------------------------------------------------- #
+
+
+def test_morning_cards_records_card_messages_in_audit_payload(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-84 — the audit row written after a successful run
+    carries every (chat_id, message_id) the bot posted today, so
+    tomorrow's run can delete them."""
+    from app.models import AuditLog
+
+    today = date(2026, 4, 29)
+    with SessionFactory() as s:
+        _mk_task(s, title="a", due_date=today)
+        _mk_task(s, title="b", due_date=today)
+        s.commit()
+        sender = _RecordingTGSender()
+        send_morning_task_cards(s, sender=sender, today=today)
+        s.commit()
+
+    with SessionFactory() as s:
+        row = s.query(AuditLog).filter_by(
+            category="telegram_morning_cards", actor="111",
+        ).one()
+    payload = row.payload or {}
+    cards = payload.get("card_messages") or []
+    # Intro + 2 cards = 3 message_ids.
+    assert len(cards) == 3
+    for c in cards:
+        assert isinstance(c.get("chat_id"), int)
+        assert isinstance(c.get("message_id"), int)
+
+
+def test_morning_cards_deletes_yesterdays_cards_before_posting_today(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-84 — operator: «ты их как бы удаляй если они
+    ранее были и создавай заново с утра». On day 2's run, the
+    bot must call `deleteMessage` on every (chat_id, message_id)
+    saved in yesterday's audit row before posting today's
+    intro + cards."""
+    from datetime import timedelta as _td
+
+    yesterday = date(2026, 4, 28)
+    today = date(2026, 4, 29)
+
+    with SessionFactory() as s:
+        # Due yesterday → in yesterday's run as due-today; in
+        # today's run as overdue. Either way the task qualifies
+        # for both days' digests.
+        _mk_task(s, title="rolling task", owner_user_id="111", due_date=yesterday)
+        s.commit()
+        sender_y = _RecordingTGSender()
+        send_morning_task_cards(s, sender=sender_y, today=yesterday)
+        s.commit()
+    # Sanity — yesterday's run posted intro + 1 card.
+    assert len(sender_y.sent) == 2
+
+    # Today's run uses a fresh sender (mimics a separate cron tick).
+    sender_t = _RecordingTGSender()
+    with SessionFactory() as s:
+        report = send_morning_task_cards(s, sender=sender_t, today=today)
+        s.commit()
+
+    # Today's sender deleted yesterday's 2 messages first.
+    assert len(sender_t.deleted) == 2
+    deleted_mids = sorted(d["message_id"] for d in sender_t.deleted)
+    assert deleted_mids == [1, 2]
+    # The report counter exposes the cleanup.
+    assert report.prior_cards_deleted == 2
+    # Today still posted intro + 1 card (delete-then-post, not
+    # skip).
+    assert len(sender_t.sent) == 2
+
+
+def test_morning_cards_no_prior_audit_row_means_no_delete_calls(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-84 — first-ever run has nothing to delete; the
+    sender's `delete_message` must not be called at all."""
+    today = date(2026, 4, 29)
+    with SessionFactory() as s:
+        _mk_task(s, title="x", due_date=today)
+        s.commit()
+        sender = _RecordingTGSender()
+        report = send_morning_task_cards(s, sender=sender, today=today)
+        s.commit()
+    assert sender.deleted == []
+    assert report.prior_cards_deleted == 0
+
+
+def test_morning_cards_delete_failures_dont_abort_today_post(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-84 — Telegram refuses deletions older than 48h
+    or for messages that no longer exist. Per-message failures
+    must be swallowed; today's intro + cards still post."""
+    yesterday = date(2026, 4, 28)
+    today = date(2026, 4, 29)
+
+    with SessionFactory() as s:
+        _mk_task(s, title="x", owner_user_id="111", due_date=yesterday)
+        s.commit()
+        sender_y = _RecordingTGSender()
+        send_morning_task_cards(s, sender=sender_y, today=yesterday)
+        s.commit()
+
+    sender_t = _RecordingTGSender()
+    sender_t.delete_should_raise = True
+    with SessionFactory() as s:
+        report = send_morning_task_cards(s, sender=sender_t, today=today)
+        s.commit()
+    # Despite delete failures, today's run posted the digest.
+    assert len(sender_t.sent) >= 2  # intro + at least 1 card
+    assert report.recipients == 1
+    # `prior_cards_deleted` counts only successful deletes.
+    assert report.prior_cards_deleted == 0
 
 
 # --------------------------------------------------------------------------- #

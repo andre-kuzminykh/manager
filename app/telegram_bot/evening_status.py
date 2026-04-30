@@ -63,6 +63,12 @@ log = get_logger(__name__)
 
 
 _OPEN = (TaskStatus.backlog, TaskStatus.todo, TaskStatus.in_progress)
+
+# FR-CR-05-83 — priority order for the tomorrow-plan addendum.
+# urgent first, low last; matches the morning-cards ordering so
+# the operator sees the same shape evening + morning.
+_PRIORITY_RANK = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
+
 _TG_MESSAGE_HARD_CAP = 4096
 # Leave ~10% headroom so a renderer rounding error or a stray
 # entity-encoded char doesn't push us over.
@@ -104,6 +110,10 @@ class EveningStatusReport:
     recipients: int = 0
     messages_sent: int = 0
     tasks_described: int = 0
+    # FR-CR-05-83 — separate counter for the «tomorrow plan»
+    # follow-up so the cron log shows whether operators
+    # actually saw their next-day list.
+    tomorrow_plans_sent: int = 0
     skipped_idempotent: int = 0
     skipped_no_tasks: int = 0
     failures: int = 0
@@ -212,6 +222,38 @@ def _todo_for_owner(session: Session, *, owner_uid: str) -> list[Task]:
             Task.due_date.asc().nullslast(),
             Task.is_current_week.desc(),
             Task.id.asc(),
+        )
+        .all()
+    )
+
+
+def _owned_for_tomorrow(
+    session: Session, *, owner_uid: str, tomorrow: date
+) -> list[Task]:
+    """FR-CR-05-83 — selector for the «tomorrow's plan» evening
+    follow-up message.
+
+    Returns the user's open tasks that should be on tomorrow's
+    plate — same shape as `_owned_due_today` but anchored to
+    `tomorrow`. Uses `due_date <= tomorrow` so overdue-as-of-
+    today rolls forward (nothing's done if it wasn't closed by
+    18:00); also picks up `in_progress` tasks regardless of
+    `due_date`, plus `is_current_week` slated work without a
+    firm deadline."""
+    return (
+        session.query(Task)
+        .filter(
+            Task.owner_user_id == owner_uid,
+            Task.deleted_at.is_(None),
+            Task.status.in_(_OPEN),
+            or_(
+                Task.due_date == tomorrow,
+                Task.due_date < tomorrow,
+                Task.status == TaskStatus.in_progress,
+                (Task.is_current_week.is_(True))
+                & Task.due_date.is_(None)
+                & Task.status.in_((TaskStatus.todo, TaskStatus.backlog)),
+            ),
         )
         .all()
     )
@@ -465,6 +507,125 @@ def _render_task_line(
     return "\n".join(lines)
 
 
+def _sort_for_tomorrow_plan(
+    tasks: list[Task], *, today: date
+) -> list[Task]:
+    """FR-CR-05-83 — overdue first (rolling forward into
+    tomorrow stays a 🚨 alarm), then priority desc, then
+    due_date asc nulls-last, then id asc."""
+    from datetime import time as _t
+
+    def key(t: Task):
+        overdue_rank = 0 if _is_overdue(t, today=today) else 1
+        pri_rank = _PRIORITY_RANK.get(t.priority.value, 99)
+        # date None → push to the bottom by using a far-future sentinel
+        d = t.due_date or date.max
+        # time None → end-of-day so timed tasks sort earlier
+        tt = t.due_time or _t(23, 59, 59)
+        return (overdue_rank, pri_rank, d, tt, t.id)
+
+    return sorted(tasks, key=key)
+
+
+def _render_tomorrow_plan_message(
+    *,
+    session: Session,
+    user_id: str,
+    today: date,
+    tomorrow: date,
+    bot_user_id: str | None,
+) -> tuple[list[str], int] | None:
+    """FR-CR-05-83 — operator-requested second evening message:
+    «след сообщением пост со списком задач моих на завтра с
+    гиперссылками на эти задачи в боте».
+
+    Returns (messages, task_count) where `messages` is a list
+    of HTML chunks under the Telegram 4096-char cap (target
+    3800 with headroom). Returns None when the user has no
+    tasks scheduled for tomorrow. Each line carries the
+    priority bullet, the title hyperlinked to the BOT'S task
+    card, the due date+time when present, and the owner
+    badge — a compact snapshot the operator can act on first
+    thing tomorrow.
+    """
+    tasks = _sort_for_tomorrow_plan(
+        _owned_for_tomorrow(session, owner_uid=user_id, tomorrow=tomorrow),
+        today=today,
+    )
+    if not tasks:
+        return None
+
+    try:
+        recipient_chat_id = int(user_id)
+    except (TypeError, ValueError):
+        recipient_chat_id = None
+
+    overdue_n = sum(1 for t in tasks if _is_overdue(t, today=today))
+    header = f"📅 <b>Plan for tomorrow ({tomorrow.isoformat()}): {len(tasks)}</b>"
+    if overdue_n:
+        header += f"\n🚨 Rolling over from today: {overdue_n}"
+
+    rendered_blocks: list[str] = []
+    for t in tasks:
+        if _is_overdue(t, today=today):
+            bullet = "🚨"
+        else:
+            bullet = PRIORITY_EMOJI.get(t.priority.value, "🟡")
+        safe_title = _escape_html(t.title or "")
+        url = _task_card_url(
+            t,
+            recipient_chat_id=recipient_chat_id,
+            bot_user_id=bot_user_id,
+        )
+        if url:
+            title_html = (
+                f'<a href="{_escape_html(url)}">'
+                f"<b>{safe_title}</b></a>"
+            )
+        else:
+            title_html = f"<b>{safe_title}</b>"
+        block_lines = [f"{bullet} {title_html}"]
+        meta: list[str] = []
+        if t.due_date:
+            due_str = t.due_date.isoformat()
+            if t.due_time:
+                due_str += " " + t.due_time.strftime("%H:%M")
+            meta.append(f"📅 {due_str}")
+        tg_id, tg_handle, real_name = _resolve_owner_link_target(
+            session, t.owner_user_id, t.owner_display_name
+        )
+        owner_label = _resolve_owner_display(t, real_name=real_name)
+        if owner_label:
+            eff_handle = tg_handle or _handle_from_display(t.owner_display_name)
+            meta.append(
+                "👤 "
+                + _owner_html_link(
+                    t.owner_user_id,
+                    owner_label,
+                    tg_user_id=tg_id,
+                    tg_handle=eff_handle,
+                )
+            )
+        if meta:
+            block_lines.append("   " + " · ".join(meta))
+        rendered_blocks.append("\n".join(block_lines))
+
+    # Pack into ≤_SPLIT_TARGET-char messages, splitting at task
+    # boundaries so a single line never breaks across messages.
+    messages: list[str] = []
+    current = header + "\n"
+    for block in rendered_blocks:
+        chunk = "\n" + block
+        if len(current) + len(chunk) > _SPLIT_TARGET and current.strip():
+            messages.append(current.rstrip())
+            current = "📅 <i>(continued)</i>\n" + block
+        else:
+            current += chunk
+    if current.strip():
+        messages.append(current.rstrip())
+    return messages, len(tasks)
+
+
 def _build_groups(
     *,
     session: Session,
@@ -690,11 +851,49 @@ def send_evening_status_report(
             sent += 1
         if sent == 0:
             continue
+
+        # FR-CR-05-83 — follow-up message(s): tomorrow's plan,
+        # hyperlinked to the BOT'S task cards. Sent right after the
+        # status digest so the operator first reads what happened
+        # today, then sees what they own for tomorrow. Long plans
+        # split at task boundaries to stay under the Telegram
+        # 4096-char cap.
+        tomorrow = today + timedelta(days=1)
+        plan_payload = _render_tomorrow_plan_message(
+            session=session,
+            user_id=uid,
+            today=today,
+            tomorrow=tomorrow,
+            bot_user_id=bot_user_id,
+        )
+        plan_tasks = 0
+        if plan_payload is not None:
+            plan_msgs, plan_tasks = plan_payload
+            for plan_text in plan_msgs:
+                try:
+                    sender.send_message(chat_id=int(uid), text=plan_text)
+                    sent += 1
+                except Exception as e:  # noqa: BLE001
+                    report.failures += 1
+                    log.warning(
+                        "evening_tomorrow_plan_send_failed",
+                        uid=uid,
+                        error=str(e),
+                    )
+                    break
+            else:
+                report.tomorrow_plans_sent += 1
+
         _mark_sent(
             session,
             user_id=uid,
             day=today,
-            payload={"groups": len(groups), "tasks": described, "messages": sent},
+            payload={
+                "groups": len(groups),
+                "tasks": described,
+                "messages": sent,
+                "tomorrow_plan_tasks": plan_tasks,
+            },
         )
         report.recipients += 1
         report.messages_sent += sent

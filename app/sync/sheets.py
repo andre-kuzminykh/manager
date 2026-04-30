@@ -17,6 +17,20 @@ _MENTION_RE = re.compile(r"^<@([UW][A-Z0-9]+)>$")
 
 log = get_logger(__name__)
 
+def _col_letter(n: int) -> str:
+    """1-indexed column index → A1-style letter. 1→'A', 22→'V',
+    27→'AA'. The schema currently has ≤26 columns so the simple
+    ASCII path is enough; the algorithm handles 27+ for future-
+    proofing."""
+    if n < 1:
+        raise ValueError(f"column index must be ≥1, got {n}")
+    out = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(ord("A") + rem) + out
+    return out
+
+
 _HEADER_ROW = [
     "task_id",
     "title",
@@ -147,7 +161,7 @@ class SheetsSyncService:
         self._headers_checked = True
         if getattr(self, "_service", None) is None:
             return  # tests inject `_service=None`; nothing to call
-        end_col = chr(ord("A") + len(_HEADER_ROW) - 1)
+        end_col = _col_letter(len(_HEADER_ROW))
         rng = f"{self._sheet_name}!A1:{end_col}1"
         try:
             resp = (
@@ -176,12 +190,22 @@ class SheetsSyncService:
         retry=retry_if_exception_type(HttpError),
     )
     def _append(self, row: list[str]) -> dict[str, Any]:
+        # FR-CR-05-86 — operator regression: new rows landed
+        # shifted ~22 columns to the right (data starting at
+        # column W/X instead of A). Root cause: range=A:Z (26
+        # cols) plus legacy data in columns W-Z (the rolled-back
+        # `dialogue` column from before FR-CR-05-15) made
+        # Google's append heuristic detect the "table" as wider
+        # than 22 columns and place new rows past the schema.
+        # Pinning the range to the EXACT schema width forces
+        # Sheets to ignore stray content in W-Z.
+        end_col = _col_letter(len(_HEADER_ROW))
         return (
             self._service.spreadsheets()
             .values()
             .append(
                 spreadsheetId=self._spreadsheet_id,
-                range=f"{self._sheet_name}!A:Z",
+                range=f"{self._sheet_name}!A:{end_col}",
                 valueInputOption="RAW",
                 insertDataOption="INSERT_ROWS",
                 body={"values": [row]},
@@ -196,12 +220,13 @@ class SheetsSyncService:
         retry=retry_if_exception_type(HttpError),
     )
     def _update(self, row_id: int, row: list[str]) -> dict[str, Any]:
+        end_col = _col_letter(len(_HEADER_ROW))
         return (
             self._service.spreadsheets()
             .values()
             .update(
                 spreadsheetId=self._spreadsheet_id,
-                range=f"{self._sheet_name}!A{row_id}:Z{row_id}",
+                range=f"{self._sheet_name}!A{row_id}:{end_col}{row_id}",
                 valueInputOption="RAW",
                 body={"values": [row]},
             )

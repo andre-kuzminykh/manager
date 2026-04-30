@@ -99,6 +99,80 @@ def _mark_sent(
     session.flush()
 
 
+def _last_morning_card_messages(
+    session: Session, *, user_id: str, today: date
+) -> tuple[date | None, list[dict]]:
+    """FR-CR-05-84 — find the most recent prior-day morning audit
+    row for `user_id` and return its `card_messages` payload list.
+
+    Used to delete yesterday's cards before posting today's so the
+    operator's DM only ever shows the current-day cards. Returns
+    `(prior_day, list_of_{chat_id, message_id})` or
+    `(None, [])` when no prior row exists / payload is empty.
+    """
+    rows = (
+        session.query(AuditLog)
+        .filter(
+            AuditLog.category == _CATEGORY,
+            AuditLog.actor == user_id,
+            AuditLog.entity_id != today.isoformat(),
+        )
+        .order_by(AuditLog.entity_id.desc())
+        .limit(1)
+        .all()
+    )
+    if not rows:
+        return None, []
+    payload = rows[0].payload or {}
+    cards = payload.get("card_messages") or []
+    if not isinstance(cards, list):
+        return None, []
+    try:
+        prior_day = date.fromisoformat(rows[0].entity_id)
+    except (TypeError, ValueError):
+        prior_day = None
+    return prior_day, cards
+
+
+def _delete_prior_morning_cards(
+    *,
+    sender: TelegramSender,
+    session: Session,
+    user_id: str,
+    today: date,
+) -> int:
+    """FR-CR-05-84 — delete the recipient's prior-day morning
+    cards before we post today's. Best-effort: a delete failure
+    (message already gone, 7-day deletion window expired,
+    permissions revoked) is logged and skipped, never aborts
+    today's post."""
+    prior_day, cards = _last_morning_card_messages(
+        session, user_id=user_id, today=today
+    )
+    if not cards:
+        return 0
+    deleted = 0
+    for c in cards:
+        try:
+            cid = int(c.get("chat_id"))
+            mid = int(c.get("message_id"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            sender.delete_message(chat_id=cid, message_id=mid)
+            deleted += 1
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "morning_cards_prior_delete_failed",
+                uid=user_id,
+                prior_day=prior_day.isoformat() if prior_day else None,
+                chat_id=cid,
+                message_id=mid,
+                error=str(e),
+            )
+    return deleted
+
+
 # --------------------------------------------------------------------------- #
 # Selectors
 # --------------------------------------------------------------------------- #
@@ -219,6 +293,10 @@ def _build_intro_text(*, today: date, tasks: list[Task]) -> str:
 class MorningCardsReport:
     recipients: int = 0
     cards_sent: int = 0
+    # FR-CR-05-84 — counter for prior-day cards deleted at the
+    # start of today's run (so the cron log shows the cleanup
+    # happening, separately from today's posting).
+    prior_cards_deleted: int = 0
     skipped_idempotent: int = 0
     skipped_no_tasks: int = 0
     failures: int = 0
@@ -266,9 +344,22 @@ def send_morning_task_cards(
             report.skipped_no_tasks += 1
             _mark_sent(
                 session, user_id=uid, day=today,
-                payload={"cards": 0, "owned": 0, "subs": 0},
+                payload={"cards": 0, "owned": 0, "subs": 0, "card_messages": []},
             )
             continue
+
+        # FR-CR-05-84 — operator: «ты их как бы удаляй если они
+        # ранее были и создавай заново с утра». Wipe yesterday's
+        # cards first so the DM shows only today's set. Best-
+        # effort: per-message failures don't abort today's post.
+        deleted_prior = _delete_prior_morning_cards(
+            sender=sender, session=session, user_id=uid, today=today,
+        )
+        report.prior_cards_deleted += deleted_prior
+
+        # Track every (chat_id, message_id) we successfully post
+        # today so tomorrow's run can delete them in turn.
+        card_messages: list[dict[str, int]] = []
 
         # Intro DM listing the day's load at a glance. If THIS
         # send fails (e.g. «chat not found» — operator on the
@@ -281,7 +372,8 @@ def send_morning_task_cards(
             chat_id=int(uid),
             text=_build_intro_text(today=today, tasks=all_tasks),
         )
-        if not (intro_resp or {}).get("message_id"):
+        intro_mid = (intro_resp or {}).get("message_id")
+        if not intro_mid:
             report.failures += 1
             log.warning(
                 "morning_cards_intro_send_failed",
@@ -294,10 +386,12 @@ def send_morning_task_cards(
             except Exception:  # noqa: BLE001
                 pass
             continue
+        card_messages.append({"chat_id": int(uid), "message_id": int(intro_mid)})
+
         cards = 0
         is_admin = uid in admin_uids
         for t in owned:
-            if _post_one_card(
+            mid = _post_one_card(
                 sender=sender,
                 session=session,
                 chat_id=int(uid),
@@ -305,16 +399,23 @@ def send_morning_task_cards(
                 is_owner=True,
                 is_admin=is_admin,
                 today=today,
-            ):
+            )
+            if mid:
                 cards += 1
+                card_messages.append({"chat_id": int(uid), "message_id": int(mid)})
         # Tasks the user follows (separator first if there were
         # owned ones above).
         if subs and owned:
             try:
-                sender.send_message(
+                sep_resp = sender.send_message(
                     chat_id=int(uid),
                     text="— — —\n👀 <b>Watching</b>",
                 )
+                sep_mid = (sep_resp or {}).get("message_id")
+                if sep_mid:
+                    card_messages.append(
+                        {"chat_id": int(uid), "message_id": int(sep_mid)}
+                    )
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "morning_cards_subs_separator_failed",
@@ -323,7 +424,7 @@ def send_morning_task_cards(
                 )
         for t in subs:
             subscribed = True
-            if _post_one_card(
+            mid = _post_one_card(
                 sender=sender,
                 session=session,
                 chat_id=int(uid),
@@ -332,15 +433,23 @@ def send_morning_task_cards(
                 is_admin=is_admin,
                 subscribed=subscribed,
                 today=today,
-            ):
+            )
+            if mid:
                 cards += 1
+                card_messages.append({"chat_id": int(uid), "message_id": int(mid)})
 
         if cards == 0:
             report.failures += 1
             continue
         _mark_sent(
             session, user_id=uid, day=today,
-            payload={"cards": cards, "owned": len(owned), "subs": len(subs)},
+            payload={
+                "cards": cards,
+                "owned": len(owned),
+                "subs": len(subs),
+                "card_messages": card_messages,
+                "prior_deleted": deleted_prior,
+            },
         )
         report.recipients += 1
         report.cards_sent += cards
@@ -357,14 +466,19 @@ def _post_one_card(
     is_admin: bool,
     subscribed: bool = False,
     today: date | None = None,
-) -> bool:
+) -> int | None:
     """Render + send one task card with the same keyboard the
-    live cards use. Returns True on success. Failures are logged
-    but don't abort the rest of the digest.
+    live cards use. Returns the posted Telegram `message_id` on
+    success, or `None` on failure. Failures are logged but
+    don't abort the rest of the digest.
 
     FR-CR-05-49 — overdue tasks (`due_date < today`) get a
-    «🚨 ПРОСРОЧЕНО · was due {date}» header so the operator
+    «🚨 OVERDUE · was due {date}» header so the operator
     sees the alarm before the rest of the card body.
+
+    FR-CR-05-84 — return type changed from bool → message_id
+    so the caller can store it in `audit_logs.payload.card_
+    messages` and tomorrow's run can delete it.
     """
     header: str | None = None
     if today is not None and _is_overdue(task, today=today) and task.due_date:
@@ -388,15 +502,19 @@ def _post_one_card(
             task_id=task.id,
             error=str(e),
         )
-        return False
+        return None
     # FR-CR-05-67 — `TelegramSender._post` swallows 4xx errors and
     # returns `{}` instead of raising. Detect failure by missing
     # `message_id` so the digest doesn't think it sent 41 cards
     # to a chat the bot can't actually DM («Bad Request: chat
     # not found»).
-    if not (resp or {}).get("message_id"):
-        return False
-    return True
+    mid = (resp or {}).get("message_id")
+    if not mid:
+        return None
+    try:
+        return int(mid)
+    except (TypeError, ValueError):
+        return None
 
 
 def _mark_started_bot_false(session: Session, user_id: int) -> None:

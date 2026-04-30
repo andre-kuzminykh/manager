@@ -46,7 +46,14 @@ Return ``is_task=false`` for:
 - Chat, greetings, reactions, jokes.
 - *Completed* status reports — work that's already done, in any
   voice / tense:
-    - active past: «отправил», «сделал», «закрыл», «позвонил»
+    - active past: «отправил», «сделал», «закрыл», «позвонил»,
+      «написал», «написала»
+    - already-prefix (FR-CR-05-93 — operator regression): any
+      verb prefixed with «уже» / «already» reports completion,
+      not new work — «уже написала», «уже отправила», «уже
+      сделал», «уже подтвердил», «already sent», «already
+      called». Even if the SAME message also says «и Y тоже»
+      / «and Y too», it's still a status recap.
     - passive past: «отправлено», «отправлены», «сделано»,
       «подписан», «закрыт», «утверждён», «оплачен»
     - present-perfect English: «sent», «done», «closed»,
@@ -56,6 +63,14 @@ Return ``is_task=false`` for:
     сделано;
     «договор подписан вчера» — done, no action owed;
     «отчёт готов, скинул в чат» — completion announcement.
+  Operator regression (FR-CR-05-93) pinned as a worked
+  failure-mode:
+    source line 1: «Уже написала на почту ему тоже»
+    source line 2: «ну ничего) и инвайт отправила»
+    → is_task=false (BOTH lines are «уже X» recap; the
+      «ну ничего)» interjection is chat noise, not an
+      imperative; «и инвайт отправила» is more recap, not
+      a separate action).
   Note: an UNFINISHED report of someone else's outstanding ask
   («Артем сказал отправить, я пока не успел») still COUNTS AS A
   TASK — the action is owed.

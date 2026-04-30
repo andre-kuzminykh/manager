@@ -833,6 +833,35 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-93 — Detect: «уже X» / «already X» = completion recap, not a task
+
+Operator: «"🟡 Уже написала на почту ему тоже / ну ничего) и
+инвайт отправила / 📝 обсуждалось в Юля - аналитик · 2026-04-30
+13:23" — ужасное описание и название».
+
+Both source lines are completion-recap («уже написала», «уже
+отправила»). The detect prompt's existing «active past tense»
+list catches «отправила» / «написала» on their own, but the LLM
+slipped past it because the message also contained the chat
+interjection «ну ничего)» and a second clause «и инвайт
+отправила» that looked like ANOTHER action.
+
+`detect_prompt.py` strengthened:
+
+  - **«уже X» / «already X» prefix** explicitly listed as
+    a completion marker. Any verb prefixed with «уже» —
+    «уже написала», «уже отправила», «уже сделал», «уже
+    подтвердил», «already sent», «already called» —
+    reports completion, not new work, even if the SAME
+    message also says «и Y тоже» / «and Y too».
+  - **Two-line operator regression** pinned as a worked
+    failure-mode example:
+        source line 1: «Уже написала на почту ему тоже»
+        source line 2: «ну ничего) и инвайт отправила»
+        → `is_task=false` (both lines are «уже X» recap;
+          the «ну ничего)» is chat noise, not an
+          imperative).
+
 #### FR-CR-05-92 — Dedup: transliteration / name-variants are the same person
 
 Operator: «"Предложить слоты для созвона с James Morgon" и
@@ -4089,6 +4118,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-93  | `test_intent_pipeline.py::test_detect_prompt_rejects_uzhe_completed_recap_as_no_action` («уже / already» prefix + «уже написала» / «уже отправила» / «Уже написала на почту» / «и инвайт отправила» fragments + FR-CR-05-93 pinned) |
 | FR-CR-05-92  | `test_task_dedup.py::test_dedup_prompt_pins_transliteration_rule` (TRANSLITERATION block + James Morgon / Джеймсу Моргану / Olayan / Олаян / Артем / Артём / Artem / Petya / Петя fragments + FR-CR-05-92 pinned) |
 | FR-CR-05-91  | `test_wipe_tasks_cli.py::test_wipe_dry_run_keeps_all_rows`; `::test_wipe_without_yes_flag_is_dry_run` (no `--yes` → no deletion); `::test_wipe_with_yes_clears_task_data_keeps_team_registry` (tasks/drafts/history/subs/sheets-sync/audit gone, team_members + telegram_chat_members preserved); `test_evening_status.py::test_evening_tomorrow_plan_drops_owner_badge_when_recipient_is_owner`; `::test_evening_admin_tomorrow_plan_groups_per_person` (per-person sections with `👤 <Name>` headers + counts); `::test_evening_admin_audit_payload_carries_per_person_plan_task_ids` (audit row carries `{uid: [task_id]}` for morning diff); `test_morning_cards.py::test_morning_admin_diff_renders_added_and_done_per_person` (✅ done + 🗑 deleted + ➕ added classification); `::test_morning_admin_diff_returns_none_with_no_changes`; `::test_morning_admin_diff_returns_none_when_no_prior_plan` |
 | FR-CR-05-90  | `test_retro_share_docs_cli.py::test_retro_share_dry_run_skips_api_calls` (--dry-run never calls `_share_anyone_with_link`); `::test_retro_share_invokes_share_with_writer_role_by_default` (one call per recording, role=writer); `::test_retro_share_role_flag_overrides_default` (--role reader → reader); `::test_retro_share_skips_recordings_without_google_doc_id` (null doc_id excluded by SQL filter); `::test_retro_share_continues_on_per_doc_failure` (per-doc 4xx doesn't abort, exit=1); `::test_retro_share_returns_2_when_credentials_unavailable` (bad config → exit 2); `::test_fireflies_pipeline_calls_export_summary_with_writer_default` (invariant — pipeline does NOT pass `share_role=` to export_summary, default 'writer' wins) |

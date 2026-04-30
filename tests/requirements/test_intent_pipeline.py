@@ -640,6 +640,28 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "temporal anchor" in blob.lower() or "к 5" in blob
 
 
+def test_detect_prompt_rejects_uzhe_completed_recap_as_no_action():
+    """FR-CR-05-93 — operator regression: «Уже написала на
+    почту ему тоже / ну ничего) и инвайт отправила» landed as
+    a task with title «Уже написала на почту ему тоже» and
+    fallback description. Both lines are «уже X» status
+    recaps + a chat interjection — `is_task=false`."""
+    blob = DETECT_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "FR-CR-05-93" in blob
+    # «уже / already» prefix as completion marker.
+    assert "уже" in blob and "already" in blob.lower()
+    # Concrete verbs from the regression pinned.
+    for fragment in (
+        "уже написала",
+        "уже отправила",
+        "Уже написала на почту",
+        "и инвайт отправила",
+    ):
+        assert fragment in blob, f"{fragment!r} should be pinned"
+
+
 def test_detect_prompt_rejects_transcription_dumps_as_no_action():
     """FR-CR-05-89 — operator regressions: messages whose
     source is a paragraph DESCRIBING what's in a screenshot or

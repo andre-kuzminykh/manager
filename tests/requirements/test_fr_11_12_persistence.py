@@ -394,27 +394,56 @@ def test_fr12_task_source_metadata_is_preserved_via_finalize(
         assert t.created_by_slack_user_id == "U1"  # from draft
 
 
-def test_fr_cr05_63_long_title_hard_capped(session):
-    """FR-CR-05-63 — runaway LLM title (full source dumped into
-    title field with newlines, URLs, screenshots-OCR fragments)
-    gets hard-truncated to ≤ ~200 chars at the persistence
-    layer. Reproduces operator's «Devon Kirk - Portage Capital
-    Solutions - отказ - Ден Лифшиц прислал скрин ... На
-    изображе» nightmare title."""
+def test_fr_cr05_72_long_title_first_line_or_clause(session):
+    """FR-CR-05-72 — when the LLM dumps a multi-line forward
+    into the title field, take the FIRST line. When the first
+    line still has a strong break (colon / em-dash / period)
+    after a sensible verb-phrase, cut there. Operator
+    regression: «Поговорил с Fortuna: 1) по SPAC...» was
+    landing as the entire 300-char string."""
     long = (
-        "Devon Kirk - Portage Capital Solutions - отказ - "
-        "Ден Лифшиц прислал скрин ответа [https://mail.google.com/...] - "
-        "wouldn't be fit for us. На изображении письмо: "
-        "Hi Dan, thanks for reaching out, but we're focusing on "
-        "later-stage opportunities so this won't be a fit for our "
-        "current strategy. Regards. -- Devon Kirk."
+        "Поговорил с Fortuna: 1) по SPAC - эта тема не имеет для "
+        "нас смысла. У них в спаке капитала будет на $100-150m"
+        " и целевая оценка таргета $800-1,200m"
     )
     draft, snap = _prep(session, payload={"title": long})
     t = create_task_from_draft(
         session, draft=draft, source={},
         context_snapshot_id=snap.id, fallback_author_slack_id="U1",
     )
-    assert len(t.title) <= 205  # 200 + «…»
+    # First clause before the colon survives.
+    assert t.title == "Поговорил с Fortuna"
+
+
+def test_fr_cr05_72_multiline_title_takes_first_line(session):
+    """When the LLM emits a multi-line dump, only the first line
+    is kept (operator typically shouldn't see the whole forward
+    in a card title)."""
+    long = (
+        "Devon Kirk - Portage Capital Solutions\n"
+        "отказ — wouldn't be fit for us"
+    )
+    draft, snap = _prep(session, payload={"title": long})
+    t = create_task_from_draft(
+        session, draft=draft, source={},
+        context_snapshot_id=snap.id, fallback_author_slack_id="U1",
+    )
+    assert t.title == "Devon Kirk - Portage Capital Solutions"
+
+
+def test_fr_cr05_72_long_title_word_boundary_cap(session):
+    """No clean break found → cap at 100 with ellipsis."""
+    long = (
+        "Hi Dan thanks for reaching out but were focusing on later "
+        "stage opportunities so this wont be a fit for our current "
+        "strategy regards Devon Kirk"
+    )
+    draft, snap = _prep(session, payload={"title": long})
+    t = create_task_from_draft(
+        session, draft=draft, source={},
+        context_snapshot_id=snap.id, fallback_author_slack_id="U1",
+    )
+    assert len(t.title) <= 105  # 100 + «…»
     assert t.title.endswith("…")
 
 

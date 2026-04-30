@@ -83,16 +83,32 @@ def create_task_from_draft(
     title = (payload.get("title") or "").strip()
     if not title:
         raise ValueError("Task title is required")
-    # FR-CR-05-63 — hard-cap title at 200 chars so a runaway LLM
-    # response (e.g. it dumped the full source message into the
-    # title field) doesn't make the card unreadable. The prompt
-    # already says ≤80 chars / 4-7 words, but the model isn't
-    # always disciplined on long forwards-with-screenshots.
-    # We trim at the last word boundary if possible and append «…».
-    if len(title) > 200:
-        cut = title[:200].rstrip()
-        last_ws = max(cut.rfind(" "), cut.rfind("\n"), cut.rfind("—"))
-        if last_ws > 100:
+    # FR-CR-05-63 / FR-CR-05-72 — hard-cap title to keep cards
+    # readable when the LLM dumps a multi-line forward into the
+    # title field («Поговорил с Fortuna: 1) по SPAC… 2) …»).
+    # Cap is 100 chars now (was 200) so even a backstop title
+    # stays a one-glance label. Strategy:
+    #   1. If title spans multiple lines, take the FIRST line.
+    #   2. If first line still ≥100 chars, trim at the first
+    #      «strong break» — colon / dash / em-dash — that's
+    #      ≥40 chars in. The first clause is usually the action
+    #      verb («Поговорил с Fortuna») and the rest is content.
+    #   3. Fall back to a word-boundary cut at 100.
+    if "\n" in title:
+        title = title.split("\n", 1)[0].strip()
+    if len(title) > 100:
+        # Look for a strong-break that ends a usable verb-phrase.
+        # Prefix must be at least 8 chars so we don't cut to «1»
+        # or other tiny fragments.
+        for sep in (": ", " — ", " - ", "; ", ". "):
+            idx = title.find(sep)
+            if 8 <= idx <= 100:
+                title = title[:idx].rstrip()
+                break
+    if len(title) > 100:
+        cut = title[:100].rstrip()
+        last_ws = max(cut.rfind(" "), cut.rfind("—"), cut.rfind("-"))
+        if last_ws > 60:
             cut = cut[:last_ws].rstrip()
         title = cut + "…"
 

@@ -19,8 +19,19 @@ Output a single JSON object with:
 - reasoning: one sentence quoting the wording you resolved.
 
 Rules:
-1. Resolve every date against the provided current_date. Never emit a
-   date in the past unless the user literally wrote "сегодня"/"today".
+1. Resolve every date against the provided current_date. **TODAY
+   ITSELF IS VALID** — when the user says «сегодня» or the date
+   resolves to current_date, emit current_date. Never push it
+   forward to the next year just because today's "April 30"
+   already happened earlier in the day. Operator regression:
+   source had «обсуждалось в CEO Office · 2026-04-30 10:02» as
+   metadata, LLM read «30 April» as past and emitted
+   `2027-04-30` (a year off). The «not in the past» rule below
+   means STRICTLY before current_date, not today.
+   ONLY back-date when the user literally wrote
+   "сегодня"/"today" AND there's a date phrase. For a date
+   phrase like «1 мая» when today is 2 мая — emit next year's
+   May 1. For «30 апреля» when today IS 30 апреля — emit today.
 2. Weekdays always mean the NEXT upcoming occurrence strictly after
    current_date. If today is Friday and the user says "к пятнице" or
    "by Friday", the answer is next Friday, not today.

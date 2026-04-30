@@ -281,3 +281,75 @@ def test_pull_fires_refresh_callback_per_applied_change(session):
     svc.pull(session, refresh_card=lambda task: refreshed.append(task.id))
     session.commit()
     assert refreshed == [t1.id]
+
+
+def test_pull_does_not_clobber_due_date_when_api_omits_field(session):
+    """FR-CR-05-64 — Google Tasks API omits unset optional fields
+    rather than returning null. The previous pull treated
+    missing `due` as «set to null», which silently wiped local
+    default deadlines (FR-CR-05-63: today 18:00) on every 60s
+    cycle. Now: only overwrite when the field is EXPLICITLY in
+    the API row."""
+    from datetime import date as _d
+
+    t = _mk_task(session, due_date=_d(2026, 4, 30))
+    _mk_sync_row(session, task_id=t.id, google_task_id="gid-due")
+    session.commit()
+
+    svc = _stub_service([
+        {
+            "id": "gid-due",
+            "title": t.title,
+            "status": "needsAction",
+            # NOTE: no «due» key
+        }
+    ])
+    svc.pull(session)
+    session.commit()
+    refreshed = session.get(Task, t.id)
+    assert refreshed.due_date == _d(2026, 4, 30)
+
+
+def test_pull_does_not_clobber_description_when_api_omits_field(session):
+    """Same trap for `notes` (Google Tasks' name for the
+    description field). Missing → keep local value."""
+    t = _mk_task(session, description="local description")
+    _mk_sync_row(session, task_id=t.id, google_task_id="gid-notes")
+    session.commit()
+
+    svc = _stub_service([
+        {
+            "id": "gid-notes",
+            "title": t.title,
+            "status": "needsAction",
+            # No «notes» key.
+        }
+    ])
+    svc.pull(session)
+    session.commit()
+    refreshed = session.get(Task, t.id)
+    assert refreshed.description == "local description"
+
+
+def test_pull_explicit_null_due_clears_local_value(session):
+    """When the API DOES carry `due: null` (operator deleted
+    the deadline in the Google Tasks UI), we DO clear the
+    local value — that's the explicit-edit case."""
+    from datetime import date as _d
+
+    t = _mk_task(session, due_date=_d(2026, 4, 30))
+    _mk_sync_row(session, task_id=t.id, google_task_id="gid-clear")
+    session.commit()
+
+    svc = _stub_service([
+        {
+            "id": "gid-clear",
+            "title": t.title,
+            "status": "needsAction",
+            "due": None,  # explicit null
+        }
+    ])
+    svc.pull(session)
+    session.commit()
+    refreshed = session.get(Task, t.id)
+    assert refreshed.due_date is None

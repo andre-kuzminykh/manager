@@ -206,17 +206,25 @@ class GoogleTasksPullService:
             task.title = new_title[:10_000]
             changed = True
 
-        # Google Tasks calls the description field `notes`.
-        new_notes = (api.get("notes") or "").strip() or None
-        if new_notes != task.description:
-            task.description = new_notes
-            changed = True
+        # FR-CR-05-64 — only overwrite description/due_date when
+        # the API row EXPLICITLY carried that field. The Google
+        # Tasks API omits unset optional fields rather than
+        # returning null, so checking «`api.get('notes')` is
+        # falsy» wrongly clobbers a description we set locally
+        # (e.g. via the LLM-extracted text). Same trap for
+        # `due` — without this guard the 60s pull cycle would
+        # zero out every locally-assigned default deadline.
+        if "notes" in api:
+            new_notes = (api.get("notes") or "").strip() or None
+            if new_notes != task.description:
+                task.description = new_notes
+                changed = True
 
-        # Due date: API returns RFC3339 datetime — normalise to date.
-        new_due = _parse_due(api.get("due"))
-        if new_due != task.due_date:
-            task.due_date = new_due
-            changed = True
+        if "due" in api:
+            new_due = _parse_due(api.get("due"))
+            if new_due != task.due_date:
+                task.due_date = new_due
+                changed = True
 
         # Status: completed → done; needsAction → keep current
         # OPEN status (we don't downgrade done back to todo

@@ -39,6 +39,21 @@ def _parse_args() -> argparse.Namespace:
         "--newest", action="store_true",
         help="Required flag — pulls the `--limit` most-recent recordings.",
     )
+    p.add_argument(
+        "--rerun",
+        action="store_true",
+        help=(
+            "FR-CR-05-117 — re-run pipeline on the latest "
+            "recordings even if they're already processed. "
+            "Resets all step flags + last_error + "
+            "tasks_extracted_count + transcript / summary / "
+            "doc text on existing rows so each step runs again. "
+            "Use after prompt updates or to refresh stale "
+            "summaries. Existing Tasks extracted from those "
+            "recordings are NOT deleted (operator's responsibility "
+            "via wipe_tasks if needed)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -90,7 +105,47 @@ def main() -> int:
     )
 
     metas = client.list_recordings(limit=args.limit)
-    log.info("zoom_migration_starting", limit=args.limit, seen=len(metas))
+    log.info(
+        "zoom_migration_starting",
+        limit=args.limit,
+        seen=len(metas),
+        rerun=args.rerun,
+    )
+
+    # FR-CR-05-117 — symmetric with `migrate_fireflies --rerun`:
+    # reset every step flag + step output on the matched rows so
+    # the pipeline re-executes from scratch. Tasks already
+    # extracted from those recordings are NOT deleted.
+    if args.rerun and metas:
+        from app.models import ZoomRecording
+
+        ids = [m.id for m in metas]
+        with session_scope() as session:
+            rows = (
+                session.query(ZoomRecording)
+                .filter(ZoomRecording.zoom_id.in_(ids))
+                .all()
+            )
+            for r in rows:
+                r.audio_downloaded = False
+                r.transcribed = False
+                r.detailed_summarised = False
+                r.short_summary_sent = False
+                r.doc_exported = False
+                r.tasks_extracted = False
+                r.transcript_text = None
+                r.detailed_summary = None
+                r.short_summary = None
+                r.google_doc_id = None
+                r.google_doc_url = None
+                r.tasks_extracted_count = None
+                r.last_error = None
+                r.processed_at = None
+            log.info(
+                "zoom_rerun_reset",
+                count=len(rows),
+                ids=[r.zoom_id for r in rows],
+            )
 
     processed = 0
     errors = 0

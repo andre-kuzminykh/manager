@@ -76,12 +76,74 @@ def _recipient_user_ids(task: Task, author_id: str | None) -> list[str]:
     return out
 
 
+def _viewer_is_owner(task: Task, viewer: str | None) -> bool:
+    """FR-CR-05-113 — operator regression: «пропала кнопка
+    запустить задачу когда она на мне (и почему то подписаться
+    есть)». Direct `task.owner_user_id == viewer` mis-fires
+    when the owner is recorded as a Slack-style uid / @handle
+    / real-name while the viewer is the bare numeric Telegram
+    uid (or vice versa). Look up every identifier the
+    `team_members` registry knows for `viewer` and check if
+    ANY overlaps with the task's owner_user_id or
+    owner_display_name.
+    """
+    if not viewer:
+        return False
+    raw_match = (
+        task.owner_user_id == viewer
+        or task.owner_display_name == viewer
+    )
+    if raw_match:
+        return True
+    # Resolve viewer's known identities via team_members.
+    try:
+        from app.db import session_scope
+        from app.models import TeamMember
+
+        ids: set[str] = {viewer.strip().lower()}
+        with session_scope() as s:
+            row = None
+            if viewer.lstrip("-").isdigit():
+                row = (
+                    s.query(TeamMember)
+                    .filter(TeamMember.telegram_user_id == int(viewer))
+                    .first()
+                )
+            if row is None:
+                row = (
+                    s.query(TeamMember)
+                    .filter(TeamMember.slack_user_id == viewer)
+                    .first()
+                )
+            if row is not None:
+                for v in (
+                    row.slack_user_id,
+                    row.telegram_user_id,
+                    row.telegram_username,
+                    row.real_name,
+                ):
+                    if v is None:
+                        continue
+                    s_ = str(v).strip().lower().lstrip("@")
+                    if s_:
+                        ids.add(s_)
+        owner_keys = {
+            (str(task.owner_user_id) or "").strip().lower().lstrip("@"),
+            (str(task.owner_display_name) or "").strip().lower().lstrip("@"),
+        }
+        owner_keys.discard("")
+        owner_keys.discard("none")
+        return bool(ids & owner_keys)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _keyboard_for(
     task: Task, viewer: str | None, *, subscribed: bool
 ) -> dict[str, Any]:
     from app.telegram_bot.handlers import is_admin as _is_admin
 
-    is_owner = bool(viewer) and task.owner_user_id == viewer
+    is_owner = _viewer_is_owner(task, viewer)
     return task_card_keyboard(
         task_id=task.id,
         status=task.status.value,

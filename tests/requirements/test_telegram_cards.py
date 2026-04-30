@@ -88,6 +88,74 @@ def test_recipient_set_author_then_owner_then_admins(session, monkeypatch):
         get_settings.cache_clear()  # type: ignore[attr-defined]
 
 
+def test_viewer_is_owner_matches_via_team_member_uid_handle_realname(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-113 — operator regression: «пропала кнопка
+    запустить задачу когда она на мне». A task whose
+    `owner_user_id` is recorded as a `@handle` or
+    `real_name` failed the direct `==` viewer check, so the
+    keyboard rendered with `is_owner=False` and Subscribe
+    instead of Start. The new `_viewer_is_owner` resolves
+    every identifier the team_members row carries for the
+    viewer and matches by set-intersection."""
+    from app.models import Task, TeamMember
+    from app.models.task import TaskPriority, TaskStatus
+    from app.telegram_bot.cards import _viewer_is_owner
+
+    with SessionFactory() as s:
+        s.add(
+            TeamMember(
+                slack_user_id=None,
+                telegram_user_id=111,
+                telegram_username="andrey",
+                real_name="Андрей Кузьминых",
+                active=True,
+            )
+        )
+        s.commit()
+
+        # Case A — owner_user_id matches viewer directly.
+        t_a = Task(
+            title="t",
+            owner_user_id="111",
+            owner_display_name=None,
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+        )
+        assert _viewer_is_owner(t_a, "111") is True
+
+        # Case B — owner_user_id is the handle, viewer is uid.
+        t_b = Task(
+            title="t",
+            owner_user_id="@andrey",
+            owner_display_name="Андрей Кузьминых",
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+        )
+        assert _viewer_is_owner(t_b, "111") is True
+
+        # Case C — owner_user_id is the real_name.
+        t_c = Task(
+            title="t",
+            owner_user_id="Андрей Кузьминых",
+            owner_display_name="Андрей Кузьминых",
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+        )
+        assert _viewer_is_owner(t_c, "111") is True
+
+        # Negative — different uid, no overlap.
+        t_d = Task(
+            title="t",
+            owner_user_id="222",
+            owner_display_name="Кто-то Другой",
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+        )
+        assert _viewer_is_owner(t_d, "111") is False
+
+
 def test_recipient_set_dedups_when_author_is_owner(session):
     t = _mk_task(session, owner_user_id="111")
     rec = _recipient_user_ids(t, author_id="111")

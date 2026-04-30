@@ -833,6 +833,33 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-113 — Owner-detection on task card uses team_members set-intersection
+
+Operator: «пропала кнопка запустить задачу когда она на мне (и
+почему-то подписаться есть)». The Start button is owner-only;
+the Subscribe button is non-owner-only. Both buttons rendered
+WRONG because `is_owner = task.owner_user_id == viewer` was a
+direct string compare. When owner was recorded as a @handle
+(`@andre_andreevich`), Slack-style uid (`U_...`), or real-name
+(«Андрей Кузьминых»), and viewer was the bare numeric Telegram
+uid (`111`) — the equality failed and the bot decided the
+viewer wasn't the owner.
+
+`app/telegram_bot/cards.py` adds `_viewer_is_owner(task,
+viewer)`:
+  - Direct match `task.owner_user_id == viewer` or
+    `task.owner_display_name == viewer` short-circuits true.
+  - Otherwise look up the viewer's `team_members` row (by
+    `telegram_user_id` if numeric, else `slack_user_id`),
+    collect every identifier (slack_user_id /
+    telegram_user_id / telegram_username / real_name),
+    intersect with the task's owner identifiers
+    (owner_user_id ∪ owner_display_name).
+  - Any overlap → True.
+
+Both `cards._keyboard_for` and `morning_cards._post_one_card`
+use the new helper.
+
 #### FR-CR-05-112 — Drop LLM-picked due_date when source has no temporal anchor
 
 Operator regression: «🟡 Поставить встречу по Бете с
@@ -4821,6 +4848,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-113 | `test_telegram_cards.py::test_viewer_is_owner_matches_via_team_member_uid_handle_realname` (case A: direct uid match; case B: owner=@handle, viewer=uid; case C: owner=real_name; negative: different person → False) |
 | FR-CR-05-112 | `test_intent_pipeline.py::test_has_explicit_temporal_anchor_helper` (Russian + English deadline anchors → True; meeting-slot dates без «к/до/by» → False; empty / None safe). Manual: `node_date` drops LLM-picked due_date when no anchor in source; logged as `date_node_dropped_no_temporal_anchor`. |
 | FR-CR-05-111 | `test_task_dedup.py::test_dedup_similar_description_safety_net_skips_llm` (Beta-Jared Zoom-ID dup → similarity≥0.70 fast path catches it without LLM call); `::test_dedup_similarity_does_not_match_unrelated_descriptions` (different work → similarity gate doesn't fire, LLM still called) |
 | FR-CR-05-110 | `test_task_dedup.py::test_dedup_dispatches_to_llm_with_full_descriptions` updated for the FR-CR-05-110/111 fast-path bypass; existing dedup tests still hold; `Settings.dedup_fast_path` config flag wired to enable/disable the safety net |

@@ -38,6 +38,7 @@ from app.models import (
     TaskSubscription,
 )
 from app.telegram_bot.handlers import admin_user_ids
+from app.telegram_bot.cards import _viewer_is_owner
 from app.telegram_bot.keyboards import task_card_keyboard
 from app.telegram_bot.notifications import (
     _is_telegram_user_id,
@@ -601,7 +602,10 @@ def send_morning_task_cards(
                 session=session,
                 chat_id=int(uid),
                 task=t,
-                is_owner=(t.owner_user_id == uid),
+                # FR-CR-05-113 — set-intersection check via
+                # team_members so handle / real_name / uid
+                # variants of the same person all match.
+                is_owner=_viewer_is_owner(t, uid),
                 is_admin=is_admin,
                 subscribed=subscribed,
                 today=today,

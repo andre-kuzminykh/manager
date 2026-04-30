@@ -833,6 +833,42 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-96 — Dedup synonym families: meeting-family, confirm-family, etc.
+
+Operator: 4 separate tasks for the same Jared+Thomas meeting,
+plus «Подтвердить детали партнёрства с Bosch» landed twice as
+«Подтвердить» and «Закрепить» variants. FR-CR-05-95 introduced
+synonym-verb dedup but only listed 3 families — too narrow.
+
+`task_dedup.py::_SYSTEM_PROMPT` now spells out FIVE curated
+synonym families:
+
+  - **confirm-family**: подтвердить ≈ согласовать ≈ утвердить
+    ≈ закрепить ≈ зафиксировать ≈ финализировать ≈
+    окончательно решить ≈ confirm ≈ approve ≈ sign off ≈
+    lock in ≈ finalize ≈ pin down
+  - **ask-family**: узнать ≈ уточнить ≈ выяснить ≈ спросить ≈
+    проверить ≈ ask ≈ check ≈ find out ≈ verify ≈ clarify
+  - **intro-family**: познакомиться ≈ представить ≈ соединить
+    ≈ свести ≈ интро ≈ introduce ≈ connect ≈ set up an intro
+  - **send-family**: отправить ≈ выслать ≈ переслать ≈
+    скинуть ≈ send ≈ forward ≈ share
+  - **meeting-family**: организовать встречу ≈ пообщаться ≈
+    встретиться ≈ собраться ≈ созвониться ≈ запланировать
+    звонок ≈ организовать 1-1 ≈ catch up ≈ have a call ≈
+    schedule a meeting ≈ set up a 1:1.
+
+Plus a meta-rule: «обсудить X» on the same topic as a
+meeting-family task is the SAME meeting (you can't discuss
+without first having the meeting), and «подготовить 1-1 с X»
+in a context where the meeting isn't yet scheduled means «set
+it up», not «prep materials for an already-scheduled call».
+
+Four worked counter-examples pinned (Bosch close-twice; the
+two-owner Bosch case; Jared+Thomas «пообщаться» vs
+«организовать 1-1»; Jared+Thomas «встретиться и обсудить» vs
+«организовать встречу»).
+
 #### FR-CR-05-95 — Title hard cap 80; third-party intent / chat outbursts; synonym-verb dedup
 
 Operator pack:
@@ -4238,6 +4274,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-96  | `test_task_dedup.py::test_dedup_prompt_pins_meeting_family_and_confirm_family` (5 family names + 7 individual synonyms + 4 worked counter-examples pinned) |
 | FR-CR-05-95  | `test_intent_pipeline.py::test_detect_prompt_rejects_third_party_future_intent` («Они сами отправят», «Артем сам пришлёт», «They will send the link themselves» pinned); `::test_detect_prompt_rejects_emotional_chat_outbursts` («Очень важный день», «помолиться» pinned); `::test_dedup_prompt_pins_synonym_verbs_and_same_subject` (3 regression pairs + synonym families pinned); `::test_normalize_task_title_caps_at_80_chars` (hard cap 80, clause-break uses `. ` for the «Очень важный день. …» split) |
 | FR-CR-05-94  | `test_intent_pipeline.py::test_detect_prompt_rejects_opinion_qualifier_statements` (Singapore/HK 250-char regression + «По X я не против, но Y» / «Они у Алины в задачах есть» / «Мне кажется» / «I think we should» fragments + FR-CR-05-94 pinned); `::test_date_prompt_status_as_of_is_not_a_deadline` («статус на 26/02» pattern + 2027-02-23 BAD-output + status-update framing); manual verification: drafts now show ≤101-char titles via `normalize_task_title` in `prepare_drafts`; `_resolve_uids_in_text` resolves bare 9-15 digit tokens to `team_members.real_name`; edit prompt accepts `current_user_id` + `current_user_label` so «на меня» resolves to the editor's uid; `ops/wipe_tasks.py --also-wipe-sheet` calls `values().clear(A2:V)`. |
 | FR-CR-05-93  | `test_intent_pipeline.py::test_detect_prompt_rejects_uzhe_completed_recap_as_no_action` («уже / already» prefix + «уже написала» / «уже отправила» / «Уже написала на почту» / «и инвайт отправила» fragments + FR-CR-05-93 pinned) |

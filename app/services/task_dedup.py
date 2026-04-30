@@ -176,10 +176,30 @@ regressions:
 
 Rules:
 - VERB SYNONYMS that share the same direct object are the
-  same task: подтвердить ≈ согласовать ≈ утвердить;
-  узнать ≈ уточнить ≈ выяснить; познакомиться ≈ представить
-  ≈ соединить; отправить ≈ выслать ≈ переслать; confirm ≈
-  approve ≈ sign off; ask ≈ check ≈ find out ≈ verify.
+  same task. Curated families (FR-CR-05-95 / -96):
+    confirm-family: подтвердить ≈ согласовать ≈ утвердить ≈
+                    закрепить ≈ зафиксировать ≈ финализировать
+                    ≈ окончательно решить ≈ confirm ≈ approve
+                    ≈ sign off ≈ lock in ≈ finalize ≈ pin down
+    ask-family:     узнать ≈ уточнить ≈ выяснить ≈ спросить ≈
+                    проверить ≈ ask ≈ check ≈ find out ≈
+                    verify ≈ clarify
+    intro-family:   познакомиться ≈ представить ≈ соединить ≈
+                    свести ≈ интро ≈ introduce ≈ connect ≈
+                    set up an intro
+    send-family:    отправить ≈ выслать ≈ переслать ≈ скинуть
+                    ≈ send ≈ forward ≈ share
+    meeting-family (FR-CR-05-96): организовать встречу ≈
+                    пообщаться ≈ встретиться ≈ собраться ≈
+                    созвониться ≈ запланировать звонок ≈
+                    организовать 1-1 ≈ catch up ≈ have a call
+                    ≈ schedule a meeting ≈ set up a 1:1.
+                    Different framings of «set up a sync»
+                    collapse to one task when participants
+                    overlap.
+  Additional rule: «обсудить X» / «discuss X» on the same
+  topic as a meeting-family task = the SAME meeting (you
+  have to have it before you can discuss in it).
 - SAME SPECIFIC SUBJECT is the discriminator. «отчёт Ирине»
   vs «отчёт Артёму» = two different reports with two
   different audiences — DIFFERENT (FR-CR-05-78 still holds).
@@ -194,6 +214,41 @@ Worked counter-example:
   candidate: «Подтвердить время с ADNOC» (owner=Genia)
   existing:  «Согласовать время с ADNOC» (owner=Genia)
   → true (синонимные глаголы; ADNOC = same external event)
+
+Worked counter-examples (FR-CR-05-96):
+  candidate: «Закрепить детали партнёрства с Bosch»
+  existing:  «Подтвердить детали партнёрства с Bosch»
+    → true (закрепить ∈ confirm-family; same noun phrase
+      «детали партнёрства с Bosch»; same external partner)
+
+  candidate: «Закрепить детали партнёрства с Bosch» (Игорь)
+  existing:  «Закрепить детали партнёрства с Bosch» (Ирина)
+    → true (identical title; internal owner attribution
+      doesn't discriminate when the SUBJECT names a specific
+      external partner — same SAME-SPECIFIC-SUBJECT rule)
+
+  candidate: «Пообщаться с Джарадом и Томасом»
+  existing:  «Организовать 1-1 с Джарадом и Томасом»
+    → true (both meeting-family; same participants Джарад +
+      Томас)
+
+  candidate: «Встретиться и обсудить партнёрство»
+  existing:  «Организовать встречу» (same context: Джарад,
+                 Томас, partnership discussion)
+    → true (meeting-family; «обсудить партнёрство» is what
+      will happen IN the meeting, not a separate task)
+
+  candidate: «Подготовить 1-1 с Джарадом и Томасом»
+  existing:  «Пообщаться с Джарадом и Томасом»
+    → true (meeting-family; same participants; «подготовить»
+      here means «set it up», not «prep materials FOR the
+      already-scheduled meeting»)
+
+When in doubt about meeting-family overlap: ask «is this
+about THE SAME meeting / call / sync as the existing one?»
+If yes → duplicate. The operator can split into a separate
+prep task by hand if needed; better to err on collapsing
+than to spam 5 widgets for one meeting.
 """
 
 

@@ -43,6 +43,48 @@ def _mk(session, **kw) -> int:
     return t.id
 
 
+def test_dedup_prompt_pins_meeting_family_and_confirm_family():
+    """FR-CR-05-96 — operator regression: 4 separate tasks for
+    the same Jared+Thomas meeting; «Подтвердить» / «Закрепить»
+    Bosch deal landed twice. Dedup prompt now spells out
+    confirm-family + meeting-family + intro-family + ask-
+    family + send-family with the operator's worked
+    counter-examples."""
+    from app.services.task_dedup import _SYSTEM_PROMPT
+
+    blob = _SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "FR-CR-05-96" in blob
+    # Curated synonym families pinned.
+    for fragment in (
+        "confirm-family",
+        "meeting-family",
+        "intro-family",
+        "ask-family",
+        "send-family",
+    ):
+        assert fragment in flat, f"family {fragment!r} should be pinned"
+
+    # Specific synonym pairs from regressions.
+    for pair in (
+        "закрепить",
+        "зафиксировать",
+        "финализировать",
+        "пообщаться",
+        "встретиться",
+        "созвониться",
+        "организовать 1-1",
+    ):
+        assert pair in blob, f"synonym {pair!r} should be pinned"
+
+    # Worked counter-examples for the operator regressions.
+    assert "Закрепить детали партнёрства с Bosch" in blob
+    assert "Подтвердить детали партнёрства с Bosch" in blob
+    assert "Пообщаться с Джарадом и Томасом" in blob
+    assert "Организовать 1-1 с Джарадом и Томасом" in blob
+
+
 def test_dedup_prompt_pins_transliteration_rule():
     """FR-CR-05-92 — operator regression: «Предложить слоты для
     созвона с James Morgon» and «Предложить слоты Джеймсу

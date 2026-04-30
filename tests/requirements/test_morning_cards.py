@@ -174,15 +174,15 @@ def test_morning_cards_subscriber_gets_separator_only_when_owned_above(
         send_morning_task_cards(s, sender=sender, today=today)
         s.commit()
 
-    # User 333 should see: intro + own card + Подписки separator
+    # User 333 should see: intro + own card + Watching separator
     # + subscribed card.
     sent_to_333 = [m for m in sender.sent if m["chat_id"] == 333]
-    sep_present = any("Подписки" in m["text"] for m in sent_to_333)
+    sep_present = any("Watching" in m["text"] for m in sent_to_333)
     assert sep_present
     # User 222 (just an owner of `t_other`, no subs) sees: intro
     # + 1 card; no separator.
     sent_to_222 = [m for m in sender.sent if m["chat_id"] == 222]
-    sep_for_222 = [m for m in sent_to_222 if "Подписки" in m["text"]]
+    sep_for_222 = [m for m in sent_to_222 if "Watching" in m["text"]]
     assert sep_for_222 == []
 
 
@@ -233,7 +233,7 @@ def test_morning_cards_intro_lists_day_count(
         send_morning_task_cards(s, sender=sender, today=today)
         s.commit()
     intro = sender.sent[0]
-    assert "Доброе утро" in intro["text"]
+    assert "Good morning" in intro["text"]
     assert "3" in intro["text"]
 
 
@@ -307,10 +307,10 @@ def test_morning_cards_picks_up_overdue_tasks(
     # 1 intro + 1 card.
     assert len(sender.sent) == 2
     # Card body has the alarm header.
-    assert "ПРОСРОЧЕНО" in sender.sent[1]["text"]
+    assert "OVERDUE" in sender.sent[1]["text"]
     assert "🚨" in sender.sent[1]["text"]
     # Intro mentions the overdue count.
-    assert "🚨 Просрочено: 1" in sender.sent[0]["text"]
+    assert "🚨 Overdue: 1" in sender.sent[0]["text"]
 
 
 def test_morning_cards_overdue_sorted_first(
@@ -358,7 +358,7 @@ def test_morning_cards_no_alarm_for_done_overdue(
         s.commit()
     bodies = " ".join(m["text"] for m in sender.sent)
     assert "done-yesterday" not in bodies
-    assert "ПРОСРОЧЕНО" not in bodies
+    assert "OVERDUE" not in bodies
     assert "real task" in bodies
 
 

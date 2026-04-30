@@ -186,10 +186,21 @@ def prompt_done(
     if task is None or task.deleted_at is not None:
         raise NotAuthorised("Task not found or already deleted.")
     _ensure_can_edit(task, actor)
+    # FR-CR-05-73 — operator wants the bot's user-facing copy in
+    # English (matches the live card buttons «Start / Edit / Mark
+    # done» which are already English) AND mentions WHO closed
+    # WHICH task explicitly so the line stands on its own when
+    # the operator reads back the chat history.
+    from app.telegram_bot.cards import _resolve_actor_label
+    from app.telegram_bot.sender import _escape_html
+
+    actor_label = _resolve_actor_label(session, actor) or actor
+    safe_title = (task.title or "")[:80]
     text = (
-        f"✅ <b>Task #{task.id} marked as done</b>\n"
-        f"📎 Хочешь — ответь сюда ссылкой или коротким комментом, "
-        f"добавлю в карточку. Иначе просто пропусти."
+        f"✅ <b>Task #{task.id} «{_escape_html(safe_title)}»</b> — "
+        f"marked as done by <b>{_escape_html(actor_label)}</b>.\n"
+        f"📎 Optional: reply with a link or a short note and I'll "
+        f"attach it to the card. Otherwise just ignore this."
     )
     return task, text
 
@@ -698,8 +709,8 @@ def format_edit_receipt(
         )
         if any(m in text for m in vague_markers):
             lines.append(
-                "🤔 ответственного хотел поменять? уточни на кого "
-                "именно (имя или @handle)."
+                "🤔 Wanted to change the owner? Tell me who exactly "
+                "(name or @handle)."
             )
     return "\n".join(lines)
 

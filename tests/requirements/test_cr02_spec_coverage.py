@@ -54,7 +54,7 @@ def test_fr_cr02_1_fallback_creates_draft_with_source_text_as_title(
         from app.models import Task
 
         task = s.query(Task).one()
-        assert task.title == "настрой CRM"
+        assert task.title == "Настрой CRM"
         d = s.query(ActionDraft).one()
         assert d.state == ActionDraftState.confirmed
         assert d.task_id == task.id

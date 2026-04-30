@@ -609,7 +609,7 @@ def test_process_all_creates_one_task_per_chunk(
         out = service.process_all(s, msg)
         s.commit()
         assert len(out) == 2
-        assert {t.title for t in out} == {"prepare deck", "write report"}
+        assert {t.title for t in out} == {"Prepare deck", "Write report"}
         # Bookmark singular per message — points at the first task.
         bookmark = s.get(ProcessedTelegramMessage, (-100, 42))
         assert bookmark is not None

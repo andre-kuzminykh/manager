@@ -568,7 +568,7 @@ def test_listener_confirm_button_finalises_draft_into_task(
         # Now there's a Task and the draft is confirmed.
         tasks = s.query(Task).all()
         assert len(tasks) == 1
-        assert tasks[0].title == "prepare deck"
+        assert tasks[0].title == "Prepare deck"
         assert tasks[0].source_kind == TaskSourceKind.telegram
         d = s.get(ActionDraft, draft_id)
         assert d.state == ActionDraftState.confirmed
@@ -1161,7 +1161,7 @@ def test_listener_tick_voice_dm_no_transcript_sends_nudge(
         report = listener.tick()
         assert report.tasks_created == 0
         nudge = sent[-1]
-        assert "Не разобрал голос" in nudge["text"]
+        assert "Couldn't transcribe the voice" in nudge["text"]
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 
@@ -1200,8 +1200,8 @@ def test_listener_tick_responds_to_start_with_welcome_widget(
     report = listener.tick()
     assert report.tasks_created == 0
     assert sent
-    assert "Привет" in sent[0]["text"]
-    assert "голосом" in sent[0]["text"]
+    assert "Hi" in sent[0]["text"]
+    assert "voice" in sent[0]["text"]
     with SessionFactory() as s:
         assert s.query(Task).count() == 0
 
@@ -1231,7 +1231,7 @@ def test_listener_tick_help_command_also_returns_welcome_widget(
     sent: list[dict] = []
     listener._sender.send_message = lambda **kw: sent.append(kw) or {"message_id": 1}  # type: ignore[method-assign]
     listener.tick()
-    assert sent and "задач" in sent[0]["text"].lower()
+    assert sent and "task" in sent[0]["text"].lower()
 
 
 def test_listener_tick_start_in_group_chat_falls_through_to_ingest(
@@ -1261,7 +1261,7 @@ def test_listener_tick_start_in_group_chat_falls_through_to_ingest(
     listener._sender.send_message = lambda **kw: sent.append(kw) or {"message_id": 1}  # type: ignore[method-assign]
     listener.tick()
     # No welcome widget would have been posted to a group.
-    assert not any("Привет" in m.get("text", "") for m in sent)
+    assert not any("Hi" in m.get("text", "") for m in sent)
 
 
 # --------------------------------------------------------------------------- #

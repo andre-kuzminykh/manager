@@ -523,11 +523,12 @@ def _build_groups(
             )
         groups.append(g)
 
-    _section("✅ Сделано сегодня", done, show_owner=is_admin_view)
-    _section("🚀 В процессе", in_progress, show_owner=is_admin_view)
+    # FR-CR-05-73 — section labels in English to match the UI.
+    _section("✅ Done today", done, show_owner=is_admin_view)
+    _section("🚀 In progress", in_progress, show_owner=is_admin_view)
     _section("📋 Todo", todo, show_owner=is_admin_view)
     if not is_admin_view:
-        _section("👀 Подписки", subs, show_owner=True)
+        _section("👀 Watching", subs, show_owner=True)
     return groups, described
 
 
@@ -601,13 +602,13 @@ def _split_groups_into_messages(
         section_header = f"\n\n<b>{g.title}</b>"
         if len(current) + len(section_header) > cap and current.strip():
             messages.append(current)
-            current = "(продолжение)"
+            current = "(continued)"
         current += section_header
         for line in g.lines:
             chunk = "\n" + line
             if len(current) + len(chunk) > cap and current.strip():
                 messages.append(current)
-                current = "(продолжение)\n" + line
+                current = "(continued)\n" + line
             else:
                 current += chunk
     if current.strip():
@@ -674,7 +675,7 @@ def send_evening_status_report(
                 payload={"groups": 0, "tasks": 0},
             )
             continue
-        header = f"📊 <b>Статус задач — {today.isoformat()}</b>"
+        header = f"📊 <b>Task status — {today.isoformat()}</b>"
         msgs = _split_groups_into_messages(header=header, groups=groups)
         sent = 0
         for body in msgs:
@@ -731,7 +732,7 @@ def send_evening_status_report(
                 report.skipped_no_tasks += 1
                 continue
             header = (
-                f"📊 <b>Сводка по команде — {today.isoformat()}</b>"
+                f"📊 <b>Team summary — {today.isoformat()}</b>"
             )
             msgs = _split_groups_into_messages(header=header, groups=groups)
             sent = 0

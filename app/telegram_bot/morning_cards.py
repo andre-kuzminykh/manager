@@ -200,13 +200,13 @@ def _sort_tasks_for_morning(
 
 def _build_intro_text(*, today: date, tasks: list[Task]) -> str:
     if not tasks:
-        return f"☀ <b>Доброе утро — на сегодня {today.isoformat()}</b>\nПусто. Хорошего дня."
+        return f"☀ <b>Good morning — {today.isoformat()}</b>\nNothing on the plate. Have a good day."
     overdue_count = sum(1 for t in tasks if _is_overdue(t, today=today))
     lines = [
-        f"☀ <b>Доброе утро — задачи на {today.isoformat()}: {len(tasks)}</b>",
+        f"☀ <b>Good morning — tasks for {today.isoformat()}: {len(tasks)}</b>",
     ]
     if overdue_count:
-        lines.append(f"🚨 Просрочено: {overdue_count}")
+        lines.append(f"🚨 Overdue: {overdue_count}")
     return "\n".join(lines)
 
 
@@ -313,7 +313,7 @@ def send_morning_task_cards(
             try:
                 sender.send_message(
                     chat_id=int(uid),
-                    text="— — —\n👀 <b>Подписки</b>",
+                    text="— — —\n👀 <b>Watching</b>",
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning(
@@ -368,7 +368,7 @@ def _post_one_card(
     """
     header: str | None = None
     if today is not None and _is_overdue(task, today=today) and task.due_date:
-        header = f"🚨 ПРОСРОЧЕНО · был дедлайн {task.due_date.isoformat()}"
+        header = f"🚨 OVERDUE · was due {task.due_date.isoformat()}"
     text = build_task_card_text(task, session=session, header=header)
     keyboard = task_card_keyboard(
         task_id=task.id,

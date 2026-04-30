@@ -74,16 +74,17 @@ log = get_logger(__name__)
 # routing. Single source of truth so the message stays consistent
 # across re-deploys.
 _WELCOME_WIDGET_TEXT = (
-    "👋 <b>Привет! Я веду список задач.</b>\n\n"
-    "📝 Напиши задачу текстом или продиктуй голосом — я разберу.\n"
-    "Можно списком: <i>«первая задача …, вторая задача …»</i> — "
-    "раскидаю в виде отдельных карточек.\n\n"
-    "🚦 На каждой карточке кнопки: <b>Start</b>, <b>Edit</b>, "
-    "<b>Mark done</b>, <b>Subscribe</b>. Нажмёшь Edit — отвечай "
-    "сразу под промптом, можно текстом или голосом.\n\n"
-    "📊 Каждый вечер пришлю краткий статус по всем задачам.\n"
-    "☀ Каждое утро — карточки на сегодня в порядке приоритета.\n\n"
-    "Начнём — что нужно сделать?"
+    "👋 <b>Hi! I keep your task list.</b>\n\n"
+    "📝 Send a task as text or dictate it as voice — I'll parse "
+    "it. You can also list several at once: <i>«first task …, "
+    "second task …»</i> — and I'll split them into separate "
+    "cards.\n\n"
+    "🚦 Each card has buttons: <b>Start</b>, <b>Edit</b>, "
+    "<b>Mark done</b>, <b>Subscribe</b>. Tap Edit and reply "
+    "right under the prompt — text or voice both work.\n\n"
+    "📊 Every evening I'll send a short status of all tasks.\n"
+    "☀ Every morning — the cards for today, ordered by priority.\n\n"
+    "Let's start — what needs to be done?"
 )
 
 
@@ -923,7 +924,7 @@ class TelegramListener:
                                 self._sender.send_message(
                                     chat_id=msg.chat_id,
                                     text=(
-                                        "🎙 Не разобрал голос. "
+                                        "🎙 Couldn't transcribe the voice. "
                                         "Попробуй ещё раз или напиши "
                                         "текстом."
                                     ),
@@ -1376,8 +1377,8 @@ class TelegramListener:
             self._sender.send_message(
                 chat_id=msg.chat_id,
                 text=(
-                    "🎙 Не разобрал голос. Попробуй ещё раз или "
-                    "напиши текстом."
+                    "🎙 Couldn't transcribe the voice. Try again or "
+                    "send text."
                 ),
                 reply_to_message_id=msg.message_id,
             )
@@ -1479,8 +1480,8 @@ class TelegramListener:
                         self._sender.send_message(
                             chat_id=msg.chat_id,
                             text=(
-                                "🤔 ответственного хотел поменять? "
-                                "уточни на кого именно (имя или @handle)."
+                                "🤔 Wanted to change the owner? "
+                                "Tell me who exactly (name or @handle)."
                             ),
                             reply_to_message_id=msg.message_id,
                         )

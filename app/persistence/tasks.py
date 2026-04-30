@@ -83,6 +83,11 @@ def create_task_from_draft(
     title = (payload.get("title") or "").strip()
     if not title:
         raise ValueError("Task title is required")
+    # FR-CR-05-75 — capitalize the first character. The LLM
+    # often returns lowercase imperatives («подготовить отчёт»);
+    # operator wants «Подготовить отчёт». Works for Cyrillic.
+    if title and not title[0].isupper():
+        title = title[0].upper() + title[1:]
     # FR-CR-05-63 / FR-CR-05-72 — hard-cap title to keep cards
     # readable when the LLM dumps a multi-line forward into the
     # title field («Поговорил с Fortuna: 1) по SPAC… 2) …»).

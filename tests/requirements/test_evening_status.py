@@ -173,8 +173,8 @@ def test_evening_status_groups_done_in_progress_todo(
     # One DM (the report fits in <3800 chars).
     assert len(sender.sent) == 1
     body = sender.sent[0]["text"]
-    assert "✅ Сделано сегодня" in body
-    assert "🚀 В процессе" in body
+    assert "✅ Done today" in body
+    assert "🚀 In progress" in body
     assert "📋 Todo" in body
     assert "closed today" in body and "in flight" in body and "planned" in body
 
@@ -183,7 +183,7 @@ def test_evening_status_subscriber_only_user_still_gets_dm(
     patched_session_scope, SessionFactory
 ):
     """A user who owns nothing but subscribes to one open task
-    still receives the report with a 👀 Подписки section."""
+    still receives the report with a 👀 Watching section."""
     today = date(2026, 4, 29)
     with SessionFactory() as s:
         owner = _mk_task(s, title="someone else's task", owner_user_id="222")
@@ -206,7 +206,7 @@ def test_evening_status_subscriber_only_user_still_gets_dm(
     chats = sorted(m["chat_id"] for m in sender.sent)
     assert 222 in chats and 333 in chats
     sub_dm = next(m for m in sender.sent if m["chat_id"] == 333)
-    assert "👀 Подписки" in sub_dm["text"]
+    assert "👀 Watching" in sub_dm["text"]
 
 
 def test_evening_status_skips_user_with_no_tasks(
@@ -440,7 +440,7 @@ def test_evening_status_admin_gets_team_overview(
         assert 999 in chats
         admin_dm = next(m for m in sender.sent if m["chat_id"] == 999)
         body = admin_dm["text"]
-        assert "Сводка по команде" in body
+        assert "Team summary" in body
         assert "task A" in body and "task B" in body
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
@@ -463,7 +463,7 @@ def test_split_groups_packs_into_multiple_messages_under_cap():
     for m in msgs:
         assert len(m) <= cap + 200  # +200 for the section-header overhead
     # Continuation marker present on follow-up messages.
-    assert any("(продолжение)" in m for m in msgs[1:])
+    assert any("(continued)" in m for m in msgs[1:])
 
 
 def test_split_groups_single_message_when_short():

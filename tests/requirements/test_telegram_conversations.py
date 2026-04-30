@@ -496,8 +496,8 @@ def test_format_edit_receipt_hints_at_vague_owner_without_match():
         {"due": "2026-04-30"},
         raw_reply="завтра / другого оунера",
     )
-    assert "другого оунер" in out.lower() or "ответственного" in out
-    assert "уточни" in out.lower()
+    assert "wanted to change the owner" in out.lower() or "owner" in out.lower()
+    assert "name or @handle" in out
 
 
 def test_format_edit_receipt_no_vague_hint_when_owner_resolved():

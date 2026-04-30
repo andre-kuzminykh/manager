@@ -335,7 +335,16 @@ def build_task_card_text(
             f"👤 {_owner_html_link(task.owner_user_id, owner_label, tg_user_id=tg_id, tg_handle=effective_handle)}"
         )
     if task.due_date:
-        meta.append(f"📅 {task.due_date.isoformat()}")
+        # FR-CR-05-74 — render due_time next to due_date when set,
+        # so the operator sees the full deadline («2026-04-30 ·
+        # 18:00») without opening the Edit modal. Operator works
+        # in GMT+1 — we don't have the TZ stored per-task yet,
+        # so we just append the local time the LLM / default
+        # captured. Future iteration: per-user TZ.
+        due_str = task.due_date.isoformat()
+        if task.due_time:
+            due_str += f" · {task.due_time.strftime('%H:%M')}"
+        meta.append(f"📅 {due_str}")
     if meta:
         lines.append(" · ".join(meta))
     return "\n".join(lines)

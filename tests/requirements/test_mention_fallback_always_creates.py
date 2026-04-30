@@ -46,7 +46,7 @@ def test_mention_with_short_text_synthesises_task_draft(
         assert len(drafts) == 1
         assert drafts[0].state == ActionDraftState.confirmed
         assert len(tasks) == 1
-        assert tasks[0].title == "надо сделать бота для сбора задач"
+        assert tasks[0].title == "Надо сделать бота для сбора задач"
 
 
 def test_mention_card_includes_recorded_title(
@@ -77,12 +77,12 @@ def test_mention_card_includes_recorded_title(
     # inside the first `section` block.
     found = False
     for m in sender.posted:
-        if "допилить интеграцию" in (m.get("text") or ""):
+        if "Допилить интеграцию" in (m.get("text") or ""):
             found = True
             break
         for blk in m.get("blocks") or []:
             text = (blk.get("text") or {}).get("text") or ""
-            if "допилить интеграцию" in text:
+            if "Допилить интеграцию" in text:
                 found = True
                 break
         if found:

@@ -633,6 +633,141 @@ def test_evening_tomorrow_plan_long_list_splits_into_multiple_messages(
 
 
 # --------------------------------------------------------------------------- #
+# FR-CR-05-91 — self-owner badge skip + admin per-person plan
+# --------------------------------------------------------------------------- #
+
+
+def test_evening_tomorrow_plan_drops_owner_badge_when_recipient_is_owner(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-91 — operator: «тут если для меня то не пиши».
+    The «👤 owner» line on a task line is redundant when the
+    recipient owns that task — drop it. Subscribed-task lines
+    keep the owner badge (it's somebody else's task)."""
+    today = date(2026, 4, 29)
+    tomorrow = today + timedelta(days=1)
+    with SessionFactory() as s:
+        # Recipient 111 owns task A. They don't own task B.
+        _mk_task(s, title="my own task", owner_user_id="111", due_date=tomorrow)
+        s.commit()
+        sender = _RecordingTGSender()
+        send_evening_status_report(
+            s, sender=sender, llm=_StubLLM(reply="ok"),
+            today=today, include_admin_overview=False,
+        )
+        s.commit()
+
+    plan_body = sender.sent[1]["text"]
+    assert "my own task" in plan_body
+    # No «👤 …» line for the recipient's own task.
+    assert "👤" not in plan_body
+
+
+def test_evening_admin_tomorrow_plan_groups_per_person(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-91 — operator: «выводи админу план всех людей
+    на завтра, прям в разрезе людей». Admin's tomorrow plan
+    must be a per-person breakdown, not the admin's own task
+    list."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "999")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        today = date(2026, 4, 29)
+        tomorrow = today + timedelta(days=1)
+        with SessionFactory() as s:
+            _mk_task(s, title="report A", owner_user_id="111", due_date=tomorrow)
+            _mk_task(s, title="report B", owner_user_id="111", due_date=tomorrow)
+            _mk_task(s, title="email C", owner_user_id="222", due_date=tomorrow)
+            s.commit()
+            # Add nice display names so the per-person headers render
+            # something useful.
+            s.add(
+                TeamMember(
+                    slack_user_id=None,
+                    telegram_user_id=111,
+                    real_name="Андрей",
+                    active=True,
+                )
+            )
+            s.add(
+                TeamMember(
+                    slack_user_id=None,
+                    telegram_user_id=222,
+                    real_name="Ирина",
+                    active=True,
+                )
+            )
+            s.commit()
+            sender = _RecordingTGSender()
+            send_evening_status_report(
+                s, sender=sender, llm=_StubLLM(reply="ok"), today=today,
+                include_admin_overview=True,
+            )
+            s.commit()
+
+        admin_dms = [m for m in sender.sent if m["chat_id"] == 999]
+        # Find the per-person plan DM — the one with «Team plan for tomorrow».
+        plan_dms = [m for m in admin_dms if "Team plan for tomorrow" in m["text"]]
+        assert len(plan_dms) >= 1
+        body = plan_dms[0]["text"]
+        # Per-person section headers present.
+        assert "👤 <b>Андрей</b>" in body
+        assert "👤 <b>Ирина</b>" in body
+        # Counts per person.
+        assert "2 tasks" in body
+        assert "1 task" in body
+        # Task titles present.
+        assert "report A" in body and "report B" in body and "email C" in body
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_evening_admin_audit_payload_carries_per_person_plan_task_ids(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-91 — the admin audit row must persist the
+    per-person task ID map so the morning admin diff can
+    compute deltas."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "999")
+    from app.config import get_settings
+    from app.models import AuditLog
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        today = date(2026, 4, 29)
+        tomorrow = today + timedelta(days=1)
+        with SessionFactory() as s:
+            _mk_task(s, title="A", owner_user_id="111", due_date=tomorrow)
+            _mk_task(s, title="B", owner_user_id="222", due_date=tomorrow)
+            s.commit()
+            sender = _RecordingTGSender()
+            send_evening_status_report(
+                s, sender=sender, llm=_StubLLM(reply="ok"), today=today,
+                include_admin_overview=True,
+            )
+            s.commit()
+        with SessionFactory() as s:
+            row = (
+                s.query(AuditLog)
+                .filter_by(
+                    category="telegram_evening_status",
+                    action="admin",
+                    actor="999",
+                )
+                .one()
+            )
+        payload = row.payload or {}
+        per_person = payload.get("per_person_plan_task_ids") or {}
+        assert "111" in per_person and "222" in per_person
+        assert len(per_person["111"]) == 1 and len(per_person["222"]) == 1
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- #
 # FR-CR-05-49 — overdue badge
 # --------------------------------------------------------------------------- #
 

@@ -134,6 +134,31 @@ Worked examples:
   candidate: «подготовить sales-deck к пятнице»
   existing:  «сделать презу по продажам к пятнице»
   → true (same deliverable, same deadline, paraphrase)
+
+TRANSLITERATION & NAME-VARIANTS (FR-CR-05-92). Operator
+regression: «Предложить слоты для созвона с James Morgon» and
+«Предложить слоты Джеймсу Моргану» landed as TWO tasks. Same
+person, just one mentions the name in English transliteration
+and the other in Russian. Treat as DUPLICATE.
+
+Rules:
+- An English / Latin spelling of a person and a Russian /
+  Cyrillic spelling of phonetically the same person ARE THE
+  SAME PERSON: «James Morgon» = «Джеймс Морган»; «Olayan»
+  = «Олаян»; «Ryan Gariepy» = «Райан Гариепи». Apply the same
+  matching rule to companies / funds / projects.
+- Diminutives / short-forms are the same person: «Артем» =
+  «Артём» = «Artem»; «Ира» = «Ирина» = «Irina»; «Petya» =
+  «Петя» = «Пётр».
+- Title paraphrases that swap one name-variant for another
+  but keep verb + recipient + deadline = duplicate.
+
+Worked counter-example:
+  candidate: «Предложить слоты для созвона с James Morgon»
+  existing:  «Предложить слоты Джеймсу Моргану»
+  → true (same person James Morgan / Джеймс Морган, same
+    verb «предложить слоты», same recipient assistant Ирина,
+    same deadline 2026-04-30)
 """
 
 

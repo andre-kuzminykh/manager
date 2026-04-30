@@ -15,7 +15,7 @@ Covers:
 """
 from __future__ import annotations
 
-from datetime import date, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 
@@ -368,6 +368,141 @@ def test_morning_cards_no_alarm_for_done_overdue(
     assert "done-yesterday" not in bodies
     assert "OVERDUE" not in bodies
     assert "real task" in bodies
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-91 — admin morning diff vs yesterday's per-person plan
+# --------------------------------------------------------------------------- #
+
+
+def test_morning_admin_diff_renders_added_and_done_per_person(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-91 — operator: «перед этим [утренними карточками]
+    изменения во вчерашнем плане по людям новую сделай (если
+    есть изменения)». Admin gets a delta DM listing per-person:
+      ➕ added tasks (new on today's plan)
+      ✅ tasks done since
+      ➖ tasks otherwise removed
+    Sent BEFORE the morning intro + cards."""
+    from app.models import AuditLog, TeamMember
+    from app.telegram_bot.morning_cards import _render_admin_morning_diff
+
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "999")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        yesterday = date(2026, 4, 29)
+        today = date(2026, 4, 30)
+        with SessionFactory() as s:
+            # Three tasks on yesterday's plan owned by 111:
+            #   - t_done: now done → ✅
+            #   - t_kept: still pending → not in diff
+            #   - t_removed: deleted → ➖
+            t_done = _mk_task(
+                s, title="closed", owner_user_id="111", due_date=today,
+                status=TaskStatus.done,
+            )
+            t_kept = _mk_task(
+                s, title="still here", owner_user_id="111", due_date=today,
+            )
+            t_removed = _mk_task(
+                s, title="gone", owner_user_id="111", due_date=today,
+            )
+            t_removed.deleted_at = datetime(
+                2026, 4, 30, tzinfo=timezone.utc
+            )
+            # New task added today, NOT in yesterday's plan.
+            t_added = _mk_task(
+                s, title="new today", owner_user_id="111", due_date=today,
+            )
+            s.add(
+                TeamMember(
+                    slack_user_id=None,
+                    telegram_user_id=111,
+                    real_name="Андрей",
+                    active=True,
+                )
+            )
+            # Yesterday's evening admin audit row carrying the
+            # per-person plan map.
+            s.add(
+                AuditLog(
+                    category="telegram_evening_status",
+                    action="admin",
+                    entity_type="telegram_evening_status",
+                    entity_id=f"admin:{yesterday.isoformat()}",
+                    actor="999",
+                    payload={
+                        "per_person_plan_task_ids": {
+                            "111": [t_done.id, t_kept.id, t_removed.id],
+                        },
+                    },
+                )
+            )
+            s.commit()
+
+            text = _render_admin_morning_diff(
+                s, today=today, admin_uid="999",
+            )
+        assert text is not None
+        # Per-person section header present.
+        assert "👤 <b>Андрей</b>" in text
+        # Done line with ✅.
+        assert "✅" in text and "closed" in text
+        # Removed line with 🗑 (deleted) — distinct from generic ➖.
+        assert "🗑" in text and "gone" in text
+        # Added line with ➕.
+        assert "➕" in text and "new today" in text
+        # Untouched task NOT in diff.
+        assert "still here" not in text
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_morning_admin_diff_returns_none_with_no_changes(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-91 — when nothing changed since yesterday's
+    plan (every task still pending, no new ones), the diff
+    helper returns None and the morning loop sends no
+    delta DM."""
+    from app.models import AuditLog, TeamMember
+    from app.telegram_bot.morning_cards import _render_admin_morning_diff
+
+    yesterday = date(2026, 4, 29)
+    today = date(2026, 4, 30)
+    with SessionFactory() as s:
+        t = _mk_task(s, title="x", owner_user_id="111", due_date=today)
+        s.add(
+            AuditLog(
+                category="telegram_evening_status",
+                action="admin",
+                entity_type="telegram_evening_status",
+                entity_id=f"admin:{yesterday.isoformat()}",
+                actor="999",
+                payload={
+                    "per_person_plan_task_ids": {"111": [t.id]},
+                },
+            )
+        )
+        s.commit()
+        text = _render_admin_morning_diff(s, today=today, admin_uid="999")
+    assert text is None
+
+
+def test_morning_admin_diff_returns_none_when_no_prior_plan(
+    patched_session_scope, SessionFactory
+):
+    """FR-CR-05-91 — first run has no prior admin audit row →
+    nothing to diff against, return None silently."""
+    from app.telegram_bot.morning_cards import _render_admin_morning_diff
+
+    today = date(2026, 4, 30)
+    with SessionFactory() as s:
+        text = _render_admin_morning_diff(s, today=today, admin_uid="999")
+    assert text is None
 
 
 # --------------------------------------------------------------------------- #

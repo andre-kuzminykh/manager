@@ -1,4 +1,4 @@
-"""FR-CR-05-89 — Bulk re-sync every Task to the Google Sheet.
+"""FR-CR-05-89 / -91 — Bulk re-sync every Task to the Google Sheet.
 
 Operator workflow: «давай я все задачи дропнул в шит,
 перезальем туда». Use this when:
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from app.config import get_settings
 from app.db import session_scope
@@ -46,6 +47,13 @@ from app.persistence.tasks import normalize_task_title
 from app.sync.factories import build_sheets_factory
 
 log = get_logger(__name__)
+
+
+# FR-CR-05-91 — Sheets API quota is 60 write requests per minute
+# per user. Without throttling, a 100+-task resync hits 429 and
+# 21+ rows get dropped. 1.1s delay = ~54 writes/min, comfortable
+# headroom under the limit.
+_DEFAULT_WRITE_DELAY_SEC = 1.1
 
 
 def _parse_args() -> argparse.Namespace:
@@ -59,6 +67,16 @@ def _parse_args() -> argparse.Namespace:
         "--include-deleted",
         action="store_true",
         help="Also re-push soft-deleted tasks (status=deleted rows).",
+    )
+    p.add_argument(
+        "--write-delay-sec",
+        type=float,
+        default=_DEFAULT_WRITE_DELAY_SEC,
+        help=(
+            "Delay in seconds between sheet writes. Defaults to "
+            f"{_DEFAULT_WRITE_DELAY_SEC}s (~54 writes/min, under the "
+            "60/min Sheets API quota). Set 0 to disable."
+        ),
     )
     return p.parse_args()
 
@@ -117,7 +135,8 @@ def main() -> int:
 
         if not args.dry_run:
             session.flush()
-            for task in tasks:
+            delay = max(0.0, float(args.write_delay_sec))
+            for i, task in enumerate(tasks):
                 try:
                     sheets.sync(session, task)
                     rows_synced += 1
@@ -128,6 +147,9 @@ def main() -> int:
                         task_id=task.id,
                         error=str(e),
                     )
+                # Sleep BETWEEN writes (not after the last one).
+                if delay > 0 and i + 1 < len(tasks):
+                    time.sleep(delay)
         # session_scope commits on exit
 
     log.info(

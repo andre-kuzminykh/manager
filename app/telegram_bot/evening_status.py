@@ -534,19 +534,23 @@ def _render_tomorrow_plan_message(
     today: date,
     tomorrow: date,
     bot_user_id: str | None,
-) -> tuple[list[str], int] | None:
+) -> tuple[list[str], int, list[int]] | None:
     """FR-CR-05-83 — operator-requested second evening message:
     «след сообщением пост со списком задач моих на завтра с
     гиперссылками на эти задачи в боте».
 
-    Returns (messages, task_count) where `messages` is a list
-    of HTML chunks under the Telegram 4096-char cap (target
-    3800 with headroom). Returns None when the user has no
-    tasks scheduled for tomorrow. Each line carries the
-    priority bullet, the title hyperlinked to the BOT'S task
-    card, the due date+time when present, and the owner
-    badge — a compact snapshot the operator can act on first
-    thing tomorrow.
+    Returns (messages, task_count, task_ids) where `messages`
+    is a list of HTML chunks under the Telegram 4096-char cap
+    (target 3800 with headroom), `task_ids` is the ordered
+    list of Task.id values shown in the plan (saved into the
+    audit payload so FR-CR-05-91 can diff vs yesterday in the
+    morning). Returns None when the user has no tasks
+    scheduled for tomorrow.
+
+    FR-CR-05-91 — when `task.owner_user_id == user_id` (the
+    recipient is the owner), the «👤 owner» line is dropped.
+    No reason to show «👤 Андрей Кузьминых» to Андрей.
+    Subscribed-task lines still keep the owner badge.
     """
     tasks = _sort_for_tomorrow_plan(
         _owned_for_tomorrow(session, owner_uid=user_id, tomorrow=tomorrow),
@@ -566,6 +570,7 @@ def _render_tomorrow_plan_message(
         header += f"\n🚨 Rolling over from today: {overdue_n}"
 
     rendered_blocks: list[str] = []
+    task_ids: list[int] = []
     for t in tasks:
         if _is_overdue(t, today=today):
             bullet = "🚨"
@@ -591,24 +596,33 @@ def _render_tomorrow_plan_message(
             if t.due_time:
                 due_str += " " + t.due_time.strftime("%H:%M")
             meta.append(f"📅 {due_str}")
-        tg_id, tg_handle, real_name = _resolve_owner_link_target(
-            session, t.owner_user_id, t.owner_display_name
+        # FR-CR-05-91 — drop the «👤 self» badge when the
+        # recipient owns this task. Operator: «тут если для
+        # меня то не пиши».
+        is_self_owned = (
+            t.owner_user_id is not None
+            and str(t.owner_user_id) == str(user_id)
         )
-        owner_label = _resolve_owner_display(t, real_name=real_name)
-        if owner_label:
-            eff_handle = tg_handle or _handle_from_display(t.owner_display_name)
-            meta.append(
-                "👤 "
-                + _owner_html_link(
-                    t.owner_user_id,
-                    owner_label,
-                    tg_user_id=tg_id,
-                    tg_handle=eff_handle,
-                )
+        if not is_self_owned:
+            tg_id, tg_handle, real_name = _resolve_owner_link_target(
+                session, t.owner_user_id, t.owner_display_name
             )
+            owner_label = _resolve_owner_display(t, real_name=real_name)
+            if owner_label:
+                eff_handle = tg_handle or _handle_from_display(t.owner_display_name)
+                meta.append(
+                    "👤 "
+                    + _owner_html_link(
+                        t.owner_user_id,
+                        owner_label,
+                        tg_user_id=tg_id,
+                        tg_handle=eff_handle,
+                    )
+                )
         if meta:
             block_lines.append("   " + " · ".join(meta))
         rendered_blocks.append("\n".join(block_lines))
+        task_ids.append(t.id)
 
     # Pack into ≤_SPLIT_TARGET-char messages, splitting at task
     # boundaries so a single line never breaks across messages.
@@ -623,7 +637,117 @@ def _render_tomorrow_plan_message(
             current += chunk
     if current.strip():
         messages.append(current.rstrip())
-    return messages, len(tasks)
+    return messages, len(tasks), task_ids
+
+
+def _render_admin_tomorrow_plan_per_person(
+    *,
+    session: Session,
+    today: date,
+    tomorrow: date,
+    bot_user_id: str | None,
+) -> tuple[list[str], int, dict[str, list[int]]] | None:
+    """FR-CR-05-91 — admin's evening tomorrow-plan view, grouped
+    BY PERSON. Operator: «выводи админу план всех людей на
+    завтра, прям в разрезе людей».
+
+    Returns (messages, total_task_count, per_person_task_ids).
+    `per_person_task_ids` maps owner_user_id → ordered list of
+    Task.id, used by the morning admin diff (FR-CR-05-91) to
+    compute «what changed since yesterday's plan».
+
+    Returns None when nobody has any tomorrow tasks.
+    """
+    # Pull every open task that qualifies for tomorrow across all
+    # owners — same selector as `_owned_for_tomorrow` but with no
+    # owner filter.
+    rows = (
+        session.query(Task)
+        .filter(
+            Task.deleted_at.is_(None),
+            Task.status.in_(_OPEN),
+            or_(
+                Task.due_date == tomorrow,
+                Task.due_date < tomorrow,
+                Task.status == TaskStatus.in_progress,
+                (Task.is_current_week.is_(True))
+                & Task.due_date.is_(None)
+                & Task.status.in_((TaskStatus.todo, TaskStatus.backlog)),
+            ),
+        )
+        .all()
+    )
+    if not rows:
+        return None
+
+    # Group by owner.
+    by_owner: dict[str, list[Task]] = {}
+    for t in rows:
+        key = t.owner_user_id or "_unassigned_"
+        by_owner.setdefault(key, []).append(t)
+    for k in by_owner:
+        by_owner[k] = _sort_for_tomorrow_plan(by_owner[k], today=today)
+
+    # Resolve each owner's display name once.
+    def _label_for(owner_uid: str) -> str:
+        if owner_uid == "_unassigned_":
+            return "Не назначено"
+        tg_id, tg_handle, real_name = _resolve_owner_link_target(
+            session, owner_uid, None
+        )
+        return real_name or owner_uid
+
+    # Order owner sections: alphabetical by display name, with
+    # «Не назначено» pinned to the bottom.
+    owner_keys = sorted(
+        by_owner.keys(),
+        key=lambda k: (1 if k == "_unassigned_" else 0, _label_for(k).lower()),
+    )
+
+    overdue_n = sum(1 for t in rows if _is_overdue(t, today=today))
+    header = (
+        f"📅 <b>Team plan for tomorrow ({tomorrow.isoformat()}): "
+        f"{len(rows)} task{'s' if len(rows) != 1 else ''} across "
+        f"{len(by_owner)} owner{'s' if len(by_owner) != 1 else ''}</b>"
+    )
+    if overdue_n:
+        header += f"\n🚨 Rolling over from today: {overdue_n}"
+
+    rendered_sections: list[str] = []
+    per_person_ids: dict[str, list[int]] = {}
+    for owner_uid in owner_keys:
+        tasks = by_owner[owner_uid]
+        per_person_ids[owner_uid] = [t.id for t in tasks]
+        section_lines = [
+            f"\n👤 <b>{_escape_html(_label_for(owner_uid))}</b>"
+            f" — {len(tasks)} task{'s' if len(tasks) != 1 else ''}"
+        ]
+        for t in tasks:
+            if _is_overdue(t, today=today):
+                bullet = "🚨"
+            else:
+                bullet = PRIORITY_EMOJI.get(t.priority.value, "🟡")
+            safe_title = _escape_html(t.title or "")
+            section_lines.append(f"  {bullet} {safe_title}")
+            if t.due_date:
+                due_str = t.due_date.isoformat()
+                if t.due_time:
+                    due_str += " " + t.due_time.strftime("%H:%M")
+                section_lines.append(f"     📅 {due_str}")
+        rendered_sections.append("\n".join(section_lines))
+
+    messages: list[str] = []
+    current = header
+    for section in rendered_sections:
+        chunk = "\n" + section
+        if len(current) + len(chunk) > _SPLIT_TARGET and current.strip():
+            messages.append(current.rstrip())
+            current = "📅 <i>(continued)</i>" + chunk
+        else:
+            current += chunk
+    if current.strip():
+        messages.append(current.rstrip())
+    return messages, len(rows), per_person_ids
 
 
 def _build_groups(
@@ -867,8 +991,9 @@ def send_evening_status_report(
             bot_user_id=bot_user_id,
         )
         plan_tasks = 0
+        plan_task_ids: list[int] = []
         if plan_payload is not None:
-            plan_msgs, plan_tasks = plan_payload
+            plan_msgs, plan_tasks, plan_task_ids = plan_payload
             for plan_text in plan_msgs:
                 try:
                     sender.send_message(chat_id=int(uid), text=plan_text)
@@ -893,6 +1018,10 @@ def send_evening_status_report(
                 "tasks": described,
                 "messages": sent,
                 "tomorrow_plan_tasks": plan_tasks,
+                # FR-CR-05-91 — saved so the morning admin diff
+                # can compare yesterday's plan vs today's
+                # selector and report what changed.
+                "tomorrow_plan_task_ids": plan_task_ids,
             },
         )
         report.recipients += 1
@@ -949,6 +1078,37 @@ def send_evening_status_report(
                 sent += 1
             if sent == 0:
                 continue
+
+            # FR-CR-05-91 — admin tomorrow plan grouped per
+            # person. Sent right after the team status digest
+            # so the operator first reads what's done today,
+            # then sees the per-person breakdown for tomorrow.
+            tomorrow = today + timedelta(days=1)
+            per_person_plan = _render_admin_tomorrow_plan_per_person(
+                session=session,
+                today=today,
+                tomorrow=tomorrow,
+                bot_user_id=bot_user_id,
+            )
+            per_person_task_ids: dict[str, list[int]] = {}
+            plan_total_tasks = 0
+            if per_person_plan is not None:
+                plan_msgs, plan_total_tasks, per_person_task_ids = per_person_plan
+                for plan_text in plan_msgs:
+                    try:
+                        sender.send_message(chat_id=int(admin_uid), text=plan_text)
+                        sent += 1
+                    except Exception as e:  # noqa: BLE001
+                        report.failures += 1
+                        log.warning(
+                            "evening_admin_tomorrow_plan_send_failed",
+                            uid=admin_uid,
+                            error=str(e),
+                        )
+                        break
+                else:
+                    report.tomorrow_plans_sent += 1
+
             session.add(
                 AuditLog(
                     category=_CATEGORY,
@@ -960,6 +1120,12 @@ def send_evening_status_report(
                         "groups": len(groups),
                         "tasks": described,
                         "messages": sent,
+                        "tomorrow_plan_tasks": plan_total_tasks,
+                        # FR-CR-05-91 — `{owner_uid: [task_id, …]}`
+                        # for tomorrow's per-person admin plan, so
+                        # the next morning's admin diff can show
+                        # «➕ added / ➖ removed» per person.
+                        "per_person_plan_task_ids": per_person_task_ids,
                     },
                 )
             )

@@ -297,9 +297,153 @@ class MorningCardsReport:
     # start of today's run (so the cron log shows the cleanup
     # happening, separately from today's posting).
     prior_cards_deleted: int = 0
+    # FR-CR-05-91 — admin morning diff DMs sent (one per admin
+    # who had any per-person delta vs yesterday's evening plan).
+    admin_diff_sent: int = 0
     skipped_idempotent: int = 0
     skipped_no_tasks: int = 0
     failures: int = 0
+
+
+def _render_admin_morning_diff(
+    session: Session,
+    *,
+    today: date,
+    admin_uid: str,
+) -> str | None:
+    """FR-CR-05-91 — operator: «перед этим [утренними карточками]
+    изменения во вчерашнем плане по людям новую сделай (если
+    есть изменения)».
+
+    Diffs:
+      - YESTERDAY: read `audit_logs.payload.per_person_plan_task_ids`
+        from the most recent admin row of the evening status
+        (one entry per owner with the task IDs that were on the
+        evening plan).
+      - TODAY: re-run the same per-person tomorrow selector
+        (now `today` since we've crossed midnight).
+
+    Per owner, classify each task as:
+      - DONE: yesterday-only AND now status=done
+      - REMOVED: yesterday-only AND not done (deleted /
+        deferred / re-assigned)
+      - ADDED: today-only (didn't exist on yesterday's plan)
+
+    Returns the rendered HTML message, or `None` when there's
+    nothing to report (no audit row, or no changes anywhere).
+    """
+    from app.telegram_bot.evening_status import _CATEGORY as _EVENING_CATEGORY
+    from app.telegram_bot.evening_status import _owned_for_tomorrow
+
+    # Most-recent admin row before today.
+    prior = (
+        session.query(AuditLog)
+        .filter(
+            AuditLog.category == _EVENING_CATEGORY,
+            AuditLog.action == "admin",
+            AuditLog.actor == admin_uid,
+            AuditLog.entity_id < f"admin:{today.isoformat()}",
+        )
+        .order_by(AuditLog.entity_id.desc())
+        .limit(1)
+        .one_or_none()
+    )
+    if prior is None:
+        return None
+    yesterday_payload = prior.payload or {}
+    yesterday_ids: dict[str, list[int]] = (
+        yesterday_payload.get("per_person_plan_task_ids") or {}
+    )
+    if not yesterday_ids:
+        return None
+
+    # Today's per-person plan — same selector, anchored to today.
+    today_ids: dict[str, set[int]] = {}
+    all_owners = set(yesterday_ids.keys())
+    # Also include owners who don't show up in yesterday but do today
+    # (i.e., NEW additions). For that we need to query everyone open
+    # for today.
+    rows = (
+        session.query(Task)
+        .filter(
+            Task.deleted_at.is_(None),
+            Task.owner_user_id.isnot(None),
+        )
+        .all()
+    )
+    owners_today = {t.owner_user_id for t in rows if t.owner_user_id}
+    all_owners |= owners_today
+    for owner in all_owners:
+        if owner == "_unassigned_":
+            continue
+        tasks = _owned_for_tomorrow(session, owner_uid=owner, tomorrow=today)
+        today_ids[owner] = {t.id for t in tasks}
+
+    # Resolve display names once.
+    from app.telegram_bot.sender import (
+        _escape_html as _esc,
+        _resolve_owner_link_target,
+    )
+
+    def _label(uid: str) -> str:
+        if uid == "_unassigned_":
+            return "Не назначено"
+        _tg_id, _tg_handle, real_name = _resolve_owner_link_target(
+            session, uid, None
+        )
+        return real_name or uid
+
+    sections: list[str] = []
+    any_change = False
+    for owner_uid in sorted(all_owners, key=lambda u: _label(u).lower()):
+        y_ids = set(yesterday_ids.get(owner_uid) or [])
+        t_ids = today_ids.get(owner_uid, set())
+        added = sorted(t_ids - y_ids)
+        removed = sorted(y_ids - t_ids)
+        if not added and not removed:
+            continue
+        any_change = True
+        section_lines = [f"\n👤 <b>{_esc(_label(owner_uid))}</b>"]
+        # Resolve titles for the changed task ids.
+        if added:
+            for tid in added:
+                t = session.get(Task, tid)
+                if t is None or t.deleted_at is not None:
+                    continue
+                section_lines.append(
+                    f"  ➕ <b>{_esc(t.title or '')}</b>"
+                )
+        if removed:
+            for tid in removed:
+                t = session.get(Task, tid)
+                if t is None:
+                    section_lines.append(f"  ➖ <i>task #{tid} removed</i>")
+                    continue
+                # Classify: done / deleted / deferred / other.
+                if t.status == TaskStatus.done:
+                    section_lines.append(
+                        f"  ✅ <b>{_esc(t.title or '')}</b> — done"
+                    )
+                elif t.deleted_at is not None:
+                    section_lines.append(
+                        f"  🗑 <s>{_esc(t.title or '')}</s> — deleted"
+                    )
+                elif t.due_date and t.due_date > today:
+                    section_lines.append(
+                        f"  📅 <b>{_esc(t.title or '')}</b> — "
+                        f"deferred to {t.due_date.isoformat()}"
+                    )
+                else:
+                    section_lines.append(
+                        f"  ➖ <b>{_esc(t.title or '')}</b> — removed"
+                    )
+        sections.append("\n".join(section_lines))
+
+    if not any_change:
+        return None
+
+    header = f"📊 <b>Plan changes since yesterday — {today.isoformat()}</b>"
+    return header + "\n" + "\n".join(sections)
 
 
 def send_morning_task_cards(
@@ -356,6 +500,34 @@ def send_morning_task_cards(
             sender=sender, session=session, user_id=uid, today=today,
         )
         report.prior_cards_deleted += deleted_prior
+
+        # FR-CR-05-91 — admin recipients ALSO get a per-person
+        # «what changed since yesterday's plan» diff DM BEFORE
+        # today's intro + cards. Only sent when there are
+        # actual changes, so a quiet day doesn't spam an empty
+        # message. Best-effort.
+        if uid in admin_uids:
+            try:
+                diff_text = _render_admin_morning_diff(
+                    session, today=today, admin_uid=uid,
+                )
+            except Exception as e:  # noqa: BLE001
+                diff_text = None
+                log.warning(
+                    "morning_admin_diff_render_failed",
+                    uid=uid,
+                    error=str(e),
+                )
+            if diff_text:
+                try:
+                    sender.send_message(chat_id=int(uid), text=diff_text)
+                    report.admin_diff_sent += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "morning_admin_diff_send_failed",
+                        uid=uid,
+                        error=str(e),
+                    )
 
         # Track every (chat_id, message_id) we successfully post
         # today so tomorrow's run can delete them in turn.

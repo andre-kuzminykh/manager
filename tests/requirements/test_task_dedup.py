@@ -43,6 +43,27 @@ def _mk(session, **kw) -> int:
     return t.id
 
 
+def test_dedup_prompt_pins_transliteration_rule():
+    """FR-CR-05-92 — operator regression: «Предложить слоты для
+    созвона с James Morgon» and «Предложить слоты Джеймсу
+    Моргану» landed as TWO tasks. Same person, just one in
+    English transliteration. Prompt must teach name-variant
+    matching."""
+    from app.services.task_dedup import _SYSTEM_PROMPT
+
+    blob = _SYSTEM_PROMPT
+    assert "TRANSLITERATION" in blob
+    assert "FR-CR-05-92" in blob
+    # Both regression spellings pinned.
+    assert "James Morgon" in blob
+    assert "Джеймсу Моргану" in blob
+    # Other paired examples to anchor the rule.
+    for fragment in ("Olayan", "Олаян", "Артем", "Артём", "Artem"):
+        assert fragment in blob, f"name-variant {fragment!r} should be pinned"
+    # Diminutives covered.
+    assert "Petya" in blob or "Петя" in blob
+
+
 def test_dedup_returns_not_duplicate_when_no_recent_tasks(session):
     backend = _FakeBackend({"is_duplicate": True})
     out = check_duplicate(

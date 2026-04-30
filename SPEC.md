@@ -833,6 +833,100 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-92 — Dedup: transliteration / name-variants are the same person
+
+Operator: «"Предложить слоты для созвона с James Morgon" и
+"Предложить слоты Джеймсу Моргану" — дубли».
+
+Same person, just one mention in English transliteration and
+one in Russian. Existing FR-CR-05-78 dedup gate said «different
+spelling = different» and shipped both as separate tasks.
+
+`task_dedup.py::_SYSTEM_PROMPT` gains a TRANSLITERATION block:
+
+  - English/Latin spelling and Russian/Cyrillic spelling of
+    phonetically the same person ARE the same person:
+    James Morgon = Джеймс Морган; Olayan = Олаян; Ryan
+    Gariepy = Райан Гариепи. Same rule for companies /
+    funds / projects.
+  - Diminutives / short-forms are the same person: Артём =
+    Артем = Artem; Ира = Ирина = Irina; Petya = Петя = Пётр.
+  - Title paraphrases that swap one name-variant for another
+    but keep verb + recipient + deadline = duplicate.
+
+The James-Morgon ↔ Джеймсу-Моргану regression is pinned as
+the worked counter-example.
+
+#### FR-CR-05-91 — Wipe CLI; admin per-person tomorrow plan; admin morning diff; self-owner badge skip; Sheets throttle
+
+Operator three-pack:
+
+  1. «давай обнулим все данные по задачам и начнем вести их
+     заново».
+  2. «выводи админу план всех людей на завтра, прям в
+     разрезе людей … а перед этим изменения во вчерашнем
+     плане по людям новую сделай (если есть изменения)».
+  3. «"📅 Plan for tomorrow … 👤 Андрей Кузьминых" — тут
+     если для меня то не пиши».
+
+Plus the FR-CR-05-89 resync hit the Sheets `60 writes/min`
+quota and dropped 21 rows on a 108-task resync.
+
+Five layered fixes:
+
+  - **`ops/wipe_tasks.py`** — DESTRUCTIVE bulk wipe. Deletes
+    `tasks` / `action_drafts` / `task_status_history` /
+    `task_subscriptions` / `google_sheets_sync` /
+    `google_tasks_sync` / `daily_plan_items` + targeted
+    `audit_logs` rows (digest + plan categories). KEEPS
+    `team_members`, `telegram_chat_members`,
+    `processed_telegram_messages`, `meeting_recordings` so
+    re-ingestion picks up where it left off.
+    Two-step confirm: bare `python -m ops.wipe_tasks` is a
+    dry-run; `--yes` actually wipes.
+
+  - **Self-owner badge skip in tomorrow plan.**
+    `_render_tomorrow_plan_message` no longer emits the
+    «👤 owner» line when `task.owner_user_id == recipient`.
+    Subscribed-task lines keep the badge — they're somebody
+    else's work.
+
+  - **Admin per-person tomorrow plan.** New
+    `_render_admin_tomorrow_plan_per_person` selects every
+    open task across all owners for tomorrow, groups by
+    owner with section headers «👤 <Name> — N tasks», sorts
+    sections alphabetically with «Не назначено» pinned to
+    bottom. Sent in the admin loop right after the team
+    status digest. Replaces the previous
+    «admin gets their own tasks» behaviour.
+
+  - **Admin morning diff vs yesterday's plan.** New
+    `_render_admin_morning_diff(session, today, admin_uid)`
+    in `morning_cards.py`:
+      1. Reads the most recent prior `audit_logs` row for
+         the admin under `category=telegram_evening_status`,
+         `action=admin`. Pulls
+         `payload.per_person_plan_task_ids` (saved on the
+         evening run as `{owner_uid: [task_id, …]}`).
+      2. Re-runs the per-person tomorrow selector for today.
+      3. Per owner, classifies each diff:
+           ✅ DONE  — yesterday-only AND status=done
+           🗑 DELETED — yesterday-only AND deleted_at set
+           📅 DEFERRED — yesterday-only AND due_date > today
+           ➖ REMOVED — yesterday-only otherwise
+           ➕ ADDED  — today-only
+      4. Returns rendered HTML, or `None` when no person has
+         changes.
+    Sent in the admin morning loop BEFORE the intro + cards
+    so the operator first sees deltas, then today's owned
+    cards. New `MorningCardsReport.admin_diff_sent` counter.
+
+  - **Sheets `--write-delay-sec` throttle.** `ops/resync_
+    sheet.py` defaults to 1.1s between writes (~54
+    writes/min, headroom under the 60/min Sheets API
+    quota). Tunable via `--write-delay-sec`. Was hitting
+    429 and dropping 21/108 rows on the 108-task resync.
+
 #### FR-CR-05-90 — Retroactive anyone-with-link writer share for legacy meeting docs
 
 Operator: «сделай так чтобы отчеты которые генерируются в
@@ -3995,6 +4089,8 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-92  | `test_task_dedup.py::test_dedup_prompt_pins_transliteration_rule` (TRANSLITERATION block + James Morgon / Джеймсу Моргану / Olayan / Олаян / Артем / Артём / Artem / Petya / Петя fragments + FR-CR-05-92 pinned) |
+| FR-CR-05-91  | `test_wipe_tasks_cli.py::test_wipe_dry_run_keeps_all_rows`; `::test_wipe_without_yes_flag_is_dry_run` (no `--yes` → no deletion); `::test_wipe_with_yes_clears_task_data_keeps_team_registry` (tasks/drafts/history/subs/sheets-sync/audit gone, team_members + telegram_chat_members preserved); `test_evening_status.py::test_evening_tomorrow_plan_drops_owner_badge_when_recipient_is_owner`; `::test_evening_admin_tomorrow_plan_groups_per_person` (per-person sections with `👤 <Name>` headers + counts); `::test_evening_admin_audit_payload_carries_per_person_plan_task_ids` (audit row carries `{uid: [task_id]}` for morning diff); `test_morning_cards.py::test_morning_admin_diff_renders_added_and_done_per_person` (✅ done + 🗑 deleted + ➕ added classification); `::test_morning_admin_diff_returns_none_with_no_changes`; `::test_morning_admin_diff_returns_none_when_no_prior_plan` |
 | FR-CR-05-90  | `test_retro_share_docs_cli.py::test_retro_share_dry_run_skips_api_calls` (--dry-run never calls `_share_anyone_with_link`); `::test_retro_share_invokes_share_with_writer_role_by_default` (one call per recording, role=writer); `::test_retro_share_role_flag_overrides_default` (--role reader → reader); `::test_retro_share_skips_recordings_without_google_doc_id` (null doc_id excluded by SQL filter); `::test_retro_share_continues_on_per_doc_failure` (per-doc 4xx doesn't abort, exit=1); `::test_retro_share_returns_2_when_credentials_unavailable` (bad config → exit 2); `::test_fireflies_pipeline_calls_export_summary_with_writer_default` (invariant — pipeline does NOT pass `share_role=` to export_summary, default 'writer' wins) |
 | FR-CR-05-89  | `test_resync_sheet_cli.py::test_normalize_task_title_caps_long_no_break_paragraph` (200-char paragraph with no early break → 100+ellipsis word-boundary cut); `::test_normalize_task_title_first_clause_break_wins_over_hard_cut` («Поговорил с Fortuna: …» kept first clause); `::test_normalize_task_title_preserves_short_titles_unchanged` (no rewriting on short input); `::test_resync_sheet_dry_run_reports_capped_titles_without_writing`; `::test_resync_sheet_caps_titles_resets_row_id_and_resyncs` (title normalised in DB, row_id cleared, sheets.sync invoked); `::test_resync_sheet_include_deleted_flag_pushes_tombstones`; `::test_resync_sheet_returns_exit_code_2_when_no_credentials`; `test_intent_pipeline.py::test_detect_prompt_rejects_transcription_dumps_as_no_action` (TRANSCRIPTION DUMP HARD RULE + «На изображении» / «Обсуждают» / «Это что?» worked failure-modes pinned); `::test_title_prompt_forbids_naked_verb_titles` («Встретиться» counter-example + (уточнить детали) fallback); `::test_title_prompt_pins_truncated_date_range_failure» («Ryan будет в Лондоне с 4 по» half-range example); `::test_date_prompt_requires_proof_quote_or_null` (PROOF QUOTE OR NULL rule + MGX «до конца мая» counter-example + «либо в описание добавляй пруф либо сегодня» literal phrase pinned) |
 | FR-CR-05-83  | `test_evening_status.py::test_evening_tomorrow_plan_lists_tasks_for_next_day` (status digest + second message naming tomorrow's tasks; `tg://openmessage` hyperlink lands on the title); `::test_evening_tomorrow_plan_includes_overdue_today` (🚨 bullet on overdue lines + «Rolling over from today: 1» count); `::test_evening_tomorrow_plan_skipped_when_no_tasks` (no second DM when nothing scheduled, `tomorrow_plans_sent=0`); `::test_evening_tomorrow_plan_long_list_splits_into_multiple_messages` (80-task list splits at task boundaries, every chunk ≤4096 chars, `(continued)` marker on follow-ups); `::test_evening_status_groups_done_in_progress_todo` updated to assert 2 DMs (status + plan) |

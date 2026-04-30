@@ -88,6 +88,52 @@ def _ffprobe_duration_seconds(path: str) -> float:
         raise RuntimeError(f"ffprobe output unparseable: {proc.stdout!r}") from e
 
 
+def _sniff_audio_extension(path: str) -> str | None:
+    """FR-CR-05-117 — peek at the first 16 bytes and decide the
+    real container. Returns the extension WITHOUT a dot, or
+    None when the bytes don't match anything we know.
+
+    Zoom's `download_url` never carries the file extension, so
+    we used to guess based on the URL string and got it wrong
+    when M4A/MP4 collisions happened. Sniffing is reliable.
+    """
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except OSError:
+        return None
+    if len(head) < 12:
+        return None
+    # ISO-BMFF (MP4 / M4A): bytes 4-7 are «ftyp», 8-11 are the
+    # major brand. M4A uses brand «M4A », MP4 video uses «mp42»
+    # / «isom» / «iso2».
+    if head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"M4A ", b"M4B ", b"mp41", b"mp42") and (
+            head[8:11] in (b"M4A", b"M4B")
+        ):
+            return "m4a"
+        return "mp4"
+    # MP3 ID3 header «ID3» or MP3 frame sync «0xFFE…» / «0xFFF…».
+    if head[:3] == b"ID3":
+        return "mp3"
+    if head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
+        return "mp3"
+    # WAV «RIFF….WAVE».
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "wav"
+    # Ogg «OggS».
+    if head[:4] == b"OggS":
+        return "ogg"
+    # FLAC «fLaC».
+    if head[:4] == b"fLaC":
+        return "flac"
+    # WebM / Matroska «1a 45 df a3».
+    if head[:4] == b"\x1a\x45\xdf\xa3":
+        return "webm"
+    return None
+
+
 def _split_audio_into_chunks(path: str, *, max_bytes: int) -> list[str]:
     """FR-CR-05-115 — split `path` (an mp3 file) into chunks
     each ≤ `max_bytes`, using `ffmpeg -c copy` so we don't
@@ -111,11 +157,18 @@ def _split_audio_into_chunks(path: str, *, max_bytes: int) -> list[str]:
     # +5% safety margin so we don't sit right at max_bytes.
     n_chunks = max(2, math.ceil(size * 1.05 / max_bytes))
     chunk_seconds = duration / n_chunks
-    base = path.rsplit(".", 1)[0]
+    base, _, in_ext = path.rpartition(".")
+    if not base:
+        base, in_ext = path, "mp3"
+    # FR-CR-05-117 — chunker preserves the input container so
+    # `-c copy` works (AAC into M4A, MP3 into MP3, etc.). Forcing
+    # `.mp3` while the source is M4A/AAC trips ffmpeg with
+    # «Exactly one MP3 audio stream is required».
+    out_ext = (in_ext or "mp3").lower()
     out: list[str] = []
     for i in range(n_chunks):
         start = i * chunk_seconds
-        chunk_path = f"{base}.chunk{i:02d}.mp3"
+        chunk_path = f"{base}.chunk{i:02d}.{out_ext}"
         proc = subprocess.run(
             [
                 "ffmpeg", "-y", "-loglevel", "error",

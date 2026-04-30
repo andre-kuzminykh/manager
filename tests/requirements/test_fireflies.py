@@ -25,6 +25,7 @@ from app.fireflies.client import FirefliesClient, FirefliesTranscript
 from app.fireflies.pipeline import (
     FirefliesPipeline,
     _looks_like_auto_stamp_title,
+    _sniff_audio_extension,
     _strip_markdown_emphasis,
     _strip_uid_suffixes,
     _truncate,
@@ -614,6 +615,82 @@ def test_looks_like_auto_stamp_title_detects_fireflies_defaults():
     assert _looks_like_auto_stamp_title("Раунд Humanoid") is False
     assert _looks_like_auto_stamp_title("Goldman Sachs intro") is False
     assert _looks_like_auto_stamp_title("Mayfield prep") is False
+
+
+def test_sniff_audio_extension_detects_real_container(tmp_path):
+    """FR-CR-05-117 — Zoom never includes the file extension in
+    `download_url`, and the actual M4A audio it serves used to
+    be saved as `.mp4` because the URL didn't say «m4a». That
+    tripped Whisper («Invalid file format») and the chunker
+    («Exactly one MP3 audio stream is required»). Sniffer reads
+    the first 16 bytes and returns the real container, which the
+    Zoom pipeline uses to pick a .m4a / .mp3 / etc. extension."""
+    cases = {
+        # M4A (Zoom's default audio-only export).
+        "m4a": b"\x00\x00\x00\x20" + b"ftyp" + b"M4A " + b"\x00" * 4,
+        # Real video MP4.
+        "mp4": b"\x00\x00\x00\x20" + b"ftyp" + b"mp42" + b"\x00" * 4,
+        # MP3 with ID3v2 header (Fireflies path).
+        "mp3": b"ID3\x04\x00\x00\x00\x00\x00\x00" + b"\x00" * 6,
+        # WAV.
+        "wav": b"RIFF\x00\x00\x00\x00WAVEfmt " + b"\x00" * 0,
+        # Ogg.
+        "ogg": b"OggS\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        # FLAC.
+        "flac": b"fLaC\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+    }
+    for ext, magic in cases.items():
+        f = tmp_path / f"sample.bin"
+        f.write_bytes(magic)
+        assert _sniff_audio_extension(str(f)) == ext, ext
+
+    # Mystery garbage → None (caller falls back to a default).
+    f = tmp_path / "junk.bin"
+    f.write_bytes(b"not-a-known-magic-prefix-123456")
+    assert _sniff_audio_extension(str(f)) is None
+
+    # Missing file → None, no exception.
+    assert _sniff_audio_extension(str(tmp_path / "nope")) is None
+
+
+def test_split_audio_chunker_preserves_input_container(monkeypatch, tmp_path):
+    """FR-CR-05-117 — chunker used to force `.mp3` output via
+    `-c copy`, which fails when the source is M4A/AAC. After
+    the fix, output extension equals input extension so
+    «-c copy» is always a valid combo."""
+    from app.fireflies import pipeline as fp
+
+    # Stub ffmpeg + ffprobe so the test doesn't need the binary.
+    monkeypatch.setattr(fp.shutil, "which", lambda _name: "/usr/bin/" + _name)
+    monkeypatch.setattr(fp, "_ffprobe_duration_seconds", lambda _p: 60.0)
+
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        captured.append(list(cmd))
+        # Materialise the expected output file so the chunker's
+        # post-condition («ffmpeg produced no output») passes.
+        out_path = cmd[-1]
+        with open(out_path, "wb") as f:
+            f.write(b"x" * 100)
+
+        class _R:
+            returncode = 0
+            stderr = ""
+
+        return _R()
+
+    monkeypatch.setattr(fp.subprocess, "run", fake_run)
+
+    src = tmp_path / "meeting.m4a"
+    src.write_bytes(b"x" * (30 * 1024 * 1024))
+
+    chunks = fp._split_audio_into_chunks(str(src), max_bytes=10 * 1024 * 1024)
+    assert chunks, "chunker returned nothing"
+    for ch in chunks:
+        assert ch.endswith(".m4a"), ch  # NOT .mp3
+    # Verify the ffmpeg call carried `-c copy` and an .m4a output.
+    assert any("-c" in cmd and cmd[-1].endswith(".m4a") for cmd in captured)
 
 
 def test_strip_markdown_emphasis_removes_paired_markers():

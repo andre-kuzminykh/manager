@@ -132,9 +132,16 @@ class ZoomPipeline:
         if not row.audio_url:
             row.last_error = "no audio_url on Zoom record"
             return False
-        ext = "m4a" if "m4a" in (row.audio_url or "").lower() else "mp4"
+        # FR-CR-05-117 — Zoom UUIDs are base64 with `/` and `=`,
+        # which create unwanted subdirs / weird filenames when
+        # used directly. Sanitize for the on-disk path.
+        safe_id = (row.zoom_id or "").replace("/", "_").replace("=", "")
+        # Provisional .bin extension; we sniff magic bytes after
+        # download and rename to the real container so Whisper +
+        # ffmpeg get the right hint. Zoom's URL never contains
+        # the file extension, so we can't decide it upfront.
         dest = os.path.join(
-            self._settings.zoom_audio_dir, f"{row.zoom_id}.{ext}"
+            self._settings.zoom_audio_dir, f"{safe_id}.bin"
         )
         size = self._client.download_audio(
             url=row.audio_url,
@@ -144,7 +151,16 @@ class ZoomPipeline:
         if size is None:
             row.last_error = "audio download failed or exceeded cap"
             return False
-        row.audio_path = dest
+        # Detect the real container from magic bytes and rename.
+        from app.fireflies.pipeline import _sniff_audio_extension
+
+        ext = _sniff_audio_extension(dest) or "mp4"
+        final = os.path.join(
+            self._settings.zoom_audio_dir, f"{safe_id}.{ext}"
+        )
+        if final != dest:
+            os.replace(dest, final)
+        row.audio_path = final
         row.audio_downloaded = True
         row.last_error = None
         return True

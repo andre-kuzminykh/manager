@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # cannot handle reliably on relative phrases. Defaults to gpt-4o; set
     # to empty string to fall back to openai_model.
     openai_date_model: str = Field(default="gpt-4o", alias="OPENAI_DATE_MODEL")
+    # FR-CR-05-102 — dedup compares long-form Russian
+    # descriptions; gpt-4o-mini missed near-identical cases. Set
+    # to empty string to fall back to `openai_model`.
+    openai_dedup_model: str = Field(default="gpt-4o", alias="OPENAI_DEDUP_MODEL")
 
     # Google
     google_client_id: str = Field(default="", alias="GOOGLE_CLIENT_ID")

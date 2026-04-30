@@ -833,6 +833,37 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-102 — Dedup call upgraded to gpt-4o (away from gpt-4o-mini)
+
+Operator: «надо смотреть в описание и с LLM сравнивать как я
+написал: берем последнее сообщение и 10 последних задач и
+спрашиваем LLM есть ли дубли — все!!!». No deterministic
+matching. Pure LLM dispatch.
+
+Root cause of the persistent dup regressions (Atuwatse
+Okorodudu × 2 with literally-identical titles AND
+near-identical descriptions; PALADIN Goldman Sachs × 2):
+the dedup LLM call was using `openai_model` (gpt-4o-mini)
+which is unreliable on long-form Russian description
+comparison. The model defaults to «not duplicate» on
+near-misses.
+
+Fix: `task_dedup.py::check_duplicate` now forces the dedup
+call to use `gpt-4o` via the new
+`Settings.openai_dedup_model` config (defaults to `gpt-4o`,
+override with `OPENAI_DEDUP_MODEL=…`, set empty string to
+fall back to `openai_model`). Same trick the date node
+already uses (`openai_date_model`). The model override is
+passed via the existing `call_tool(model=...)` kwarg;
+backends without that kwarg silently use their default.
+
+Architectural unchanged from operator's spec:
+  - take new task (full title + description)
+  - take 10 recent open tasks/drafts (full title +
+    description, ≤1500 chars each)
+  - LLM verdict: yes → drop draft; no → ship.
+  - no Python title/owner/date matching.
+
 #### FR-CR-05-101 — Final dedup form, first-person→imperative post-process, suffix-naked-verb, no-fallback for intentional null
 
 Operator: «нужно сравнить описание новой задачи с контекстом
@@ -4465,6 +4496,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-102 | `test_task_dedup.py::test_dedup_call_uses_strong_model` (dedup `call_tool` invoked with `model="gpt-4o"`, not the default mini); existing `::test_dedup_dispatches_to_llm_with_full_descriptions` still pins the ≤1500-char description feed |
 | FR-CR-05-101 | `test_task_dedup.py::test_dedup_prompt_is_minimal_focused_classifier` (≤700-char final form: 10-existing framing + «compare descriptions» + output schema); `test_intent_pipeline.py::test_dedup_prompt_minimal_no_legacy_blocks` (legacy synonym/family blocks gone); `test_intent_graph.py::test_date_node_does_not_fall_back_when_llm_intentionally_null` (LLM null + reasoning → no fallback); `::test_date_node_falls_back_when_llm_silent_no_reasoning` (still falls back when call genuinely failed) |
 | FR-CR-05-100 | `test_intent_pipeline.py::test_title_prompt_converts_first_person_to_imperative` (FIRST-PERSON COMMITMENTS block + Артём Барсуков regression «Я тебе сейчас пришлю драфт письма» → «прислать драфт письма по Артему Барсукову» rewrite + «Я отправлю» / «I'll send» / «сейчас скину» fragments pinned); `test_task_dedup.py::test_dedup_dispatches_to_llm_with_full_descriptions` (no deterministic gate; LLM sees up to 1500 chars of description for both candidate and existing); `::test_dedup_prompt_is_minimal_focused_classifier` (≤2500-char prompt + «look at the descriptions, not just the titles» framing) |
 | FR-CR-05-99  | `test_task_dedup.py::test_dedup_prompt_is_minimal_focused_classifier` (≤1700-char tight binary-classifier prompt with verb-family + specific-subject + EXTERNAL-audience-discriminator + Default-to-FALSE rules); `::test_dedup_prompt_keeps_different_audience_distinct` («отчёт Ирине ≠ отчёт Артёму» rule survives the minimal-prompt rewrite); `test_intent_pipeline.py::test_is_naked_verb_title_catches_bare_verbs` (Russian + English bare-verb list; trailing punctuation stripping; verb-with-object passes through); `test_telegram_listener.py::test_listener_tick_processes_updates_and_advances_offset` updated for dedup behaviour (2 same-title updates → 1 Task created via deterministic dedup, both bookmarked) |

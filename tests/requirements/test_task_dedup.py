@@ -79,6 +79,45 @@ def test_normalize_title_for_match_collapses_whitespace_case_yo_e():
     assert f("Подтвердить тёщу") == f("Подтвердить тещу")
 
 
+def test_dedup_call_uses_strong_model(session, monkeypatch):
+    """FR-CR-05-102 — operator: «надо смотреть в описание и с
+    LLM сравнивать». gpt-4o-mini was missing near-identical
+    cases (Atuwatse Okorodudu × 2). Dedup now forces gpt-4o
+    via `openai_dedup_model` so the LLM call is reliable
+    enough to handle long-form Russian description
+    comparison."""
+    from app.config import get_settings
+    from app.services.task_dedup import check_duplicate
+
+    captured: dict = {}
+
+    class _ModelCapturingBackend:
+        def __init__(self):
+            self.calls = 0
+            self.last_user_prompt = None
+
+        def call_tool(self, **kw):
+            self.calls += 1
+            self.last_user_prompt = kw.get("user_prompt")
+            captured["model"] = kw.get("model")
+            return {"is_duplicate": False}
+
+    _mk(session, title="x", owner_user_id="111")
+    session.commit()
+    backend = _ModelCapturingBackend()
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        check_duplicate(
+            session,
+            candidate={"title": "y", "owner_user_id": "111"},
+            llm_backend=backend,
+        )
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+    # The dedup call passes `model=gpt-4o`, not the default mini.
+    assert captured["model"] == "gpt-4o"
+
+
 def test_dedup_dispatches_to_llm_with_full_descriptions(session):
     """FR-CR-05-100 — operator: «по описанию задачи надо».
     The LLM gets each existing item with its FULL description

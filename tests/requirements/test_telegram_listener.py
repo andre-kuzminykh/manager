@@ -227,10 +227,9 @@ def test_listener_tick_processes_updates_and_advances_offset(
     report = listener.tick()
     assert report.updates_seen == 2
     assert report.messages_processed == 2
-    # FR-CR-05-100 — without the deterministic pre-check, the
-    # LLM dedup gate is bypassed when no backend is configured
-    # (this test's stub classifier doesn't carry an LLM). Both
-    # tasks land.
+    # FR-CR-05-102 — pure LLM dedup; this test's classifier
+    # stub doesn't carry an LLM backend, so dedup short-
+    # circuits to «not duplicate» and both tasks land.
     assert report.tasks_created == 2
 
     with SessionFactory() as s:
@@ -240,7 +239,6 @@ def test_listener_tick_processes_updates_and_advances_offset(
         assert s.query(Task).count() == 2
         rows = s.query(ProcessedTelegramMessage).all()
         assert {(r.chat_id, r.message_id) for r in rows} == {(7, 1), (7, 2)}
-        # Both tasks are flagged as Telegram-sourced.
         for t in s.query(Task).all():
             assert t.source_kind == TaskSourceKind.telegram
 

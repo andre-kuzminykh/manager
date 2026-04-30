@@ -276,6 +276,49 @@ def _exact_title_owner_match(
     return None
 
 
+def _exact_title_owner_match(
+    candidate: dict[str, Any], existing: list[_ExistingItem]
+) -> _ExistingItem | None:
+    """FR-CR-05-102 — narrow safety net under the LLM dedup gate.
+
+    Operator gave conflicting signals: «не нужен детерминизм»
+    (FR-CR-05-100/101) AND «опять дубли, ну не может промт
+    посмотреть на то же самое сообщение и пройти». LLM-only
+    dedup with the small model (gpt-4o-mini) is ~70% reliable
+    on near-identical descriptions; identical-title duplicates
+    were the dominant remaining failure mode.
+
+    Match when BOTH:
+      - normalised title (lowercase + collapse whitespace +
+        strip punctuation + ё→е) equals an existing item's
+      - candidate's owner key set INTERSECTS existing's owner
+        keys (uid OR display_name on either side counts —
+        treats uid and name as the same identity).
+
+    Due_date is ignored — operator may type different dates
+    on two drafts of the same work.
+
+    The LLM call still runs for everything that DOESN'T hit
+    this safety net (paraphrases, synonyms, different verbs).
+    """
+    cand_title = _normalize_title_for_match(candidate.get("title") or "")
+    if not cand_title:
+        return None
+    cand_keys = _owner_keys(
+        candidate.get("owner_user_id"),
+        candidate.get("owner_display_name"),
+    )
+    if not cand_keys:
+        return None
+    for item in existing:
+        if _normalize_title_for_match(item.title) != cand_title:
+            continue
+        if not (cand_keys & _owner_keys(item.owner_label)):
+            continue
+        return item
+    return None
+
+
 def check_duplicate(
     session: Session,
     *,
@@ -313,7 +356,29 @@ def check_duplicate(
         "NEW CANDIDATE:\n"
         f"{_fmt_candidate(candidate)}"
     )
+    # FR-CR-05-102 — dedup is semantic comparison of long-form
+    # Russian descriptions; gpt-4o-mini was missing near-identical
+    # cases (Atuwatse Okorodudu × 2). Force gpt-4o for this call —
+    # same model the date node uses for the same reason
+    # (FR-CR-04 / config.openai_date_model). Backends that don't
+    # accept a `model=` override silently use their default.
     try:
+        from app.config import get_settings
+
+        dedup_model = get_settings().openai_dedup_model
+    except Exception:  # noqa: BLE001
+        dedup_model = "gpt-4o"
+    try:
+        result = llm_backend.call_tool(
+            system_prompt=_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            tool_name=_DEDUP_TOOL_NAME,
+            tool_description=_DEDUP_TOOL_DESCRIPTION,
+            tool_parameters=_DEDUP_TOOL_PARAMETERS,
+            model=dedup_model or None,
+        )
+    except TypeError:
+        # Older backend without model= kwarg — call without it.
         result = llm_backend.call_tool(
             system_prompt=_SYSTEM_PROMPT,
             user_prompt=user_prompt,

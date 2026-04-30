@@ -833,6 +833,58 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-82 — Description must carry every named entity; date prompt blocks implicit-Monday hallucination
+
+Operator: «"Обсудить возможность встречи или следующей чтобы
+подготовиться к раунду" — почему стоит 4 мая? категорически
+не хватает описания, чтобы можно было доверить, вся фактура
+в описании должна быть».
+
+Source/context contained Fubon, Ryan Gariepy, four explicit
+time-slot windows (May 5 18-21, May 6 9-12 or 17-19, May 8
+9-12, May 9 17-19), and an internal draft consensus on May 6
+11:30 London / 18:30 Taiwan. The bot produced:
+
+  - `due_date=2026-05-04` — Monday after current_date=2026-04-30,
+    which appears NOWHERE in the source (pure inference from a
+    vague «следующей»).
+  - description = 2 short sentences mirroring the title and
+    naming nobody («Важно, чтобы это было согласовано с
+    руководителем»).
+
+Two layered prompt fixes:
+
+  - **`title_prompt.py::TITLE_SYSTEM_PROMPT` — NAMED-ENTITY
+    COVERAGE (HARD REQUIREMENT).** New section sits ABOVE
+    «CONCRETE OVER VAGUE» and demands the LLM scan source +
+    every preceding `context` message and copy EVERY person
+    name, company / fund / client / project, specific date or
+    time slot, amount / valuation / contract number into the
+    description verbatim. ≤1 named entity in the description
+    when ≥2 are in source = explicit failure. The full Fubon /
+    Ryan Gariepy / four-slot regression is pinned as a worked
+    BAD/GOOD example. LENGTH RULE bumped from «1-3 SHORT
+    sentences, ~40-200 chars» to «3-6 sentences, ~150-600
+    chars when material is available» to give the LLM room to
+    pack context.
+
+  - **`date_prompt.py::DATE_SYSTEM_PROMPT` — NO HALLUCINATING
+    DATES NOT IN SOURCE.** New rule 9 forbids projecting the
+    upcoming Monday unless the source LITERALLY contains
+    «следующая неделя» / «next week» / «понедельник» /
+    «Monday» / «к понедельнику» / «by Monday». Same constraint
+    on every other weekday. Multi-candidate-dates branch:
+    when source offers OPTIONS («pick one of May 5/6/8/9»),
+    emit null unless one slot is unambiguously singled out
+    («выбрали X», «final: Z»); never pick «the earliest».
+    The exact 2026-05-04 regression is pinned as BAD output
+    alongside the Fubon scenario.
+
+Same `prompts.py::SYSTEM_PROMPT` description block updated
+in parallel (it's the legacy single-call path; production now
+uses the split `title_prompt.py` stage but we keep both
+copies in sync for any future fall-back path).
+
 #### FR-CR-05-79 — Owner prompt: requester ≠ doer + role-pair assistant inference
 
 Operator: «"Артём попросил посмотреть письмо свежим взглядом"
@@ -3645,6 +3697,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-82  | `test_intent_pipeline.py::test_title_prompt_requires_named_entity_coverage` (NAMED-ENTITY COVERAGE block + Fubon / Ryan Gariepy / May 6 11:30 London / FR-CR-05-82 fragments pinned; entity classes spelled out); `::test_title_prompt_length_rule_targets_3_to_6_sentences` («3-6 sentences» replaces «1-3 SHORT sentences»); `::test_date_prompt_forbids_implicit_monday_inference` (NO HALLUCINATING DATES + four required literal triggers + multi-candidate-dates rule + 2026-05-04 BAD-output regression all pinned, «never pick the earliest» enforced) |
 | FR-CR-05-38  | manual visual verification — after an Edit reply the listener posts a fresh DM with the full rendered task card / widget body in context; the original card / widget is also edited in place by `refresh_card` / `refresh_draft_widgets` |
 | FR-CR-05-40  | `test_evening_status.py::test_evening_status_groups_done_in_progress_todo` (3 tasks → 3 sections + 1 LLM call each); `::test_evening_status_subscriber_only_user_still_gets_dm` (no owned tasks but subscribed → 👀 Подписки section); `::test_evening_status_skips_user_with_no_tasks` (no tasks → 0 recipients); `::test_compose_narrative_falls_back_when_llm_raises` + `::test_compose_narrative_falls_back_when_llm_returns_empty` (fail-open to deterministic fallback); `::test_compose_narrative_truncates_long_response` (LLM > 240 chars → trimmed + `…`); `::test_evening_status_works_without_llm` (`llm=None` still ships fallback); `::test_evening_status_renders_title_as_hyperlink` (`<a href=permalink><b>title</b></a>`); `::test_evening_status_idempotent_per_user_per_day` (re-run = no new DMs); `::test_evening_status_admin_gets_team_overview` (admin uid → «Сводка по команде» with ALL tasks); `::test_split_groups_packs_into_multiple_messages_under_cap` + `::test_split_groups_single_message_when_short` (helper unit tests); `::test_evening_status_splits_long_report_into_multiple_messages` (80 tasks + verbose narrative → ≥2 DMs, each ≤4096 chars) |
 | FR-CR-05-41  | `test_morning_cards.py::test_morning_cards_picks_due_today_in_progress_and_current_week_no_due` (selector: 3 categories qualify; far-away + done excluded); `::test_morning_cards_orders_by_priority_then_due_time` (urgent → high-early → med-late → low); `::test_morning_cards_subscriber_gets_separator_only_when_owned_above` (📋 / 👀 boundary marker only when there's something above it); `::test_morning_cards_attaches_full_task_keyboard` (Mark done + Edit buttons present on the in_progress card); `::test_morning_cards_intro_lists_day_count` (intro DM has «Доброе утро» + N); `::test_morning_cards_idempotent_per_user_per_day` (re-run = no-op); `::test_morning_cards_owner_with_no_due_today_marked_skipped` (no qualifying tasks → skipped_no_tasks=1) |

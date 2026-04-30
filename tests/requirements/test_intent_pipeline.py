@@ -164,6 +164,45 @@ def test_title_prompt_forbids_trailing_clauses_in_descriptions():
     assert "trail off" in blob.lower() or "trailing" in blob.lower()
 
 
+def test_title_prompt_requires_named_entity_coverage():
+    """FR-CR-05-82 — operator regression: source had Fubon, Ryan
+    Gariepy, four explicit time slots; LLM produced a 2-sentence
+    description that named NOBODY. The title prompt must demand
+    every named entity from source + context lands verbatim in
+    the description, with the «Обсудить возможность встречи»
+    failure case pinned."""
+    blob = TITLE_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    # Hard requirement section is present.
+    assert "NAMED-ENTITY COVERAGE" in blob
+    assert "HARD REQUIREMENT" in blob
+
+    # The four entity classes are spelled out.
+    for cls in ("person names", "company", "time slots", "amounts"):
+        assert cls in flat.lower(), f"entity class {cls!r} should be pinned"
+
+    # FR-CR-05-82 worked counter-example pinned (key fragments).
+    for fragment in (
+        "Fubon",
+        "Ryan Gariepy",
+        "May 6 11:30 London",
+        "FR-CR-05-82",
+    ):
+        assert fragment in blob, f"{fragment!r} should be pinned in failure-mode example"
+
+
+def test_title_prompt_length_rule_targets_3_to_6_sentences():
+    """FR-CR-05-82 — operator complaint «вся фактура в описании
+    должна быть». The previous «1-3 SHORT sentences, ~40-200
+    chars» rule discouraged the LLM from packing context. New
+    target: 3-6 sentences when material is available."""
+    blob = TITLE_SYSTEM_PROMPT
+    assert "3-6 sentences" in blob or "3-6 sentences total" in blob
+    # Old «1-3 SHORT sentences» language should be gone.
+    assert "1-3 SHORT sentences" not in blob
+
+
 def test_owner_prompt_renders_role_and_notes_columns():
     """FR-CR-05-12 — the owner prompt receives `role` and `notes`
     per known_employee row to disambiguate same-first-name
@@ -599,6 +638,40 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "Мистраль" in blob or "Arthur Mehcsh" in blob
     # Anchor requirement.
     assert "temporal anchor" in blob.lower() or "к 5" in blob
+
+
+def test_date_prompt_forbids_implicit_monday_inference():
+    """FR-CR-05-82 — operator regression: source had four
+    explicit time-slot dates (May 5/6/8/9) and the LLM emitted
+    `due_date=2026-05-04` (next Monday — NOT in source
+    anywhere). The date prompt must now refuse to project the
+    upcoming Monday unless the source LITERALLY contains
+    «следующая неделя» / «next week» / «понедельник» /
+    «Monday» / «к понедельнику» / «by Monday»."""
+    from app.intent.date_prompt import DATE_SYSTEM_PROMPT
+
+    blob = DATE_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    # Anti-hallucination rule and FR ID pinned.
+    assert "NO HALLUCINATING DATES" in blob or "hallucinating dates" in blob.lower()
+    assert "FR-CR-05-82" in blob
+
+    # The required literal phrases for «next Monday» are spelled out.
+    for phrase in ("следующая неделя", "next week", "понедельник", "Monday"):
+        assert phrase in blob, f"{phrase!r} must be listed as a required literal trigger"
+
+    # Multi-candidate-dates rule is taught (May 5/6/8/9 example).
+    assert "MULTIPLE candidate dates" in blob or "multiple candidate dates" in blob.lower()
+    assert "May 5" in blob and "May 6" in blob and "May 8" in blob and "May 9" in blob
+
+    # The exact regression output (2026-05-04 from no source phrase) is
+    # pinned as BAD.
+    assert "2026-05-04" in blob
+    assert "BAD output" in blob
+
+    # «Never pick the earliest of multiple candidate slots» is in.
+    assert "earliest" in blob.lower()
 
 
 def test_intent_prompt_pins_no_list_item_dates():

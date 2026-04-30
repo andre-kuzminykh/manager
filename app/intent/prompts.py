@@ -116,8 +116,26 @@ Rules:
 7. Description must carry CONCRETE, RICH CONTEXT — aim for
    3-6 sentences. The title is the imperative one-liner; the
    description is where the recipient figures out the FULL
-   story WITHOUT going back to the source chat. Required
-   contents (when the source / context carry any of these —
+   story WITHOUT going back to the source chat.
+
+   HARD REQUIREMENT — NAMED-ENTITY COVERAGE. Before you
+   finish the description, scan the source AND the
+   `context_messages` block and copy EVERY ONE of these
+   entities into the description verbatim:
+     - person names (Артём, Ирина, Ryan Gariepy, …)
+     - company / fund / client / project names (Fubon,
+       Mistral, Apex, …)
+     - specific dates and time slots (May 5 6-9pm, May 6
+       11:30 London / 18:30 Taiwan, …)
+     - amounts, fund sizes, valuations, contract numbers,
+       document names, URLs
+   If the source/context names ≥2 such entities and your
+   description mentions ≤1 of them, YOU HAVE FAILED — go
+   back and rewrite. A description that mirrors the title
+   («необходимо обсудить возможность встречи») is the
+   regression signal we are fighting.
+
+   Required content order (when present in source/context —
    never invent):
 
    (a) THE SPECIFIC SUBJECT. Which report? which list? which
@@ -129,17 +147,15 @@ Rules:
        `context_messages` block right above the source. Pull
        names liberally from the surrounding conversation —
        they're the «whose request is this», «who's the
-       audience», «who else was tagged». BAD: «отправить
-       инвайт Олаяна. Просьба от Юли». GOOD: «По просьбе
-       Юли (CEO Office) — отправить Олаяну приглашение на
-       встречу 30 апреля в 14:00 МСК через Google Calendar.
-       Олаян ранее выражал интерес к раунду; meeting agenda
-       прислала Юля выше в чате».
+       audience», «who else was tagged».
 
-   (c) ALL FACTS / NUMBERS / DEADLINES copied verbatim from
-       source — dates, times, amounts, fund sizes, valuations,
-       check sizes, contract numbers, document names,
-       URLs.
+   (c) ALL FACTS / NUMBERS / DEADLINES / TIME SLOTS copied
+       verbatim from source — dates, times, amounts, fund
+       sizes, valuations, check sizes, contract numbers,
+       document names, URLs. If source lists multiple
+       candidate slots («May 5 6-9pm, May 6 9-12 or 5-7pm,
+       May 8 9-12pm, May 9 5-7pm»), include ALL of them in
+       the description even if you can't pick one due_date.
 
    (d) WHY THIS NEEDS TO BE DONE — only when the source
        describes it: «к 14:00 потому что это слот клиента»,
@@ -159,7 +175,7 @@ Rules:
    leave description null and the deterministic fallback
    («обсуждалось в …») will fill it.
 
-   Worked failure-mode example:
+   Worked failure-mode example A (assistant request):
        source: «Юля: отправь инвайт Олаяна на встречу в 14:00»
        context_messages (preceding):
          - [11:32] Юля: ребят, утвердили слот с Олаяном — 30 апреля
@@ -167,13 +183,41 @@ Rules:
                   Calendar
          - [11:33] Юля: agenda прикреплена в drive
        BAD desc:  «Необходимо отправить инвайт Олаяна на встречу в
-                   14:00. Это просьба от Юли»  (~80 chars)
+                   14:00. Это просьба от Юли»  (~80 chars,
+                   misses Google Calendar / agenda / 30 апреля)
        GOOD desc: «По просьбе Юли — отправить Олаяну инвайт на
                    встречу 30 апреля в 14:00 МСК через Google
                    Calendar. Слот утверждён с его помощником;
                    agenda Юля приложила в Drive выше в чате.
                    Нужно отправить ДО следующего рабочего дня
                    чтобы Олаян успел подтвердить.» (~280 chars)
+
+   Worked failure-mode example B (meeting scheduling —
+   operator regression FR-CR-05-82):
+       source: «Обсудить возможность встречи или следующей
+                чтобы подготовиться к раунду»
+       context_messages (preceding):
+         - email from Ryan Gariepy about meeting
+         - Fubon contact: «May 5th 6-9pm, May 6th 9-12 or
+                          5-7pm, May 8th 9-12pm, May 9th 5-7pm»
+         - internal: «возьмём May 6 11:30 London / 18:30 Taiwan»
+         - Артём: «у меня 5 мая блок в календаре»
+       BAD desc: «Необходимо обсудить возможность встречи или
+                  следующей, чтобы подготовиться к раунду.
+                  Важно, чтобы это было согласовано с
+                  руководителем» (mirrors title, names NOBODY,
+                  loses Fubon, Ryan Gariepy, all four time
+                  slots — UNACCEPTABLE)
+       GOOD desc: «По переписке с Fubon и Ryan Gariepy —
+                   подтвердить слот встречи под раунд. Fubon
+                   предложили 4 окна: 5 мая 18:00–21:00, 6 мая
+                   09:00–12:00 или 17:00–19:00, 8 мая 09:00–12:00,
+                   9 мая 17:00–19:00. Внутри предварительно
+                   договорились на 6 мая 11:30 London / 18:30
+                   Taiwan, но Артём отметил, что 5 мая у него
+                   блок в календаре. Нужно согласовать
+                   финальный слот и отправить инвайт.»
+
    Same rule applies to meetings → notes.
 8. Respond with a single JSON object matching the provided schema.
 """

@@ -43,8 +43,13 @@ Produce three fields:
                 context to act on the task without scrolling back
                 through the chat.
 
-                LENGTH RULE — keep it tight:
-                  - 1-3 SHORT sentences total, ~40-200 characters.
+                LENGTH RULE — aim for SUBSTANTIAL context:
+                  - 3-6 sentences total, ~150-600 characters
+                    when the source/context carry enough
+                    material (FR-CR-05-82 — operator complaint:
+                    «вся фактура в описании должна быть»).
+                    Shorter is acceptable ONLY when the source
+                    is genuinely sparse.
                   - ALWAYS finish every sentence with a period /
                     full stop. Never trail off mid-sentence with
                     an open clause («так как осталось открытым
@@ -53,6 +58,55 @@ Produce three fields:
                     sentence — partial trailing clauses are
                     worse than a shorter description.
                   - No bullet lists, no markdown.
+
+                NAMED-ENTITY COVERAGE (HARD REQUIREMENT) —
+                before you finish writing the description, scan
+                the source AND every preceding `context` message
+                and copy EVERY ONE of these entities into the
+                description verbatim:
+                  - person names (Артём, Ирина, Ryan Gariepy, …)
+                  - company / fund / client / project names
+                    (Fubon, Mistral, Apex, Olayan, …)
+                  - specific dates / time slots / windows
+                    («5 мая 18-21», «May 6 11:30 London»)
+                  - amounts, valuations, fund sizes, contract
+                    numbers, document names, URLs
+                If the source/context together name ≥2 such
+                entities and your description mentions ≤1 of
+                them, YOU HAVE FAILED — rewrite. A description
+                that mirrors the title («необходимо обсудить
+                возможность встречи») is THE regression signal
+                we are fighting.
+
+                Worked failure-mode (operator regression
+                FR-CR-05-82):
+                    source: «Обсудить возможность встречи или
+                            следующей чтобы подготовиться к
+                            раунду»
+                    context (preceding):
+                      - email from Ryan Gariepy about meeting
+                      - Fubon: «May 5th 6-9pm, May 6th 9-12 or
+                        5-7pm, May 8th 9-12pm, May 9th 5-7pm»
+                      - internal: «возьмём May 6 11:30 London»
+                      - Артём: «у меня 5 мая блок в календаре»
+                    BAD desc: «Необходимо обсудить возможность
+                              встречи или следующей, чтобы
+                              подготовиться к раунду. Важно,
+                              чтобы это было согласовано с
+                              руководителем» (mirrors title,
+                              names NOBODY — UNACCEPTABLE)
+                    GOOD desc: «По переписке с Fubon и Ryan
+                              Gariepy — подтвердить слот встречи
+                              под раунд. Fubon предложили четыре
+                              окна: 5 мая 18:00-21:00, 6 мая
+                              09:00-12:00 или 17:00-19:00, 8 мая
+                              09:00-12:00, 9 мая 17:00-19:00.
+                              Внутри предварительно
+                              договорились на 6 мая 11:30 London
+                              / 18:30 Taiwan, но Артём отметил,
+                              что 5 мая у него блок в календаре.
+                              Нужно согласовать финальный слот и
+                              отправить инвайт.»
 
                 CONCRETE OVER VAGUE — fill in real names /
                 numbers / projects from context, never use empty

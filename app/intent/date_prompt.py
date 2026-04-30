@@ -84,6 +84,36 @@ Rules:
      source: "5. Мистраль - Arthur Mehcsh - отправьте письмо…"
      BAD output: due_date=2026-05-05 (treats «5.» as 5th day)
      GOOD output: due_date=null (it's a list item, not a date)
+9. NO HALLUCINATING DATES NOT IN THE SOURCE. If the message
+   does NOT literally contain «следующая неделя» / «next week»
+   / «понедельник» / «Monday» / «к понедельнику» / «by Monday»,
+   you MUST NOT emit the upcoming Monday. The same goes for any
+   other weekday — only emit a weekday's ISO date when the
+   message explicitly names that weekday or a phrase that
+   directly maps to it (table in rule 3).
+
+   When the message has MULTIPLE candidate dates (e.g. «May 5
+   6-9pm, May 6 9-12, May 8 9-12, May 9 5-7pm — pick a slot»),
+   the message is offering OPTIONS, not a deadline. Emit null
+   unless one of the slots is clearly singled out as «выбрали
+   X» / «зафиксировали Y» / «final: Z». Never average, never
+   pick "the earliest", never pick "the next Monday after
+   today" — emit null and let the human resolve.
+
+   Worked counter-example (operator regression FR-CR-05-82):
+     current_date 2026-04-30 (Thursday)
+     source: «Обсудить возможность встречи. Fubon предложили
+              5 мая 18-21, 6 мая 9-12 или 17-19, 8 мая 9-12,
+              9 мая 17-19. Думаю, возьмём 6 мая 11:30 London»
+     BAD output:  due_date=2026-05-04 (next Monday — NOT in
+                  source anywhere — pure hallucination)
+     BAD output:  due_date=2026-05-05 (earliest of the slots —
+                  the user did not say «к 5 мая», these are
+                  meeting time candidates, not a deadline)
+     GOOD output: due_date=null OR 2026-05-06 (only if the
+                  «возьмём 6 мая» phrase is unambiguously a
+                  decision; if it's «думаю» / «возможно»
+                  / «давайте подумаем» — null is correct)
 
 Worked examples:
   current_date 2026-04-24 (Friday)

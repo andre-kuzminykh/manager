@@ -333,12 +333,19 @@ class ZoomPipeline:
         except Exception as e:  # noqa: BLE001
             row.last_error = f"short summary failed: {e}"
             return False
-        text = _truncate(text, limit=2000)
+        text = _truncate(text, limit=3800)
         if not text:
             row.last_error = "short summary returned empty"
             return False
+        # FR-CR-05-117 — same deterministic doc-link append as
+        # Fireflies path so both pipelines emit the identical
+        # «📄 Подробный отчёт: …» trailer.
         if row.google_doc_url:
-            text += f"\n\n📄 Полный отчёт: {row.google_doc_url}"
+            text = (
+                text.rstrip()
+                + "\n\n📄 Подробный отчёт: "
+                + row.google_doc_url
+            )
         row.short_summary = text
         row.last_error = None
         # Sender DMs handled by `_send_short_summary` if available.

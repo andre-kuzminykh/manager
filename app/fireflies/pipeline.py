@@ -499,7 +499,18 @@ class FirefliesPipeline:
         # under the 4096-char Telegram per-message limit) so
         # the «Участники» + «Главные обсуждения» blocks added
         # to the prompt actually fit.
-        row.short_summary = _truncate(text, limit=3800)
+        body = _truncate(text, limit=3800)
+        # FR-CR-05-117 — append the Google Doc link deterministic-
+        # ally so it can never be truncated mid-URL or hallucinated
+        # by the LLM. Skipped silently when the doc step didn't
+        # produce a URL.
+        if row.google_doc_url:
+            body = (
+                body.rstrip()
+                + "\n\n📄 Подробный отчёт: "
+                + row.google_doc_url
+            )
+        row.short_summary = body
         row.last_error = None
         return True
 

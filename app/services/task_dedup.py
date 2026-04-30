@@ -86,33 +86,43 @@ _SYSTEM_PROMPT = """\
 You are a binary duplicate-detection classifier for newly
 proposed tasks.
 
-You receive ONE candidate task and up to 10 existing open tasks
-(or pending drafts) from the same backlog. Decide whether the
-candidate describes the SAME WORK as any one of them. Yes or no.
+You receive ONE candidate task and up to 10 existing open
+tasks (or pending drafts) from the same backlog. EACH item
+includes its title, owner, due, and full DESCRIPTION. Read
+all of them. Decide whether the candidate's title +
+description describes the SAME WORK as any existing item's
+title + description. Yes or no.
 
 THE RULE — collapse when the candidate and an existing item
-describe the same end-state. Two tasks are the same when they
-overlap on:
+describe the same end-state. Look at the descriptions, not
+just the titles. Two tasks are the same when:
   - the action (verb / verb-family — confirm, ask, send,
-    organize a meeting, intro, follow up, prep, …), AND
-  - the specific subject (named external entity, event,
+    organize a meeting, intro, follow up, prep, …) overlaps
+  - AND the specific subject (named external entity, event,
     deliverable, project — ADNOC, Bosch deal, Ryan Gariepy
-    meeting, the Q2 report, the Atuwatse Okorodudu intro).
+    meeting, the Q2 report, the Atuwatse Okorodudu intro)
+    overlaps.
 
-The candidate's owner does NOT have to match — internal
-team-owner attribution drifts between drafts. Due date does NOT
-have to match — operator may set 18:00 today on one and tomorrow
-on another for the same work.
+If the descriptions describe the same situation (same
+external party, same ask, same context), they are duplicates
+even if the titles differ slightly («Подтвердить» vs
+«Закрепить», «Запланировать» vs «Организовать») and even if
+the description wordings differ slightly («необходимо» vs
+«нужно»).
 
-Different EXTERNAL audience IS a discriminator: «отчёт Ирине»
-≠ «отчёт Артёму» (two reports going to two different audiences).
-But internal-team attribution between team members for ONE
-external piece of work is NOT.
+Owner does NOT have to match — internal team attribution
+drifts between drafts. Due date does NOT have to match —
+operator may set different dates on two drafts of the same
+work.
 
-Default to FALSE when in doubt. Better one extra task the
-operator merges than silently dropping real work. But when the
-candidate clearly orbits the same external entity / event as
-an existing item, return TRUE.
+Different EXTERNAL audience IS a discriminator: «отчёт
+Ирине» ≠ «отчёт Артёму» (two reports going to two
+different audiences). But internal-team attribution
+between team members for ONE external piece of work is NOT.
+
+Default to FALSE only when descriptions truly describe
+different work. When the descriptions clearly describe the
+same situation, return TRUE.
 
 Output:
   is_duplicate: bool
@@ -184,32 +194,36 @@ def _fetch_recent(session: Session, limit: int = 20) -> list[_ExistingItem]:
 
 
 def _fmt_existing(items: list[_ExistingItem]) -> str:
-    """Compact one-line-per-item listing fed to the LLM. Mark
-    drafts with `D#` and tasks with `T#` so the model can address
-    them separately when reporting which one is the duplicate."""
+    """Compact per-item listing fed to the LLM. Mark drafts
+    with `D#` and tasks with `T#` so the model can address
+    them separately when reporting which one is the duplicate.
+
+    FR-CR-05-100 — operator: «по описанию задачи надо». Each
+    existing item gets its FULL description (≤1500 chars per
+    item) on its own line so the LLM can compare descriptions
+    semantically, not just titles.
+    """
     if not items:
         return "(none)"
     lines: list[str] = []
     for it in items:
         prefix = "T#" if it.kind == "task" else "D#"
         desc = (it.description or "").replace("\n", " ").strip()
-        if len(desc) > 200:
-            desc = desc[:197] + "..."
-        bits = [
-            f"{prefix}{it.item_id}",
-            it.title,
-            f"owner={it.owner_label}",
-            f"due={it.due_date}",
-        ]
-        if desc:
-            bits.append(f"desc={desc}")
-        lines.append("- " + " | ".join(bits))
+        if len(desc) > 1500:
+            desc = desc[:1497] + "..."
+        lines.append(
+            f"- {prefix}{it.item_id} | title: {it.title}\n"
+            f"   owner: {it.owner_label} | due: {it.due_date}\n"
+            f"   desc: {desc}"
+        )
     return "\n".join(lines)
 
 
 def _fmt_candidate(payload: dict[str, Any]) -> str:
     title = payload.get("title") or ""
-    desc = payload.get("description") or ""
+    desc = (payload.get("description") or "").replace("\n", " ").strip()
+    if len(desc) > 1500:
+        desc = desc[:1497] + "..."
     owner = (
         payload.get("owner_display_name")
         or payload.get("owner_user_id")
@@ -218,82 +232,35 @@ def _fmt_candidate(payload: dict[str, Any]) -> str:
     due = payload.get("due_date") or "—"
     parts = [f"title: {title}"]
     if desc:
-        parts.append(f"description: {desc[:500]}")
+        parts.append(f"description: {desc}")
     parts.append(f"owner: {owner}")
     parts.append(f"due: {due}")
     return "\n".join(parts)
 
 
-def _normalize_title_for_match(title: str) -> str:
-    """FR-CR-05-97 — operator: «надо не расширять синонимы а
-    поумнее их различать явно».
+# FR-CR-05-100 — the deterministic Python pre-check that lived
+# here (FR-CR-05-97/99/100) was operator-rejected: «да не нужен
+# никакой детерминистический матч, то есть просто по описанию
+# задачи надо!». The LLM call below sees title + full
+# description for both candidate and existing items and decides.
+# Helper kept solely for tests that probe normalisation of the
+# fed-to-LLM strings.
 
-    Lowercase + collapse whitespace + strip Cyrillic/Latin
-    punctuation noise. This isn't a synonym matcher — it's a
-    «two LLM outputs landed nearly identical strings» backstop
-    so the LLM dedup gate doesn't have to re-litigate exact
-    matches under prompt-bloat noise.
-    """
+
+def _normalize_title_for_match(title: str) -> str:
+    """Lowercase + collapse whitespace + strip Cyrillic/Latin
+    punctuation + ё→е. Used to render the candidate / existing
+    strings consistently into the LLM prompt; not used as a
+    deterministic match gate any more."""
     if not title:
         return ""
     import re
 
     out = title.lower().strip()
-    # Collapse internal whitespace.
     out = re.sub(r"\s+", " ", out)
-    # Strip leading/trailing punctuation.
     out = out.strip(".!?,;:—-«»\"' ")
-    # Replace Cyrillic ё → е (LLM often emits both for the same word).
     out = out.replace("ё", "е")
     return out
-
-
-def _candidate_owner_uid(candidate: dict[str, Any]) -> str:
-    return str(
-        candidate.get("owner_user_id")
-        or candidate.get("owner_display_name")
-        or ""
-    ).strip().lower()
-
-
-def _existing_owner_key(item: _ExistingItem) -> str:
-    return (item.owner_label or "").strip().lower()
-
-
-def _deterministic_duplicate(
-    candidate: dict[str, Any], existing: list[_ExistingItem]
-) -> _ExistingItem | None:
-    """FR-CR-05-97 / -99 — fast-path duplicate check that skips
-    the LLM entirely.
-
-    Match when BOTH:
-      - `_normalize_title_for_match(title)` (case + whitespace
-        + ё/е normalised) is equal
-      - owner key (uid or display_name, lowercased) is equal
-
-    Due date is NOT part of the match — operator may set
-    different dates on two drafts for the same work (FR-CR-05-99
-    regression: «Запланировать встречу с Atuwatse Okorodudu» on
-    2026-04-30 vs 2026-05-04 — same work, drift in operator's
-    date estimate).
-
-    Returns the matched `_ExistingItem` or `None`. Used as a
-    pre-LLM gate in `check_duplicate`. The LLM still runs for
-    everything else (paraphrase / synonym dedup remains the
-    LLM's domain via `_SYSTEM_PROMPT`).
-    """
-    cand_title = _normalize_title_for_match(candidate.get("title") or "")
-    if not cand_title:
-        return None
-    cand_owner = _candidate_owner_uid(candidate)
-
-    for item in existing:
-        if _normalize_title_for_match(item.title) != cand_title:
-            continue
-        if _existing_owner_key(item) != cand_owner:
-            continue
-        return item
-    return None
 
 
 def check_duplicate(
@@ -323,23 +290,6 @@ def check_duplicate(
     existing = _fetch_recent(session, limit=lookback)
     if not existing:
         return DedupResult(is_duplicate=False)
-
-    # FR-CR-05-97 — deterministic exact-match fast path.
-    fast = _deterministic_duplicate(candidate, existing)
-    if fast is not None:
-        log.info(
-            "task_dedup_deterministic_hit",
-            item_id=fast.item_id,
-            kind=fast.kind,
-        )
-        return DedupResult(
-            is_duplicate=True,
-            duplicate_of_task_id=fast.item_id if fast.kind == "task" else None,
-            reason=(
-                "deterministic match: same title + owner + due_date "
-                f"as {fast.kind} #{fast.item_id}"
-            ),
-        )
 
     if llm_backend is None or not hasattr(llm_backend, "call_tool"):
         return DedupResult(is_duplicate=False)

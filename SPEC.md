@@ -833,6 +833,49 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-100 — LLM-only dedup over full descriptions; first-person → imperative title rewrite
+
+Operator three-pack:
+
+  1. «Взять обратную связь по PALADIN у Goldman Sachs» × 2
+     and «Запланировать встречу с Atuwatse Okorodudu» × 2
+     landed as duplicates with literally-identical titles.
+  2. «да не нужен никакой детерминистический матч, то есть
+     просто по описанию задачи надо!»
+  3. «Я тебе сейчас пришлю драфт письма по Артему Барсукову»
+     landed verbatim as the title — operator: «должно быть
+     нормальное название и достаточно описания по контексту».
+
+Three layered fixes:
+
+  - **Removed the deterministic Python pre-check.** The
+    `_deterministic_duplicate` helper from FR-CR-05-97/99 is
+    gone; `check_duplicate` now always runs the LLM (when a
+    backend is configured). Operator: trust the LLM, don't
+    engineer brittle string-matching.
+
+  - **LLM dedup sees full descriptions.** `_fmt_existing` /
+    `_fmt_candidate` now feed each item with up to 1500
+    chars of description (was 200 / 500). Each existing
+    item lands on a multi-line block: `title / owner+due /
+    desc`. Prompt rewritten to emphasize «look at the
+    descriptions, not just the titles» — the operator's
+    PALADIN regression had identical titles AND
+    near-identical descriptions; LLM should now collapse
+    them. The same-end-state rule (verb-family + specific
+    subject overlap) is preserved.
+
+  - **`title_prompt.py` — first-person commitment →
+    third-person imperative.** New block teaches: «Я пришлю
+    X» / «Я отправлю Y» / «I'll send Z» / «сейчас скину» →
+    title is the imperative form («прислать X» / «send Z»),
+    near-future adverbs («сейчас», «right now») are
+    stripped, «тебе» / «you» pronouns dropped. The Артём
+    Барсуков regression «Я тебе сейчас пришлю драфт письма
+    по Артему Барсукову» pinned with the «прислать драфт
+    письма по Артему Барсукову» imperative as the worked
+    rewrite.
+
 #### FR-CR-05-99 — Minimal dedup prompt + naked-verb rejection + title-only deterministic match
 
 Operator: «давай промт более хороший сделаем уже раз и
@@ -4369,6 +4412,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-100 | `test_intent_pipeline.py::test_title_prompt_converts_first_person_to_imperative` (FIRST-PERSON COMMITMENTS block + Артём Барсуков regression «Я тебе сейчас пришлю драфт письма» → «прислать драфт письма по Артему Барсукову» rewrite + «Я отправлю» / «I'll send» / «сейчас скину» fragments pinned); `test_task_dedup.py::test_dedup_dispatches_to_llm_with_full_descriptions` (no deterministic gate; LLM sees up to 1500 chars of description for both candidate and existing); `::test_dedup_prompt_is_minimal_focused_classifier` (≤2500-char prompt + «look at the descriptions, not just the titles» framing) |
 | FR-CR-05-99  | `test_task_dedup.py::test_dedup_prompt_is_minimal_focused_classifier` (≤1700-char tight binary-classifier prompt with verb-family + specific-subject + EXTERNAL-audience-discriminator + Default-to-FALSE rules); `::test_dedup_prompt_keeps_different_audience_distinct` («отчёт Ирине ≠ отчёт Артёму» rule survives the minimal-prompt rewrite); `test_intent_pipeline.py::test_is_naked_verb_title_catches_bare_verbs` (Russian + English bare-verb list; trailing punctuation stripping; verb-with-object passes through); `test_telegram_listener.py::test_listener_tick_processes_updates_and_advances_offset` updated for dedup behaviour (2 same-title updates → 1 Task created via deterministic dedup, both bookmarked) |
 | FR-CR-05-98  | `test_task_dedup.py::test_dedup_prompt_pins_one_event_collapse_rule` (ONE-EVENT COLLAPSE block + Ryan Gariepy «Организовать» vs «Пригласить Йохана» worked counter-example + «single named external event» discriminator + «distinct deliverable» escape hatch all pinned) |
 | FR-CR-05-97  | `test_task_dedup.py::test_normalize_title_for_match_collapses_whitespace_case_yo_e` (case + whitespace + leading-trailing-punctuation + ё↔е); `::test_dedup_deterministic_match_skips_llm` (Atuwatse Okorodudu regression: identical title triple-match → is_duplicate=true, LLM never called); `::test_dedup_deterministic_match_normalises_case_and_punctuation` («  подтвердить  ВСТРЕЧУ.  » matches «Подтвердить встречу»); `::test_dedup_deterministic_does_not_match_when_owner_differs` (different owner → falls through to LLM) |

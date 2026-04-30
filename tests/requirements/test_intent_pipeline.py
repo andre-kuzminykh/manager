@@ -821,6 +821,31 @@ def test_detect_prompt_rejects_transcription_dumps_as_no_action():
     assert "ОТПРАВЬ" in blob or "imperative" in flat.lower()
 
 
+def test_title_prompt_converts_first_person_to_imperative():
+    """FR-CR-05-100 — operator regression: «Я тебе сейчас
+    пришлю драфт письма по Артему Барсукову» landed as the
+    title verbatim. The author is committing to send something
+    — IS a task, but the title must be in canonical
+    third-person imperative form: «Прислать драфт письма по
+    Артему Барсукову»."""
+    blob = TITLE_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "FIRST-PERSON COMMITMENTS" in blob
+    assert "FR-CR-05-100" in blob
+    # The exact regression case is pinned.
+    assert "Я тебе сейчас пришлю драфт письма по Артему Барсукову" in blob
+    # The expected imperative rewrite is shown.
+    assert "прислать драфт письма по Артему Барсукову" in blob
+    # Other listed patterns.
+    for fragment in (
+        "Я отправлю",
+        "I'll send",
+        "сейчас скину",
+    ):
+        assert fragment in blob
+
+
 def test_title_prompt_forbids_naked_verb_titles():
     """FR-CR-05-89 — operator regression: title «Встретиться»
     landed without a complement (with whom? about what?). The

@@ -351,6 +351,32 @@ the trace isn't lost:
       → title: "prepare Y"
         description: "asked by Petya"
 
+FIRST-PERSON COMMITMENTS → THIRD-PERSON IMPERATIVE (FR-CR-05-100).
+When the source is the author saying what THEY will do («Я
+пришлю X», «Я отправлю Y», «I'll send Z», «прикреплю файл»,
+«сейчас скину»), convert to a third-person imperative — that's
+the canonical title shape. Strip «Я / I'll / сейчас» framing,
+strip «тебе» / «вам» / «you» pronouns, drop near-future
+adverbs («сейчас», «скоро», «потом», «right now»). Keep the
+ACTION + OBJECT.
+
+Operator regression: «Я тебе сейчас пришлю драфт письма по
+Артему Барсукову» landed verbatim as the title. WRONG. The
+imperative form is «Прислать драфт письма по Артему Барсукову»
+(or «Send draft email re Artem Barsukov»).
+
+Worked counter-examples:
+  "Я тебе сейчас пришлю драфт письма по Артему Барсукову"
+      → title: "прислать драфт письма по Артему Барсукову"
+  "Я отправлю отчёт по продажам к пятнице"
+      → title: "отправить отчёт по продажам"
+        (date goes to due_date, not title)
+  "I'll send the deck right now"
+      → title: "send the deck"
+  "сейчас скину файл"
+      → title: "скинуть файл"  (or with the OBJECT from
+        context if known, e.g. «скинуть файл по Acme»)
+
 A name is only a stripped *assignee* when it stands at the start
 in vocative / @-mention form, or appears in dative ("Ивану", "to
 Ivan"). A name in **accusative case** ("ивана", "машу" — i.e. the

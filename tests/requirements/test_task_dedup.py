@@ -54,19 +54,21 @@ def test_dedup_prompt_is_minimal_focused_classifier():
     blob = _SYSTEM_PROMPT
     flat = " ".join(blob.split())
 
-    # The prompt is now tight (≤1700 chars; was ~3000 with all
+    # The prompt is now tight (≤2500 chars; was ~3000 with all
     # the synonym blocks and worked examples).
-    assert len(blob) <= 1700
+    assert len(blob) <= 2500
     # Classifier framing.
     assert "binary duplicate-detection" in blob
     # Same-end-state rule + verb + subject overlap.
     assert "end-state" in blob
     # The FR-CR-05-78 audience discriminator survives.
     assert "EXTERNAL audience" in blob or "external audience" in flat.lower()
-    # «Different external audience = different task».
-    assert "отчёт Ирине" in blob and "отчёт Артёму" in blob
+    # «Different external audience = different task». The
+    # prompt may wrap «отчёт» across lines, so check the
+    # whitespace-collapsed form.
+    assert "отчёт Ирине" in flat and "отчёт Артёму" in flat
     # Internal team-owner attribution does NOT discriminate.
-    assert "internal-team attribution" in blob.lower() or "internal team-owner" in blob.lower()
+    assert "internal-team attribution" in flat.lower() or "internal team-owner" in flat.lower() or "internal team attribution" in flat.lower()
     # Default to FALSE when unsure.
     assert "Default to FALSE" in blob
 
@@ -86,94 +88,57 @@ def test_normalize_title_for_match_collapses_whitespace_case_yo_e():
     assert f("Подтвердить тёщу") == f("Подтвердить тещу")
 
 
-def test_dedup_deterministic_match_skips_llm(session):
-    """FR-CR-05-97 — operator regression: 2 drafts with
-    EXACTLY the same title «Запланировать встречу с Atuwatse
-    Okorodudu», same owner, same due_date landed as 2 separate
-    tasks. The LLM dedup wasn't catching it under prompt
-    bloat. Deterministic pre-check now short-circuits BEFORE
-    the LLM call."""
+def test_dedup_dispatches_to_llm_with_full_descriptions(session):
+    """FR-CR-05-100 — operator: «по описанию задачи надо».
+    The LLM gets each existing item with its FULL description
+    (≤1500 chars), not a 200-char snippet. Two drafts with
+    same external entity but slightly differing description
+    wordings («необходимо» vs «нужно») must be visible to the
+    model in full so it can spot the overlap."""
     from app.services.task_dedup import check_duplicate
 
-    existing_id = _mk(
+    existing = _mk(
         session,
-        title="Запланировать встречу с Atuwatse Okorodudu",
+        title="Взять обратную связь по PALADIN у Goldman Sachs",
+        description=(
+            "По просьбе Артёма необходимо получить обратную связь "
+            "от Goldman Sachs по проекту PALADIN. Упомянуто, что "
+            "сообщение могло попасть в спам, и важно выяснить, что "
+            "происходит с их ответом. Это связано с обсуждением в "
+            "дата руме, где они проявили интерес, но сейчас не "
+            "отвечают"
+        ),
         owner_user_id="111",
-        due_date=date(2026, 4, 30),
     )
     session.commit()
 
-    backend = _FakeBackend({"is_duplicate": False})  # would say no
-    result = check_duplicate(
+    backend = _FakeBackend(
+        {
+            "is_duplicate": True,
+            "duplicate_of_task_id": existing,
+            "reason": "same description, same Goldman Sachs feedback ask",
+        }
+    )
+    out = check_duplicate(
         session,
         candidate={
-            "title": "Запланировать встречу с Atuwatse Okorodudu",
+            "title": "Взять обратную связь по PALADIN у Goldman Sachs",
+            "description": (
+                "По просьбе Артёма нужно получить обратную связь "
+                "от Goldman Sachs по проекту PALADIN. Упомянуто, что "
+                "сообщение могло попасть в спам, и важно выяснить, "
+                "что происходит с их ответом. Это связано с "
+                "обсуждением в дата руме, где они проявили интерес"
+            ),
             "owner_user_id": "111",
-            "due_date": "2026-04-30",
         },
         llm_backend=backend,
     )
-    assert result.is_duplicate is True
-    assert result.duplicate_of_task_id == existing_id
-    # The LLM was never called — deterministic gate caught it.
-    assert backend.calls == 0
-    assert "deterministic" in (result.reason or "")
-
-
-def test_dedup_deterministic_match_normalises_case_and_punctuation(session):
-    """FR-CR-05-97 — normalisation handles capitalisation and
-    trailing punctuation — both common LLM output noise."""
-    from app.services.task_dedup import check_duplicate
-
-    _mk(
-        session,
-        title="Подтвердить встречу",
-        owner_user_id="111",
-        due_date=date(2026, 4, 30),
-    )
-    session.commit()
-
-    result = check_duplicate(
-        session,
-        candidate={
-            "title": "  подтвердить  ВСТРЕЧУ.  ",
-            "owner_user_id": "111",
-            "due_date": "2026-04-30",
-        },
-        llm_backend=_FakeBackend({"is_duplicate": False}),
-    )
-    assert result.is_duplicate is True
-
-
-def test_dedup_deterministic_does_not_match_when_owner_differs(session):
-    """FR-CR-05-97 — same title but different owner falls
-    through to the LLM (the LLM may still call it duplicate
-    via SAME-SPECIFIC-SUBJECT, but the deterministic gate
-    only fires on exact-match-everything)."""
-    from app.services.task_dedup import check_duplicate
-
-    _mk(
-        session,
-        title="Подтвердить встречу",
-        owner_user_id="111",
-        due_date=date(2026, 4, 30),
-    )
-    session.commit()
-
-    backend = _FakeBackend({"is_duplicate": False})
-    result = check_duplicate(
-        session,
-        candidate={
-            "title": "Подтвердить встречу",
-            "owner_user_id": "222",  # different owner
-            "due_date": "2026-04-30",
-        },
-        llm_backend=backend,
-    )
-    # Deterministic gate didn't fire → LLM was called → its
-    # negative answer wins.
-    assert result.is_duplicate is False
-    assert backend.calls == 1
+    assert out.is_duplicate is True
+    # The LLM saw both descriptions IN FULL (no 200-char truncation).
+    prompt = backend.last_user_prompt or ""
+    assert "проявили интерес, но сейчас не отвечают" in prompt
+    assert "не отвечают" in prompt or "проявили интерес" in prompt
 
 
 def test_dedup_returns_not_duplicate_when_no_recent_tasks(session):

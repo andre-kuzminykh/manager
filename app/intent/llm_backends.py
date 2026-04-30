@@ -179,6 +179,23 @@ class AnthropicBackend:
         )
 
 
+def _model_uses_completion_tokens(model: str | None) -> bool:
+    """FR-CR-05-106 — newer OpenAI models (`gpt-5*`, `o1*`,
+    `o3*`, `o4*`) reject the `max_tokens` parameter and require
+    `max_completion_tokens` instead. Old models (`gpt-4o`,
+    `gpt-4-turbo`, `gpt-3.5-turbo`) still want `max_tokens`.
+    """
+    if not model:
+        return False
+    m = model.lower()
+    return (
+        m.startswith("gpt-5")
+        or m.startswith("o1")
+        or m.startswith("o3")
+        or m.startswith("o4")
+    )
+
+
 def _extract_anthropic_tool_input(response: Any) -> dict[str, Any] | None:
     content = getattr(response, "content", None) or []
     for block in content:
@@ -229,8 +246,15 @@ class OpenAIBackend:
                 "parameters": tool_parameters,
             },
         }
-        response = self._client.chat.completions.create(
-            model=model or self._model,
+        # FR-CR-05-70 — bump max output to 4096 so multi-task
+        # arrays + 3-6 sentence descriptions land complete.
+        # FR-CR-05-106 — gpt-5.5 (and other reasoning-style
+        # models) reject `max_tokens` and demand
+        # `max_completion_tokens`. Probe the request shape and
+        # retry on the «unsupported_parameter» error.
+        eff_model = model or self._model
+        kwargs: dict[str, Any] = dict(
+            model=eff_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -241,13 +265,33 @@ class OpenAIBackend:
                 "function": {"name": tool_name},
             },
             temperature=0,
-            # FR-CR-05-70 — operator: «📝 ... временных слотов с
-            # 5 по» — description got cut mid-sentence. The
-            # default max for tool-call responses is small;
-            # bump explicitly to 4096 so multi-task arrays +
-            # 3-6 sentence descriptions land complete.
-            max_tokens=4096,
         )
+        if _model_uses_completion_tokens(eff_model):
+            kwargs["max_completion_tokens"] = 4096
+        else:
+            kwargs["max_tokens"] = 4096
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            if (
+                "max_tokens" in msg
+                and "max_completion_tokens" in msg
+                and "max_tokens" in kwargs
+            ):
+                kwargs.pop("max_tokens", None)
+                kwargs["max_completion_tokens"] = 4096
+                response = self._client.chat.completions.create(**kwargs)
+            elif (
+                "max_completion_tokens" in msg
+                and "Unsupported" in msg
+                and "max_completion_tokens" in kwargs
+            ):
+                kwargs.pop("max_completion_tokens", None)
+                kwargs["max_tokens"] = 4096
+                response = self._client.chat.completions.create(**kwargs)
+            else:
+                raise
         return _extract_openai_tool_input(response)
 
     def extract_intent(self, *, user_prompt: str) -> dict[str, Any] | None:

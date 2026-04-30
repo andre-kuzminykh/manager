@@ -359,6 +359,99 @@ def test_settings_defaults_for_openai_model():
     assert Settings().openai_model == "gpt-5.5"
 
 
+def test_model_uses_completion_tokens_helper():
+    """FR-CR-05-106 — gpt-5.x / o1 / o3 / o4 reject
+    `max_tokens`; everything else still wants it."""
+    from app.intent.llm_backends import _model_uses_completion_tokens
+
+    assert _model_uses_completion_tokens("gpt-5.5") is True
+    assert _model_uses_completion_tokens("gpt-5.5-mini") is True
+    assert _model_uses_completion_tokens("o1-preview") is True
+    assert _model_uses_completion_tokens("o3-mini") is True
+    assert _model_uses_completion_tokens("o4") is True
+    assert _model_uses_completion_tokens("gpt-4o") is False
+    assert _model_uses_completion_tokens("gpt-4o-mini") is False
+    assert _model_uses_completion_tokens("gpt-4-turbo") is False
+    assert _model_uses_completion_tokens("gpt-3.5-turbo") is False
+    assert _model_uses_completion_tokens(None) is False
+    assert _model_uses_completion_tokens("") is False
+
+
+def test_openai_call_uses_completion_tokens_for_gpt5(monkeypatch):
+    """FR-CR-05-106 — operator regression: gpt-5.5 returned
+    400 «'max_tokens' is not supported with this model. Use
+    'max_completion_tokens' instead.». Backend now picks the
+    right kwarg per-model."""
+    from app.intent.llm_backends import OpenAIBackend
+
+    captured: dict = {}
+
+    class _StubChoices:
+        message = type("M", (), {"content": "{}", "tool_calls": None})()
+
+    class _StubResp:
+        choices = [_StubChoices()]
+
+    class _StubCompletions:
+        def create(self, **kw):
+            captured.update(kw)
+            return _StubResp()
+
+    class _StubChat:
+        completions = _StubCompletions()
+
+    class _StubClient:
+        chat = _StubChat()
+
+    backend = OpenAIBackend(_StubClient(), "gpt-5.5")
+    backend.call_tool(
+        system_prompt="s",
+        user_prompt="u",
+        tool_name="t",
+        tool_description="d",
+        tool_parameters={"type": "object"},
+    )
+    assert "max_completion_tokens" in captured
+    assert "max_tokens" not in captured
+    assert captured["max_completion_tokens"] == 4096
+
+
+def test_openai_call_uses_max_tokens_for_gpt4o(monkeypatch):
+    """FR-CR-05-106 — gpt-4o still wants `max_tokens` (legacy
+    name); the helper differentiates."""
+    from app.intent.llm_backends import OpenAIBackend
+
+    captured: dict = {}
+
+    class _StubChoices:
+        message = type("M", (), {"content": "{}", "tool_calls": None})()
+
+    class _StubResp:
+        choices = [_StubChoices()]
+
+    class _StubCompletions:
+        def create(self, **kw):
+            captured.update(kw)
+            return _StubResp()
+
+    class _StubChat:
+        completions = _StubCompletions()
+
+    class _StubClient:
+        chat = _StubChat()
+
+    backend = OpenAIBackend(_StubClient(), "gpt-4o")
+    backend.call_tool(
+        system_prompt="s",
+        user_prompt="u",
+        tool_name="t",
+        tool_description="d",
+        tool_parameters={"type": "object"},
+    )
+    assert "max_tokens" in captured
+    assert "max_completion_tokens" not in captured
+
+
 def test_settings_openai_api_key_field_is_empty_by_default():
     assert Settings(OPENAI_API_KEY="").openai_api_key == ""
 

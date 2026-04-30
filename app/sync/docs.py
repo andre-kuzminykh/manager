@@ -53,7 +53,51 @@ class DocsExportService:
         retry=retry_if_exception_type(HttpError),
     )
     def _create_doc(self, title: str) -> dict[str, Any]:
+        """Create an empty Google Doc in the SA's own Drive.
+        Used when no `parent_folder_id` is configured.
+
+        WARNING: service accounts in non-Workspace projects have
+        ZERO storage quota of their own, so this path will 403
+        with «caller does not have permission». Set
+        `FIREFLIES_DOCS_FOLDER_ID` to a folder shared with the
+        SA — `_create_doc_in_folder` works around the quota
+        problem by creating the doc inside that folder
+        directly.
+        """
         return self._docs.documents().create(body={"title": title}).execute()
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+        retry=retry_if_exception_type(HttpError),
+    )
+    def _create_doc_in_folder(
+        self, *, title: str, parent_folder_id: str
+    ) -> dict[str, Any]:
+        """FR-CR-05-55 — create the Google Doc directly inside
+        `parent_folder_id` via the Drive API. This sidesteps the
+        SA-without-storage-quota issue: the doc inherits the
+        folder's storage (owned by a real user) instead of being
+        charged to the service account.
+
+        Returns the same shape as `_create_doc` (with
+        `documentId`) so downstream code doesn't care which
+        path created it.
+        """
+        file = (
+            self._drive.files()
+            .create(
+                body={
+                    "name": title or "Meeting summary",
+                    "mimeType": "application/vnd.google-apps.document",
+                    "parents": [parent_folder_id],
+                },
+                fields="id",
+            )
+            .execute()
+        )
+        return {"documentId": file["id"]}
 
     @retry(
         reraise=True,
@@ -108,12 +152,25 @@ class DocsExportService:
         parent_folder_id: str = "",
     ) -> tuple[str, str]:
         """Create a doc with `title`, write `body`, optionally
-        move into the configured Drive folder. Returns
+        in the configured Drive folder. Returns
         ``(doc_id, share_url)``.
+
+        FR-CR-05-55 — when `parent_folder_id` is provided, the
+        doc is created INSIDE that folder via the Drive API,
+        not in the SA's Drive. This is the only path that works
+        for service accounts in non-Workspace projects (they
+        have no storage quota of their own and `documents.
+        create` 403s with «caller does not have permission»).
 
         Share URL format is the standard
         ``https://docs.google.com/document/d/<id>/edit``."""
-        doc = self._create_doc(title=title or "Meeting summary")
+        if parent_folder_id:
+            doc = self._create_doc_in_folder(
+                title=title or "Meeting summary",
+                parent_folder_id=parent_folder_id,
+            )
+        else:
+            doc = self._create_doc(title=title or "Meeting summary")
         doc_id = doc["documentId"]
         if body:
             try:
@@ -122,16 +179,6 @@ class DocsExportService:
                 log.warning(
                     "docs_insert_text_failed",
                     doc_id=doc_id,
-                    error=str(e),
-                )
-        if parent_folder_id:
-            try:
-                self._move_to_folder(doc_id, parent_folder_id)
-            except HttpError as e:
-                log.warning(
-                    "docs_move_to_folder_failed",
-                    doc_id=doc_id,
-                    folder=parent_folder_id,
                     error=str(e),
                 )
         url = f"https://docs.google.com/document/d/{doc_id}/edit"

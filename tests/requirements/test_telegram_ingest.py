@@ -646,8 +646,8 @@ def test_prepare_drafts_creates_one_draft_per_chunk(
         s.commit()
         assert len(drafts) == 2
         assert {d.payload.get("title") for d in drafts} == {
-            "prepare deck",
-            "write report",
+            "Prepare deck",
+            "Write report",
         }
         for d in drafts:
             assert d.state == ActionDraftState.proposed

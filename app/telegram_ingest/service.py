@@ -3,7 +3,7 @@ pipeline and persist the resulting tasks in our local DB."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -751,6 +751,19 @@ class TelegramIngestService:
                     slack_message_ts=str(message.message_id),
                 )
                 payload = dict(draft.payload or {})
+                # FR-CR-05-75 / 63 / 74 — apply the same
+                # cosmetic + default fixes the persist layer
+                # applies, so the draft widget the operator sees
+                # already matches what the post-Accept Task
+                # will look like (capitalized title, default
+                # deadline today 18:00 if LLM didn't extract).
+                t = (payload.get("title") or "").strip()
+                if t and not t[0].isupper():
+                    payload["title"] = t[0].upper() + t[1:]
+                if not (payload.get("due_date") or "").strip():
+                    payload["due_date"] = date.today().isoformat()
+                if not (payload.get("due_time") or "").strip():
+                    payload["due_time"] = "18:00"
                 payload["_pending"] = {
                     "source_kind": "telegram",
                     "conversation_id": str(message.chat_id),

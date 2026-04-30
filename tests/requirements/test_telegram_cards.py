@@ -388,7 +388,7 @@ def test_draft_widget_text_drops_create_header_and_uses_emoji_only_priority(
     draft = _mk_proposed_draft(
         session,
         payload={
-            "title": "написать Андрею",
+            "title": "Написать Андрею",
             "description": "Андрей спрашивал про SoW.",
             "priority": "high",
             "owner_user_id": "111",
@@ -403,7 +403,7 @@ def test_draft_widget_text_drops_create_header_and_uses_emoji_only_priority(
     # First line: priority emoji + bold title.
     first_line = text.splitlines()[0]
     assert "🟠" in first_line  # high
-    assert "<b>написать Андрею</b>" in first_line
+    assert "<b>Написать Андрею</b>" in first_line
     # No «high» / «medium» text in the body — emoji only.
     assert "high" not in text
     assert "medium" not in text
@@ -421,7 +421,7 @@ def test_draft_widget_text_wraps_title_in_source_permalink(session):
     draft = _mk_proposed_draft(
         session,
         payload={
-            "title": "написать Андрею",
+            "title": "Написать Андрею",
             "_pending": {
                 "permalink": "https://t.me/c/2061886148/2981",
                 "source_chat_id": -1002061886148,
@@ -432,7 +432,7 @@ def test_draft_widget_text_wraps_title_in_source_permalink(session):
     text = _build_draft_widget_text(draft)
     assert (
         '<a href="https://t.me/c/2061886148/2981">'
-        "<b>написать Андрею</b></a>" in text
+        "<b>Написать Андрею</b></a>" in text
     )
     # No separate 🔗 line.
     assert "🔗" not in text
@@ -453,7 +453,7 @@ def test_draft_widget_text_falls_back_to_plain_bold_without_permalink(session):
     )
     text = _build_draft_widget_text(draft)
     assert "<a href=" not in text.split("\n")[0]
-    assert "<b>x</b>" in text
+    assert "<b>X</b>" in text
 
 
 def test_draft_widget_text_renders_plain_text_when_no_username_anywhere(session):
@@ -529,7 +529,7 @@ def test_post_draft_confirmation_sends_only_widget_no_forward_no_quote(
         draft = _mk_proposed_draft(
             session,
             payload={
-                "title": "написать Андрею",
+                "title": "Написать Андрею",
                 "description": "Андрей спрашивал про SoW по сделке Acme.",
                 "owner_user_id": "111",
                 "_pending": {

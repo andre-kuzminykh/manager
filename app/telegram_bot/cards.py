@@ -454,10 +454,19 @@ def _build_draft_widget_text(
 
     payload = draft.payload or {}
     title = payload.get("title") or ""
+    # FR-CR-05-75 — capitalize first character so draft widgets
+    # match the eventual Task-card rendering (`create_task_from_
+    # draft` does the same on persist). Without this the
+    # operator sees lowercase «сообщить о закрытии раунда» on
+    # the confirm widget and «Сообщить о закрытии раунда» on
+    # the post-Accept card — inconsistent and looks unfixed.
+    if title and not title[0].isupper():
+        title = title[0].upper() + title[1:]
     owner_user_id = payload.get("owner_user_id") or ""
     payload_disp = payload.get("owner_display_name") or ""
     priority = payload.get("priority") or "medium"
     due = payload.get("due_date") or ""
+    due_time = payload.get("due_time") or ""
     description = payload.get("description") or ""
     permalink = ((payload.get("_pending") or {}).get("permalink")) or ""
 
@@ -503,7 +512,12 @@ def _build_draft_widget_text(
             f"👤 {_owner_html_link(str(owner_user_id) if owner_user_id else None, owner_label, tg_user_id=tg_id, tg_handle=effective_handle)}"
         )
     if due:
-        meta.append(f"📅 {due}")
+        # FR-CR-05-74 — same render shape as live cards: append
+        # `due_time` after `due_date` when both are present.
+        due_str = str(due)
+        if due_time:
+            due_str += f" · {due_time}"
+        meta.append(f"📅 {due_str}")
     if meta:
         lines.append(" · ".join(meta))
     return "\n".join(lines)

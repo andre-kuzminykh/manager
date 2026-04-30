@@ -1,4 +1,4 @@
-"""Periodic Telegram ingest CLI (FR-CR-04-26).
+"""Periodic Telegram ingest CLI (FR-CR-04-26 / FR-CR-05-95).
 
 Run from cron every few minutes:
 
@@ -14,11 +14,27 @@ Idempotent: each processed (chat_id, message_id) lands in
 ``processed_telegram_messages`` so re-running the cron is a no-op
 on the same rows.
 
+Flags (FR-CR-05-95 — operator workflow «обнулил БД, надо
+перепрочитать последние 50»):
+
+  --limit N            Override the per-tick batch size for this
+                       single run.
+  --last N             Pull the N most recent messages from the
+                       view IGNORING the watermark. Useful right
+                       after `wipe_tasks` when the watermark
+                       still says «processed up to msg X» but
+                       the DB is empty. WARNING: each yielded
+                       message is processed; if you didn't wipe
+                       processed_telegram_messages first, the
+                       drafts gate will skip rows already
+                       bookmarked.
+
 Exits 0 on success (even with per-message errors logged), 2 on
 configuration problems.
 """
 from __future__ import annotations
 
+import argparse
 import sys
 
 from sqlalchemy import select
@@ -81,8 +97,30 @@ def _resume_watermark() -> tuple[int | None, int | None]:
         return row.chat_id, row.message_id
 
 
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Override per-tick batch size for this run.",
+    )
+    p.add_argument(
+        "--last",
+        type=int,
+        default=None,
+        help=(
+            "Re-process the N most recent messages from the view "
+            "IGNORING the watermark. Use after `wipe_tasks` to "
+            "reseed drafts."
+        ),
+    )
+    return p.parse_args()
+
+
 def main() -> int:
     setup_logging()
+    args = _parse_args()
     settings = get_settings()
     if not settings.telegram_source_database_url:
         log.error(
@@ -127,21 +165,61 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         log.warning("tg_ingest_syncer_setup_failed", error=str(e))
 
-    after_chat, after_msg = _resume_watermark()
-    log.info(
-        "telegram_ingest_starting",
-        watermark_chat=after_chat,
-        watermark_msg=after_msg,
-        view=settings.telegram_source_view,
-    )
-
-    page = list(
-        reader.page(
-            after_chat_id=after_chat,
-            after_message_id=after_msg,
-            limit=settings.telegram_ingest_batch_size,
+    if args.last is not None:
+        # FR-CR-05-95 — pull last N from the view, ignoring the
+        # watermark. `iter_newest` returns DESC by sent_at; we
+        # reverse so prepare_drafts processes them in chronological
+        # order (older first) — that way the per-message context
+        # window is built from earlier messages, like the cron path.
+        log.info(
+            "telegram_ingest_starting",
+            mode="last",
+            last=args.last,
+            view=settings.telegram_source_view,
         )
-    )
+        page = list(reader.iter_newest(limit=args.last))
+        page.reverse()
+        # Drop the per-(chat_id, message_id) bookmark rows for
+        # exactly these messages so `prepare_drafts` doesn't
+        # short-circuit on its idempotency check. Other bookmarks
+        # (untouched messages) stay intact so the next regular
+        # cron tick still resumes from the watermark correctly.
+        if page:
+            from sqlalchemy import and_, or_
+
+            with session_scope() as bm_session:
+                preds = [
+                    and_(
+                        ProcessedTelegramMessage.chat_id == m.chat_id,
+                        ProcessedTelegramMessage.message_id == m.message_id,
+                    )
+                    for m in page
+                ]
+                if preds:
+                    bm_session.query(ProcessedTelegramMessage).filter(
+                        or_(*preds)
+                    ).delete(synchronize_session=False)
+            log.info(
+                "telegram_ingest_bookmark_cleared",
+                cleared=len(page),
+            )
+    else:
+        after_chat, after_msg = _resume_watermark()
+        batch_size = args.limit or settings.telegram_ingest_batch_size
+        log.info(
+            "telegram_ingest_starting",
+            watermark_chat=after_chat,
+            watermark_msg=after_msg,
+            view=settings.telegram_source_view,
+            limit=batch_size,
+        )
+        page = list(
+            reader.page(
+                after_chat_id=after_chat,
+                after_message_id=after_msg,
+                limit=batch_size,
+            )
+        )
     if not page:
         log.info("telegram_ingest_no_new_messages")
         return 0

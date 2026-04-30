@@ -466,8 +466,25 @@ class FirefliesPipeline:
             fireflies_id=row.fireflies_id,
             title=row.title,
         )
-        if row.processed_at and row.tasks_extracted:
-            # Already done end-to-end; nothing to do.
+        # FR-CR-05-53 — only short-circuit when EVERY pipeline
+        # step succeeded. The earlier `processed_at AND
+        # tasks_extracted` check stuck the recording in a
+        # «pretend done» state when an upstream step like Google
+        # Docs export had failed but the tail of the pipeline
+        # (short summary + task extraction) still ran. A retry
+        # then skipped the failed step instead of fixing it.
+        # Each step is internally idempotent — if its flag is
+        # set the work is short-circuited inside the helper —
+        # so re-running is cheap.
+        if (
+            row.processed_at
+            and row.audio_downloaded
+            and row.transcribed
+            and row.detailed_summarised
+            and row.doc_exported
+            and row.short_summary_sent
+            and row.tasks_extracted
+        ):
             report.skipped_reason = "already_processed"
             return report
         row.attempts += 1

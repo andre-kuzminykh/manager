@@ -279,45 +279,117 @@ def test_pipeline_process_one_runs_every_step(
 def test_pipeline_idempotent_when_already_processed(
     patched_session_scope, SessionFactory, monkeypatch
 ):
-    """Re-running on an already-processed recording is a near-
-    no-op: pipeline reports `skipped_reason='already_processed'`
-    and no extra tasks get created."""
+    """Re-running on a fully-processed recording is a no-op:
+    every step's flag is set, so `process_one` short-circuits
+    with `skipped_reason='already_processed'` (FR-CR-05-53).
+
+    Needs an `admin_user_ids()` recipient so the short-summary
+    step actually flips its flag — without it
+    `short_summary_sent` stays False and the early-return
+    check (which now demands every flag, FR-CR-05-53) wouldn't
+    fire."""
+    def fake_transcribe(**kw):
+        return "x"
+
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "555")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        monkeypatch.setattr(
+            "app.services.transcription.transcribe_bytes", fake_transcribe
+        )
+        settings = _settings_with_audio_dir()
+        client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-2")])
+        llm = _FakeLLM(tasks=[{"title": "t1"}])
+        sender = _FakeSender()
+        pipeline = FirefliesPipeline(
+            settings=settings,
+            client=client,
+            llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(),
+            sender=sender,
+        )
+        with SessionFactory() as s:
+            t = client.list_transcripts(limit=1)[0]
+            first = pipeline.process_one(s, t)
+            s.commit()
+        assert first.tasks_created == 1
+        assert first.skipped_reason is None
+
+        with SessionFactory() as s:
+            t = client.list_transcripts(limit=1)[0]
+            second = pipeline.process_one(s, t)
+            s.commit()
+        assert second.skipped_reason == "already_processed"
+        # No new tasks.
+        with SessionFactory() as s:
+            assert (
+                s.query(Task)
+                .filter(Task.source_kind == TaskSourceKind.fireflies)
+                .count()
+                == 1
+            )
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_pipeline_retries_failed_step_on_rerun(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-53 — when an upstream step (e.g. Google Docs
+    export) fails on the first run, a re-run should NOT short-
+    circuit on `processed_at`. The retry must reach the failed
+    step and try again.
+
+    Reproduces the production bug operator hit: Docs API was
+    disabled, doc_exported stayed False, but processed_at +
+    tasks_extracted made the recording look 'done' so the
+    next migrate_fireflies skipped it instead of retrying."""
     def fake_transcribe(**kw):
         return "x"
 
     monkeypatch.setattr(
         "app.services.transcription.transcribe_bytes", fake_transcribe
     )
+
+    class _FlakyDocs:
+        def __init__(self):
+            self.calls = 0
+
+        def export_summary(self, *, title, body, parent_folder_id=""):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("Docs API not enabled")
+            return ("doc-id-321", "https://docs.google.com/document/d/doc-id-321/edit")
+
+    docs = _FlakyDocs()
     settings = _settings_with_audio_dir()
-    client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-2")])
+    client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-flaky")])
     llm = _FakeLLM(tasks=[{"title": "t1"}])
     pipeline = FirefliesPipeline(
         settings=settings,
         client=client,
         llm_backend=llm,
-        docs_factory=lambda: _FakeDocs(),
+        docs_factory=lambda: docs,
         sender=None,
     )
     with SessionFactory() as s:
         t = client.list_transcripts(limit=1)[0]
         first = pipeline.process_one(s, t)
         s.commit()
-    assert first.tasks_created == 1
+    # First run: doc_exported failed but everything else flipped.
     assert first.skipped_reason is None
-
+    assert first.google_doc_url is None
+    assert first.tasks_created == 1
+    # Re-run: should NOT short-circuit, should retry the doc step.
     with SessionFactory() as s:
         t = client.list_transcripts(limit=1)[0]
         second = pipeline.process_one(s, t)
         s.commit()
-    assert second.skipped_reason == "already_processed"
-    # No new tasks.
-    with SessionFactory() as s:
-        assert (
-            s.query(Task)
-            .filter(Task.source_kind == TaskSourceKind.fireflies)
-            .count()
-            == 1
-        )
+    assert second.skipped_reason is None
+    assert second.google_doc_url == "https://docs.google.com/document/d/doc-id-321/edit"
+    assert docs.calls == 2  # second call succeeded
 
 
 def test_pipeline_admin_fallback_for_unresolved_owner(

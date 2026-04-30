@@ -270,15 +270,29 @@ def send_morning_task_cards(
             )
             continue
 
-        # Intro DM listing the day's load at a glance.
-        try:
-            sender.send_message(
-                chat_id=int(uid),
-                text=_build_intro_text(today=today, tasks=all_tasks),
-            )
-        except Exception as e:  # noqa: BLE001
+        # Intro DM listing the day's load at a glance. If THIS
+        # send fails (e.g. «chat not found» — operator on the
+        # team list but never /started the bot), we flip
+        # `has_started_bot=False` for them and SKIP the rest of
+        # the cards for this recipient. Otherwise we'd dump the
+        # full N-card stream into a black hole and pollute the
+        # logs (FR-CR-05-67).
+        intro_resp = sender.send_message(
+            chat_id=int(uid),
+            text=_build_intro_text(today=today, tasks=all_tasks),
+        )
+        if not (intro_resp or {}).get("message_id"):
             report.failures += 1
-            log.warning("morning_cards_intro_send_failed", uid=uid, error=str(e))
+            log.warning(
+                "morning_cards_intro_send_failed",
+                uid=uid,
+                hint="recipient probably hasn't /start-ed the bot",
+            )
+            try:
+                _mark_started_bot_false(session, int(uid))
+                session.flush()
+            except Exception:  # noqa: BLE001
+                pass
             continue
         cards = 0
         is_admin = uid in admin_uids
@@ -364,7 +378,7 @@ def _post_one_card(
         subscribed=subscribed,
     )
     try:
-        sender.send_message(
+        resp = sender.send_message(
             chat_id=chat_id, text=text, reply_markup=keyboard
         )
     except Exception as e:  # noqa: BLE001
@@ -375,7 +389,31 @@ def _post_one_card(
             error=str(e),
         )
         return False
+    # FR-CR-05-67 — `TelegramSender._post` swallows 4xx errors and
+    # returns `{}` instead of raising. Detect failure by missing
+    # `message_id` so the digest doesn't think it sent 41 cards
+    # to a chat the bot can't actually DM («Bad Request: chat
+    # not found»).
+    if not (resp or {}).get("message_id"):
+        return False
     return True
+
+
+def _mark_started_bot_false(session: Session, user_id: int) -> None:
+    """FR-CR-05-67 — Telegram returned «chat not found» for
+    this user. Whatever flag was set previously was wrong;
+    flip every `telegram_chat_members` row for them to
+    `has_started_bot=False` so the next pull's recipient
+    filter (FR-CR-05-66) drops them silently."""
+    from app.models import TelegramChatMember
+
+    rows = (
+        session.query(TelegramChatMember)
+        .filter(TelegramChatMember.user_id == user_id)
+        .all()
+    )
+    for r in rows:
+        r.has_started_bot = False
 
 
 def _telegram_subscriber_ids(session: Session) -> list[str]:

@@ -258,3 +258,21 @@ def test_dedup_invented_id_dropped_when_drafts_in_lookback(session):
     )
     assert out.is_duplicate is True
     assert out.duplicate_of_task_id is None
+
+
+def test_dedup_prompt_pins_different_recipient_rule():
+    """FR-CR-05-78 — operator: «подготовить отчёт Ирине
+    послезавтра» got killed as duplicate of «подготовить
+    отчёт Артёму завтра». Different recipient + different
+    deadline = different work, never duplicates. The prompt
+    now spells this out explicitly with the exact regression
+    case as a worked example."""
+    from app.services.task_dedup import _SYSTEM_PROMPT
+
+    blob = _SYSTEM_PROMPT
+    # Default is «not duplicate».
+    assert "DEFAULT TO" in blob and "false" in blob.lower()
+    # Different recipient = not duplicate.
+    assert "DIFFERENT RECIPIENT" in blob or "different recipient" in blob.lower()
+    # The exact failure mode is pinned.
+    assert "Ирине" in blob and "Артёму" in blob

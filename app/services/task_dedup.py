@@ -85,22 +85,55 @@ _DEDUP_TOOL_PARAMETERS: dict[str, Any] = {
 _SYSTEM_PROMPT = """\
 You decide whether a new task DUPLICATES an existing one.
 
-Two tasks duplicate when they describe the SAME piece of work —
-same deliverable, same target, same goal. Different wording for
-the same thing IS a duplicate ("подготовить отчёт" ≈ "сделать
-отчёт"). One having more / less context IS NOT a difference.
+Two tasks duplicate ONLY when they describe the SAME piece of
+work — same deliverable AND same target AND same goal. Just
+sharing a generic verb («подготовить отчёт») is NOT enough —
+the SUBJECT, RECIPIENT, and DEADLINE all matter.
 
-They are NOT duplicates when:
-- the deliverable differs (a deck vs a report, even on the same
-  project),
-- they target different people, projects, or due dates,
-- one is generic ("подготовить отчёт") and the other names a
-  different specific subject ("отчёт по продажам" vs "отчёт по
-  клиентам").
+DEFAULT TO `is_duplicate=false`. Better to have one extra task
+the operator manually merges than to silently drop a real one.
+Operator regression: «подготовить отчёт Ирине послезавтра»
+was killed as duplicate of «подготовить отчёт Артёму завтра» —
+WRONG. Different recipient + different deadline = different
+work.
 
-Return ``is_duplicate=true`` when the new task duplicates any of
-the existing tasks listed; set ``duplicate_of_task_id`` to that
-existing task's id. Otherwise return false.
+NOT duplicates (operator's «отчёт Ирине ≠ отчёт Артёму» rule):
+- DIFFERENT RECIPIENT / AUDIENCE — «отчёт Ирине» vs «отчёт
+  Артёму» are TWO different tasks; even if the verb and noun
+  overlap, the recipient is the discriminator.
+- DIFFERENT DEADLINE — «отчёт к завтра» vs «отчёт к пятнице»
+  may be two milestones of the same work, but treat them
+  as separate. The operator can merge if needed.
+- DIFFERENT DELIVERABLE — deck vs report on the same
+  project, contract vs NDA on the same client.
+- DIFFERENT SPECIFIC SUBJECT — «отчёт по продажам» vs
+  «отчёт по клиентам».
+
+Duplicates (rare):
+- SAME deliverable, SAME recipient, SAME deadline — just
+  different wording. «подготовить отчёт по продажам Ирине
+  завтра» ≈ «сделать sales-отчёт для Ирины к завтра».
+- One has more context, the other less, but the core is
+  identical (same project, same person, same date).
+
+Return ``is_duplicate=true`` ONLY when ALL of subject /
+recipient / deadline overlap AND the candidate adds no new
+information. Otherwise return false. Set
+``duplicate_of_task_id`` to the existing task's id only when
+true.
+
+Worked examples:
+  candidate: «отчёт Ирине послезавтра»
+  existing:  «отчёт Артёму завтра»
+  → false (different recipient AND different deadline)
+
+  candidate: «отчёт по продажам Q2»
+  existing:  «отчёт по клиентам Q2»
+  → false (different specific subject)
+
+  candidate: «подготовить sales-deck к пятнице»
+  existing:  «сделать презу по продажам к пятнице»
+  → true (same deliverable, same deadline, paraphrase)
 """
 
 

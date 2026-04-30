@@ -833,6 +833,37 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-97 — Deterministic title-match pre-check (no LLM) before dedup
+
+Operator: «надо не расширять синонимы а поумнее их различать
+явно». Two drafts with the LITERALLY-IDENTICAL title
+«Запланировать встречу с Atuwatse Okorodudu», same owner, same
+due_date landed as two separate tasks because the LLM dedup
+prompt — bloated with synonym families and worked counter-
+examples — was missing the obvious case.
+
+`task_dedup.py` adds a Python pre-check that runs BEFORE the
+LLM call:
+
+  - `_normalize_title_for_match(title)` — lowercase + collapse
+    internal whitespace + strip leading/trailing punctuation
+    (`.!?,;:—-«»"'`) + replace `ё → е` (LLM emits both for
+    the same word).
+  - `_deterministic_duplicate(candidate, existing)` — return
+    the matching `_ExistingItem` when ALL THREE are equal:
+      1. normalised title
+      2. owner key (uid or display_name, lowercased)
+      3. due_date string
+  - `check_duplicate` short-circuits on the first hit, returns
+    `is_duplicate=True` + `reason="deterministic match: …"`,
+    skipping the LLM call entirely.
+
+Synonym/paraphrase dedup remains the LLM's domain — those rules
+in `_SYSTEM_PROMPT` (FR-CR-05-92/95/96) still apply when the
+deterministic gate misses (e.g. «Подтвердить» vs «Закрепить»).
+The Python gate is just the «two LLM outputs that happen to be
+the same string» backstop.
+
 #### FR-CR-05-96 — Dedup synonym families: meeting-family, confirm-family, etc.
 
 Operator: 4 separate tasks for the same Jared+Thomas meeting,
@@ -4274,6 +4305,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-97  | `test_task_dedup.py::test_normalize_title_for_match_collapses_whitespace_case_yo_e` (case + whitespace + leading-trailing-punctuation + ё↔е); `::test_dedup_deterministic_match_skips_llm` (Atuwatse Okorodudu regression: identical title triple-match → is_duplicate=true, LLM never called); `::test_dedup_deterministic_match_normalises_case_and_punctuation` («  подтвердить  ВСТРЕЧУ.  » matches «Подтвердить встречу»); `::test_dedup_deterministic_does_not_match_when_owner_differs` (different owner → falls through to LLM) |
 | FR-CR-05-96  | `test_task_dedup.py::test_dedup_prompt_pins_meeting_family_and_confirm_family` (5 family names + 7 individual synonyms + 4 worked counter-examples pinned) |
 | FR-CR-05-95  | `test_intent_pipeline.py::test_detect_prompt_rejects_third_party_future_intent` («Они сами отправят», «Артем сам пришлёт», «They will send the link themselves» pinned); `::test_detect_prompt_rejects_emotional_chat_outbursts` («Очень важный день», «помолиться» pinned); `::test_dedup_prompt_pins_synonym_verbs_and_same_subject` (3 regression pairs + synonym families pinned); `::test_normalize_task_title_caps_at_80_chars` (hard cap 80, clause-break uses `. ` for the «Очень важный день. …» split) |
 | FR-CR-05-94  | `test_intent_pipeline.py::test_detect_prompt_rejects_opinion_qualifier_statements` (Singapore/HK 250-char regression + «По X я не против, но Y» / «Они у Алины в задачах есть» / «Мне кажется» / «I think we should» fragments + FR-CR-05-94 pinned); `::test_date_prompt_status_as_of_is_not_a_deadline` («статус на 26/02» pattern + 2027-02-23 BAD-output + status-update framing); manual verification: drafts now show ≤101-char titles via `normalize_task_title` in `prepare_drafts`; `_resolve_uids_in_text` resolves bare 9-15 digit tokens to `team_members.real_name`; edit prompt accepts `current_user_id` + `current_user_label` so «на меня» resolves to the editor's uid; `ops/wipe_tasks.py --also-wipe-sheet` calls `values().clear(A2:V)`. |

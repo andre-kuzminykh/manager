@@ -353,6 +353,76 @@ def _fmt_candidate(payload: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+def _normalize_title_for_match(title: str) -> str:
+    """FR-CR-05-97 — operator: «надо не расширять синонимы а
+    поумнее их различать явно».
+
+    Lowercase + collapse whitespace + strip Cyrillic/Latin
+    punctuation noise. This isn't a synonym matcher — it's a
+    «two LLM outputs landed nearly identical strings» backstop
+    so the LLM dedup gate doesn't have to re-litigate exact
+    matches under prompt-bloat noise.
+    """
+    if not title:
+        return ""
+    import re
+
+    out = title.lower().strip()
+    # Collapse internal whitespace.
+    out = re.sub(r"\s+", " ", out)
+    # Strip leading/trailing punctuation.
+    out = out.strip(".!?,;:—-«»\"' ")
+    # Replace Cyrillic ё → е (LLM often emits both for the same word).
+    out = out.replace("ё", "е")
+    return out
+
+
+def _candidate_owner_uid(candidate: dict[str, Any]) -> str:
+    return str(
+        candidate.get("owner_user_id")
+        or candidate.get("owner_display_name")
+        or ""
+    ).strip().lower()
+
+
+def _existing_owner_key(item: _ExistingItem) -> str:
+    return (item.owner_label or "").strip().lower()
+
+
+def _deterministic_duplicate(
+    candidate: dict[str, Any], existing: list[_ExistingItem]
+) -> _ExistingItem | None:
+    """FR-CR-05-97 — fast-path duplicate check that skips the
+    LLM entirely.
+
+    Match when ALL three are equal:
+      - `_normalize_title_for_match(title)` (case + whitespace
+        + ё/е normalised)
+      - owner key (uid or display_name, lowercased)
+      - due_date string
+
+    Returns the matched `_ExistingItem` or `None`. Used as a
+    pre-LLM gate in `check_duplicate`. The LLM still runs for
+    everything else (paraphrase / synonym dedup remains the
+    LLM's domain via `_SYSTEM_PROMPT`).
+    """
+    cand_title = _normalize_title_for_match(candidate.get("title") or "")
+    if not cand_title:
+        return None
+    cand_owner = _candidate_owner_uid(candidate)
+    cand_due = (str(candidate.get("due_date") or "")).strip()
+
+    for item in existing:
+        if _normalize_title_for_match(item.title) != cand_title:
+            continue
+        if _existing_owner_key(item) != cand_owner:
+            continue
+        if (item.due_date or "").strip() != cand_due:
+            continue
+        return item
+    return None
+
+
 def check_duplicate(
     session: Session,
     *,
@@ -366,6 +436,13 @@ def check_duplicate(
     `owner_*`, and `due_date` are optional. When no LLM backend is
     available or the lookback window is empty, returns
     «not a duplicate» — better to create than to silently drop.
+
+    FR-CR-05-97 — deterministic pre-check runs FIRST: when
+    `(normalized_title, owner, due_date)` triple matches an
+    existing item exactly, return is_duplicate=True without
+    calling the LLM. Operator: «надо не расширять синонимы, а
+    поумнее их различать явно». The LLM still handles
+    paraphrase / synonym cases below.
     """
     if not candidate.get("title"):
         return DedupResult(is_duplicate=False)
@@ -373,6 +450,23 @@ def check_duplicate(
     existing = _fetch_recent(session, limit=lookback)
     if not existing:
         return DedupResult(is_duplicate=False)
+
+    # FR-CR-05-97 — deterministic exact-match fast path.
+    fast = _deterministic_duplicate(candidate, existing)
+    if fast is not None:
+        log.info(
+            "task_dedup_deterministic_hit",
+            item_id=fast.item_id,
+            kind=fast.kind,
+        )
+        return DedupResult(
+            is_duplicate=True,
+            duplicate_of_task_id=fast.item_id if fast.kind == "task" else None,
+            reason=(
+                "deterministic match: same title + owner + due_date "
+                f"as {fast.kind} #{fast.item_id}"
+            ),
+        )
 
     if llm_backend is None or not hasattr(llm_backend, "call_tool"):
         return DedupResult(is_duplicate=False)

@@ -43,6 +43,111 @@ def _mk(session, **kw) -> int:
     return t.id
 
 
+def test_normalize_title_for_match_collapses_whitespace_case_yo_e():
+    """FR-CR-05-97 — exact-match normaliser handles common
+    LLM-output variations: case, internal whitespace, leading
+    punctuation, ё↔е."""
+    from app.services.task_dedup import _normalize_title_for_match
+
+    f = _normalize_title_for_match
+    assert f("Подтвердить") == f("подтвердить")
+    assert f("Подтвердить  встречу") == f("Подтвердить встречу")
+    assert f(" Подтвердить ") == f("Подтвердить")
+    assert f("Подтвердить.") == f("Подтвердить")
+    # ё / е equivalence.
+    assert f("Подтвердить тёщу") == f("Подтвердить тещу")
+
+
+def test_dedup_deterministic_match_skips_llm(session):
+    """FR-CR-05-97 — operator regression: 2 drafts with
+    EXACTLY the same title «Запланировать встречу с Atuwatse
+    Okorodudu», same owner, same due_date landed as 2 separate
+    tasks. The LLM dedup wasn't catching it under prompt
+    bloat. Deterministic pre-check now short-circuits BEFORE
+    the LLM call."""
+    from app.services.task_dedup import check_duplicate
+
+    existing_id = _mk(
+        session,
+        title="Запланировать встречу с Atuwatse Okorodudu",
+        owner_user_id="111",
+        due_date=date(2026, 4, 30),
+    )
+    session.commit()
+
+    backend = _FakeBackend({"is_duplicate": False})  # would say no
+    result = check_duplicate(
+        session,
+        candidate={
+            "title": "Запланировать встречу с Atuwatse Okorodudu",
+            "owner_user_id": "111",
+            "due_date": "2026-04-30",
+        },
+        llm_backend=backend,
+    )
+    assert result.is_duplicate is True
+    assert result.duplicate_of_task_id == existing_id
+    # The LLM was never called — deterministic gate caught it.
+    assert backend.calls == 0
+    assert "deterministic" in (result.reason or "")
+
+
+def test_dedup_deterministic_match_normalises_case_and_punctuation(session):
+    """FR-CR-05-97 — normalisation handles capitalisation and
+    trailing punctuation — both common LLM output noise."""
+    from app.services.task_dedup import check_duplicate
+
+    _mk(
+        session,
+        title="Подтвердить встречу",
+        owner_user_id="111",
+        due_date=date(2026, 4, 30),
+    )
+    session.commit()
+
+    result = check_duplicate(
+        session,
+        candidate={
+            "title": "  подтвердить  ВСТРЕЧУ.  ",
+            "owner_user_id": "111",
+            "due_date": "2026-04-30",
+        },
+        llm_backend=_FakeBackend({"is_duplicate": False}),
+    )
+    assert result.is_duplicate is True
+
+
+def test_dedup_deterministic_does_not_match_when_owner_differs(session):
+    """FR-CR-05-97 — same title but different owner falls
+    through to the LLM (the LLM may still call it duplicate
+    via SAME-SPECIFIC-SUBJECT, but the deterministic gate
+    only fires on exact-match-everything)."""
+    from app.services.task_dedup import check_duplicate
+
+    _mk(
+        session,
+        title="Подтвердить встречу",
+        owner_user_id="111",
+        due_date=date(2026, 4, 30),
+    )
+    session.commit()
+
+    backend = _FakeBackend({"is_duplicate": False})
+    result = check_duplicate(
+        session,
+        candidate={
+            "title": "Подтвердить встречу",
+            "owner_user_id": "222",  # different owner
+            "due_date": "2026-04-30",
+        },
+        llm_backend=backend,
+    )
+    # Deterministic gate didn't fire → LLM was called → its
+    # negative answer wins.
+    assert result.is_duplicate is False
+    assert backend.calls == 1
+
+
 def test_dedup_prompt_pins_meeting_family_and_confirm_family():
     """FR-CR-05-96 — operator regression: 4 separate tasks for
     the same Jared+Thomas meeting; «Подтвердить» / «Закрепить»

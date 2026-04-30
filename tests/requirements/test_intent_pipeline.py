@@ -640,6 +640,89 @@ def test_date_prompt_pins_no_list_item_dates():
     assert "temporal anchor" in blob.lower() or "к 5" in blob
 
 
+def test_detect_prompt_rejects_transcription_dumps_as_no_action():
+    """FR-CR-05-89 — operator regressions: messages whose
+    source is a paragraph DESCRIBING what's in a screenshot or
+    a chat snippet («На изображении показано электронное
+    письмо…», «Обсуждают сообщения внутри группы…») landed as
+    tasks with the entire transcript as title and no
+    description. The detect prompt now teaches: transcription
+    dumps without an explicit imperative = no_action."""
+    blob = DETECT_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "FR-CR-05-89" in blob
+    assert "Transcription / chat dumps" in blob
+
+    # Both operator regressions pinned as worked failure-mode examples.
+    assert "Это что? На изображении" in blob
+    assert "Обсуждают сообщения внутри группы" in blob
+
+    # Lead-in patterns are listed.
+    for pattern in (
+        "На изображении",
+        "На скрине",
+        "Обсуждают",
+        "Сообщение",
+        "В переписке",
+        "Это что?",
+    ):
+        assert pattern in blob, f"transcription pattern {pattern!r} should be pinned"
+
+    # The transcript+imperative exception is documented.
+    assert "ОТПРАВЬ" in blob or "imperative" in flat.lower()
+
+
+def test_title_prompt_forbids_naked_verb_titles():
+    """FR-CR-05-89 — operator regression: title «Встретиться»
+    landed without a complement (with whom? about what?). The
+    prompt now teaches: bare verb = bad; include
+    object/addressee/topic, or fall back to «(уточнить
+    детали)»."""
+    blob = TITLE_SYSTEM_PROMPT
+
+    assert "NEVER SHIP A NAKED VERB TITLE" in blob
+    assert "FR-CR-05-89" in blob
+    # The operator regression is pinned as a worked example.
+    assert "Встретиться" in blob
+    # The (уточнить ...) fallback is documented.
+    assert "уточнить" in blob
+
+
+def test_title_prompt_pins_truncated_date_range_failure():
+    """FR-CR-05-89 — operator regression: description «Ryan
+    будет в Лондоне с 4 по и предлагает …» — the «по и» is a
+    half-emitted date range («с 4 по 8 мая» got cut at «по»).
+    The prompt's LENGTH RULE now pins this and tells the LLM
+    to drop the range entirely rather than ship half."""
+    blob = TITLE_SYSTEM_PROMPT
+    assert "Ryan будет в Лондоне с 4 по" in blob
+    assert "half-range" in blob.lower() or "drop the range" in blob
+
+
+def test_date_prompt_requires_proof_quote_or_null():
+    """FR-CR-05-89 — operator policy: «либо в описание
+    добавляй пруф либо сегодня». For every non-null `due_
+    date`, the LLM's `reasoning` MUST start with a verbatim
+    quote of the date phrase from source. The MGX «до конца
+    мая → null» case is pinned as the failure-mode."""
+    from app.intent.date_prompt import DATE_SYSTEM_PROMPT
+
+    blob = DATE_SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "PROOF QUOTE OR NULL" in blob
+    assert "FR-CR-05-89" in blob
+    # Operator's literal phrasing (transliterated) of the policy.
+    assert "либо в описание добавляй пруф либо сегодня" in blob
+
+    # The MGX worked counter-example: «до конца мая → null».
+    assert "до конца мая" in blob
+    # The «if you can't quote source verbatim, emit null» fallback.
+    assert "verbatim" in blob.lower() or "verbatim quote" in flat.lower()
+    assert "earned the right" in blob.lower() or "emit null" in blob.lower()
+
+
 def test_title_prompt_forbids_titles_ending_in_preposition():
     """FR-CR-05-88 — operator regression: title rendered as
     «Спросить слоты с» — chopped on «с», losing «Марко». The

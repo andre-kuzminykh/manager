@@ -94,6 +94,35 @@ Return ``is_task=false`` for:
   [Name]…», «На изображении письмо с темой …»). The artefact
   ITSELF isn't a task. If the author explicitly says «отправь»,
   the imperative is the task and the artefact is the description.
+- *Transcription / chat dumps* — HARD RULE (FR-CR-05-89). When
+  the source is a paragraph DESCRIBING what someone else did,
+  said, or what's visible in an image, it is NOT a task. These
+  are observation / commentary, no action owed. Reject lead-in
+  patterns:
+    «На изображении показано / На скрине …»  (image transcript)
+    «На фото видно / На картинке …»          (image transcript)
+    «Обсуждают / Обсуждается / Discussion of / In the chat …»  (chat dump)
+    «Сообщение / Message from X: …»          (forwarded msg dump)
+    «В переписке / В треде / В диалоге …»    (thread dump)
+    «По переписке / По обсуждению …»         (recap; exception
+        below — recap+«нужно сделать» IS a task)
+    «Это что? / What is this? / Что это?»    (clarification
+        question, the user is asking ABOUT the artefact)
+  Worked failure-mode examples (operator regressions):
+    source: «Это что? На изображении показано электронное
+            письмо от Артема Соколова, отправленное Джоди и с
+            копией Ирине …»
+       → is_task=false (the user is asking what the
+         screenshot is, not delegating work)
+    source: «Обсуждают сообщения внутри группы CEO Office с
+            Ириной. Ирэн сообщает, что Артём, скорее всего,
+            не летит, и спрашивает источник …»
+       → is_task=false (chat-content recap, no imperative)
+  Exception: if the source contains BOTH a transcript AND an
+  explicit action verb («Это письмо от Олаяна — ОТПРАВЬ ему
+  ответ»), the action is the task and the transcript is its
+  description. Confidence ≥0.75 only when the imperative is
+  unambiguous; otherwise emit no_action.
 - Pure information ("доска в Figma: <link>").
 
 Scope: tasks only. Meetings and calendar events are OUT of scope

@@ -9,6 +9,46 @@ from app.models import ActionDraft, ActionDraftState, Task, TaskStatusHistory
 from app.models.task import TaskPriority, TaskStatus
 
 
+def normalize_task_title(raw: Any) -> str:
+    """FR-CR-05-72 / -75 / -89 — produce a one-glance title.
+
+    Pipeline:
+      1. Strip whitespace; raise on empty.
+      2. Capitalize the first character (works for Cyrillic).
+      3. If multi-line, keep the FIRST line only.
+      4. If still ≥100 chars, trim at the first strong break
+         (`: `, ` — `, ` - `, `; `, `. `) sitting between offset 8
+         and 100 — usually ends the action-verb clause.
+      5. Fallback: word-boundary cut at 100 + ellipsis. This is
+         the FR-CR-05-89 backstop — without it, a long sentence
+         that has no early strong-break (operator's «Это что?
+         На изображении показано электронное письмо …»)
+         escaped the cap and shipped a 200-char title.
+
+    Reused from `ops.resync_sheet` to retro-cap legacy rows.
+    """
+    title = (raw or "").strip()
+    if not title:
+        raise ValueError("Task title is required")
+    if not title[0].isupper():
+        title = title[0].upper() + title[1:]
+    if "\n" in title:
+        title = title.split("\n", 1)[0].strip()
+    if len(title) > 100:
+        for sep in (": ", " — ", " - ", "; ", ". "):
+            idx = title.find(sep)
+            if 8 <= idx <= 100:
+                title = title[:idx].rstrip()
+                break
+    if len(title) > 100:
+        cut = title[:100].rstrip()
+        last_ws = max(cut.rfind(" "), cut.rfind("—"), cut.rfind("-"))
+        if last_ws > 60:
+            cut = cut[:last_ws].rstrip()
+        title = cut + "…"
+    return title
+
+
 def _coerce_due(value: Any) -> date | None:
     if value is None or value == "":
         return None
@@ -80,42 +120,7 @@ def create_task_from_draft(
             return v[:_MAX]
         return v
 
-    title = (payload.get("title") or "").strip()
-    if not title:
-        raise ValueError("Task title is required")
-    # FR-CR-05-75 — capitalize the first character. The LLM
-    # often returns lowercase imperatives («подготовить отчёт»);
-    # operator wants «Подготовить отчёт». Works for Cyrillic.
-    if title and not title[0].isupper():
-        title = title[0].upper() + title[1:]
-    # FR-CR-05-63 / FR-CR-05-72 — hard-cap title to keep cards
-    # readable when the LLM dumps a multi-line forward into the
-    # title field («Поговорил с Fortuna: 1) по SPAC… 2) …»).
-    # Cap is 100 chars now (was 200) so even a backstop title
-    # stays a one-glance label. Strategy:
-    #   1. If title spans multiple lines, take the FIRST line.
-    #   2. If first line still ≥100 chars, trim at the first
-    #      «strong break» — colon / dash / em-dash — that's
-    #      ≥40 chars in. The first clause is usually the action
-    #      verb («Поговорил с Fortuna») and the rest is content.
-    #   3. Fall back to a word-boundary cut at 100.
-    if "\n" in title:
-        title = title.split("\n", 1)[0].strip()
-    if len(title) > 100:
-        # Look for a strong-break that ends a usable verb-phrase.
-        # Prefix must be at least 8 chars so we don't cut to «1»
-        # or other tiny fragments.
-        for sep in (": ", " — ", " - ", "; ", ". "):
-            idx = title.find(sep)
-            if 8 <= idx <= 100:
-                title = title[:idx].rstrip()
-                break
-    if len(title) > 100:
-        cut = title[:100].rstrip()
-        last_ws = max(cut.rfind(" "), cut.rfind("—"), cut.rfind("-"))
-        if last_ws > 60:
-            cut = cut[:last_ws].rstrip()
-        title = cut + "…"
+    title = normalize_task_title(payload.get("title"))
 
     owner_user_id = _cap(payload.get("owner_user_id"))
     owner_display_name = _cap(payload.get("owner_display_name"))

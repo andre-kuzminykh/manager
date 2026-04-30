@@ -21,6 +21,22 @@ Produce three fields:
                 separate field. Use the imperative form
                 ("подготовить питчдек", "prepare pitch-deck").
 
+                NEVER SHIP A NAKED VERB TITLE (FR-CR-05-89).
+                A title that's a single bare verb («Встретиться»,
+                «Подготовить», «Send», «Follow up») is
+                useless — the operator can't tell WITH WHOM,
+                ABOUT WHAT, FOR WHICH PROJECT. Always include
+                the object / addressee / topic. If the source
+                doesn't make the complement clear, append
+                «(уточнить детали)» rather than shipping the
+                bare verb. Worked counter-example:
+                  BAD title:  «Встретиться»
+                  GOOD title: «Встретиться с Ryan Gariepy
+                              (Rockwell)»  (when context names
+                              the participant)
+                  GOOD title: «Встретиться (уточнить с кем)»
+                              (when context is sparse)
+
                 NEVER END A TITLE WITH A PREPOSITION (FR-CR-05-88).
                 Russian prepositions to watch for: с, со, в, во,
                 на, от, к, ко, по, за, у, для, из, под, над, о,
@@ -79,10 +95,18 @@ Produce three fields:
                   - ALWAYS finish every sentence with a period /
                     full stop. Never trail off mid-sentence with
                     an open clause («так как осталось открытым
-                    с»). If you can't finish the thought
-                    cleanly, end after the first complete
-                    sentence — partial trailing clauses are
-                    worse than a shorter description.
+                    с», «Ryan будет в Лондоне с 4 по и»). If
+                    you can't finish the thought cleanly, end
+                    after the first complete sentence — partial
+                    trailing clauses are worse than a shorter
+                    description. Operator regression
+                    FR-CR-05-89: «Ryan будет в Лондоне с 4 по
+                    и предлагает …» — the «по и» is a date-
+                    range cut («с 4 по 8 мая» got truncated to
+                    «с 4 по»). When you don't have both ends
+                    of a range, drop the range entirely
+                    («Ryan будет в Лондоне в начале мая»)
+                    rather than ship a half-range.
                   - No bullet lists, no markdown.
 
                 NAMED-ENTITY COVERAGE (HARD REQUIREMENT) —

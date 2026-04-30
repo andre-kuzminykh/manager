@@ -833,6 +833,80 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-89 — Bulk-resync CLI + transcript dumps as no_action + naked-verb / proof-quote rules
+
+Operator: «давай я все задачи дропнул в шит, перезальем
+туда» plus three back-to-back regressions:
+
+  - «🟡 Это что? / На изображении показано электронное
+    письмо от Артема Соколова, отправленное Джоди и с
+    копией Ирине …» (long screenshot transcript as title);
+  - «🟡 Обсуждают сообщения внутри группы CEO Office с
+    Ириной …» (chat-content recap as title);
+  - «🟡 Встретиться» (naked verb, no complement);
+  - «📝 Ryan будет в Лондоне с 4 по и предлагает …»
+    (mid-sentence date-range trail-off);
+  - «🟡 Подготовить письмо для MGX … 📅 2026-05-31» (date
+    re-emerging despite FR-CR-05-87).
+
+Five layered fixes shipped under one FR ID:
+
+  - **`ops/resync_sheet.py`** — new bulk-resync CLI.
+    Walks every non-deleted Task, runs the new
+    `normalize_task_title` helper (FR-CR-05-72/-75/-89
+    rules now in one place), clears
+    `Task.google_sheets_row_id` + the matching
+    `GoogleSheetsSync.row_id` so the next sync APPENDS
+    fresh into A:V (FR-CR-05-86 path) instead of updating
+    a stale row pointer, and pushes through
+    `sheets.sync(session, task)`. Flags: `--dry-run`,
+    `--include-deleted`. Operator command after «дропнул в
+    шит»:
+    ```
+    sudo docker exec slack-task-bot python -m ops.resync_sheet
+    ```
+
+  - **`detect_prompt.py` — TRANSCRIPTION DUMP HARD RULE.**
+    New paragraph in the «Return is_task=false for» list
+    teaching: source paragraphs that DESCRIBE what's in a
+    screenshot or chat snippet are observation, not action.
+    Reject lead-in patterns: «На изображении / На скрине /
+    Обсуждают / Сообщение от / В переписке / Это что?». Two
+    operator regressions pinned as failure-mode worked
+    examples. Exception: explicit imperative alongside the
+    transcript («Это письмо от Олаяна — ОТПРАВЬ ему ответ»)
+    still extracts the imperative as the task and the
+    transcript as the description.
+
+  - **`title_prompt.py` — NEVER SHIP A NAKED VERB TITLE.**
+    A title that's a single bare verb («Встретиться»,
+    «Подготовить», «Send», «Follow up») is useless without
+    the object/addressee/topic. Always include the
+    complement; if context can't fill it, append «(уточнить
+    детали)» rather than ship the bare verb.
+
+  - **`title_prompt.py` — half-emitted date ranges.** New
+    LENGTH RULE addendum: if the LLM can't quote both ends
+    of a date range («с 4 по 8 мая»), drop the range
+    entirely («в начале мая») rather than ship the half-
+    range «с 4 по и …». The Ryan-Gariepy / Лондон trail-
+    off pinned as worked counter-example.
+
+  - **`date_prompt.py` rule 11 — PROOF QUOTE OR NULL.**
+    Operator policy: «либо в описание добавляй пруф либо
+    сегодня». For every non-null `due_date`, the
+    `reasoning` field MUST start with a verbatim quote of
+    the date phrase from source. The MGX «до конца мая»
+    counter-example is pinned as the canonical failure-
+    mode (the «до конца мая» modifies the round, not the
+    edit-letter task — emit null + reasoning explaining
+    why).
+
+`normalize_task_title` is now exported from
+`app/persistence/tasks.py` (refactored out of the inline
+block in `create_task_from_draft`) so the resync CLI and
+any future migration can share the same logic.
+
 #### FR-CR-05-88 — Title never ends on a preposition; description never null with context
 
 Operator: «"🟡 Спросить слоты с / 📝 Необходимо уточнить
@@ -3884,6 +3958,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-89  | `test_resync_sheet_cli.py::test_normalize_task_title_caps_long_no_break_paragraph` (200-char paragraph with no early break → 100+ellipsis word-boundary cut); `::test_normalize_task_title_first_clause_break_wins_over_hard_cut` («Поговорил с Fortuna: …» kept first clause); `::test_normalize_task_title_preserves_short_titles_unchanged` (no rewriting on short input); `::test_resync_sheet_dry_run_reports_capped_titles_without_writing`; `::test_resync_sheet_caps_titles_resets_row_id_and_resyncs` (title normalised in DB, row_id cleared, sheets.sync invoked); `::test_resync_sheet_include_deleted_flag_pushes_tombstones`; `::test_resync_sheet_returns_exit_code_2_when_no_credentials`; `test_intent_pipeline.py::test_detect_prompt_rejects_transcription_dumps_as_no_action` (TRANSCRIPTION DUMP HARD RULE + «На изображении» / «Обсуждают» / «Это что?» worked failure-modes pinned); `::test_title_prompt_forbids_naked_verb_titles` («Встретиться» counter-example + (уточнить детали) fallback); `::test_title_prompt_pins_truncated_date_range_failure» («Ryan будет в Лондоне с 4 по» half-range example); `::test_date_prompt_requires_proof_quote_or_null` (PROOF QUOTE OR NULL rule + MGX «до конца мая» counter-example + «либо в описание добавляй пруф либо сегодня» literal phrase pinned) |
 | FR-CR-05-83  | `test_evening_status.py::test_evening_tomorrow_plan_lists_tasks_for_next_day` (status digest + second message naming tomorrow's tasks; `tg://openmessage` hyperlink lands on the title); `::test_evening_tomorrow_plan_includes_overdue_today` (🚨 bullet on overdue lines + «Rolling over from today: 1» count); `::test_evening_tomorrow_plan_skipped_when_no_tasks` (no second DM when nothing scheduled, `tomorrow_plans_sent=0`); `::test_evening_tomorrow_plan_long_list_splits_into_multiple_messages` (80-task list splits at task boundaries, every chunk ≤4096 chars, `(continued)` marker on follow-ups); `::test_evening_status_groups_done_in_progress_todo` updated to assert 2 DMs (status + plan) |
 | FR-CR-05-84  | `test_morning_cards.py::test_morning_cards_records_card_messages_in_audit_payload` (audit row carries `[{chat_id,message_id}…]` for intro + every card); `::test_morning_cards_deletes_yesterdays_cards_before_posting_today` (day-2 run calls `deleteMessage` on every prior-day card BEFORE posting today's intro; `prior_cards_deleted=2`); `::test_morning_cards_no_prior_audit_row_means_no_delete_calls` (first-ever run = no deletes); `::test_morning_cards_delete_failures_dont_abort_today_post` (Telegram-refuses-to-delete failures swallowed, today's posting continues) |
 | FR-CR-05-85  | `test_telegram_digest_cron.py::test_cron_registry_includes_evening_and_morning_flows` (both subtypes present); `::test_cron_registry_evening_routes_to_send_evening_status_report` + `::test_cron_registry_morning_routes_to_send_morning_task_cards` (function identity pinned); `::test_cron_registry_lists_all_expected_subtypes` (full set); `::test_cron_main_passes_iso_date_through_to_evening` + `::test_cron_main_passes_iso_date_through_to_morning` (`--date` parses to ISO and reaches the called fn as `today=`); `::test_cron_main_only_builds_llm_backend_for_evening_flow` (morning never touches `_build_llm_backend`) |

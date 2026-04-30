@@ -158,6 +158,26 @@ Rules:
     or another entity in the same sentence, EMIT NULL. The
     downstream default (`due_date=today 18:00`) is the safe
     fallback when context dates exist but don't apply.
+11. PROOF QUOTE OR NULL (FR-CR-05-89). Operator policy:
+    «либо в описание добавляй пруф либо сегодня». For every
+    non-null `due_date` you emit, the `reasoning` field MUST
+    start with a verbatim quote (≥4 chars, with surrounding
+    context word if needed) of the date phrase from the
+    source. Examples:
+
+      source: «отчёт к пятнице»
+      due_date: <Friday ISO>
+      reasoning: «"к пятнице" — ближайшая пятница»
+
+      source: «Подготовить письмо для MGX … упомянуть, что
+              раунд закрыть до конца мая»
+      ⇒ no exact phrase ties «до конца мая» to the EDIT verb.
+        due_date: null
+        reasoning: «нет явного дедлайна на правку письма;
+                    "до конца мая" относится к раунду»
+
+    If you cannot quote source verbatim, you have not
+    earned the right to emit a date — emit null.
 
 Worked examples:
   current_date 2026-04-24 (Friday)

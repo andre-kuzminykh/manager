@@ -758,3 +758,76 @@ def test_refresh_card_works_for_fireflies_source(session):
     sender = _RecordingSender()
     refresh_card(sender=sender, session=session, task=t)
     assert len(sender.updated) == 1
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-80 — replace_draft_widget_for_viewer
+# --------------------------------------------------------------------------- #
+
+
+def test_replace_draft_widget_for_viewer_persists_new_widget_id(session):
+    """When the editor sends an Edit-on-draft reply, their old
+    widget gets DELETED + a fresh one posted under the reply.
+    The new widget's message_id MUST be persisted onto
+    `draft.payload["_widgets"]` so Accept's
+    `replace_widgets_with_task_card` finds it and converts to
+    a task card. Operator regression: «нажимаю Accept, прошлая
+    не исчезает, новая не реагирует»."""
+    from app.models import (
+        ActionDraft, ActionDraftState, ContextSnapshot,
+        IntentInference,
+    )
+    from app.models.intent import IntentType
+    from app.telegram_bot.cards import replace_draft_widget_for_viewer
+
+    snap = ContextSnapshot(
+        conversation_id="C1",
+        source_ts="1.0",
+        source_message={"ts": "1.0", "text": "src", "user": "U1"},
+        history_before=[],
+        thread_messages=[],
+    )
+    session.add(snap)
+    session.flush()
+    inf = IntentInference(
+        context_snapshot_id=snap.id,
+        intent=IntentType.create_task,
+        confidence=0.9,
+        invocation_type="passive",
+    )
+    session.add(inf)
+    session.flush()
+    d = ActionDraft(
+        inference_id=inf.id,
+        intent=IntentType.create_task,
+        state=ActionDraftState.proposed,
+        payload={
+            "title": "x",
+            "_widgets": [
+                {"chat_id": 222, "message_id": 100},  # editor
+                {"chat_id": 333, "message_id": 200},  # other admin
+            ],
+        },
+    )
+    session.add(d)
+    session.flush()
+
+    sender = _RecordingSenderWithDelete(next_message_id=500)
+    replace_draft_widget_for_viewer(
+        sender=sender, draft=d, viewer_chat_id=222,
+        reply_to_message_id=42, session=session,
+    )
+
+    # Editor's stale widget was deleted.
+    assert {"chat_id": 222, "message_id": 100} in sender.deleted
+    # Other admin's widget was refreshed in place.
+    assert any(u["chat_id"] == 333 for u in sender.updated)
+    # New widget posted under reply.
+    assert sender.sent and sender.sent[0]["chat_id"] == 222
+    # Crucial: stored widget list now contains the NEW message_id.
+    widgets = (d.payload or {}).get("_widgets") or []
+    chat_ids = sorted(int(w["chat_id"]) for w in widgets)
+    assert chat_ids == [222, 333]
+    # Editor's entry has the FRESH message_id (500), not 100.
+    editor_entry = [w for w in widgets if int(w["chat_id"]) == 222][0]
+    assert editor_entry["message_id"] == 500

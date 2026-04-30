@@ -1514,24 +1514,32 @@ class TelegramListener:
                 )
                 return
             _drop_prompt()
-            refresh_draft_widgets(
-                sender=self._sender, draft=draft, session=session
-            )
-            # FR-CR-05-38 — full updated widget body as a fresh DM
-            # under the operator's reply. Same rationale as the
-            # task-card path: visible state in context.
+            # FR-CR-05-80 — replace the editor's stale widget
+            # with a fresh one posted under their reply. Other
+            # recipients' widgets are refreshed in place inside
+            # the helper. Crucially the helper persists the new
+            # widget's message_id onto `draft.payload["_widgets"]`
+            # so a subsequent Accept's `replace_widgets_with_
+            # task_card` converts the new widget too — without
+            # it the new widget stayed alive with stale buttons.
             try:
-                from app.telegram_bot.cards import _build_draft_widget_text
-                from app.telegram_bot.keyboards import confirm_keyboard
+                from app.telegram_bot.cards import (
+                    replace_draft_widget_for_viewer,
+                )
 
-                self._sender.send_message(
-                    chat_id=msg.chat_id,
-                    text=_build_draft_widget_text(draft, session=session),
-                    reply_markup=confirm_keyboard(draft_id=draft.id),
+                replace_draft_widget_for_viewer(
+                    sender=self._sender,
+                    draft=draft,
+                    viewer_chat_id=msg.chat_id,
                     reply_to_message_id=msg.message_id,
+                    session=session,
                 )
             except Exception as e:  # noqa: BLE001
-                log.info("telegram_edit_receipt_failed", error=str(e))
+                log.warning(
+                    "telegram_edit_draft_replace_widget_failed",
+                    draft_id=draft.id,
+                    error=str(e),
+                )
         else:
             log.info("telegram_unknown_pending_action", action=pending.action)
 

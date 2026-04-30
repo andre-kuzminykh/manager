@@ -664,6 +664,112 @@ def replace_widgets_with_task_card(
     session.flush()
 
 
+def replace_draft_widget_for_viewer(
+    *,
+    sender: TelegramSender,
+    draft: ActionDraft,
+    viewer_chat_id: int,
+    reply_to_message_id: int | None = None,
+    session: Session | None = None,
+) -> None:
+    """FR-CR-05-80 — used by the Edit-draft reply flow. Mirrors
+    `replace_card_for_viewer` for the post-Accept Task path:
+
+      1. Refresh every OTHER recipient's widget in place
+         (admins, etc. didn't trigger the edit but need to see
+         the new state).
+      2. DELETE the editor's stale widget(s) via
+         `delete_message`.
+      3. POST a fresh widget to the editor under their reply.
+      4. Persist the updated `(chat_id, message_id)` list onto
+         `draft.payload["_widgets"]` so the eventual Accept's
+         `replace_widgets_with_task_card` finds the NEW
+         widget id and converts it to a task card too.
+
+    Without (4) the new under-reply widget would stay alive
+    after Accept, with stale buttons that no longer dispatch
+    (operator regression: «нажимаю Accept после Edit, прошлая
+    не исчезает, новая не реагирует»)."""
+    if not sender.enabled:
+        return
+    widgets = _draft_widgets(draft)
+    text = _build_draft_widget_text(draft, session=session)
+    keyboard = confirm_keyboard(draft_id=draft.id)
+
+    other_widgets: list[dict[str, int]] = []
+    viewer_old: list[dict[str, int]] = []
+    for w in widgets:
+        if int(w["chat_id"]) == int(viewer_chat_id):
+            viewer_old.append(w)
+        else:
+            other_widgets.append(w)
+
+    # 1. Refresh other recipients in place.
+    for w in other_widgets:
+        try:
+            sender.update_message(
+                chat_id=w["chat_id"],
+                message_id=w["message_id"],
+                text=text,
+                reply_markup=keyboard,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "telegram_replace_draft_refresh_other_failed",
+                draft_id=draft.id,
+                chat_id=w["chat_id"],
+                error=str(e),
+            )
+
+    # 2. Delete editor's stale widget(s).
+    for w in viewer_old:
+        try:
+            sender.delete_message(
+                chat_id=w["chat_id"], message_id=w["message_id"]
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "telegram_replace_draft_delete_failed",
+                draft_id=draft.id,
+                chat_id=w["chat_id"],
+                message_id=w["message_id"],
+                error=str(e),
+            )
+
+    # 3. Post fresh widget to viewer under their reply.
+    try:
+        resp = sender.send_message(
+            chat_id=int(viewer_chat_id),
+            text=text,
+            reply_markup=keyboard,
+            reply_to_message_id=reply_to_message_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "telegram_replace_draft_post_failed",
+            draft_id=draft.id,
+            chat_id=viewer_chat_id,
+            error=str(e),
+        )
+        resp = {}
+
+    new_msg_id = (resp or {}).get("message_id")
+    new_widgets = list(other_widgets)
+    if new_msg_id:
+        new_widgets.append(
+            {"chat_id": int(viewer_chat_id), "message_id": int(new_msg_id)}
+        )
+
+    # 4. Persist new `_widgets` list back to draft.payload so
+    # Accept's `replace_widgets_with_task_card` finds the new
+    # message_id.
+    payload = dict(draft.payload or {})
+    payload["_widgets"] = new_widgets
+    draft.payload = payload
+    if session is not None:
+        session.flush()
+
+
 def refresh_draft_widgets(
     *,
     sender: TelegramSender,

@@ -43,6 +43,29 @@ def _mk(session, **kw) -> int:
     return t.id
 
 
+def test_dedup_prompt_pins_one_event_collapse_rule():
+    """FR-CR-05-98 — operator regression: «Организовать
+    встречу с Ryan Gariepy» vs «Пригласить Йохана на встречу
+    с Ryan Gariepy» landed as 2 tasks. Different verbs but
+    one external event. The prompt's ONE-EVENT COLLAPSE rule
+    must teach: when both tasks orbit the same named meeting,
+    collapse even if verbs are far apart."""
+    from app.services.task_dedup import _SYSTEM_PROMPT
+
+    blob = _SYSTEM_PROMPT
+    flat = " ".join(blob.split())
+
+    assert "ONE-EVENT COLLAPSE" in blob
+    assert "FR-CR-05-98" in blob
+    # The Ryan Gariepy regression pinned as a worked example.
+    assert "Пригласить Йохана на встречу с Ryan Gariepy" in blob
+    assert "Организовать встречу с Ryan Gariepy" in blob
+    # The «one event both orbit» discriminator phrasing.
+    assert "single named external event" in flat or "one event" in flat.lower()
+    # The escape hatch: distinct deliverables stay separate.
+    assert "distinct deliverable" in blob
+
+
 def test_normalize_title_for_match_collapses_whitespace_case_yo_e():
     """FR-CR-05-97 — exact-match normaliser handles common
     LLM-output variations: case, internal whitespace, leading

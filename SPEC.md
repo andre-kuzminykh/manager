@@ -833,6 +833,34 @@ retry skipped the failed step instead of fixing it. The
 check now requires EVERY per-step flag, so partially-failed
 runs DO retry the failed step on the next pass.
 
+#### FR-CR-05-98 — One-event collapse rule for dedup
+
+Operator: «надо чуть строже их отбирать, чуть свободнее промт,
+но не сильно». «Организовать встречу с Ryan Gariepy» (Юля) and
+«Пригласить Йохана на встречу с Ryan Gariepy» (Ирина) landed
+as two tasks. Different verbs (организовать vs пригласить) so
+the synonym-family rule didn't apply, but BOTH revolve around
+ONE upcoming external meeting.
+
+`task_dedup.py::_SYSTEM_PROMPT` adds a single ONE-EVENT
+COLLAPSE rule:
+
+  - When BOTH candidate and existing name the SAME external
+    upcoming meeting / call / event (by participant or
+    topic), collapse them as duplicates EVEN IF the verbs
+    are far apart («организовать» vs «пригласить» vs
+    «подготовить агенду» vs «обсудить»).
+  - Discriminator: «is there a single named external event
+    both tasks orbit?» Yes → duplicate.
+  - Escape hatch: when the second task has its OWN distinct
+    deliverable that doesn't dissolve into the first
+    («подготовить slide deck для встречи» — a separate
+    artefact owed regardless of whether the meeting
+    happens), keep separate.
+
+The Ryan Gariepy regression pinned as the worked counter-
+example.
+
 #### FR-CR-05-97 — Deterministic title-match pre-check (no LLM) before dedup
 
 Operator: «надо не расширять синонимы а поумнее их различать
@@ -4305,6 +4333,7 @@ pure unit tests for internal helpers.
 | FR-CR-05-35  | `test_telegram_listener.py::test_listener_view_realtime_off_by_default` (flag off ⇒ reader.iter_newest never called); `::test_listener_view_realtime_pulls_when_enabled` (flag on ⇒ listener pulls + posts widget DM via `prepare_drafts` / `post_draft_confirmation`); `::test_listener_view_realtime_throttled_within_interval` (repeated calls inside the window are no-ops); `::test_listener_view_realtime_no_op_when_reader_unconfigured` (no source URL ⇒ silent no-op even with the flag on) |
 | FR-CR-05-36  | `test_telegram_listener.py::test_listener_view_realtime_pulls_full_batch_size_per_poll` (single SQL roundtrip per poll, limit = `view_poll_batch_size`; 500 default covers realistic bursts) |
 | FR-CR-05-37  | `test_telegram_conversations.py::test_prompt_done_returns_text_for_owner` (prompt invites optional reply, no «/skip»); `::test_apply_done_no_op_when_reply_empty` (empty reply is a no-op now that the transition happened on click); `::test_apply_done_url_artifact` + `::test_apply_done_text_artifact` (artifact still stored when the operator does reply, with no extra transition attempt) |
+| FR-CR-05-98  | `test_task_dedup.py::test_dedup_prompt_pins_one_event_collapse_rule` (ONE-EVENT COLLAPSE block + Ryan Gariepy «Организовать» vs «Пригласить Йохана» worked counter-example + «single named external event» discriminator + «distinct deliverable» escape hatch all pinned) |
 | FR-CR-05-97  | `test_task_dedup.py::test_normalize_title_for_match_collapses_whitespace_case_yo_e` (case + whitespace + leading-trailing-punctuation + ё↔е); `::test_dedup_deterministic_match_skips_llm` (Atuwatse Okorodudu regression: identical title triple-match → is_duplicate=true, LLM never called); `::test_dedup_deterministic_match_normalises_case_and_punctuation` («  подтвердить  ВСТРЕЧУ.  » matches «Подтвердить встречу»); `::test_dedup_deterministic_does_not_match_when_owner_differs` (different owner → falls through to LLM) |
 | FR-CR-05-96  | `test_task_dedup.py::test_dedup_prompt_pins_meeting_family_and_confirm_family` (5 family names + 7 individual synonyms + 4 worked counter-examples pinned) |
 | FR-CR-05-95  | `test_intent_pipeline.py::test_detect_prompt_rejects_third_party_future_intent` («Они сами отправят», «Артем сам пришлёт», «They will send the link themselves» pinned); `::test_detect_prompt_rejects_emotional_chat_outbursts` («Очень важный день», «помолиться» pinned); `::test_dedup_prompt_pins_synonym_verbs_and_same_subject` (3 regression pairs + synonym families pinned); `::test_normalize_task_title_caps_at_80_chars` (hard cap 80, clause-break uses `. ` for the «Очень важный день. …» split) |

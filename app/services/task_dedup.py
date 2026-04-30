@@ -249,6 +249,31 @@ about THE SAME meeting / call / sync as the existing one?»
 If yes → duplicate. The operator can split into a separate
 prep task by hand if needed; better to err on collapsing
 than to spam 5 widgets for one meeting.
+
+ONE-EVENT COLLAPSE (FR-CR-05-98). Operator: «надо чуть
+строже их отбирать, чуть свободнее промт, но не сильно».
+When BOTH candidate and existing name the SAME external
+upcoming meeting / call / event (by participant or topic),
+collapse them as duplicates EVEN IF the verbs are far apart
+(«организовать» vs «пригласить» vs «подготовить агенду» vs
+«обсудить»). All of «schedule the X meeting», «invite Y to
+the X meeting», «prep agenda for the X meeting», «follow up
+after the X meeting» revolve around ONE event — the operator
+gets one card, splits into sub-tasks by hand if they want.
+
+The discriminator: «is there a single named external event
+both tasks orbit?» If yes → duplicate. If the second task
+has its OWN distinct deliverable that doesn't dissolve into
+the first («подготовить slide deck для встречи» — a
+separate artefact owed regardless of whether the meeting
+happens), keep them separate.
+
+Worked counter-example (FR-CR-05-98):
+  candidate: «Пригласить Йохана на встречу с Ryan Gariepy»
+  existing:  «Организовать встречу с Ryan Gariepy»
+    → true (one event «встреча с Ryan Gariepy»; «invite Y»
+      is a sub-step of «organize the meeting», not its own
+      deliverable)
 """
 
 

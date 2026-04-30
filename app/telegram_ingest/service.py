@@ -719,8 +719,12 @@ class TelegramIngestService:
                 sender_user_name=message.user_name,
                 admin_uid=admin_uid,
             )
-            if not (td.description or "").strip():
-                td.description = fallback_desc
+            # FR-CR-05-105 — operator: drop drafts the LLM
+            # couldn't describe rather than ship the
+            # «обсуждалось в …» fallback template. The check
+            # below in the per-draft flush picks up empty
+            # descriptions and deletes the draft.
+            # (Removed: `td.description = fallback_desc`.)
 
         snapshot = self._orchestrator.persist_context_snapshot(
             session, window.to_snapshot_dict()
@@ -799,58 +803,53 @@ class TelegramIngestService:
                     slack_message_ts=str(message.message_id),
                 )
                 payload = dict(draft.payload or {})
-                # FR-CR-05-75 / 63 / 74 / 94 — apply the SAME
-                # cosmetic + default fixes the persist layer
-                # applies, so the draft widget the operator sees
-                # already matches what the post-Accept Task
-                # will look like (FR-CR-05-72/89 title cap +
-                # capitalized first letter + default deadline
-                # today 18:00 if LLM didn't extract).
-                from app.persistence.tasks import (
-                    is_naked_verb_title,
-                    normalize_task_title,
-                    strip_chat_prefix_to_imperative,
-                    strip_first_person_prefix,
-                )
+                # FR-CR-05-105 — operator: «убери нахуй все
+                # детерменированные штуки, оставь только LLM,
+                # но в контекст бери по задаче 10 сообщений
+                # чтобы определить задача это или нет и
+                # контекст к ней для описания и бери 10
+                # предыдущих задач чтобы понять дубль это или
+                # нет».
+                #
+                # Removed Python title post-processors that
+                # were masking LLM behavior:
+                #   - strip_chat_prefix_to_imperative
+                #   - strip_first_person_prefix
+                #   - is_naked_verb_title
+                # Only `normalize_task_title` (≤80-char hard cap
+                # + capitalize first letter) survives as a
+                # cheap safety net against the rendered card
+                # overflowing.
+                from app.persistence.tasks import normalize_task_title
 
                 raw_title = (payload.get("title") or "").strip()
-                # FR-CR-05-103 — strip «@handle, подскажи,
-                # пожалуйста, X?» chat-question wrappers FIRST.
-                # Operator regression: «@IrinaMorato подскажи,
-                # пожалуйста, отправить фоллоу-ап Neuberger ?»
-                # landed verbatim — strip leading mentions +
-                # politeness verbs + softener + trailing «?».
-                if raw_title:
-                    raw_title = strip_chat_prefix_to_imperative(raw_title)
-                # FR-CR-05-101 — convert «Я тебе сейчас пришлю X»
-                # → «Прислать X» BEFORE checking naked-verb /
-                # capping. The LLM is told to do this in the
-                # title prompt (FR-CR-05-100), but doesn't
-                # always; this Python post-process is the
-                # safety net.
-                if raw_title:
-                    raw_title = strip_first_person_prefix(raw_title)
-                # FR-CR-05-99 — drop drafts whose title is a
-                # bare verb («Встретиться», «Забежать»,
-                # «Организовать») with no object/addressee.
-                if raw_title and is_naked_verb_title(raw_title):
-                    log.info(
-                        "telegram_ingest_drop_naked_verb_title",
-                        chat_id=message.chat_id,
-                        message_id=message.message_id,
-                        title=raw_title,
-                    )
-                    session.delete(draft)
-                    continue
                 if raw_title:
                     try:
                         payload["title"] = normalize_task_title(raw_title)
                     except ValueError:
-                        # `normalize_task_title` raises on empty
-                        # title; we already early-returned above
-                        # via the strip + truthy check, but stay
-                        # defensive.
                         pass
+
+                # FR-CR-05-105 — DROP the draft when the LLM
+                # couldn't produce a real description. The
+                # bot used to ship a deterministic fallback
+                # «обсуждалось в <chat> · <date>» which the
+                # operator can't act on. Better to drop than
+                # to clutter the backlog with task-less rows.
+                desc = (payload.get("description") or "").strip()
+                if not desc:
+                    log.info(
+                        "telegram_ingest_drop_no_description",
+                        chat_id=message.chat_id,
+                        message_id=message.message_id,
+                        title=raw_title,
+                        hint=(
+                            "LLM returned empty description; source "
+                            "lacks actionable context — dropping "
+                            "draft instead of shipping fallback."
+                        ),
+                    )
+                    session.delete(draft)
+                    continue
                 if not (payload.get("due_date") or "").strip():
                     payload["due_date"] = date.today().isoformat()
                 if not (payload.get("due_time") or "").strip():

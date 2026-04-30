@@ -193,7 +193,7 @@ def test_listener_tick_processes_updates_and_advances_offset(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="x"),
+        task=TaskDraft(title="x", description="x desc"),
         reasoning="r",
     )
     listener = _make_listener(
@@ -363,7 +363,7 @@ def test_listener_second_tick_with_same_offset_is_a_noop(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="x"),
+        task=TaskDraft(title="x", description="x desc"),
     )
     listener = _make_listener(
         classification,
@@ -401,7 +401,7 @@ def test_listener_at_mention_in_group_skips_confirm_widget(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.95,
-        task=TaskDraft(title="prepare deck"),
+        task=TaskDraft(title="prepare deck", description="Prep slides for the meeting."),
     )
     listener = _make_listener(
         classification,
@@ -442,7 +442,7 @@ def test_listener_routes_group_messages_to_draft_flow(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="prepare deck"),
+        task=TaskDraft(title="prepare deck", description="Prep slides for the meeting."),
         reasoning="r",
     )
     listener = _make_listener(
@@ -507,7 +507,7 @@ def test_listener_confirm_button_finalises_draft_into_task(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="prepare deck"),
+        task=TaskDraft(title="prepare deck", description="Prep slides for the meeting."),
     )
     # Step 1 — feed a group message so the listener creates a draft.
     listener = _make_listener(
@@ -596,7 +596,7 @@ def test_listener_reject_button_marks_draft_ignored(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="x"),
+        task=TaskDraft(title="x", description="x desc"),
     )
     listener = _make_listener(
         classification,
@@ -832,7 +832,7 @@ def test_listener_view_realtime_pulls_when_enabled(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="prepare deck"),
+        task=TaskDraft(title="prepare deck", description="Prep slides for the meeting."),
     )
     ingest = _make_ingest(classification)
     ingest._reader = _StubReader()  # noqa: SLF001
@@ -1092,7 +1092,7 @@ def test_listener_tick_transcribes_voice_dm_and_creates_task(
         classification = IntentClassification(
             intent=IntentType.create_task,
             confidence=0.9,
-            task=TaskDraft(title="купить молоко"),
+            task=TaskDraft(title="купить молоко", description="Зайти в магазин по дороге домой."),
             reasoning="r",
         )
         listener = _make_listener(
@@ -1284,7 +1284,7 @@ def test_listener_drops_pre_startup_bot_api_messages(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="x"),
+        task=TaskDraft(title="x", description="x desc"),
         reasoning="r",
     )
     listener = _make_listener(

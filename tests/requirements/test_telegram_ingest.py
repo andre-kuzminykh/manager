@@ -629,8 +629,8 @@ def test_prepare_drafts_creates_one_draft_per_chunk(
         intent=IntentType.create_task,
         confidence=0.9,
         tasks=[
-            TaskDraft(title="prepare deck"),
-            TaskDraft(title="write report"),
+            TaskDraft(title="prepare deck", description="Prep slides for the Acme review meeting."),
+            TaskDraft(title="write report", description="Draft Q2 sales report; due to leadership."),
         ],
     )
     service = _make_service(classification)
@@ -761,7 +761,10 @@ def test_prepare_drafts_stashes_source_text_for_quote_fallback(
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
-        task=TaskDraft(title="написать письмо клиенту"),
+        task=TaskDraft(
+            title="написать письмо клиенту",
+            description="Подготовить письмо клиенту по обсуждаемой сделке.",
+        ),
         reasoning="...",
     )
     service = _make_service(classification)
@@ -950,12 +953,15 @@ def test_resolve_owner_resolves_display_name_via_registry(
         assert task.owner_user_id == "42"
 
 
-def test_prepare_drafts_fills_in_fallback_description_when_llm_silent(
+def test_prepare_drafts_drops_when_llm_returns_empty_description(
     patched_session_scope, SessionFactory
 ):
-    """FR-CR-05-10 — when the LLM didn't produce a description, the
-    draft gets a deterministic «обсуждалось в <chat> · <date>»
-    summary so the operator at least sees where it came from."""
+    """FR-CR-05-105 — operator: «если контекста нет, то не
+    выводи». When the LLM doesn't give a real description,
+    the draft is DROPPED rather than shipped with the
+    deterministic «обсуждалось в <chat> · <date>» fallback.
+    Operators couldn't act on those rows; better to not
+    show them at all."""
     classification = IntentClassification(
         intent=IntentType.create_task,
         confidence=0.9,
@@ -971,10 +977,8 @@ def test_prepare_drafts_fills_in_fallback_description_when_llm_silent(
     with SessionFactory() as s:
         drafts = service.prepare_drafts(s, msg)
         s.commit()
-        assert len(drafts) == 1
-        desc = (drafts[0].payload or {}).get("description") or ""
-        assert "Acme Deal" in desc
-        assert "2026-04-29" in desc
+        # Empty-description draft → dropped.
+        assert len(drafts) == 0
 
 
 def test_prepare_drafts_keeps_llm_description_when_present(

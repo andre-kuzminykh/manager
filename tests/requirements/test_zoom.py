@@ -301,10 +301,12 @@ def test_zoom_pipeline_runs_every_step_and_creates_zoom_source_tasks(
             assert row.short_summary_sent is True
             assert row.google_doc_url == "https://docs.google.com/document/d/doc-zoom-1/edit"
             assert row.tasks_extracted_count == 1
-            # FR-CR-05-117 — short summary ends with the doc-link
-            # trailer (deterministic append, not LLM-emitted).
-            assert "📄 Подробный отчёт:" in (row.short_summary or "")
+            # FR-CR-05-127 — title becomes an HTML hyperlink to
+            # the Google Doc; the old «📄 Подробный отчёт: <url>»
+            # trailer line is gone.
+            assert "<a href=" in (row.short_summary or "")
             assert (row.google_doc_url or "") in (row.short_summary or "")
+            assert "📄 Подробный отчёт:" not in (row.short_summary or "")
 
             tasks = s.query(Task).all()
             assert len(tasks) == 1

@@ -249,7 +249,7 @@ def test_pipeline_process_one_runs_every_step(
     try:
         # Bypass Whisper (no real OpenAI key) — replace
         # transcribe_bytes with a stub that returns canned text.
-        def fake_transcribe(*, audio_bytes, mimetype, filename, openai_api_key, model="whisper-1"):
+        def fake_transcribe(*, audio_bytes, mimetype, filename, openai_api_key, model="whisper-1", prompt=None):
             return "Это тестовый транскрипт встречи."
 
         monkeypatch.setattr(
@@ -306,12 +306,16 @@ def test_pipeline_process_one_runs_every_step(
                 .first()
             )
             assert row is not None
-            # FR-CR-05-117 — short summary trailer pins the
-            # Google Doc URL to the end of the LLM body. Built
-            # deterministically (NOT by the LLM) so it can't be
-            # truncated mid-link or hallucinated.
-            assert "📄 Подробный отчёт:" in (row.short_summary or "")
+            # FR-CR-05-127 — title becomes an HTML hyperlink to
+            # the Google Doc; the old «📄 Подробный отчёт: <url>»
+            # trailer line is gone. Sender uses parse_mode=HTML
+            # so the `<a href>` block renders as a clickable
+            # title in Telegram. Built deterministically (NOT by
+            # the LLM) so it can't be truncated mid-link or
+            # hallucinated.
+            assert "<a href=" in (row.short_summary or "")
             assert (row.google_doc_url or "") in (row.short_summary or "")
+            assert "📄 Подробный отчёт:" not in (row.short_summary or "")
             assert row.audio_downloaded is True
             assert row.transcribed is True
             assert row.detailed_summarised is True
@@ -1661,3 +1665,262 @@ def test_docs_export_skip_share_when_role_none():
         share_role=None,
     )
     assert doc_id == "doc-y"
+
+
+# ============================================================
+# FR-CR-05-127 — title-as-hyperlink + Whisper biasing
+# ============================================================
+
+
+def test_wrap_short_summary_with_doc_link_wraps_first_line_html():
+    """FR-CR-05-127 — operator pinned: «'📄 Подробный отчёт:' -
+    не выводи, просто гиперссылкой к названию». The first line
+    of the body (the «DD/MM - <Topic>» header) is wrapped in
+    `<a href="<doc_url>">…</a>`; the rest of the body is HTML-
+    escaped so Telegram's `parse_mode=HTML` accepts the message
+    even when free-text contains `&` / `<` / `>` (owner names,
+    deal numbers etc.). The old «📄 Подробный отчёт: <url>»
+    trailer line is NOT appended anymore — the doc-link is on
+    the title only."""
+    from app.fireflies.pipeline import _wrap_short_summary_with_doc_link
+
+    body = (
+        "01/05 - ADNOC\n\n"
+        "Участники: Артем, Алина\n\n"
+        "Суть: партнёрство по робототехнике.\n\n"
+        "To-Do:\n1) Подписать NDA. (Артем)"
+    )
+    url = "https://docs.google.com/document/d/abc/edit"
+    out = _wrap_short_summary_with_doc_link(body, url)
+    # First line wrapped exactly once at the top.
+    assert out.startswith(f'<a href="{url}">01/05 - ADNOC</a>')
+    # No legacy trailer.
+    assert "📄 Подробный отчёт" not in out
+    # Doc URL is present (in the `href`).
+    assert url in out
+    # Body content survives (Cyrillic / emoji unaffected by escape).
+    assert "Участники: Артем, Алина" in out
+    assert "Суть: партнёрство по робототехнике." in out
+    # Free-text `&` would be escaped — sanity check the helper is
+    # using `html.escape` on the rest of the body.
+    body_amp = "01/05 - X\n\nNotes: A & B"
+    out_amp = _wrap_short_summary_with_doc_link(body_amp, url)
+    assert "A &amp; B" in out_amp
+
+    # Empty / no URL → unchanged (don't HTML-escape when we're
+    # not building a link).
+    assert _wrap_short_summary_with_doc_link("", url) == ""
+    assert _wrap_short_summary_with_doc_link(body, "") == body
+
+
+def test_short_summary_prompt_no_longer_mentions_old_doc_trailer():
+    """FR-CR-05-127 — prompt previously instructed: «No emojis
+    except optional `📄 Подробный отчёт: <url>` line appended at
+    the very end». Now the trailer is gone (caller wraps the
+    header in `<a href>` instead). The prompt must NOT instruct
+    the LLM to emit any «📄 Подробный отчёт» / URL trailer of
+    its own — that would leak through into the body."""
+    from app.fireflies.prompts import SHORT_SUMMARY_SYSTEM
+
+    # The old trailer-line instruction is gone.
+    assert "Подробный отчёт: <url>" not in SHORT_SUMMARY_SYSTEM
+    # The new contract is documented: caller wraps header in
+    # `<a href>`. Pin the FR + key word so a future regression
+    # is loud.
+    assert "FR-CR-05-127" in SHORT_SUMMARY_SYSTEM
+    assert "<a href>" in SHORT_SUMMARY_SYSTEM
+
+
+def test_build_whisper_bias_prompt_packs_team_and_counterparties(session):
+    """FR-CR-05-127 — operator pinned: «Whisper транскрипция
+    максимально подробная, не пропускает 'tether'» — bias the
+    Whisper call with the operator's canonical name registries
+    so brand names don't mutate in transcription. Pack order:
+    meeting_title → participants → team_members.real_name →
+    counterparties.name."""
+    from app.models import Counterparty, TeamMember
+    from app.services.transcription import build_whisper_bias_prompt
+
+    session.add_all([
+        TeamMember(real_name="Артем Кузьминых",
+                   telegram_user_id=111, active=True),
+        TeamMember(real_name="Алина",
+                   telegram_user_id=222, active=True),
+        # Inactive — must be excluded.
+        TeamMember(real_name="ExEmployee",
+                   telegram_user_id=333, active=False),
+    ])
+    session.add_all([
+        Counterparty(name="Tether", type="Outreach",
+                     name_normalised="tether"),
+        Counterparty(name="Schaeffler", type="Outreach",
+                     name_normalised="schaeffler"),
+        Counterparty(name="ADNOC", type="Outreach",
+                     name_normalised="adnoc"),
+    ])
+    session.flush()
+
+    prompt = build_whisper_bias_prompt(
+        session,
+        meeting_title="Fundraising sync",
+        participants=["Артем", "Sean"],
+    )
+    assert prompt is not None
+    # All categories present.
+    assert "Fundraising sync" in prompt
+    assert "Артем" in prompt  # participant (also team — dedup)
+    assert "Sean" in prompt
+    assert "Алина" in prompt
+    assert "Tether" in prompt
+    assert "Schaeffler" in prompt
+    assert "ADNOC" in prompt
+    # Inactive employees are NOT included.
+    assert "ExEmployee" not in prompt
+    # Comma-separated packing (not newline / sentence form) so
+    # we fit more proper nouns into Whisper's 224-token cap.
+    assert ", " in prompt
+
+
+def test_build_whisper_bias_prompt_returns_none_when_empty(session):
+    """No team rows + no counterparties + no meeting metadata →
+    None. Caller passes nothing to Whisper rather than an empty
+    string."""
+    from app.services.transcription import build_whisper_bias_prompt
+
+    assert build_whisper_bias_prompt(session) is None
+
+
+def test_build_whisper_bias_prompt_caps_at_max_chars(session):
+    """Cap at `max_chars` so we don't exceed Whisper's 224-token
+    `prompt` limit. Excess names are dropped — the order
+    (title → participants → team → counterparties) determines
+    priority."""
+    from app.models import Counterparty
+    from app.services.transcription import build_whisper_bias_prompt
+
+    # 50 long-name counterparties pushes well past any cap.
+    for i in range(50):
+        session.add(Counterparty(
+            name=f"VeryLongCompanyName{i:02d}", type="Outreach",
+            name_normalised=f"verylongcompanyname{i:02d}",
+        ))
+    session.flush()
+
+    prompt = build_whisper_bias_prompt(
+        session,
+        meeting_title="Critical meeting topic that comes first",
+        max_chars=200,
+    )
+    assert prompt is not None
+    assert len(prompt) <= 200
+    # Highest-priority piece (title) survived.
+    assert "Critical meeting topic" in prompt
+
+
+def test_transcribe_bytes_passes_prompt_to_openai(monkeypatch):
+    """FR-CR-05-127 — `prompt` parameter is forwarded to OpenAI's
+    Whisper endpoint. Operator regression: «tether» missing from
+    transcript because Whisper had no context about brand names;
+    fix is to pass them in the `prompt` arg."""
+    from app.services import transcription as tr_mod
+
+    captured: dict = {}
+
+    class _FakeResp:
+        text = "Tether это плохо распознаётся без подсказки."
+
+    class _FakeAudio:
+        class transcriptions:
+            @staticmethod
+            def create(**kwargs):
+                captured.update(kwargs)
+                return _FakeResp()
+
+    class _FakeOpenAI:
+        def __init__(self, *_, **__):
+            self.audio = _FakeAudio()
+
+    monkeypatch.setattr("openai.OpenAI", _FakeOpenAI)
+
+    result = tr_mod.transcribe_bytes(
+        audio_bytes=b"FAKE",
+        mimetype="audio/mpeg",
+        filename="x.mp3",
+        openai_api_key="sk-x",
+        model="whisper-1",
+        prompt="Tether, Schaeffler, ADNOC",
+    )
+    assert result == "Tether это плохо распознаётся без подсказки."
+    assert captured.get("prompt") == "Tether, Schaeffler, ADNOC"
+
+    # No prompt → no `prompt` in kwargs (back-compat: Slack
+    # voice path has no biasing).
+    captured.clear()
+    tr_mod.transcribe_bytes(
+        audio_bytes=b"FAKE",
+        mimetype="audio/mpeg",
+        filename="x.mp3",
+        openai_api_key="sk-x",
+        prompt=None,
+    )
+    assert "prompt" not in captured
+
+
+def test_fireflies_pipeline_passes_whisper_bias_prompt(
+    patched_session_scope, SessionFactory, monkeypatch, tmp_path
+):
+    """FR-CR-05-127 — end-to-end: Fireflies pipeline pulls
+    counterparty + team names from the session and forwards them
+    to Whisper as the `prompt` argument. Pin the integration so
+    a future refactor can't silently drop the biasing."""
+    from app.config import get_settings
+    from app.fireflies.pipeline import FirefliesPipeline
+    from app.models import Counterparty, TeamMember
+
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    captured_prompts: list[str | None] = []
+
+    def fake_transcribe(*, audio_bytes, mimetype, filename,
+                        openai_api_key, model="whisper-1",
+                        prompt=None):
+        captured_prompts.append(prompt)
+        return "Это тестовый транскрипт встречи."
+
+    monkeypatch.setattr(
+        "app.services.transcription.transcribe_bytes", fake_transcribe
+    )
+    try:
+        settings = _settings_with_audio_dir()
+        client = _FakeFirefliesClient(transcripts=[_fake_transcript()])
+        llm = _FakeLLM(tasks=[])
+        pipeline = FirefliesPipeline(
+            settings=settings,
+            client=client,
+            llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(),
+            sender=_FakeSender(),
+        )
+        with SessionFactory() as s:
+            s.add(TeamMember(
+                real_name="Артем Кузьминых", telegram_user_id=777,
+                active=True,
+            ))
+            s.add(Counterparty(
+                name="Tether", type="Outreach",
+                name_normalised="tether",
+            ))
+            s.flush()
+            t = client.list_transcripts(limit=5)[0]
+            pipeline.process_one(s, t)
+            s.commit()
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    assert captured_prompts, "transcribe_bytes was never called"
+    final_prompt = captured_prompts[0]
+    assert final_prompt is not None
+    # Both name registries surfaced into the Whisper bias prompt.
+    assert "Артем" in final_prompt
+    assert "Tether" in final_prompt

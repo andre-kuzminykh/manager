@@ -167,7 +167,9 @@ class ZoomPipeline:
 
     # --- step 2: Whisper transcribe (with FR-CR-05-115 chunking)
 
-    def _step_transcribe(self, row: ZoomRecording) -> bool:
+    def _step_transcribe(
+        self, row: ZoomRecording, session: Session | None = None
+    ) -> bool:
         if row.transcribed and row.transcript_text:
             return True
         if not row.audio_path or not os.path.exists(row.audio_path):
@@ -177,7 +179,31 @@ class ZoomPipeline:
         if not api_key:
             row.last_error = "OPENAI_API_KEY not set"
             return False
-        from app.services.transcription import transcribe_bytes
+        from app.services.transcription import (
+            build_whisper_bias_prompt, transcribe_bytes,
+        )
+
+        # FR-CR-05-127 — bias Whisper toward the operator's
+        # canonical name registries (counterparties + team) so
+        # brand names don't mutate in transcription.
+        try:
+            whisper_prompt = build_whisper_bias_prompt(
+                session,
+                meeting_title=row.title,
+                participants=getattr(row, "participants", None),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_whisper_bias_prompt_failed",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            whisper_prompt = None
+        if whisper_prompt:
+            log.info(
+                "zoom_whisper_bias_prompt_built",
+                zoom_id=row.zoom_id,
+                prompt_chars=len(whisper_prompt),
+            )
 
         size = os.path.getsize(row.audio_path)
         whisper_max = 24 * 1024 * 1024
@@ -215,6 +241,7 @@ class ZoomPipeline:
                 filename=os.path.basename(p),
                 openai_api_key=api_key,
                 model=self._settings.fireflies_whisper_model,
+                prompt=whisper_prompt,
             )
             if not chunk_text:
                 row.last_error = (
@@ -404,12 +431,16 @@ class ZoomPipeline:
         )
         if cp_line:
             text = text.rstrip() + "\n\n" + cp_line
-        # FR-CR-05-117 — Google Doc trailer (deterministic).
+        # FR-CR-05-127 — title becomes an HTML hyperlink to the
+        # Google Doc; the «📄 Подробный отчёт: <url>» trailer is
+        # gone (replaced by the wrap on the first line). Sent
+        # with parse_mode=HTML.
         if row.google_doc_url:
-            text = (
-                text.rstrip()
-                + "\n\n📄 Подробный отчёт: "
-                + row.google_doc_url
+            from app.fireflies.pipeline import (
+                _wrap_short_summary_with_doc_link,
+            )
+            text = _wrap_short_summary_with_doc_link(
+                text.rstrip(), row.google_doc_url,
             )
         row.short_summary = text
         row.last_error = None
@@ -949,10 +980,13 @@ class ZoomPipeline:
 
         # FR-CR-05-119 follow-up — order: detailed → tasks →
         # verify → doc → short → post_cards.
+        # FR-CR-05-127 — transcribe receives session so it can
+        # pull team + counterparty names for the Whisper bias
+        # prompt. Other early steps don't need it.
         for label, fn in (
-            ("download", self._step_download_audio),
-            ("transcribe", self._step_transcribe),
-            ("detailed_summary", self._step_detailed_summary),
+            ("download", lambda r: self._step_download_audio(r)),
+            ("transcribe", lambda r: self._step_transcribe(r, session=session)),
+            ("detailed_summary", lambda r: self._step_detailed_summary(r)),
         ):
             with _trace_step("zoom", label, **ctx):
                 ok = fn(row)

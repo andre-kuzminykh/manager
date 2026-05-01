@@ -17,6 +17,7 @@ near-no-op (each step skips when the flag is set).
 """
 from __future__ import annotations
 
+import html
 import math
 import os
 import shutil
@@ -470,6 +471,34 @@ def _strip_llm_todo_block(text: str) -> str:
     return _TODO_SECTION_HEADERS_RE.sub("", text).rstrip()
 
 
+def _wrap_short_summary_with_doc_link(body: str, doc_url: str) -> str:
+    """FR-CR-05-127 — replace the «📄 Подробный отчёт: <url>»
+    trailer with an HTML hyperlink wrapping the FIRST line of
+    `body` (operator-pinned: the meeting title «DD/MM - <Topic>»
+    becomes a clickable link to the Google Doc, no trailer
+    line). The rest of the body is HTML-escaped so Telegram
+    `parse_mode=HTML` accepts it (free-text owner names with
+    `&`, deal numbers with `<`/`>` survive intact).
+
+    Empty / no-URL → body returned as-is (unescaped); we only
+    escape when we're emitting an HTML-wrapped first line so
+    that the existing plain-text path stays unchanged.
+    """
+    if not body:
+        return body
+    if not doc_url:
+        return body
+    sep_idx = body.find("\n")
+    if sep_idx == -1:
+        first, rest = body, ""
+    else:
+        first, rest = body[:sep_idx], body[sep_idx:]
+    safe_url = html.escape(doc_url, quote=True)
+    safe_first = html.escape(first.strip())
+    safe_rest = html.escape(rest)
+    return f'<a href="{safe_url}">{safe_first}</a>{safe_rest}'
+
+
 def _split_for_telegram(text: str, *, limit: int = 3800) -> list[str]:
     """FR-CR-05-119 — split a long short-summary body into
     Telegram-sized chunks (≤4096 chars per message).
@@ -649,7 +678,9 @@ class FirefliesPipeline:
 
     # --- step 2: Whisper transcribe ---------------------------
 
-    def _step_transcribe(self, row: MeetingRecording) -> bool:
+    def _step_transcribe(
+        self, row: MeetingRecording, session: Session | None = None
+    ) -> bool:
         if row.transcribed and row.transcript_text:
             return True
         if not row.audio_path or not os.path.exists(row.audio_path):
@@ -659,7 +690,32 @@ class FirefliesPipeline:
         if not api_key:
             row.last_error = "OPENAI_API_KEY not set"
             return False
-        from app.services.transcription import transcribe_bytes
+        from app.services.transcription import (
+            build_whisper_bias_prompt, transcribe_bytes,
+        )
+
+        # FR-CR-05-127 — bias Whisper toward the operator's
+        # canonical name registries (counterparties + team) so
+        # brand names don't mutate in transcription («Tether» →
+        # «teaser»). Empty registry → no prompt sent.
+        try:
+            whisper_prompt = build_whisper_bias_prompt(
+                session,
+                meeting_title=row.title,
+                participants=row.participants,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_whisper_bias_prompt_failed",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+            whisper_prompt = None
+        if whisper_prompt:
+            log.info(
+                "fireflies_whisper_bias_prompt_built",
+                fireflies_id=row.fireflies_id,
+                prompt_chars=len(whisper_prompt),
+            )
 
         size = os.path.getsize(row.audio_path)
         # FR-CR-05-115 — Whisper hard-limits at 25 MB. Operator:
@@ -697,6 +753,7 @@ class FirefliesPipeline:
                 filename=os.path.basename(p),
                 openai_api_key=api_key,
                 model=self._settings.fireflies_whisper_model,
+                prompt=whisper_prompt,
             )
             if not chunk_text:
                 row.last_error = (
@@ -988,13 +1045,15 @@ class FirefliesPipeline:
         )
         if cp_line:
             body = body.rstrip() + "\n\n" + cp_line
-        # FR-CR-05-117 — Google Doc trailer deterministic; never
-        # gets truncated mid-link.
+        # FR-CR-05-127 — operator-pinned: the «DD/MM - <Topic>»
+        # header becomes an HTML hyperlink to the Google Doc.
+        # Replaces the old «📄 Подробный отчёт: <url>» trailer
+        # line so the doc-link is on the title itself and the
+        # body looks cleaner. Sent with parse_mode=HTML
+        # (sender's default).
         if row.google_doc_url:
-            body = (
-                body.rstrip()
-                + "\n\n📄 Подробный отчёт: "
-                + row.google_doc_url
+            body = _wrap_short_summary_with_doc_link(
+                body.rstrip(), row.google_doc_url,
             )
         row.short_summary = body
         row.last_error = None
@@ -1493,7 +1552,7 @@ class FirefliesPipeline:
                 report.errors.append(row.last_error or "download_failed")
                 return report
         with _trace_step("fireflies", "transcribe", **ctx):
-            if not self._step_transcribe(row):
+            if not self._step_transcribe(row, session=session):
                 session.flush()
                 report.errors.append(row.last_error or "transcribe_failed")
                 return report

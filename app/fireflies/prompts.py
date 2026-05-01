@@ -149,9 +149,12 @@ PARTICIPANTS — SINGLE LINE (REQUIRED):
 Style:
 
 - Telegram-friendly HTML-safe text. Don't emit raw `<`, `>`,
-  `&` in free text — escape if you must include them.
-- No emojis except optional `📄 Подробный отчёт: <url>` line
-  appended at the very end (caller adds it; you don't).
+  `&` in free text — the caller HTML-escapes the body before
+  sending, but cleaner if you avoid them entirely.
+- No emojis. The header line «DD/MM - <Topic>» becomes a
+  clickable hyperlink to the Google Doc — caller wraps it in
+  `<a href>` after you finish (FR-CR-05-127). DO NOT emit any
+  «Подробный отчёт» / «Doc» / URL trailer of your own.
 - Real names from the participants list. Don't invent roles.
 - NEVER include «Apr 30, 03:32 PM»-style auto-stamps in the
   header — that's the regression we're fixing. If the only

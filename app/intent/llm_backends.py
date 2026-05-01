@@ -321,6 +321,21 @@ class OpenAIBackend:
                 # Reasoning model rejecting temperature=0.
                 kwargs.pop("temperature", None)
                 response = _try(kwargs)
+            elif (
+                "reasoning_effort" in msg
+                and "reasoning_effort" in kwargs
+            ):
+                # FR-CR-05-120 follow-up — gpt-5.5 in
+                # /v1/chat/completions rejects `reasoning_effort`
+                # when combined with function tools («Function
+                # tools with reasoning_effort are not supported
+                # for gpt-5.5 in /v1/chat/completions. Please use
+                # /v1/responses instead.»). Strip the kwarg and
+                # retry — the call still works, just without the
+                # tunable think budget. A future Responses API
+                # rewrite would re-enable it.
+                kwargs.pop("reasoning_effort", None)
+                response = _try(kwargs)
             else:
                 raise
         return _extract_openai_tool_input(response)

@@ -469,6 +469,59 @@ def test_openai_call_passes_reasoning_effort_for_gpt5(monkeypatch):
     assert "reasoning_effort" not in captured
 
 
+def test_openai_call_retries_without_reasoning_effort_on_400(monkeypatch):
+    """FR-CR-05-120 follow-up — operator regression: gpt-5.5 +
+    function tools + reasoning_effort returns 400 in
+    /v1/chat/completions («Function tools with reasoning_effort
+    are not supported … Please use /v1/responses instead.»).
+    Backend retries once without the kwarg so the pipeline
+    still gets tasks out, just without the tunable think
+    budget. A future Responses API rewrite would re-enable it."""
+    from app.intent.llm_backends import OpenAIBackend
+
+    captured_calls: list[dict] = []
+
+    class _StubChoices:
+        message = type("M", (), {"content": "{}", "tool_calls": None})()
+
+    class _StubResp:
+        choices = [_StubChoices()]
+
+    class _StubCompletions:
+        def create(self, **kw):
+            captured_calls.append(dict(kw))
+            if "reasoning_effort" in kw:
+                raise RuntimeError(
+                    "Error code: 400 - {'error': {'message': 'Function "
+                    "tools with reasoning_effort are not supported for "
+                    "gpt-5.5 in /v1/chat/completions. Please use "
+                    "/v1/responses instead.', 'type': "
+                    "'invalid_request_error', 'param': "
+                    "'reasoning_effort'}}"
+                )
+            return _StubResp()
+
+    class _StubChat:
+        completions = _StubCompletions()
+
+    class _StubClient:
+        chat = _StubChat()
+
+    backend = OpenAIBackend(_StubClient(), "gpt-5.5")
+    backend.call_tool(
+        system_prompt="s",
+        user_prompt="u",
+        tool_name="t",
+        tool_description="d",
+        tool_parameters={"type": "object"},
+        reasoning_effort="high",
+    )
+    # First attempt with reasoning_effort, second retry without.
+    assert len(captured_calls) == 2
+    assert captured_calls[0].get("reasoning_effort") == "high"
+    assert "reasoning_effort" not in captured_calls[1]
+
+
 def test_openai_call_drops_reasoning_effort_for_gpt4o(monkeypatch):
     """FR-CR-05-120 — gpt-4o-family rejects `reasoning_effort`
     (only reasoning models accept it). Same gate as

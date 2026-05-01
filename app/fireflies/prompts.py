@@ -33,13 +33,17 @@ Structure:
   • <тема 2>: …
   (3-7 тем, каждая в 2-5 предложениях)
 
-  📌 СЛЕДУЮЩИЕ ШАГИ
-  • <action 1> — кто делает, к какому сроку
-  • <action 2> — …
-
   ⚠ ОТКРЫТЫЕ ВОПРОСЫ
   • <unresolved 1>
   • <unresolved 2>
+
+FR-CR-05-119: do NOT emit a «СЛЕДУЮЩИЕ ШАГИ» / «Action items» /
+«Tasks» / «To-Do» section. Action items are extracted as
+separate Task rows by a different prompt and surfaced to the
+operator as Telegram cards + the «To-Do» section of the short
+summary. Putting them in the doc too creates duplication and a
+risk of mismatch when the operator edits a task. Keep this body
+to meeting context only.
 
 Style:
 - Третье лицо. «Андрей предложил…», «команда договорилась…».
@@ -145,14 +149,18 @@ PARTICIPANTS — TWO LINES (REQUIRED):
   важные вопросы»). If the meeting was procedural, say so
   plainly.
 
-«To-Do» (REQUIRED unless no actions came out):
+«To-Do» (LLM SHOULD NOT EMIT — caller appends from extracted tasks):
 
-- 2-5 numbered items: «1) …», «2) …»
-- Each item is a CLEAR action verb-phrase in Russian
-  (infinitive). Example: «Получить и подписать NDA», not
-  «Подписание NDA».
-- ≤120 chars per item. Drop the section entirely if no
-  concrete actions came out of the meeting.
+- FR-CR-05-119: the To-Do section is built deterministically by
+  the pipeline from the actual extracted Task rows (description
+  + owner). The LLM body MUST end at «Суть» — do NOT generate a
+  «To-Do:» / «Следующие шаги:» / «Действия:» / «Action items:»
+  section. Anything you emit will be discarded; emitting it
+  wastes tokens and risks the model contradicting the real
+  extracted tasks.
+- The example above shows the FINAL message (with To-Do filled
+  by the caller). Stop after «Суть: …» when you write your
+  output.
 
 Style:
 
@@ -257,6 +265,32 @@ OWNER SELECTION RULES (read carefully — operator-specific):
    ops / scheduling / follow-up work goes to whoever owns
    that domain per role / notes (rule 1) or to their assistant
    (rule 2), NOT to the admin.
+
+7. NAMED ASSIGNEE OVERRIDES EVERYTHING (FR-CR-05-119). When the
+   transcript explicitly names a person who SHOULD do the task
+   («Алине поручено …», «Дима, нужно протестировать …», «Ира
+   подготовит …», «Алина будет менять письмо», «Артем дал
+   поручение Алине»), you MUST find that name in the
+   `known_employees` table and pick that row's slack_user_id.
+   Match on `name` / `display_name` / `real_name` —
+   case-insensitive, accept short forms («Дима» = «Дмитрий
+   Иванов», «Ира» = «Ирина Шипилова», «Артём» = «Артём
+   Соколов»). NEVER substitute a different teammate just
+   because they have a similar role. NEVER fall back to admin
+   when a name was named.
+
+   - If the named person is in `known_employees` → use their uid
+     (this rule wins over rules 1-6).
+   - If the named person is NOT in `known_employees` → leave
+     owner null (operator will fix, downstream falls back to
+     admin uid). Do NOT invent a uid and do NOT pick a different
+     teammate as a substitute.
+
+   Operator regressions this rule fixes:
+     transcript: «Алине поручено добавить блок reminder…»
+       → owner = <Алина's uid> (NEVER Андрей / admin / AI Lead).
+     transcript: «Дима, нужно провести тест письма…»
+       → owner = <Дима's uid> (NEVER Viktor or anyone else).
 
 Worked owner-selection example:
     employees:

@@ -213,6 +213,65 @@ def _looks_like_auto_stamp_title(title: str | None) -> bool:
     return _AUTO_STAMP_TITLE_RE.match(title.strip()) is not None
 
 
+def _build_todo_section(
+    session: "Session",
+    *,
+    source_kind: "TaskSourceKind",
+    source_conversation_id: str,
+) -> str:
+    """FR-CR-05-119 — render the To-Do block from the actual
+    `Task` rows extracted for this recording. Items are the
+    task descriptions (verbatim what the LLM wrote on the row)
+    with the owner real-name in parens. Sorted by creation
+    order so the operator sees the same sequence as the DM
+    cards arriving in TG.
+
+    Returns "" when no tasks were extracted (operator pinned:
+    drop the section entirely instead of an empty header).
+    """
+    from app.models import Task as _Task
+
+    tasks = (
+        session.query(_Task)
+        .filter(_Task.source_kind == source_kind)
+        .filter(_Task.source_conversation_id == source_conversation_id)
+        .filter(_Task.deleted_at.is_(None))
+        .order_by(_Task.id.asc())
+        .all()
+    )
+    if not tasks:
+        return ""
+    lines = ["To-Do:"]
+    for i, t in enumerate(tasks, 1):
+        body = (t.description or "").strip() or (t.title or "").strip()
+        owner = (t.owner_display_name or "").strip() or "не назначен"
+        lines.append(f"{i}) {body} ({owner})")
+    return "\n".join(lines)
+
+
+_TODO_SECTION_HEADERS_RE = __import__("re").compile(
+    # FR-CR-05-119 — match a heading line for an LLM-emitted
+    # To-Do / next-steps block + everything after it up to the
+    # next blank-blank-line boundary or end-of-string. Used to
+    # strip such a block before we append the deterministic one.
+    r"\n{1,2}(?:to[\s\-]?do|to do list|следующие\s+шаги|"
+    r"next\s+steps|action\s+items|action\s+list|"
+    r"задачи|to[-\s]do list)\s*:[\s\S]*?(?=\n{2,}\S|\Z)",
+    flags=__import__("re").IGNORECASE,
+)
+
+
+def _strip_llm_todo_block(text: str) -> str:
+    """FR-CR-05-119 — strip any LLM-emitted To-Do / Next-steps
+    section so we can append the deterministic one without
+    duplication. Tolerant of multiple labels and of the LLM
+    occasionally emitting the section despite the prompt
+    forbidding it (FR-CR-05-119)."""
+    if not text:
+        return text
+    return _TODO_SECTION_HEADERS_RE.sub("", text).rstrip()
+
+
 def _truncate(text: str | None, *, limit: int) -> str:
     """Trim `text` to `limit` chars without breaking mid-word
     when we can avoid it. Used to enforce the 2000-char Telegram
@@ -515,16 +574,14 @@ class FirefliesPipeline:
 
     # --- step 5: short summary -------------------------------
 
-    def _step_short_summary(self, row: MeetingRecording) -> bool:
+    def _step_short_summary(
+        self, session: Session, row: MeetingRecording
+    ) -> bool:
         if row.short_summary:
             return True
         if not row.detailed_summary:
             row.last_error = "no detailed summary as short-summary input"
             return False
-        # FR-CR-05-54 — participants get their own block in the
-        # user prompt so the LLM doesn't have to re-derive the
-        # list from the transcript. One per line, falsy entries
-        # dropped.
         participants_block = "\n".join(
             f"  - {p}" for p in (row.participants or []) if p
         ) or "  (нет данных)"
@@ -548,15 +605,24 @@ class FirefliesPipeline:
         if not text:
             row.last_error = "short summary LLM returned empty"
             return False
-        # FR-CR-05-54 — hard cap raised to 3800 chars (~10%
-        # under the 4096-char Telegram per-message limit) so
-        # the «Участники» + «Главные обсуждения» blocks added
-        # to the prompt actually fit.
         body = _truncate(text, limit=3800)
-        # FR-CR-05-117 — append the Google Doc link deterministic-
-        # ally so it can never be truncated mid-URL or hallucinated
-        # by the LLM. Skipped silently when the doc step didn't
-        # produce a URL.
+        # FR-CR-05-119 — strip any «To-Do» / «Следующие шаги»
+        # block the LLM still emits despite the prompt forbidding
+        # it. We rebuild the section deterministically from the
+        # actual extracted tasks below.
+        body = _strip_llm_todo_block(body)
+        # FR-CR-05-119 — append To-Do built from the just-extracted
+        # Task rows. Description (verbatim what the LLM wrote on
+        # the Task row) + owner_display_name in parens. If no
+        # tasks were extracted we drop the section.
+        todo = _build_todo_section(
+            session, source_kind=TaskSourceKind.fireflies,
+            source_conversation_id=row.fireflies_id,
+        )
+        if todo:
+            body = body.rstrip() + "\n\n" + todo
+        # FR-CR-05-117 — Google Doc trailer deterministic; never
+        # gets truncated mid-link.
         if row.google_doc_url:
             body = (
                 body.rstrip()
@@ -834,7 +900,12 @@ class FirefliesPipeline:
             report.errors.append(row.last_error or "doc_export_failed")
         else:
             report.google_doc_url = row.google_doc_url
-        if not self._step_short_summary(row):
+        # FR-CR-05-119: extract tasks BEFORE building the short
+        # summary so the To-Do section can be populated from the
+        # actual `Task` rows (description + owner) rather than
+        # asked-from-the-LLM-twice.
+        report.tasks_created = self._step_extract_tasks(session, row)
+        if not self._step_short_summary(session, row):
             log.warning(
                 "fireflies_short_summary_failed",
                 recording_id=row.id,
@@ -843,7 +914,6 @@ class FirefliesPipeline:
             report.errors.append(row.last_error or "short_summary_failed")
         report.short_chars = len(row.short_summary or "")
         report.short_summary_recipients = self._step_send_short_summary(row)
-        report.tasks_created = self._step_extract_tasks(session, row)
 
         row.processed_at = datetime.now(timezone.utc)
         session.flush()

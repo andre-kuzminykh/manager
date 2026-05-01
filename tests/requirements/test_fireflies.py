@@ -699,6 +699,178 @@ def test_split_audio_chunker_preserves_input_container(monkeypatch, tmp_path):
     assert any("-c" in cmd and cmd[-1].endswith(".m4a") for cmd in captured)
 
 
+def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
+    """FR-CR-05-119 — operator pinned: the To-Do section in the
+    short TG summary lists every extracted Task verbatim
+    (description + owner_display_name in parens). One line per
+    task, sequential numbering, no 120-char cap, drop the
+    section entirely when nothing was extracted."""
+    from app.fireflies.pipeline import _build_todo_section
+    from app.models import Task, TaskPriority, TaskSourceKind, TaskStatus
+
+    # Empty case → "" (caller drops the section).
+    assert _build_todo_section(
+        session,
+        source_kind=TaskSourceKind.fireflies,
+        source_conversation_id="trans-empty",
+    ) == ""
+
+    # Two tasks for the same recording — both should appear,
+    # in id order, with owner in parens.
+    session.add(
+        Task(
+            title="Send NDA",
+            description="Send the signed NDA to ADNOC contact today.",
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+            owner_display_name="Алина",
+            source_kind=TaskSourceKind.fireflies,
+            source_conversation_id="trans-ok",
+        )
+    )
+    session.add(
+        Task(
+            title="Schedule DD",
+            description="Координировать расписание тех-DD с командой ADNOC.",
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+            owner_display_name="Ирина Шипилова",
+            source_kind=TaskSourceKind.fireflies,
+            source_conversation_id="trans-ok",
+        )
+    )
+    session.flush()
+
+    out = _build_todo_section(
+        session,
+        source_kind=TaskSourceKind.fireflies,
+        source_conversation_id="trans-ok",
+    )
+    lines = out.splitlines()
+    assert lines[0] == "To-Do:"
+    assert lines[1].startswith("1) Send the signed NDA")
+    assert "(Алина)" in lines[1]
+    assert lines[2].startswith("2) Координировать расписание тех-DD")
+    assert "(Ирина Шипилова)" in lines[2]
+
+    # Soft-deleted tasks are excluded.
+    other = Task(
+        title="Cancelled",
+        description="not visible",
+        priority=TaskPriority.medium,
+        status=TaskStatus.todo,
+        owner_display_name="Кто-то",
+        source_kind=TaskSourceKind.fireflies,
+        source_conversation_id="trans-ok",
+        deleted_at=__import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc
+        ),
+    )
+    session.add(other)
+    session.flush()
+    out2 = _build_todo_section(
+        session,
+        source_kind=TaskSourceKind.fireflies,
+        source_conversation_id="trans-ok",
+    )
+    assert "Cancelled" not in out2 and "не видим" not in out2
+
+
+def test_strip_llm_todo_block_removes_emitted_section():
+    """FR-CR-05-119 — even with the prompt forbidding it, the
+    LLM occasionally still emits a To-Do / Следующие шаги
+    section. The pipeline strips it before appending the
+    deterministic one so the operator never sees both."""
+    from app.fireflies.pipeline import _strip_llm_todo_block
+
+    body = (
+        "Header\n\n"
+        "Их сторона: X\n"
+        "Наша сторона: Y\n\n"
+        "Суть: blah blah.\n\n"
+        "To-Do:\n"
+        "1) old item\n"
+        "2) another old item\n"
+    )
+    cleaned = _strip_llm_todo_block(body)
+    assert "To-Do" not in cleaned
+    assert "old item" not in cleaned
+    assert "Суть: blah blah." in cleaned
+
+    # Russian variant.
+    body_ru = (
+        "Суть: тестовая встреча.\n\n"
+        "Следующие шаги:\n"
+        "• сделать X\n"
+        "• сделать Y\n"
+    )
+    cleaned_ru = _strip_llm_todo_block(body_ru)
+    assert "Следующие шаги" not in cleaned_ru
+    assert "сделать X" not in cleaned_ru
+
+
+def test_short_summary_prompt_forbids_llm_emitting_todo():
+    """FR-CR-05-119 — prompt rule pinned. To-Do is appended by
+    the pipeline from the actual Task rows, not by the LLM."""
+    from app.fireflies.prompts import SHORT_SUMMARY_SYSTEM
+
+    blob = SHORT_SUMMARY_SYSTEM
+    assert "LLM SHOULD NOT EMIT" in blob or "do NOT generate a" in blob
+    # «Stop after Суть» framing pinned.
+    assert "Stop after" in blob or "stop after" in blob.lower() or (
+        "ends at" in blob.lower() or "must end at" in blob.lower()
+    )
+
+
+def test_detailed_summary_prompt_drops_next_steps_section():
+    """FR-CR-05-119 — `СЛЕДУЮЩИЕ ШАГИ` no longer in the doc
+    structure template; tasks live in their own Task rows + the
+    short summary's To-Do block, the doc carries meeting
+    context only. The string CAN appear in the explanatory
+    «do NOT emit» instruction below the template — we just want
+    it gone from the bulleted template the LLM is told to fill."""
+    from app.fireflies.prompts import DETAILED_SUMMARY_SYSTEM
+
+    blob = DETAILED_SUMMARY_SYSTEM
+    if "Structure:" in blob and "FR-CR-05-119" in blob:
+        # Slice the actual template (between the «Structure:»
+        # heading and the FR-CR-05-119 instruction line).
+        template = blob[
+            blob.find("Structure:"): blob.find("FR-CR-05-119")
+        ]
+        assert "СЛЕДУЮЩИЕ ШАГИ" not in template
+        assert "📌" not in template  # the bullet headed the section
+    # Plus the prompt has the explicit FR-CR-05-119 instruction
+    # forbidding the LLM from emitting the section.
+    assert "FR-CR-05-119" in blob
+    assert "do NOT emit" in blob
+
+
+def test_task_extraction_prompt_named_assignee_overrides_admin_default():
+    """FR-CR-05-119 rule 7 — when transcript explicitly names a
+    person who should do the task («Алине поручено …», «Дима,
+    нужно протестировать …»), the LLM MUST pick that name's row
+    from `known_employees`. NEVER falls back to admin / a
+    different teammate. Pre-fix: «Алине поручено» landed on
+    Андрей (admin / AI Lead); «Диме нужно протестировать»
+    landed on Viktor."""
+    from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
+
+    blob = TASK_EXTRACTION_SYSTEM
+    lower = blob.lower()
+    # Rule 7 framing pinned.
+    assert "named assignee" in lower or "named assignee" in lower or (
+        "named-assignee" in lower or "named assignee overrides" in lower
+    )
+    # Worked regression examples pinned.
+    assert "Алине" in blob or "алине" in lower
+    assert "Дима" in blob or "дима" in lower
+    # Anti-substitution: don't pick a different teammate.
+    assert "NEVER substitute" in blob or "do not substitute" in lower or (
+        "never substitute" in lower
+    )
+
+
 def test_strip_markdown_emphasis_removes_paired_markers():
     """FR-CR-05-117 — Google Docs renders the detailed summary
     as plain text, so `**bold**` etc. show up as literal
@@ -935,12 +1107,14 @@ def test_pipeline_posts_tg_card_per_extracted_task(
             s.commit()
 
         assert report.tasks_created == 2
-        # Two DMs went to chat_id=777 with task-card-shaped text
-        # (look for the body markers `📝` description / due
-        # icons that build_task_card_text produces).
+        # Task cards carry both a priority bullet (🟡 etc.) AND a
+        # 👤 owner-line — the FR-CR-05-119 short-summary To-Do
+        # section also contains the task descriptions but lacks
+        # the 👤 / 📅 card marker, so we filter strictly.
         admin_cards = [
             m for m in sender.sent
             if m["chat_id"] == 777
+            and "👤" in m["text"]
             and ("first task" in m["text"] or "second task" in m["text"])
         ]
         assert len(admin_cards) == 2

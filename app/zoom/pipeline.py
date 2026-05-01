@@ -321,15 +321,14 @@ class ZoomPipeline:
 
     # --- step 5: short summary + Telegram -----------------------
 
-    def _step_short_summary(self, row: ZoomRecording) -> bool:
+    def _step_short_summary(
+        self, session: Session, row: ZoomRecording
+    ) -> bool:
         if row.short_summary_sent and row.short_summary:
             return True
         if not row.detailed_summary:
             row.last_error = "no detailed summary for short summary"
             return False
-        # FR-CR-05-117 — feed the prompt the same field shape as
-        # the Fireflies path so the canonical header/participants
-        # layout stays consistent across sources.
         participants_block = "\n".join(
             f"  - {p}" for p in (row.participants or []) if p
         ) or "  (нет данных)"
@@ -340,11 +339,11 @@ class ZoomPipeline:
             f"google_doc_url: {row.google_doc_url or ''}\n"
             f"\nparticipants:\n{participants_block}\n\n"
         )
-        body = meta_line + "Подробный отчёт:\n" + row.detailed_summary
+        body_in = meta_line + "Подробный отчёт:\n" + row.detailed_summary
         try:
             text = self._llm.complete_text(  # type: ignore[attr-defined]
                 system_prompt=MEETING_SHORT_SUMMARY_PROMPT,
-                user_prompt=body,
+                user_prompt=body_in,
                 model=self._settings.fireflies_short_summary_model,
                 temperature=0.2,
             )
@@ -355,9 +354,25 @@ class ZoomPipeline:
         if not text:
             row.last_error = "short summary returned empty"
             return False
-        # FR-CR-05-117 — same deterministic doc-link append as
-        # Fireflies path so both pipelines emit the identical
-        # «📄 Подробный отчёт: …» trailer.
+        # FR-CR-05-119 — drop any LLM-emitted To-Do section so we
+        # can append the deterministic one. Also strip markdown.
+        from app.fireflies.pipeline import (
+            _build_todo_section,
+            _strip_llm_todo_block,
+        )
+
+        text = _strip_llm_todo_block(text)
+        # FR-CR-05-119 — append To-Do from the actual extracted
+        # Task rows so the TG message matches what the operator
+        # has in the DB / Sheet / DM cards.
+        todo = _build_todo_section(
+            session,
+            source_kind=TaskSourceKind.zoom,
+            source_conversation_id=row.zoom_id,
+        )
+        if todo:
+            text = text.rstrip() + "\n\n" + todo
+        # FR-CR-05-117 — Google Doc trailer (deterministic).
         if row.google_doc_url:
             text = (
                 text.rstrip()
@@ -366,7 +381,6 @@ class ZoomPipeline:
             )
         row.short_summary = text
         row.last_error = None
-        # Sender DMs handled by `_send_short_summary` if available.
         if self._sender is not None:
             self._send_short_summary(row)
         else:
@@ -596,12 +610,14 @@ class ZoomPipeline:
         row.attempts = (row.attempts or 0) + 1
         row.processed_at = datetime.now(timezone.utc)
 
+        # FR-CR-05-119 — task extraction now runs BEFORE short
+        # summary so the deterministic To-Do section in the short
+        # summary can be populated from the actual Task rows.
         steps = (
             ("download", self._step_download_audio),
             ("transcribe", self._step_transcribe),
             ("detailed", self._step_detailed_summary),
             ("doc", self._step_doc_export),
-            ("short", self._step_short_summary),
         )
         for label, fn in steps:
             ok = fn(row)
@@ -614,8 +630,8 @@ class ZoomPipeline:
                 )
                 break
 
-        # Tasks step — runs even if short summary failed (we
-        # still have a detailed summary to extract from).
+        # Extract tasks first (before the short summary) so the
+        # short summary's To-Do reflects the actual Task rows.
         if row.detailed_summarised:
             try:
                 report.tasks_created = self._step_extract_tasks(session, row)
@@ -624,6 +640,13 @@ class ZoomPipeline:
                     "zoom_extract_tasks_unexpected_error",
                     zoom_id=row.zoom_id, error=str(e),
                 )
+
+        # Now build + send the short summary, using the freshly
+        # created Task rows for the To-Do block.
+        if row.detailed_summarised:
+            ok = self._step_short_summary(session, row)
+            if not ok and row.last_error:
+                report.errors.append(row.last_error)
 
         report.transcript_chars = len(row.transcript_text or "")
         report.detailed_chars = len(row.detailed_summary or "")

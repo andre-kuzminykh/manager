@@ -325,13 +325,31 @@ def test_pipeline_process_one_runs_every_step(
             assert row.processed_at is not None
             assert row.audio_path and os.path.exists(row.audio_path)
 
+            # FR-CR-05-128 — meeting tasks ship as ActionDraft
+            # rows that the operator must approve via TG widget;
+            # Task is materialised only on ✅ click. NO Task rows
+            # exist directly after `process_one`.
             tasks = s.query(Task).filter(
                 Task.source_kind == TaskSourceKind.fireflies
             ).all()
-            assert len(tasks) == 1
-            assert tasks[0].due_date == date.today()
-            assert tasks[0].owner_user_id == "777"
-            assert tasks[0].source_conversation_id == "trans-1"
+            assert len(tasks) == 0
+            from app.models import ActionDraft, ActionDraftState
+
+            drafts = (
+                s.query(ActionDraft)
+                .filter(ActionDraft.state == ActionDraftState.proposed)
+                .all()
+            )
+            meeting_drafts = [
+                d for d in drafts
+                if ((d.payload or {}).get("_pending") or {}).get("source_kind") == "fireflies"
+            ]
+            assert len(meeting_drafts) == 1
+            d = meeting_drafts[0]
+            assert d.payload["title"] == "написать письмо клиенту"
+            assert d.payload["owner_user_id"] == "777"
+            assert d.payload["due_date"] == date.today().isoformat()
+            assert d.payload["_pending"]["conversation_id"] == "trans-1"
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 
@@ -467,14 +485,16 @@ def test_pipeline_idempotent_when_already_processed(
             second = pipeline.process_one(s, t)
             s.commit()
         assert second.skipped_reason == "already_processed"
-        # No new tasks.
+        # FR-CR-05-128 — meeting tasks now ship as ActionDraft
+        # rows; idempotency means no NEW drafts on re-run.
         with SessionFactory() as s:
-            assert (
-                s.query(Task)
-                .filter(Task.source_kind == TaskSourceKind.fireflies)
-                .count()
-                == 1
-            )
+            from app.models import ActionDraft
+
+            ff_drafts = [
+                d for d in s.query(ActionDraft).all()
+                if ((d.payload or {}).get("_pending") or {}).get("source_kind") == "fireflies"
+            ]
+            assert len(ff_drafts) == 1
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 
@@ -577,13 +597,16 @@ def test_pipeline_admin_fallback_for_unresolved_owner(
             pipeline.process_one(s, t)
             s.commit()
         with SessionFactory() as s:
-            task = (
-                s.query(Task)
-                .filter(Task.source_kind == TaskSourceKind.fireflies)
-                .first()
-            )
-            assert task is not None
-            assert task.owner_user_id == "888"
+            # FR-CR-05-128 — admin fallback now lives on the
+            # ActionDraft payload until the operator confirms.
+            from app.models import ActionDraft
+
+            ff_drafts = [
+                d for d in s.query(ActionDraft).all()
+                if ((d.payload or {}).get("_pending") or {}).get("source_kind") == "fireflies"
+            ]
+            assert len(ff_drafts) == 1
+            assert ff_drafts[0].payload["owner_user_id"] == "888"
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 
@@ -782,18 +805,77 @@ def test_split_for_telegram_chunks_at_paragraph_boundaries():
         assert len(c) <= 1000
 
 
+def _add_meeting_draft(
+    session,
+    *,
+    source_kind: str,
+    conversation_id: str,
+    title: str,
+    description: str | None = None,
+    owner_user_id: str | None = None,
+    owner_display_name: str | None = None,
+    priority: str = "medium",
+    due_date=None,
+    due_time=None,
+):
+    """Test helper — create one ActionDraft row mimicking the
+    shape pipelines emit (FR-CR-05-128)."""
+    from app.fireflies.pipeline import (
+        _create_meeting_draft,
+        _create_meeting_inference,
+    )
+
+    _, inference_id = _create_meeting_inference(
+        session,
+        source_kind=source_kind,
+        conversation_id=conversation_id,
+        title="test meeting",
+        transcript_excerpt="test",
+        pass_label=f"{source_kind}_test",
+        raw_extraction=[],
+    )
+    payload = {
+        "title": title,
+        "description": description,
+        "owner_user_id": owner_user_id,
+        "owner_display_name": owner_display_name,
+        "priority": priority,
+        "due_date": due_date.isoformat() if due_date else None,
+        "due_time": due_time.strftime("%H:%M") if due_time else None,
+    }
+    pending = {
+        "source_kind": source_kind,
+        "conversation_id": conversation_id,
+        "message_ts": conversation_id,
+        "thread_ts": None,
+        "permalink": None,
+        "fallback_author": None,
+        "context_snapshot_id": None,
+        "source_chat_id": 0,
+        "source_message_id": 0,
+        "source_text": "",
+    }
+    return _create_meeting_draft(
+        session,
+        inference_id=inference_id,
+        payload=payload,
+        pending=pending,
+        admin_uid=None,
+        slack_message_ts=conversation_id,
+    )
+
+
 def test_build_full_tasks_section_for_doc_renders_verbose_with_meta(session):
-    """FR-CR-05-119 follow-up — Google Doc gets the FULL task
-    list (verbatim multi-sentence descriptions + owner + due +
-    priority). Distinct from the short-summary helper which
-    one-sentence-compresses. Pipeline order is detailed →
-    tasks → doc → short so by doc-export the Task rows exist."""
+    """FR-CR-05-119 / FR-CR-05-128 — Google Doc gets the FULL
+    task list rendered from the meeting's pending ActionDraft
+    rows (verbatim multi-sentence descriptions + owner + due +
+    priority)."""
     from datetime import date, time as _time
 
     from app.fireflies.pipeline import (
         _build_full_tasks_section_for_doc,
     )
-    from app.models import Task, TaskPriority, TaskSourceKind, TaskStatus
+    from app.models import TaskSourceKind
 
     # Empty case → "" so the doc body stays clean.
     assert _build_full_tasks_section_for_doc(
@@ -802,34 +884,28 @@ def test_build_full_tasks_section_for_doc_renders_verbose_with_meta(session):
         source_conversation_id="trans-empty",
     ) == ""
 
-    session.add(
-        Task(
-            title="Подготовить письмо",
-            description=(
-                "Алина подготовит письмо инвесторам с приложенным "
-                "контрактом и базовой суммой. В тексте отметить "
-                "NDA и проверить список рассылки."
-            ),
-            priority=TaskPriority.high,
-            status=TaskStatus.todo,
-            owner_display_name="Алина",
-            due_date=date(2026, 5, 15),
-            due_time=_time(18, 0),
-            source_kind=TaskSourceKind.fireflies,
-            source_conversation_id="trans-doc",
-        )
+    _add_meeting_draft(
+        session,
+        source_kind="fireflies", conversation_id="trans-doc",
+        title="Подготовить письмо",
+        description=(
+            "Алина подготовит письмо инвесторам с приложенным "
+            "контрактом и базовой суммой. В тексте отметить "
+            "NDA и проверить список рассылки."
+        ),
+        priority="high",
+        owner_display_name="Алина",
+        due_date=date(2026, 5, 15),
+        due_time=_time(18, 0),
     )
-    session.add(
-        Task(
-            title="Скоординировать тайминг",
-            description="Ирина скоординирует тайминг рассылки.",
-            priority=TaskPriority.medium,
-            status=TaskStatus.todo,
-            owner_display_name="Ирина Шипилова",
-            due_date=date(2026, 5, 16),
-            source_kind=TaskSourceKind.fireflies,
-            source_conversation_id="trans-doc",
-        )
+    _add_meeting_draft(
+        session,
+        source_kind="fireflies", conversation_id="trans-doc",
+        title="Скоординировать тайминг",
+        description="Ирина скоординирует тайминг рассылки.",
+        priority="medium",
+        owner_display_name="Ирина Шипилова",
+        due_date=date(2026, 5, 16),
     )
     session.flush()
 
@@ -1106,14 +1182,12 @@ def test_first_sentence_compresses_multi_sentence_description():
 
 
 def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
-    """FR-CR-05-120: To-Do block items use the task description
-    VERBATIM (the LLM is told to write in «<topic> - <action>»
-    format already, so we trust the row content). Hard-cap at
-    350 chars guards against runaway emits. Owner in parens
-    only when set — empty owner drops the parens entirely.
-    Soft-deleted tasks excluded; no tasks → empty string."""
+    """FR-CR-05-120 / FR-CR-05-128: To-Do block items use the
+    draft description VERBATIM. Hard-cap at 350 chars. Owner
+    in parens only when set; ignored / expired drafts excluded;
+    no drafts → empty string."""
     from app.fireflies.pipeline import _build_todo_section
-    from app.models import Task, TaskPriority, TaskSourceKind, TaskStatus
+    from app.models import ActionDraftState, TaskSourceKind
 
     # Empty case → "" (caller drops the section).
     assert _build_todo_section(
@@ -1122,32 +1196,23 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
         source_conversation_id="trans-empty",
     ) == ""
 
-    # Multi-sentence description → first sentence only.
-    session.add(
-        Task(
-            title="Подготовить письмо",
-            description=(
-                "Алина подготовит письмо инвесторам с приложенным "
-                "контрактом и базовой суммой. В тексте отметить "
-                "NDA и проверить список рассылки."
-            ),
-            priority=TaskPriority.medium,
-            status=TaskStatus.todo,
-            owner_display_name="Алина",
-            source_kind=TaskSourceKind.fireflies,
-            source_conversation_id="trans-ok",
-        )
+    _add_meeting_draft(
+        session,
+        source_kind="fireflies", conversation_id="trans-ok",
+        title="Подготовить письмо",
+        description=(
+            "Алина подготовит письмо инвесторам с приложенным "
+            "контрактом и базовой суммой. В тексте отметить "
+            "NDA и проверить список рассылки."
+        ),
+        owner_display_name="Алина",
     )
-    session.add(
-        Task(
-            title="Скоординировать тайминг",
-            description="Ирина скоординирует тайминг рассылки по сегментам.",
-            priority=TaskPriority.medium,
-            status=TaskStatus.todo,
-            owner_display_name="Ирина Шипилова",
-            source_kind=TaskSourceKind.fireflies,
-            source_conversation_id="trans-ok",
-        )
+    _add_meeting_draft(
+        session,
+        source_kind="fireflies", conversation_id="trans-ok",
+        title="Скоординировать тайминг",
+        description="Ирина скоординирует тайминг рассылки по сегментам.",
+        owner_display_name="Ирина Шипилова",
     )
     session.flush()
 
@@ -1158,25 +1223,17 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
     )
     lines = out.splitlines()
     assert lines[0] == "To-Do:"
-    # FR-CR-05-120 — description used VERBATIM (the LLM is told
-    # to write in «<topic> - <action>» format on the Task row).
     assert lines[1].startswith("1) Алина подготовит письмо инвесторам")
     assert "(Алина)" in lines[1]
     assert lines[2].startswith("2) Ирина скоординирует тайминг рассылки")
     assert "(Ирина Шипилова)" in lines[2]
 
-    # FR-CR-05-120 — empty owner drops the parens (no
-    # «(не назначен)» noise).
-    session.add(
-        Task(
-            title="Орфан",
-            description="Orphan task - сделать что-то без назначения.",
-            priority=TaskPriority.medium,
-            status=TaskStatus.todo,
-            owner_display_name=None,
-            source_kind=TaskSourceKind.fireflies,
-            source_conversation_id="trans-orphan",
-        )
+    # Empty owner drops the parens.
+    _add_meeting_draft(
+        session,
+        source_kind="fireflies", conversation_id="trans-orphan",
+        title="Орфан",
+        description="Orphan task - сделать что-то без назначения.",
     )
     session.flush()
     orphan_out = _build_todo_section(
@@ -1187,20 +1244,15 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
     assert orphan_out[1] == "1) Orphan task - сделать что-то без назначения."
     assert "(не назначен)" not in "\n".join(orphan_out)
 
-    # Soft-deleted tasks are excluded.
-    other = Task(
+    # Ignored drafts are excluded (operator pressed ❌).
+    cancelled = _add_meeting_draft(
+        session,
+        source_kind="fireflies", conversation_id="trans-ok",
         title="Cancelled",
-        description="not visible",
-        priority=TaskPriority.medium,
-        status=TaskStatus.todo,
+        description="not visible — operator rejected the draft",
         owner_display_name="Кто-то",
-        source_kind=TaskSourceKind.fireflies,
-        source_conversation_id="trans-ok",
-        deleted_at=__import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc
-        ),
     )
-    session.add(other)
+    cancelled.state = ActionDraftState.ignored
     session.flush()
     out2 = _build_todo_section(
         session,
@@ -1208,6 +1260,7 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
         source_conversation_id="trans-ok",
     )
     assert "Cancelled" not in out2
+    assert "not visible" not in out2
 
 
 def test_strip_llm_todo_block_removes_emitted_section():
@@ -1490,9 +1543,11 @@ def test_task_extraction_prompt_forbids_admin_default_owner():
 def test_pipeline_posts_tg_card_per_extracted_task(
     patched_session_scope, SessionFactory, monkeypatch
 ):
-    """FR-CR-05-58 — every Fireflies-created task gets a DM
-    card posted to the admin (and owner if different) so the
-    operator sees them in TG, not just in the Sheet."""
+    """FR-CR-05-58 / FR-CR-05-128 — every Fireflies-extracted
+    draft gets a CONFIRM widget posted to the admin (and owner
+    if different) so the operator can ✅/✏️/❌ before the task
+    materialises. Pre-128 these were already-finalised cards;
+    post-128 they're the same shape as TG-ingest widgets."""
     monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
     from app.config import get_settings
 
@@ -1534,15 +1589,18 @@ def test_pipeline_posts_tg_card_per_extracted_task(
             s.commit()
 
         assert report.tasks_created == 2
-        # Task cards carry both a priority bullet (🟡 etc.) AND a
-        # 👤 owner-line — the FR-CR-05-119 short-summary To-Do
-        # section also contains the task descriptions but lacks
-        # the 👤 / 📅 card marker, so we filter strictly.
+        # Confirm widgets carry both a priority bullet (🟡 etc.)
+        # AND a 👤 owner-line; the widget builder capitalizes
+        # the first char of the title so we compare case-
+        # insensitively. Each task → one widget.
         admin_cards = [
             m for m in sender.sent
             if m["chat_id"] == 777
             and "👤" in m["text"]
-            and ("first task" in m["text"] or "second task" in m["text"])
+            and (
+                "first task" in m["text"].lower()
+                or "second task" in m["text"].lower()
+            )
         ]
         assert len(admin_cards) == 2
     finally:
@@ -1924,3 +1982,229 @@ def test_fireflies_pipeline_passes_whisper_bias_prompt(
     # Both name registries surfaced into the Whisper bias prompt.
     assert "Артем" in final_prompt
     assert "Tether" in final_prompt
+
+
+# ============================================================
+# FR-CR-05-128 — meeting tasks ship as approval-gated drafts
+# ============================================================
+
+
+def test_meeting_extract_creates_proposed_drafts_not_tasks(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-128 — operator-pinned: «апрув задач оператором в
+    тг боте после того как ты эти задачи составил, я должен
+    отжать, а они уже как будто отжаты — посмотри как
+    реализовано с тг-потоком». Meeting tasks now ship through
+    the SAME ActionDraft → ✅/✏️/❌ widget contract that TG-
+    ingested tasks use. Pin the draft creation, and pin that
+    NO Task row materialises until the operator confirms.
+    Sheets sync is therefore deferred to the confirm callback
+    (no `schedule_sync_task` invocation during the pipeline)."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    sync_calls: list[int] = []
+    monkeypatch.setattr(
+        "app.sync.task_sync.schedule_sync_task",
+        lambda session, task_id: sync_calls.append(task_id),
+    )
+
+    def fake_transcribe(**kw):
+        return "встреча про проект"
+
+    monkeypatch.setattr(
+        "app.services.transcription.transcribe_bytes", fake_transcribe
+    )
+    try:
+        settings = _settings_with_audio_dir()
+        client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-128")])
+        llm = _FakeLLM(
+            tasks=[
+                {"title": "Подготовить материалы", "owner": "777",
+                 "description": "Материалы - подготовить по проекту."},
+            ]
+        )
+        pipeline = FirefliesPipeline(
+            settings=settings,
+            client=client,
+            llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(),
+            sender=_FakeSender(),
+        )
+        with SessionFactory() as s:
+            s.add(TeamMember(real_name="Admin", telegram_user_id=777, active=True))
+            s.flush()
+            t = client.list_transcripts(limit=1)[0]
+            pipeline.process_one(s, t)
+            s.commit()
+
+        with SessionFactory() as s:
+            from app.models import ActionDraft, ActionDraftState
+
+            # No Task rows for this meeting — they're created
+            # only after ✅ on the widget.
+            assert s.query(Task).filter(
+                Task.source_kind == TaskSourceKind.fireflies
+            ).count() == 0
+            # Exactly one ActionDraft in `proposed` state with
+            # the meeting's payload + _pending block.
+            drafts = (
+                s.query(ActionDraft)
+                .filter(ActionDraft.state == ActionDraftState.proposed)
+                .all()
+            )
+            ff_drafts = [
+                d for d in drafts
+                if ((d.payload or {}).get("_pending") or {}).get("source_kind") == "fireflies"
+            ]
+            assert len(ff_drafts) == 1
+            d = ff_drafts[0]
+            assert d.payload["title"] == "Подготовить материалы"
+            assert d.payload["owner_user_id"] == "777"
+            pending = d.payload["_pending"]
+            assert pending["source_kind"] == "fireflies"
+            assert pending["conversation_id"] == "trans-128"
+
+        # No Sheets sync yet — the operator hasn't approved.
+        assert sync_calls == []
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_meeting_post_task_cards_emits_confirm_widgets(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-128 — `_step_post_task_cards` posts a CONFIRM
+    widget per draft (via `post_draft_confirmation`), NOT a
+    finalised task card. Pin: the widget keyboard carries an
+    `accept` callback wired to the existing TG-flow handler."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    keyboard_seen: list[dict] = []
+
+    class _CapturingSender:
+        enabled = True
+
+        def __init__(self):
+            self.sent = []
+
+        def send_message(self, *, chat_id, text, reply_markup=None, **kw):
+            self.sent.append({"chat_id": chat_id, "text": text, "kb": reply_markup})
+            if reply_markup:
+                keyboard_seen.append(reply_markup)
+            return {"message_id": 1}
+
+    monkeypatch.setattr(
+        "app.services.transcription.transcribe_bytes", lambda **kw: "x"
+    )
+    try:
+        settings = _settings_with_audio_dir()
+        client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-cw")])
+        llm = _FakeLLM(tasks=[{"title": "First", "owner": "777"}])
+        sender = _CapturingSender()
+        pipeline = FirefliesPipeline(
+            settings=settings, client=client, llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(), sender=sender,
+        )
+        with SessionFactory() as s:
+            s.add(TeamMember(real_name="Admin", telegram_user_id=777, active=True))
+            s.flush()
+            t = client.list_transcripts(limit=1)[0]
+            pipeline.process_one(s, t)
+            s.commit()
+
+        # Widget posted to admin (uid=777) with a 3-button
+        # confirm keyboard.
+        widget_msgs = [m for m in sender.sent if m["chat_id"] == 777 and m["kb"]]
+        assert widget_msgs, "expected at least one widget DM to admin"
+        assert keyboard_seen, "expected confirm keyboard on the widget"
+        # Keyboard shape is the standard confirm one (3 buttons).
+        kb = keyboard_seen[0]
+        flat_buttons = []
+        for row in (kb.get("inline_keyboard") or []):
+            flat_buttons.extend(row)
+        callbacks = " ".join(b.get("callback_data") or "" for b in flat_buttons)
+        # FR-CR-05-13: confirm widget exposes accept / edit /
+        # ignore callbacks (one-letter prefixes pinned in the
+        # cards module).
+        assert any(c in callbacks.lower() for c in ("accept", "confirm", "draft"))
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_meeting_draft_confirm_creates_task_with_source_fields(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-128 — when the operator ✅s a meeting-extracted
+    draft, the existing `handle_confirm_draft` handler creates
+    a Task with `source_kind=fireflies` (NOT `slack`/`telegram`)
+    and the meeting's `conversation_id` / `permalink` propagated
+    from the draft's `_pending` block. Same handler covers both
+    TG-ingest and meeting paths."""
+    from app.fireflies.pipeline import (
+        _create_meeting_draft,
+        _create_meeting_inference,
+    )
+    from app.models import ActionDraftState
+    from app.telegram_bot.handlers import handle_confirm_draft
+
+    monkeypatch.setattr(
+        "app.sync.task_sync.schedule_sync_task",
+        lambda session, task_id: None,
+    )
+    monkeypatch.setattr(
+        "app.telegram_bot.handlers._schedule_sync_task",
+        lambda session, task_id: None,
+    )
+    with SessionFactory() as s:
+        _, inference_id = _create_meeting_inference(
+            s, source_kind="fireflies", conversation_id="trans-confirm",
+            title="Investor sync", transcript_excerpt="…",
+            pass_label="fireflies_extract",
+        )
+        draft = _create_meeting_draft(
+            s,
+            inference_id=inference_id,
+            payload={
+                "title": "Подготовить меморандум",
+                "description": "Меморандум - подготовить по итогам.",
+                "owner_user_id": None,
+                "owner_display_name": None,
+                "priority": "high",
+                "due_date": "2026-05-10",
+                "due_time": "18:00",
+            },
+            pending={
+                "source_kind": "fireflies",
+                "conversation_id": "trans-confirm",
+                "message_ts": "trans-confirm",
+                "thread_ts": None,
+                "permalink": "https://app.fireflies.ai/view/trans-confirm",
+                "fallback_author": "777",
+                "context_snapshot_id": None,
+                "source_chat_id": 0,
+                "source_message_id": 0,
+                "source_text": "Investor sync",
+            },
+            admin_uid="777",
+            slack_message_ts="trans-confirm",
+        )
+        s.flush()
+
+        task, draft_after = handle_confirm_draft(
+            s, draft_id=draft.id, actor="777",
+        )
+        s.flush()
+
+    assert task is not None
+    assert task.source_kind == TaskSourceKind.fireflies
+    assert task.source_conversation_id == "trans-confirm"
+    assert task.source_permalink == "https://app.fireflies.ai/view/trans-confirm"
+    assert draft_after.state == ActionDraftState.confirmed
+    assert draft_after.task_id == task.id

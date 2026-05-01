@@ -308,23 +308,27 @@ def test_zoom_pipeline_runs_every_step_and_creates_zoom_source_tasks(
             assert (row.google_doc_url or "") in (row.short_summary or "")
             assert "📄 Подробный отчёт:" not in (row.short_summary or "")
 
-            tasks = s.query(Task).all()
-            assert len(tasks) == 1
-            t = tasks[0]
-            assert t.source_kind == TaskSourceKind.zoom
-            assert t.source_permalink == "https://zoom.us/rec/share/abc"
-            assert t.title.lower().startswith("подготовить follow-up")
-            # FR-CR-05-118 — source_conversation_id MUST be the
-            # zoom_id so the join `JOIN zoom_recordings z ON
-            # z.zoom_id = t.source_conversation_id` finds the
-            # originating meeting. Pre-fix this was NULL and
-            # every join returned 0 rows.
-            assert t.source_conversation_id == row.zoom_id
-            assert t.source_message_ts == row.zoom_id
-            # FR-CR-05-118 — Zoom-extracted tasks default to 18:00
-            # deadline same as Fireflies (FR-CR-05-63).
-            from datetime import time as _time
-            assert t.due_time == _time(18, 0)
+            # FR-CR-05-128 — meeting tasks ship as ActionDraft
+            # rows now; Task is created lazily on ✅ click. Pin
+            # the same source-routing fields on the draft's
+            # _pending block (the join key MUST survive into
+            # the eventual Task per FR-CR-05-118).
+            from app.models import ActionDraft, ActionDraftState
+
+            zoom_drafts = [
+                d for d in s.query(ActionDraft)
+                .filter(ActionDraft.state == ActionDraftState.proposed)
+                .all()
+                if ((d.payload or {}).get("_pending") or {}).get("source_kind") == "zoom"
+            ]
+            assert len(zoom_drafts) == 1
+            d = zoom_drafts[0]
+            assert d.payload["title"].lower().startswith("подготовить follow-up")
+            pending = d.payload["_pending"]
+            assert pending["conversation_id"] == row.zoom_id
+            assert pending["message_ts"] == row.zoom_id
+            assert pending["permalink"] == "https://zoom.us/rec/share/abc"
+            assert d.payload["due_time"] == "18:00"
 
         # FR-CR-05-118 — Short summary DM (one) AND a per-task
         # DM card (one per extracted task) were sent. Pre-fix
@@ -561,12 +565,19 @@ def test_verifier_pass_adds_missed_tasks_in_zoom_pipeline(
             s.commit()
 
         assert report.tasks_created == 2
+        # FR-CR-05-128 — drafts replace immediate Task creation;
+        # both extract-pass + verify-pass items land as drafts.
         with SessionFactory() as s:
-            tasks = s.query(Task).filter(
-                Task.source_kind == TaskSourceKind.zoom
-            ).all()
-            assert len(tasks) == 2
-            titles = sorted(t.title for t in tasks)
+            from app.models import ActionDraft, ActionDraftState
+
+            zoom_drafts = [
+                d for d in s.query(ActionDraft)
+                .filter(ActionDraft.state == ActionDraftState.proposed)
+                .all()
+                if ((d.payload or {}).get("_pending") or {}).get("source_kind") == "zoom"
+            ]
+            assert len(zoom_drafts) == 2
+            titles = sorted((d.payload or {}).get("title") or "" for d in zoom_drafts)
             assert "Подготовить письмо" in titles
             assert "Прислать фоллоу-ап" in titles
     finally:

@@ -199,11 +199,16 @@ class ZoomPipeline:
             )
             whisper_prompt = None
         if whisper_prompt:
+            from app.services.trace_log import trace_event as _zte0
             log.info(
                 "zoom_whisper_bias_prompt_built",
                 zoom_id=row.zoom_id,
                 prompt_chars=len(whisper_prompt),
             )
+            _zte0(source="zoom", recording_id=row.zoom_id,
+                  event="whisper_bias_prompt_built",
+                  prompt_chars=len(whisper_prompt),
+                  prompt_preview=whisper_prompt[:240])
 
         size = os.path.getsize(row.audio_path)
         whisper_max = 24 * 1024 * 1024
@@ -408,6 +413,7 @@ class ZoomPipeline:
         # FR-CR-05-119 — drop any LLM-emitted To-Do section so we
         # can append the deterministic one. Also strip markdown.
         from app.fireflies.pipeline import (
+            _SHORT_SUMMARY_ONE_MESSAGE_LIMIT,
             _build_counterparties_section_for_short_summary,
             _build_todo_section,
             _strip_llm_todo_block,
@@ -417,20 +423,42 @@ class ZoomPipeline:
         # FR-CR-05-119 — append To-Do from the actual extracted
         # Task rows so the TG message matches what the operator
         # has in the DB / Sheet / DM cards.
+        # FR-CR-05-128 — overview MUST land in ONE Telegram
+        # message (operator-pinned, repeatedly). Try verbose
+        # To-Do first; if total body > 4000 chars, rebuild in
+        # compact title-only mode. Full descriptions still ship
+        # via the Doc + per-task DM cards.
+        body_with_todo = text
         todo = _build_todo_section(
             session,
             source_kind=TaskSourceKind.zoom,
             source_conversation_id=row.zoom_id,
         )
         if todo:
-            text = text.rstrip() + "\n\n" + todo
-        # FR-CR-05-125 — single-line «🔗 Контрагенты» after the
-        # To-Do block.
+            body_with_todo = text.rstrip() + "\n\n" + todo
         cp_line = _build_counterparties_section_for_short_summary(
             session, source_kind="zoom", source_id=row.zoom_id,
         )
+        candidate = body_with_todo
         if cp_line:
-            text = text.rstrip() + "\n\n" + cp_line
+            candidate = candidate.rstrip() + "\n\n" + cp_line
+        if len(candidate) > _SHORT_SUMMARY_ONE_MESSAGE_LIMIT and todo:
+            todo_compact = _build_todo_section(
+                session,
+                source_kind=TaskSourceKind.zoom,
+                source_conversation_id=row.zoom_id,
+                compact=True,
+            )
+            log.info(
+                "zoom_short_summary_compact_todo",
+                zoom_id=row.zoom_id,
+                full_chars=len(candidate),
+                limit=_SHORT_SUMMARY_ONE_MESSAGE_LIMIT,
+            )
+            candidate = text.rstrip() + "\n\n" + todo_compact
+            if cp_line:
+                candidate = candidate.rstrip() + "\n\n" + cp_line
+        text = candidate
         # FR-CR-05-127 — title becomes an HTML hyperlink to the
         # Google Doc; the «📄 Подробный отчёт: <url>» trailer is
         # gone (replaced by the wrap on the first line). Sent
@@ -460,7 +488,7 @@ class ZoomPipeline:
         from app.fireflies.pipeline import _split_for_telegram
         from app.telegram_bot.handlers import admin_user_ids
 
-        chunks = _split_for_telegram(row.short_summary or "", limit=3800)
+        chunks = _split_for_telegram(row.short_summary or "", limit=4096)
         if not chunks:
             return 0
         sent = 0
@@ -511,6 +539,8 @@ class ZoomPipeline:
                     self._settings.fireflies_tasks_reasoning_effort
                     or None
                 ),
+                trace_source="zoom",
+                trace_recording_id=row.zoom_id,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(
@@ -619,19 +649,27 @@ class ZoomPipeline:
         if not isinstance(tasks, list):
             tasks = []
         # FR-CR-05-126 — full trace of what the LLM emitted.
+        _z_raw_titles = [
+            (t.get("title") or "")[:80]
+            for t in tasks if isinstance(t, dict)
+        ][:25]
+        _z_raw_owners = [
+            t.get("owner") for t in tasks if isinstance(t, dict)
+        ][:25]
         log.info(
             "zoom_task_extraction_llm_returned",
             zoom_id=row.zoom_id,
             model=self._settings.fireflies_tasks_model,
             raw_count=len(tasks),
-            raw_titles=[
-                (t.get("title") or "")[:80]
-                for t in tasks if isinstance(t, dict)
-            ][:25],
-            raw_owners=[
-                t.get("owner") for t in tasks if isinstance(t, dict)
-            ][:25],
+            raw_titles=_z_raw_titles,
+            raw_owners=_z_raw_owners,
         )
+        from app.services.trace_log import trace_event as _zte1
+        _zte1(source="zoom", recording_id=row.zoom_id,
+              event="task_extraction_llm_returned",
+              model=self._settings.fireflies_tasks_model,
+              raw_count=len(tasks),
+              raw_titles=_z_raw_titles, raw_owners=_z_raw_owners)
         # FR-CR-05-120 follow-up — log when we got 0 tasks back
         # so the operator can tell «meeting was procedural, no
         # actions» from «model rejected the call» / «prompt
@@ -820,19 +858,26 @@ class ZoomPipeline:
         new_tasks = (data or {}).get("tasks") or []
         if not isinstance(new_tasks, list):
             new_tasks = []
+        _z_new_titles = [
+            (t.get("title") or "")[:80]
+            for t in new_tasks if isinstance(t, dict)
+        ][:25]
+        _z_new_owners = [
+            t.get("owner") for t in new_tasks if isinstance(t, dict)
+        ][:25]
         log.info(
             "zoom_task_verification_done",
             zoom_id=row.zoom_id,
             existing_count=len(existing),
             newly_added=len(new_tasks),
-            new_titles=[
-                (t.get("title") or "")[:80]
-                for t in new_tasks if isinstance(t, dict)
-            ][:25],
-            new_owners=[
-                t.get("owner") for t in new_tasks if isinstance(t, dict)
-            ][:25],
+            new_titles=_z_new_titles,
+            new_owners=_z_new_owners,
         )
+        from app.services.trace_log import trace_event as _zte2
+        _zte2(source="zoom", recording_id=row.zoom_id,
+              event="task_verification_done",
+              existing_count=len(existing), newly_added=len(new_tasks),
+              new_titles=_z_new_titles, new_owners=_z_new_owners)
         if not new_tasks:
             return 0
         valid_ids = {e.get("slack_user_id") for e in known_employees}
@@ -1094,9 +1139,7 @@ class ZoomPipeline:
             .order_by(Task.id.asc())
             .all()
         )
-        log.info(
-            "zoom_pipeline_summary",
-            zoom_id=row.zoom_id,
+        _z_summary = dict(
             title=(row.title or "")[:80],
             transcript_chars=report.transcript_chars,
             detailed_chars=report.detailed_chars,
@@ -1113,6 +1156,10 @@ class ZoomPipeline:
             google_doc_url=row.google_doc_url,
             errors=report.errors,
         )
+        log.info("zoom_pipeline_summary", zoom_id=row.zoom_id, **_z_summary)
+        from app.services.trace_log import trace_event as _zte3
+        _zte3(source="zoom", recording_id=row.zoom_id,
+              event="pipeline_summary", **_z_summary)
         return report
 
 

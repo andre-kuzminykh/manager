@@ -1924,3 +1924,235 @@ def test_fireflies_pipeline_passes_whisper_bias_prompt(
     # Both name registries surfaced into the Whisper bias prompt.
     assert "Артем" in final_prompt
     assert "Tether" in final_prompt
+
+
+# ============================================================
+# FR-CR-05-128 — one-message overview guarantee + compact To-Do
+# ============================================================
+
+
+def test_short_summary_compact_todo_when_overview_overflows(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-128 — operator-pinned, repeatedly: «Header +
+    Участники + Суть + To-Do» MUST land in ONE Telegram DM
+    (≤4096 chars). When the verbose To-Do block (FR-CR-05-120
+    «<topic> - <action with details>» format) would push the
+    body past the cap, the pipeline rebuilds the To-Do in
+    COMPACT mode (title-only with owner) so it fits. Full
+    descriptions still ship via the Doc + per-task DM cards.
+
+    Reproduces the operator regression: 22 fundraising-sync
+    tasks with rich descriptions blew past 4000 chars and the
+    splitter cut between «Суть» and «To-Do», breaking the
+    contract."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        "app.services.transcription.transcribe_bytes",
+        lambda **kw: "x",
+    )
+    try:
+        settings = _settings_with_audio_dir()
+        client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-many")])
+
+        # 22 tasks each with 250-char description — same shape
+        # as the operator's fundraising sync that triggered the
+        # split.
+        rich_desc = (
+            "очень подробное описание задачи с большим количеством "
+            "контекста и деталей чтобы превысить лимит и проверить "
+            "работу компактного fallback. " * 2
+        )
+        tasks = [
+            {
+                "title": f"Задача {i+1:02d}",
+                "description": f"Тема{i+1:02d} - {rich_desc}",
+                "owner": "777",
+                "priority": "medium",
+            }
+            for i in range(22)
+        ]
+        llm = _FakeLLM(tasks=tasks)
+        sender = _FakeSender()
+        pipeline = FirefliesPipeline(
+            settings=settings, client=client, llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(), sender=sender,
+        )
+        with SessionFactory() as s:
+            s.add(TeamMember(real_name="Admin", telegram_user_id=777, active=True))
+            s.flush()
+            t = client.list_transcripts(limit=1)[0]
+            pipeline.process_one(s, t)
+            s.commit()
+
+        with SessionFactory() as s:
+            from app.models import MeetingRecording
+
+            row = (
+                s.query(MeetingRecording)
+                .filter(MeetingRecording.fireflies_id == "trans-many")
+                .one()
+            )
+            body = row.short_summary or ""
+
+        # Operator-pinned: ONE message ≤ 4096 chars.
+        assert 0 < len(body) <= 4096, (
+            f"short summary body must fit in one Telegram DM; "
+            f"got {len(body)} chars"
+        )
+        # All 22 task titles present (compact mode keeps titles).
+        for i in range(22):
+            assert f"Задача {i+1:02d}" in body, (
+                f"missing task {i+1:02d} from compact To-Do"
+            )
+        # Verbose description body NOT in the compact rendering
+        # (that's the whole point — full text goes to Doc).
+        assert rich_desc.strip()[:80] not in body
+        # Operator-pinned: short summary lands in EXACTLY one
+        # Telegram DM (overview block, NOT split). Per-task DM
+        # cards arrive separately (those carry «👤» + «📅» on
+        # a fresh line right after the title); short summary
+        # text starts with the `<a href>` title block AND
+        # contains the «To-Do:» header.
+        short_summary_msgs = [
+            m for m in sender.sent
+            if m["chat_id"] == 777 and "To-Do:" in m["text"]
+        ]
+        assert len(short_summary_msgs) == 1, (
+            f"expected exactly one short-summary DM; got {len(short_summary_msgs)}"
+        )
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_trace_event_writes_jsonl_per_recording(monkeypatch, tmp_path):
+    """FR-CR-05-128 — operator-pinned: «мне под каждый вызов
+    надо в трейсы складывать с датой и временем». Every key
+    pipeline event appends one JSONL line to
+    `<MEETING_TRACE_DIR>/<source>-<recording-id>.jsonl` with a
+    UTC ISO timestamp + event name + structured fields, so the
+    operator can `cat traces/zoom-XYZ.jsonl | jq` after a run
+    to walk through every step / LLM call / Telegram send."""
+    import importlib
+    import json
+
+    monkeypatch.setenv("MEETING_TRACE_DIR", str(tmp_path))
+    # Force the trace-log module to re-resolve the dir on the
+    # next call (its first-use guard caches the result).
+    import app.services.trace_log as trace_log_mod
+    importlib.reload(trace_log_mod)
+
+    trace_log_mod.trace_event(
+        source="zoom", recording_id="zm-test-001",
+        event="step_started", step="transcribe", model="whisper-1",
+    )
+    trace_log_mod.trace_event(
+        source="zoom", recording_id="zm-test-001",
+        event="task_extraction_llm_returned",
+        raw_count=3, raw_titles=["a", "b", "c"],
+    )
+    # Different recording → different file.
+    trace_log_mod.trace_event(
+        source="fireflies", recording_id="ff-other",
+        event="step_done", step="download", duration_ms=500,
+    )
+
+    file_a = tmp_path / "zoom-zm-test-001.jsonl"
+    assert file_a.exists()
+    lines = [json.loads(l) for l in file_a.read_text().splitlines()]
+    assert len(lines) == 2
+    assert lines[0]["event"] == "step_started"
+    assert lines[0]["fields"]["step"] == "transcribe"
+    assert lines[1]["event"] == "task_extraction_llm_returned"
+    assert lines[1]["fields"]["raw_count"] == 3
+    # Timestamps are ISO-format UTC.
+    from datetime import datetime
+    for line in lines:
+        ts = datetime.fromisoformat(line["ts"])
+        assert ts.tzinfo is not None
+
+    file_b = tmp_path / "fireflies-ff-other.jsonl"
+    assert file_b.exists()
+    lines_b = [json.loads(l) for l in file_b.read_text().splitlines()]
+    assert lines_b[0]["event"] == "step_done"
+    assert lines_b[0]["fields"]["duration_ms"] == 500
+
+
+def test_trace_event_safe_against_zoom_id_slashes(monkeypatch, tmp_path):
+    """Zoom UUIDs are base64 with `/` and `=` — sanitiser
+    replaces them so we don't create unwanted subdirs."""
+    import importlib
+    monkeypatch.setenv("MEETING_TRACE_DIR", str(tmp_path))
+    import app.services.trace_log as trace_log_mod
+    importlib.reload(trace_log_mod)
+
+    trace_log_mod.trace_event(
+        source="zoom", recording_id="HdyK6m9iQtKabZ/FpT6bN1Q==",
+        event="step_started", step="download",
+    )
+    files = list(tmp_path.iterdir())
+    assert len(files) == 1
+    assert "/" not in files[0].name
+    assert "=" not in files[0].name
+
+
+def test_short_summary_keeps_verbose_todo_when_fits(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-128 — when the verbose body fits, keep verbose
+    To-Do (FR-CR-05-120 contract: descriptions VERBATIM in
+    «<topic> - <action with details>» format). Compact fallback
+    is only for overflow."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(
+        "app.services.transcription.transcribe_bytes",
+        lambda **kw: "x",
+    )
+    try:
+        settings = _settings_with_audio_dir()
+        client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-few")])
+        # 3 short tasks — fits comfortably under 4000 chars.
+        tasks = [
+            {"title": "T1", "description": "Тема1 - первое действие.",
+             "owner": "777", "priority": "medium"},
+            {"title": "T2", "description": "Тема2 - второе действие.",
+             "owner": "777", "priority": "medium"},
+            {"title": "T3", "description": "Тема3 - третье действие.",
+             "owner": "777", "priority": "medium"},
+        ]
+        pipeline = FirefliesPipeline(
+            settings=settings, client=client, llm_backend=_FakeLLM(tasks=tasks),
+            docs_factory=lambda: _FakeDocs(), sender=_FakeSender(),
+        )
+        with SessionFactory() as s:
+            s.add(TeamMember(real_name="Admin", telegram_user_id=777, active=True))
+            s.flush()
+            t = client.list_transcripts(limit=1)[0]
+            pipeline.process_one(s, t)
+            s.commit()
+
+        with SessionFactory() as s:
+            from app.models import MeetingRecording
+
+            row = (
+                s.query(MeetingRecording)
+                .filter(MeetingRecording.fireflies_id == "trans-few")
+                .one()
+            )
+            body = row.short_summary or ""
+
+        # Verbose descriptions present (we're under the limit).
+        assert "Тема1 - первое действие." in body
+        assert "Тема2 - второе действие." in body
+        assert "Тема3 - третье действие." in body
+        assert len(body) <= 4096
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]

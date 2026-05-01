@@ -46,30 +46,47 @@ from app.models import MeetingRecording, Task, TaskSourceKind
 log = get_logger(__name__)
 
 
+def _log_and_trace(
+    source: str, recording_id: str | None, event: str, **fields: Any,
+) -> None:
+    """FR-CR-05-128 — emit ONE structlog `<source>_<event>` line
+    AND ONE per-recording trace JSONL row in lockstep, so the
+    operator can grep docker logs OR cat the per-recording
+    trace file and see the same events.
+
+    `event` is the bare event name (without source prefix); the
+    structlog log key becomes `<source>_<event>`. `recording_id`
+    is `MeetingRecording.fireflies_id` / `ZoomRecording.zoom_id`.
+    """
+    from app.services.trace_log import trace_event
+
+    ctx_for_log = dict(fields)
+    if source == "fireflies":
+        ctx_for_log.setdefault("fireflies_id", recording_id)
+    elif source == "zoom":
+        ctx_for_log.setdefault("zoom_id", recording_id)
+    log.info(f"{source}_{event}", **ctx_for_log)
+    trace_event(source=source, recording_id=recording_id,
+                event=event, **fields)
+
+
 @contextmanager
 def _trace_step(source: str, step: str, **ctx):
-    """FR-CR-05-122 — every pipeline step is bracketed by a
-    started/done log line so the operator can walk through a
-    rerun by `grep step_started|step_done` over the listener
-    output. Times the step in ms; on exception emits
-    `*_step_failed` with the same shape so a single grep
-    pattern covers all three outcomes.
-
-    Usage::
-
-        with _trace_step("fireflies", "transcribe", fireflies_id=…):
-            ...
-
-    Emits (with `source="fireflies"`):
-        fireflies_step_started step=transcribe fireflies_id=…
-        fireflies_step_done    step=transcribe duration_ms=N ok=True
-                                 fireflies_id=…
-
-    Failures emit `..._step_failed` and re-raise so the caller's
-    error handling stays in charge.
+    """FR-CR-05-122 / FR-CR-05-128 — every pipeline step is
+    bracketed by a started/done log line so the operator can
+    walk through a rerun by `grep step_started|step_done`. Same
+    events also append a JSONL row to
+    `/app/traces/<source>-<recording-id>.jsonl` via
+    `trace_event` (operator-pinned: «мне под каждый вызов надо
+    в трейсы складывать с датой и временем»).
     """
+    from app.services.trace_log import trace_event
+
     started = _trace_time.monotonic()
+    rec_id = ctx.get("fireflies_id") or ctx.get("zoom_id") or ctx.get("recording_id")
     log.info(f"{source}_step_started", step=step, **ctx)
+    trace_event(source=source, recording_id=rec_id,
+                event="step_started", step=step, **ctx)
     try:
         yield
     except Exception as e:  # noqa: BLE001
@@ -78,6 +95,9 @@ def _trace_step(source: str, step: str, **ctx):
             f"{source}_step_failed",
             step=step, duration_ms=elapsed, error=str(e), **ctx,
         )
+        trace_event(source=source, recording_id=rec_id,
+                    event="step_failed", step=step,
+                    duration_ms=elapsed, error=str(e))
         raise
     else:
         elapsed = int((_trace_time.monotonic() - started) * 1000)
@@ -85,6 +105,8 @@ def _trace_step(source: str, step: str, **ctx):
             f"{source}_step_done",
             step=step, duration_ms=elapsed, **ctx,
         )
+        trace_event(source=source, recording_id=rec_id,
+                    event="step_done", step=step, duration_ms=elapsed)
 
 
 @dataclass
@@ -365,11 +387,23 @@ def _build_full_tasks_section_for_doc(
     return "\n".join(lines).rstrip() + "\n"
 
 
+# FR-CR-05-128 — Telegram's per-message hard limit is 4096
+# chars. We aim for 4000 to leave room for HTML wrapping (the
+# `<a href>` block adds ~70-100 chars). Operator-pinned: the
+# «Header + Участники + Суть + To-Do» overview MUST land in
+# ONE message. When the verbose To-Do would push past this
+# limit, the short-summary step falls back to a compact title-
+# only To-Do — full descriptions still ship via the Doc + per-
+# task DM cards.
+_SHORT_SUMMARY_ONE_MESSAGE_LIMIT = 4000
+
+
 def _build_todo_section(
     session: "Session",
     *,
     source_kind: "TaskSourceKind",
     source_conversation_id: str,
+    compact: bool = False,
 ) -> str:
     """FR-CR-05-119 — render the To-Do block from the actual
     `Task` rows extracted for this recording. Items are
@@ -379,6 +413,13 @@ def _build_todo_section(
     operator gets via `post_initial_card`. Sorted by creation
     order so the operator sees the same sequence as the DM
     cards arriving in TG.
+
+    `compact=True` (FR-CR-05-128) renders just «N) Title (Owner)»
+    — used as a fallback when the full descriptions would push
+    the overview body past Telegram's 4096-char per-message cap.
+    Operator-pinned: «Header + Участники + Суть + To-Do» MUST
+    land in ONE message; verbatim descriptions still ship via
+    the Doc + per-task DM cards.
 
     Returns "" when no tasks were extracted (operator pinned:
     drop the section entirely instead of an empty header).
@@ -397,18 +438,20 @@ def _build_todo_section(
         return ""
     lines = ["To-Do:"]
     for i, t in enumerate(tasks, 1):
-        # FR-CR-05-120 — task descriptions are now in the
-        # operator-pinned «<topic> - <action with details>»
-        # format (enforced by TASK_EXTRACTION_SYSTEM). Use as
-        # is, just hard-cap at 350 chars so a runaway LLM emit
-        # can't push a single line over Telegram's per-message
-        # limit. Owner appended in parens only when set —
-        # «(не назначен)» is noise the operator pinned out.
-        raw = (t.description or "").strip() or (t.title or "").strip()
-        if len(raw) > 350:
-            cut = raw.rfind(" ", 0, 350)
-            raw = (raw[: cut if cut > 200 else 350]).rstrip(",;:- ") + "…"
         owner = (t.owner_display_name or "").strip()
+        if compact:
+            # FR-CR-05-128 — title-only fallback so the overview
+            # message fits in one Telegram DM. Full descriptions
+            # still ship via the Doc + per-task DM cards.
+            raw = (t.title or "").strip() or (t.description or "").strip()
+        else:
+            # FR-CR-05-120 — task descriptions are now in the
+            # operator-pinned «<topic> - <action with details>»
+            # format. Use verbatim, hard-cap at 350 chars.
+            raw = (t.description or "").strip() or (t.title or "").strip()
+            if len(raw) > 350:
+                cut = raw.rfind(" ", 0, 350)
+                raw = (raw[: cut if cut > 200 else 350]).rstrip(",;:- ") + "…"
         if owner:
             lines.append(f"{i}) {raw} ({owner})")
         else:
@@ -711,10 +754,18 @@ class FirefliesPipeline:
             )
             whisper_prompt = None
         if whisper_prompt:
+            from app.services.trace_log import trace_event
+
             log.info(
                 "fireflies_whisper_bias_prompt_built",
                 fireflies_id=row.fireflies_id,
                 prompt_chars=len(whisper_prompt),
+            )
+            trace_event(
+                source="fireflies", recording_id=row.fireflies_id,
+                event="whisper_bias_prompt_built",
+                prompt_chars=len(whisper_prompt),
+                prompt_preview=whisper_prompt[:240],
             )
 
         size = os.path.getsize(row.audio_path)
@@ -902,6 +953,8 @@ class FirefliesPipeline:
                     self._settings.fireflies_tasks_reasoning_effort
                     or None
                 ),
+                trace_source="fireflies",
+                trace_recording_id=row.fireflies_id,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(
@@ -1029,12 +1082,21 @@ class FirefliesPipeline:
         # Task rows. Description (verbatim what the LLM wrote on
         # the Task row) + owner_display_name in parens. If no
         # tasks were extracted we drop the section.
+        # FR-CR-05-128 — operator-pinned «один раз зафиксируй
+        # навсегда»: «Header + Участники + Суть + To-Do» MUST
+        # land in ONE Telegram message. We try the verbose
+        # To-Do first; if the resulting body would push past
+        # the 4096-char per-message cap (one Telegram DM), we
+        # rebuild the To-Do in compact mode (title-only). The
+        # full description still lives on the Doc + per-task
+        # DM cards, so no info is lost.
+        body_with_todo = body
         todo = _build_todo_section(
             session, source_kind=TaskSourceKind.fireflies,
             source_conversation_id=row.fireflies_id,
         )
         if todo:
-            body = body.rstrip() + "\n\n" + todo
+            body_with_todo = body.rstrip() + "\n\n" + todo
         # FR-CR-05-125 — single-line «🔗 Контрагенты: name1,
         # name2» appended after To-Do, before the doc-link
         # trailer. Only emitted when matches exist.
@@ -1043,8 +1105,26 @@ class FirefliesPipeline:
             source_kind="fireflies",
             source_id=row.fireflies_id,
         )
+        candidate = body_with_todo
         if cp_line:
-            body = body.rstrip() + "\n\n" + cp_line
+            candidate = candidate.rstrip() + "\n\n" + cp_line
+        # FR-CR-05-128 — overflow → compact To-Do.
+        if len(candidate) > _SHORT_SUMMARY_ONE_MESSAGE_LIMIT and todo:
+            todo_compact = _build_todo_section(
+                session, source_kind=TaskSourceKind.fireflies,
+                source_conversation_id=row.fireflies_id,
+                compact=True,
+            )
+            log.info(
+                "fireflies_short_summary_compact_todo",
+                fireflies_id=row.fireflies_id,
+                full_chars=len(candidate),
+                limit=_SHORT_SUMMARY_ONE_MESSAGE_LIMIT,
+            )
+            candidate = body.rstrip() + "\n\n" + todo_compact
+            if cp_line:
+                candidate = candidate.rstrip() + "\n\n" + cp_line
+        body = candidate
         # FR-CR-05-127 — operator-pinned: the «DD/MM - <Topic>»
         # header becomes an HTML hyperlink to the Google Doc.
         # Replaces the old «📄 Подробный отчёт: <url>» trailer
@@ -1073,7 +1153,7 @@ class FirefliesPipeline:
         # the deterministic To-Do section can grow past the
         # 4096-char per-message limit (operator regression: 25
         # tasks → 10 KB body). Each chunk goes as a separate DM.
-        chunks = _split_for_telegram(row.short_summary, limit=3800)
+        chunks = _split_for_telegram(row.short_summary, limit=4096)
         sent = 0
         for uid in recipients:
             try:
@@ -1159,19 +1239,28 @@ class FirefliesPipeline:
         # FR-CR-05-126 — full trace of what the LLM emitted so
         # the operator can sanity-check «meeting was procedural»
         # vs «model misfired» without re-running.
+        from app.services.trace_log import trace_event as _te
+
+        _raw_titles = [
+            (t.get("title") or "")[:80]
+            for t in tasks if isinstance(t, dict)
+        ][:25]
+        _raw_owners = [
+            t.get("owner") for t in tasks if isinstance(t, dict)
+        ][:25]
         log.info(
             "fireflies_task_extraction_llm_returned",
             fireflies_id=row.fireflies_id,
             model=self._settings.fireflies_tasks_model,
             raw_count=len(tasks),
-            raw_titles=[
-                (t.get("title") or "")[:80]
-                for t in tasks if isinstance(t, dict)
-            ][:25],
-            raw_owners=[
-                t.get("owner") for t in tasks if isinstance(t, dict)
-            ][:25],
+            raw_titles=_raw_titles,
+            raw_owners=_raw_owners,
         )
+        _te(source="fireflies", recording_id=row.fireflies_id,
+            event="task_extraction_llm_returned",
+            model=self._settings.fireflies_tasks_model,
+            raw_count=len(tasks),
+            raw_titles=_raw_titles, raw_owners=_raw_owners)
         if not tasks:
             log.info(
                 "fireflies_task_extraction_returned_empty",
@@ -1230,6 +1319,11 @@ class FirefliesPipeline:
                 final_owner=owner_user_id,
                 resolution=owner_resolution,
             )
+            from app.services.trace_log import trace_event as _te2
+            _te2(source="fireflies", recording_id=row.fireflies_id,
+                 event="task_owner_resolved", title=title[:80],
+                 llm_owner=llm_owner_raw, final_owner=owner_user_id,
+                 resolution=owner_resolution)
             owner_display_name = None
             if owner_user_id and known_employees:
                 for e in known_employees:
@@ -1368,19 +1462,26 @@ class FirefliesPipeline:
             new_tasks = []
         # FR-CR-05-126 — verifier transparency: titles of what
         # the second pass actually wants to add, before insert.
+        _new_titles = [
+            (t.get("title") or "")[:80]
+            for t in new_tasks if isinstance(t, dict)
+        ][:25]
+        _new_owners = [
+            t.get("owner") for t in new_tasks if isinstance(t, dict)
+        ][:25]
         log.info(
             "fireflies_task_verification_done",
             fireflies_id=row.fireflies_id,
             existing_count=len(existing),
             newly_added=len(new_tasks),
-            new_titles=[
-                (t.get("title") or "")[:80]
-                for t in new_tasks if isinstance(t, dict)
-            ][:25],
-            new_owners=[
-                t.get("owner") for t in new_tasks if isinstance(t, dict)
-            ][:25],
+            new_titles=_new_titles,
+            new_owners=_new_owners,
         )
+        from app.services.trace_log import trace_event as _te3
+        _te3(source="fireflies", recording_id=row.fireflies_id,
+             event="task_verification_done",
+             existing_count=len(existing), newly_added=len(new_tasks),
+             new_titles=_new_titles, new_owners=_new_owners)
         if not new_tasks:
             return 0
         valid_ids = {e.get("slack_user_id") for e in known_employees}
@@ -1645,9 +1746,7 @@ class FirefliesPipeline:
             .order_by(Task.id.asc())
             .all()
         )
-        log.info(
-            "fireflies_pipeline_summary",
-            fireflies_id=row.fireflies_id,
+        _summary_payload = dict(
             title=(row.title or "")[:80],
             transcript_chars=report.transcript_chars,
             detailed_chars=report.detailed_chars,
@@ -1665,6 +1764,13 @@ class FirefliesPipeline:
             short_summary_recipients=report.short_summary_recipients,
             errors=report.errors,
         )
+        log.info(
+            "fireflies_pipeline_summary",
+            fireflies_id=row.fireflies_id, **_summary_payload,
+        )
+        from app.services.trace_log import trace_event as _te4
+        _te4(source="fireflies", recording_id=row.fireflies_id,
+             event="pipeline_summary", **_summary_payload)
         return report
 
 

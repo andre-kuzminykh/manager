@@ -271,16 +271,18 @@ def match_counterparties_in_transcript(
     llm_backend: Any,
     model: str,
     reasoning_effort: str | None = None,
+    trace_source: str | None = None,
+    trace_recording_id: str | None = None,
 ) -> list[Counterparty]:
     """Run the LLM matcher and return the matched Counterparty
-    rows in transcript order. Returns [] when:
-      - no transcript text;
-      - directory is empty;
-      - LLM call fails (logged);
-      - LLM returns no matches.
-    Doesn't persist anything — caller writes
-    `CounterpartyMention` rows.
+    rows in transcript order. `trace_source` (`"fireflies"` /
+    `"zoom"`) + `trace_recording_id` thread per-recording trace
+    events to `/app/traces/<source>-<id>.jsonl` (FR-CR-05-128).
+    Returns [] when no transcript / empty directory / LLM
+    failure / no matches. Doesn't persist anything.
     """
+    from app.services.trace_log import trace_event
+
     if not transcript:
         return []
     directory = (
@@ -293,11 +295,15 @@ def match_counterparties_in_transcript(
             "counterparty_match_skipped_empty_directory",
             transcript_chars=len(transcript),
         )
+        if trace_source:
+            trace_event(
+                source=trace_source, recording_id=trace_recording_id,
+                event="counterparty_match_skipped_empty_directory",
+                transcript_chars=len(transcript),
+            )
         return []
     # FR-CR-05-126 — Python-side fuzzy prefilter narrows the
     # directory to plausible candidates before the LLM call.
-    # Boosts both recall (Whisper-mangled names land in the
-    # shortlist) and precision (fewer distractors).
     shortlist = _shortlist_directory_for_transcript(directory, transcript)
     user_prompt = (
         "directory:\n"
@@ -305,8 +311,7 @@ def match_counterparties_in_transcript(
         + "\n\nТранскрипт встречи:\n"
         + transcript
     )
-    log.info(
-        "counterparty_match_call_started",
+    _start_payload = dict(
         model=model,
         reasoning_effort=reasoning_effort,
         directory_size=len(directory),
@@ -319,6 +324,10 @@ def match_counterparties_in_transcript(
         transcript_preview=transcript[:240],
         prompt_chars=len(user_prompt),
     )
+    log.info("counterparty_match_call_started", **_start_payload)
+    if trace_source:
+        trace_event(source=trace_source, recording_id=trace_recording_id,
+                    event="counterparty_match_call_started", **_start_payload)
     try:
         result = llm_backend.call_tool(
             system_prompt=COUNTERPARTY_MATCH_SYSTEM,
@@ -334,6 +343,10 @@ def match_counterparties_in_transcript(
             "counterparty_match_llm_failed",
             model=model, error=str(e),
         )
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="counterparty_match_llm_failed",
+                        model=model, error=str(e))
         return []
     raw_ids = result.get("matched_ids") or []
     if not isinstance(raw_ids, list):
@@ -343,15 +356,16 @@ def match_counterparties_in_transcript(
     matched_ids = [
         i for i in raw_ids if isinstance(i, int) and i in valid_ids
     ]
-    # FR-CR-05-126 — post-call trace: what the LLM raw-emitted,
-    # what the filter dropped, what survived.
-    log.info(
-        "counterparty_match_llm_returned",
+    _ret_payload = dict(
         raw_ids_count=len(raw_ids),
         valid_ids_count=len(matched_ids),
         invalid_ids=invalid_ids[:10],
         raw_ids_sample=raw_ids[:10],
     )
+    log.info("counterparty_match_llm_returned", **_ret_payload)
+    if trace_source:
+        trace_event(source=trace_source, recording_id=trace_recording_id,
+                    event="counterparty_match_llm_returned", **_ret_payload)
     if not matched_ids:
         return []
     by_id = {cp.id: cp for cp in directory}
@@ -362,12 +376,15 @@ def match_counterparties_in_transcript(
             continue
         seen.add(i)
         out.append(by_id[i])
-    log.info(
-        "counterparty_match_done",
+    _done_payload = dict(
         matched=len(out),
         directory_size=len(directory),
         matched_names=[cp.name for cp in out],
     )
+    log.info("counterparty_match_done", **_done_payload)
+    if trace_source:
+        trace_event(source=trace_source, recording_id=trace_recording_id,
+                    event="counterparty_match_done", **_done_payload)
     return out
 
 

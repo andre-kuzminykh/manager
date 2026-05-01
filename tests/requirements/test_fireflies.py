@@ -733,12 +733,58 @@ def test_split_for_telegram_chunks_at_paragraph_boundaries():
         assert len(c) <= 1000
 
 
-def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
-    """FR-CR-05-119 — operator pinned: the To-Do section in the
-    short TG summary lists every extracted Task verbatim
-    (description + owner_display_name in parens). One line per
-    task, sequential numbering, no 120-char cap, drop the
-    section entirely when nothing was extracted."""
+def test_first_sentence_compresses_multi_sentence_description():
+    """FR-CR-05-119 follow-up — short TG summary's «To-Do» line
+    needs ONE sentence per task even when the full description
+    on the Task row is multi-sentence. The full text still lives
+    on the per-task DM card; this just compresses for the
+    summary so 25 tasks fit in a few Telegram messages instead
+    of 25 KB."""
+    from app.fireflies.pipeline import _first_sentence
+
+    # Empty / falsy → "".
+    assert _first_sentence("") == ""
+    assert _first_sentence(None) == ""  # type: ignore[arg-type]
+
+    # Single sentence → returned as is.
+    one = "Алина подготовит письмо инвесторам."
+    assert _first_sentence(one) == one
+
+    # Multi-sentence → keep only the first.
+    multi = (
+        "Алина подготовит письмо инвесторам с приложенным контрактом. "
+        "В письме отметить также NDA и базовую сумму. "
+        "Список рассылки уточнить с Ирой."
+    )
+    assert _first_sentence(multi) == (
+        "Алина подготовит письмо инвесторам с приложенным контрактом."
+    )
+
+    # «И. Иванов»-style abbreviation isn't taken as the boundary
+    # (the period is at index < 30 so we look further).
+    short_initials = (
+        "По договорённости с И. Ивановым подготовить апдейт инвесторам "
+        "на следующей неделе."
+    )
+    assert _first_sentence(short_initials).startswith(
+        "По договорённости с"
+    )
+
+    # No period at all → capped at limit with ellipsis on word
+    # boundary.
+    long_no_period = (
+        "очень длинная строка без точек " * 20
+    ).strip()
+    out = _first_sentence(long_no_period, limit=120)
+    assert len(out) <= 120
+    assert out.endswith("…")
+
+
+def test_build_todo_section_renders_tasks_one_sentence_with_owner(session):
+    """FR-CR-05-119 + follow-up: To-Do block items are
+    one-sentence compressions of `Task.description`, owner in
+    parens, sequential numbering, drop the section entirely if
+    no tasks were extracted, soft-deleted tasks excluded."""
     from app.fireflies.pipeline import _build_todo_section
     from app.models import Task, TaskPriority, TaskSourceKind, TaskStatus
 
@@ -749,12 +795,15 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
         source_conversation_id="trans-empty",
     ) == ""
 
-    # Two tasks for the same recording — both should appear,
-    # in id order, with owner in parens.
+    # Multi-sentence description → first sentence only.
     session.add(
         Task(
-            title="Send NDA",
-            description="Send the signed NDA to ADNOC contact today.",
+            title="Подготовить письмо",
+            description=(
+                "Алина подготовит письмо инвесторам с приложенным "
+                "контрактом и базовой суммой. В тексте отметить "
+                "NDA и проверить список рассылки."
+            ),
             priority=TaskPriority.medium,
             status=TaskStatus.todo,
             owner_display_name="Алина",
@@ -764,8 +813,8 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
     )
     session.add(
         Task(
-            title="Schedule DD",
-            description="Координировать расписание тех-DD с командой ADNOC.",
+            title="Скоординировать тайминг",
+            description="Ирина скоординирует тайминг рассылки по сегментам.",
             priority=TaskPriority.medium,
             status=TaskStatus.todo,
             owner_display_name="Ирина Шипилова",
@@ -782,9 +831,17 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
     )
     lines = out.splitlines()
     assert lines[0] == "To-Do:"
-    assert lines[1].startswith("1) Send the signed NDA")
+    # One-sentence compression — the second sentence about NDA
+    # must NOT appear.
+    assert lines[1].startswith(
+        "1) Алина подготовит письмо инвесторам"
+    )
+    assert "NDA" not in lines[1]
     assert "(Алина)" in lines[1]
-    assert lines[2].startswith("2) Координировать расписание тех-DD")
+    # Already-one-sentence description is unchanged.
+    assert lines[2].startswith(
+        "2) Ирина скоординирует тайминг рассылки"
+    )
     assert "(Ирина Шипилова)" in lines[2]
 
     # Soft-deleted tasks are excluded.
@@ -807,7 +864,7 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
         source_kind=TaskSourceKind.fireflies,
         source_conversation_id="trans-ok",
     )
-    assert "Cancelled" not in out2 and "не видим" not in out2
+    assert "Cancelled" not in out2
 
 
 def test_strip_llm_todo_block_removes_emitted_section():

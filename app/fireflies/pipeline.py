@@ -220,9 +220,11 @@ def _build_todo_section(
     source_conversation_id: str,
 ) -> str:
     """FR-CR-05-119 — render the To-Do block from the actual
-    `Task` rows extracted for this recording. Items are the
-    task descriptions (verbatim what the LLM wrote on the row)
-    with the owner real-name in parens. Sorted by creation
+    `Task` rows extracted for this recording. Items are
+    compressed to ONE sentence (FR-CR-05-119 follow-up): the
+    short TG summary stays scannable while the full multi-
+    sentence description lives on the per-task DM card the
+    operator gets via `post_initial_card`. Sorted by creation
     order so the operator sees the same sequence as the DM
     cards arriving in TG.
 
@@ -244,9 +246,42 @@ def _build_todo_section(
     lines = ["To-Do:"]
     for i, t in enumerate(tasks, 1):
         body = (t.description or "").strip() or (t.title or "").strip()
+        body = _first_sentence(body, limit=240)
         owner = (t.owner_display_name or "").strip() or "не назначен"
         lines.append(f"{i}) {body} ({owner})")
     return "\n".join(lines)
+
+
+def _first_sentence(text: str, *, limit: int = 240) -> str:
+    """FR-CR-05-119 follow-up — return the first sentence of
+    `text`, capped at `limit` chars. Used to compress task
+    descriptions for the short-summary «To-Do» block while the
+    full multi-sentence description still ships on the per-task
+    DM card.
+
+    Strategy:
+      1. Find the first `.`, `!`, `?` followed by whitespace/EOL.
+         If at least 30 chars in (avoids «И. Иванов» false
+         positives), take everything up to it.
+      2. Otherwise cap at `limit` chars on a word boundary,
+         appending an ellipsis.
+    """
+    if not text:
+        return ""
+    text = text.strip()
+    import re
+
+    head = text[: limit + 60]  # small lookahead for late period
+    m = re.search(r"[.!?](?:\s|$)", head)
+    if m and m.start() >= 30 and m.start() <= limit:
+        sentence = text[: m.start() + 1].rstrip()
+        return sentence
+    if len(text) <= limit:
+        return text
+    cut = text.rfind(" ", 0, limit)
+    if cut < int(limit * 0.6):
+        cut = limit
+    return text[:cut].rstrip(",;:- ") + "…"
 
 
 _TODO_SECTION_HEADERS_RE = __import__("re").compile(

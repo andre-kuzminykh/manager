@@ -587,6 +587,20 @@ class ZoomPipeline:
         tasks = (data or {}).get("tasks") or []
         if not isinstance(tasks, list):
             tasks = []
+        # FR-CR-05-126 — full trace of what the LLM emitted.
+        log.info(
+            "zoom_task_extraction_llm_returned",
+            zoom_id=row.zoom_id,
+            model=self._settings.fireflies_tasks_model,
+            raw_count=len(tasks),
+            raw_titles=[
+                (t.get("title") or "")[:80]
+                for t in tasks if isinstance(t, dict)
+            ][:25],
+            raw_owners=[
+                t.get("owner") for t in tasks if isinstance(t, dict)
+            ][:25],
+        )
         # FR-CR-05-120 follow-up — log when we got 0 tasks back
         # so the operator can tell «meeting was procedural, no
         # actions» from «model rejected the call» / «prompt
@@ -780,6 +794,13 @@ class ZoomPipeline:
             zoom_id=row.zoom_id,
             existing_count=len(existing),
             newly_added=len(new_tasks),
+            new_titles=[
+                (t.get("title") or "")[:80]
+                for t in new_tasks if isinstance(t, dict)
+            ][:25],
+            new_owners=[
+                t.get("owner") for t in new_tasks if isinstance(t, dict)
+            ][:25],
         )
         if not new_tasks:
             return 0

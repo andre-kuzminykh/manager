@@ -1062,6 +1062,22 @@ class FirefliesPipeline:
         tasks = (result or {}).get("tasks") or []
         if not isinstance(tasks, list):
             tasks = []
+        # FR-CR-05-126 — full trace of what the LLM emitted so
+        # the operator can sanity-check «meeting was procedural»
+        # vs «model misfired» without re-running.
+        log.info(
+            "fireflies_task_extraction_llm_returned",
+            fireflies_id=row.fireflies_id,
+            model=self._settings.fireflies_tasks_model,
+            raw_count=len(tasks),
+            raw_titles=[
+                (t.get("title") or "")[:80]
+                for t in tasks if isinstance(t, dict)
+            ][:25],
+            raw_owners=[
+                t.get("owner") for t in tasks if isinstance(t, dict)
+            ][:25],
+        )
         if not tasks:
             log.info(
                 "fireflies_task_extraction_returned_empty",
@@ -1256,11 +1272,20 @@ class FirefliesPipeline:
         new_tasks = (result or {}).get("tasks") or []
         if not isinstance(new_tasks, list):
             new_tasks = []
+        # FR-CR-05-126 — verifier transparency: titles of what
+        # the second pass actually wants to add, before insert.
         log.info(
             "fireflies_task_verification_done",
             fireflies_id=row.fireflies_id,
             existing_count=len(existing),
             newly_added=len(new_tasks),
+            new_titles=[
+                (t.get("title") or "")[:80]
+                for t in new_tasks if isinstance(t, dict)
+            ][:25],
+            new_owners=[
+                t.get("owner") for t in new_tasks if isinstance(t, dict)
+            ][:25],
         )
         if not new_tasks:
             return 0

@@ -135,12 +135,31 @@ def match_counterparties_in_transcript(
         .all()
     )
     if not directory:
+        log.info(
+            "counterparty_match_skipped_empty_directory",
+            transcript_chars=len(transcript),
+        )
         return []
     user_prompt = (
         "directory:\n"
         + _render_directory(directory)
         + "\n\nТранскрипт встречи:\n"
         + transcript
+    )
+    # FR-CR-05-126 — full pre-call trace so the operator can
+    # tell at a glance whether the LLM had the right context.
+    log.info(
+        "counterparty_match_call_started",
+        model=model,
+        reasoning_effort=reasoning_effort,
+        directory_size=len(directory),
+        directory_sample=[
+            {"id": cp.id, "name": cp.name, "type": cp.type}
+            for cp in directory[:5]
+        ],
+        transcript_chars=len(transcript),
+        transcript_preview=transcript[:240],
+        prompt_chars=len(user_prompt),
     )
     try:
         result = llm_backend.call_tool(
@@ -158,17 +177,26 @@ def match_counterparties_in_transcript(
             model=model, error=str(e),
         )
         return []
-    matched_ids = result.get("matched_ids") or []
-    if not isinstance(matched_ids, list):
-        return []
+    raw_ids = result.get("matched_ids") or []
+    if not isinstance(raw_ids, list):
+        raw_ids = []
     valid_ids = {cp.id for cp in directory}
+    invalid_ids = [i for i in raw_ids if i not in valid_ids]
     matched_ids = [
-        i for i in matched_ids if isinstance(i, int) and i in valid_ids
+        i for i in raw_ids if isinstance(i, int) and i in valid_ids
     ]
+    # FR-CR-05-126 — post-call trace: what the LLM raw-emitted,
+    # what the filter dropped, what survived.
+    log.info(
+        "counterparty_match_llm_returned",
+        raw_ids_count=len(raw_ids),
+        valid_ids_count=len(matched_ids),
+        invalid_ids=invalid_ids[:10],
+        raw_ids_sample=raw_ids[:10],
+    )
     if not matched_ids:
         return []
     by_id = {cp.id: cp for cp in directory}
-    # Preserve LLM-emitted order; dedupe.
     seen: set[int] = set()
     out: list[Counterparty] = []
     for i in matched_ids:
@@ -180,6 +208,7 @@ def match_counterparties_in_transcript(
         "counterparty_match_done",
         matched=len(out),
         directory_size=len(directory),
+        matched_names=[cp.name for cp in out],
     )
     return out
 

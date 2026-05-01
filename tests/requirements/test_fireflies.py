@@ -125,6 +125,12 @@ class _FakeLLM:
 
     def call_tool(self, *, system_prompt, tool_name, **kw):
         self.tool_calls.append(tool_name)
+        # FR-CR-05-121 — verifier pass returns empty by default
+        # so existing tests don't double-count tasks. Tests that
+        # specifically exercise the verifier instantiate
+        # `_VerifyingFakeLLM` (see below).
+        if "SECOND-PASS verifier" in (system_prompt or ""):
+            return {"tasks": []}
         return {"tasks": list(self.tasks)}
 
 
@@ -852,6 +858,28 @@ def test_task_extraction_prompt_pins_thinking_guidance():
     assert "walk the `known_employees`" in blob or (
         "walk the known_employees" in blob
     )
+
+
+def test_task_verification_prompt_pins_second_pass_contract():
+    """FR-CR-05-121 — verifier prompt forbids duplicating
+    already-extracted tasks, allows empty `{"tasks": []}` as a
+    valid response, reuses the FR-CR-05-120 description format
+    + rule 7 (named-assignee), and pins the «SECOND-PASS
+    verifier» framing the FakeLLM keys off in tests."""
+    from app.fireflies.prompts import TASK_VERIFICATION_SYSTEM
+
+    blob = TASK_VERIFICATION_SYSTEM
+    assert "SECOND-PASS verifier" in blob
+    # Empty-list-is-fine framing pinned.
+    assert '"tasks": []' in blob or '`{"tasks": []}`' in blob
+    # No-duplicates rule pinned.
+    assert "DO NOT duplicate" in blob or "do not duplicate" in blob.lower()
+    # Same description format the first pass uses.
+    assert "<тема> - <конкретное действие" in blob
+    # Same rules 6 (anti-admin-default) and 7 (named-assignee)
+    # carried over.
+    assert "NEVER pick the admin" in blob
+    assert "NAMED ASSIGNEE OVERRIDES" in blob
 
 
 def test_first_sentence_compresses_multi_sentence_description():

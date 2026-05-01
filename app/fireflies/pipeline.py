@@ -1002,6 +1002,165 @@ class FirefliesPipeline:
         row.tasks_extracted = True
         return created
 
+    def _step_verify_tasks(
+        self, session: Session, row: MeetingRecording
+    ) -> int:
+        """FR-CR-05-121 — second LLM pass to catch tasks missed
+        by `_step_extract_tasks`. Reads the transcript +
+        already-extracted Task rows and asks the verifier
+        prompt for any newly-missed actionable items. New rows
+        are added to the same session; returns count.
+        Idempotency: caller short-circuits via `row.attempts`
+        and the per-recording bookmarking; re-running is safe
+        because the verifier is told to skip duplicates."""
+        from app.fireflies.prompts import TASK_VERIFICATION_SYSTEM
+        from app.models import (
+            Task,
+            TaskPriority,
+            TaskSourceKind,
+            TaskStatus,
+            TaskStatusHistory,
+        )
+        from app.persistence.tasks import normalize_task_title
+        from app.services.team_members import as_known_employees
+        from app.sync.task_sync import schedule_sync_task
+
+        if not row.transcript_text or not row.detailed_summary:
+            return 0
+        existing = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.fireflies)
+            .filter(Task.source_conversation_id == row.fireflies_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
+        )
+        existing_block = "\n".join(
+            f"- {t.title}: {(t.description or '')[:300]} "
+            f"[owner={t.owner_display_name or '—'}]"
+            for t in existing
+        ) or "  (no tasks were extracted on the first pass)"
+        try:
+            known_employees = as_known_employees(session, prefer_telegram=True)
+        except Exception:  # noqa: BLE001
+            known_employees = []
+        emp_table = _render_known_employees_table(known_employees)
+        user_prompt = (
+            "known_employees (pick a slack_user_id from this table):\n"
+            + emp_table + "\n\n"
+            "Already-extracted tasks (DO NOT duplicate these):\n"
+            + existing_block + "\n\n"
+            "Транскрипт встречи:\n"
+            + row.transcript_text
+        )
+        try:
+            result = self._llm.call_tool(  # type: ignore[attr-defined]
+                system_prompt=TASK_VERIFICATION_SYSTEM,
+                user_prompt=user_prompt,
+                tool_name=TASK_EXTRACTION_TOOL_NAME,
+                tool_description=TASK_EXTRACTION_TOOL_DESCRIPTION,
+                tool_parameters=TASK_EXTRACTION_TOOL_PARAMETERS,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort
+                    or None
+                ),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_task_verification_failed",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+            return 0
+        new_tasks = (result or {}).get("tasks") or []
+        if not isinstance(new_tasks, list):
+            new_tasks = []
+        log.info(
+            "fireflies_task_verification_done",
+            fireflies_id=row.fireflies_id,
+            existing_count=len(existing),
+            newly_added=len(new_tasks),
+        )
+        if not new_tasks:
+            return 0
+        valid_ids = {e.get("slack_user_id") for e in known_employees}
+        admin_uid = _admin_fallback_owner_id()
+        today = date.today()
+        added = 0
+        for t in new_tasks:
+            if not isinstance(t, dict):
+                continue
+            title = (t.get("title") or "").strip()
+            if not title:
+                continue
+            try:
+                title = normalize_task_title(title)
+            except ValueError:
+                continue
+            description = (t.get("description") or "").strip() or None
+            if description:
+                description = _strip_uid_suffixes(description, valid_ids)
+            priority_raw = t.get("priority") or "medium"
+            owner_uid = (t.get("owner") or "").strip() or None
+            if owner_uid and owner_uid not in valid_ids:
+                owner_uid = None
+            if not owner_uid and admin_uid:
+                owner_uid = admin_uid
+            owner_display_name = None
+            if owner_uid and known_employees:
+                for e in known_employees:
+                    if e.get("slack_user_id") == owner_uid:
+                        owner_display_name = (
+                            e.get("real_name")
+                            or e.get("display_name")
+                            or owner_uid
+                        )
+                        break
+            try:
+                priority = (
+                    TaskPriority(priority_raw)
+                    if priority_raw in {p.value for p in TaskPriority}
+                    else TaskPriority.medium
+                )
+                task = Task(
+                    title=title[:10_000],
+                    description=description,
+                    owner_user_id=owner_uid,
+                    owner_display_name=owner_display_name,
+                    priority=priority,
+                    due_date=today,
+                    due_time=time(18, 0),
+                    status=TaskStatus.todo,
+                    is_current_week=True,
+                    source_kind=TaskSourceKind.fireflies,
+                    source_conversation_id=row.fireflies_id,
+                    source_message_ts=row.fireflies_id,
+                    source_permalink=row.fireflies_share_url,
+                    created_by_slack_user_id=admin_uid,
+                )
+                session.add(task)
+                session.flush()
+                session.add(
+                    TaskStatusHistory(
+                        task_id=task.id,
+                        from_status=None,
+                        to_status=TaskStatus.todo,
+                        changed_by_slack_user_id=admin_uid,
+                        reason="fireflies_verified",
+                        at=datetime.now(timezone.utc),
+                    )
+                )
+                schedule_sync_task(session, task.id)
+                added += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "fireflies_task_verify_create_failed",
+                    title=title[:80], error=str(e),
+                )
+        if added:
+            row.tasks_extracted_count = (row.tasks_extracted_count or 0) + added
+        return added
+
     def _step_post_task_cards(
         self, session: Session, row: MeetingRecording
     ) -> int:
@@ -1101,6 +1260,18 @@ class FirefliesPipeline:
         # short summary with the compressed task list. Order:
         # detailed → tasks → doc → short.
         report.tasks_created = self._step_extract_tasks(session, row)
+        # FR-CR-05-121 — verifier pass to catch tasks the first
+        # extraction missed. Adds Task rows in the same session;
+        # `report.tasks_created` is bumped by the new total
+        # below from the row.tasks_extracted_count.
+        try:
+            self._step_verify_tasks(session, row)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_task_verification_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+        report.tasks_created = row.tasks_extracted_count or report.tasks_created
         if not self._step_doc_export(session, row):
             log.warning(
                 "fireflies_doc_export_failed",

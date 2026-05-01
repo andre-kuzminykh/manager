@@ -67,6 +67,12 @@ class _FakeLLM:
                   tool_description, tool_parameters, model=None,
                   reasoning_effort=None):
         self.call_tool_calls += 1
+        # FR-CR-05-121 — verifier pass uses TASK_VERIFICATION_SYSTEM
+        # which mentions «SECOND-PASS verifier». Fake it by
+        # returning an empty list so existing tests don't double-
+        # count tasks.
+        if "SECOND-PASS verifier" in (system_prompt or ""):
+            return {"tasks": []}
         return {"tasks": list(self.tasks)}
 
 
@@ -461,6 +467,108 @@ def _zoom_poll_meta(zoom_id="zm-poll-1"):
         audio_url="https://zoom.us/x.m4a",
         share_url="https://zoom.us/share/x",
     )
+
+
+def test_verifier_pass_adds_missed_tasks_in_zoom_pipeline(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-121 — operator regression: first-pass extract
+    misses 30-50% of tasks on long meetings. The verifier pass
+    re-reads the transcript + already-extracted tasks and adds
+    whatever was missed. End-to-end: pipeline starts with 1
+    task from the first pass, verifier finds 1 more → DB holds
+    2 tasks."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        settings = _settings_with_audio_dir()
+
+        class _StubZoomClient:
+            enabled = True
+
+            def list_recordings(self, *, limit, **kw):
+                return [_zoom_meta()]
+
+            def download_audio(self, *, url, dest_path, max_bytes):
+                with open(dest_path, "wb") as f:
+                    f.write(b"x" * 1024)
+                return 1024
+
+        monkeypatch.setattr(
+            "app.fireflies.pipeline._sniff_audio_extension",
+            lambda *a, **kw: "m4a",
+        )
+        monkeypatch.setattr(
+            "app.services.transcription.transcribe_bytes",
+            lambda **kw: "Артем: Алина подготовит письмо. Дима пришлёт фоллоу-ап.",
+        )
+
+        class _VerifyingFakeLLM:
+            def __init__(self):
+                self.summary_text = "Подробный отчёт."
+                self.complete_text_calls = 0
+                self.call_tool_calls = 0
+
+            def complete_text(self, *, system_prompt, user_prompt,
+                              model=None, temperature=0.2):
+                self.complete_text_calls += 1
+                return self.summary_text
+
+            def call_tool(self, *, system_prompt, user_prompt, tool_name,
+                          tool_description, tool_parameters, model=None,
+                          reasoning_effort=None):
+                self.call_tool_calls += 1
+                # First pass extracts «Подготовить письмо»; the
+                # verifier (recognised by the SECOND-PASS framing
+                # in its system prompt) catches «Прислать
+                # фоллоу-ап» which the first pass missed.
+                if "SECOND-PASS verifier" in (system_prompt or ""):
+                    return {"tasks": [{
+                        "title": "Прислать фоллоу-ап",
+                        "description": "Дима - прислать фоллоу-ап.",
+                        "owner": None, "priority": "medium",
+                    }]}
+                return {"tasks": [{
+                    "title": "Подготовить письмо",
+                    "description": "Алина - подготовит письмо.",
+                    "owner": None, "priority": "medium",
+                }]}
+
+        sender = _FakeSender()
+        from app.zoom.pipeline import ZoomPipeline
+
+        pipeline = ZoomPipeline(
+            settings=settings,
+            client=_StubZoomClient(),
+            llm_backend=_VerifyingFakeLLM(),
+            docs_factory=lambda: _FakeDocs(),
+            sender=sender,
+        )
+        with SessionFactory() as s:
+            from app.models import TeamMember
+            s.add(
+                TeamMember(
+                    real_name="Admin", telegram_user_id=777,
+                    telegram_username="admin", active=True,
+                )
+            )
+            s.flush()
+            report = pipeline.process_one(s, _zoom_meta())
+            s.commit()
+
+        assert report.tasks_created == 2
+        with SessionFactory() as s:
+            tasks = s.query(Task).filter(
+                Task.source_kind == TaskSourceKind.zoom
+            ).all()
+            assert len(tasks) == 2
+            titles = sorted(t.title for t in tasks)
+            assert "Подготовить письмо" in titles
+            assert "Прислать фоллоу-ап" in titles
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_zoom_short_summary_dm_arrives_before_per_task_cards(

@@ -634,6 +634,164 @@ class ZoomPipeline:
         row.last_error = None
         return created
 
+    def _step_verify_tasks(
+        self, session: Session, row: ZoomRecording
+    ) -> int:
+        """FR-CR-05-121 — second LLM pass to catch tasks missed
+        by `_step_extract_tasks`. Symmetric to the Fireflies
+        verifier; reuses the same prompt + tool schema."""
+        from app.fireflies.prompts import (
+            TASK_EXTRACTION_TOOL_DESCRIPTION as _DESC,
+            TASK_EXTRACTION_TOOL_NAME as _NAME,
+            TASK_EXTRACTION_TOOL_PARAMETERS as _PARAMS,
+            TASK_VERIFICATION_SYSTEM,
+        )
+        from app.models import (
+            Task,
+            TaskPriority,
+            TaskSourceKind,
+            TaskStatus,
+            TaskStatusHistory,
+        )
+        from app.persistence.tasks import normalize_task_title
+        from app.services.team_members import as_known_employees
+        from app.sync.task_sync import schedule_sync_task
+
+        if not row.transcript_text or not row.detailed_summary:
+            return 0
+        existing = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.zoom)
+            .filter(Task.source_conversation_id == row.zoom_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
+        )
+        existing_block = "\n".join(
+            f"- {t.title}: {(t.description or '')[:300]} "
+            f"[owner={t.owner_display_name or '—'}]"
+            for t in existing
+        ) or "  (no tasks were extracted on the first pass)"
+        try:
+            known_employees = as_known_employees(session)
+        except Exception:  # noqa: BLE001
+            known_employees = []
+        emp_table = _render_known_employees_table(known_employees)
+        prompt_user = (
+            f"Заголовок: {row.title or '(без названия)'}\n"
+            f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}\n"
+            "\nИзвестные сотрудники:\n"
+            f"{emp_table}\n\n"
+            "Already-extracted tasks (DO NOT duplicate these):\n"
+            + existing_block + "\n\n"
+            "Транскрипт встречи:\n"
+            + row.transcript_text
+        )
+        try:
+            data = self._llm.call_tool(  # type: ignore[attr-defined]
+                system_prompt=TASK_VERIFICATION_SYSTEM,
+                user_prompt=prompt_user,
+                tool_name=_NAME,
+                tool_description=_DESC,
+                tool_parameters=_PARAMS,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort
+                    or None
+                ),
+            ) or {}
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_task_verification_failed",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            return 0
+        new_tasks = (data or {}).get("tasks") or []
+        if not isinstance(new_tasks, list):
+            new_tasks = []
+        log.info(
+            "zoom_task_verification_done",
+            zoom_id=row.zoom_id,
+            existing_count=len(existing),
+            newly_added=len(new_tasks),
+        )
+        if not new_tasks:
+            return 0
+        valid_ids = {e.get("slack_user_id") for e in known_employees}
+        admin_uid = _admin_fallback_owner_id()
+        today = datetime.now(timezone.utc).date()
+        added = 0
+        for t in new_tasks:
+            if not isinstance(t, dict):
+                continue
+            title = (t.get("title") or "").strip()
+            if not title:
+                continue
+            try:
+                title = normalize_task_title(title)
+            except ValueError:
+                continue
+            owner_uid = (t.get("owner") or "").strip() or None
+            if owner_uid and owner_uid not in valid_ids:
+                owner_uid = None
+            if not owner_uid and admin_uid:
+                owner_uid = admin_uid
+            owner_display_name = None
+            if owner_uid and known_employees:
+                for e in known_employees:
+                    if e.get("slack_user_id") == owner_uid:
+                        owner_display_name = (
+                            e.get("real_name")
+                            or e.get("display_name")
+                            or owner_uid
+                        )
+                        break
+            try:
+                priority = TaskPriority(t.get("priority") or "medium")
+            except ValueError:
+                priority = TaskPriority.medium
+            try:
+                task = Task(
+                    title=title[:10_000],
+                    description=(t.get("description") or "").strip() or None,
+                    priority=priority,
+                    status=TaskStatus.todo,
+                    owner_user_id=owner_uid,
+                    owner_display_name=owner_display_name,
+                    due_date=today,
+                    due_time=time(18, 0),
+                    is_current_week=True,
+                    source_kind=TaskSourceKind.zoom,
+                    source_conversation_id=row.zoom_id,
+                    source_message_ts=row.zoom_id,
+                    source_permalink=(
+                        row.zoom_share_url or row.google_doc_url
+                    ),
+                    created_by_slack_user_id=admin_uid,
+                )
+                session.add(task)
+                session.flush()
+                session.add(
+                    TaskStatusHistory(
+                        task_id=task.id,
+                        from_status=None,
+                        to_status=TaskStatus.todo,
+                        changed_by_slack_user_id=admin_uid,
+                        reason="zoom_verified",
+                        at=datetime.now(timezone.utc),
+                    )
+                )
+                schedule_sync_task(session, task.id)
+                added += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "zoom_task_verify_create_failed",
+                    title=title[:80], error=str(e),
+                )
+        if added:
+            row.tasks_extracted_count = (row.tasks_extracted_count or 0) + added
+        return added
+
     def _step_post_task_cards(
         self, session: Session, row: ZoomRecording
     ) -> int:
@@ -723,6 +881,21 @@ class ZoomPipeline:
                     "zoom_extract_tasks_unexpected_error",
                     zoom_id=row.zoom_id, error=str(e),
                 )
+
+        # FR-CR-05-121 — verifier pass: catch missed tasks via a
+        # second LLM call that reads transcript + the just-
+        # extracted task list.
+        if row.detailed_summarised:
+            try:
+                self._step_verify_tasks(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_task_verification_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+        report.tasks_created = (
+            row.tasks_extracted_count or report.tasks_created
+        )
 
         if row.detailed_summarised:
             ok = self._step_doc_export(session, row)

@@ -705,6 +705,45 @@ def test_split_audio_chunker_preserves_input_container(monkeypatch, tmp_path):
     assert any("-c" in cmd and cmd[-1].endswith(".m4a") for cmd in captured)
 
 
+def test_split_for_telegram_keeps_overview_block_in_first_message():
+    """FR-CR-05-126 — operator pinned: «Header + Участники +
+    Суть + To-Do» MUST land in ONE message. Optional «🔗
+    Контрагенты» / «📄 Подробный отчёт» trailers can spill to
+    a second message. Pre-fix the greedy packer split between
+    Суть and To-Do because To-Do was very long; operator saw
+    the overview broken across two DMs."""
+    from app.fireflies.pipeline import _split_for_telegram
+
+    body = (
+        "01/05 - Fundraising sync\n\n"
+        "Участники: Артем, Алина, Дима\n\n"
+        "Суть: " + ("очень подробное описание встречи. " * 50) + "\n\n"
+        "To-Do:\n" + "\n".join(
+            f"{i}) Длинная задача с ответственным." for i in range(1, 30)
+        ) + "\n\n"
+        "🔗 Контрагенты: ADNOC, Bosch, Tether\n\n"
+        "📄 Подробный отчёт: https://docs.google.com/document/d/X/edit"
+    )
+    chunks = _split_for_telegram(body, limit=3800)
+    # First chunk must contain BOTH «Суть» and «To-Do» — the
+    # overview block.
+    assert len(chunks) >= 1
+    assert "Суть:" in chunks[0]
+    assert "To-Do:" in chunks[0]
+    # Trailers go to the second chunk.
+    if len(chunks) > 1:
+        rest = "\n\n".join(chunks[1:])
+        assert "🔗 Контрагенты" in rest or "📄 Подробный отчёт" in rest
+
+    # Short body that fits in one chunk → single message.
+    short_body = (
+        "01/05 - Quick sync\n\nУчастники: А\n\nСуть: short.\n\n"
+        "To-Do:\n1) Done.\n\n"
+        "📄 Подробный отчёт: https://docs.google.com/document/d/X/edit"
+    )
+    assert len(_split_for_telegram(short_body, limit=3800)) == 1
+
+
 def test_split_for_telegram_chunks_at_paragraph_boundaries():
     """FR-CR-05-119 — operator regression: 25-task To-Do block
     pushed `short_summary` to 10 KB, Telegram returned

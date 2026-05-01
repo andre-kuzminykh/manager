@@ -1032,6 +1032,53 @@ class ZoomPipeline:
         report.detailed_chars = len(row.detailed_summary or "")
         report.short_chars = len(row.short_summary or "")
         report.google_doc_url = row.google_doc_url
+
+        # FR-CR-05-126 — single end-of-pipeline summary log.
+        from app.models import (
+            Counterparty,
+            CounterpartyMention,
+            Task,
+            TaskSourceKind,
+        )
+
+        cp_matches = (
+            session.query(Counterparty.name, Counterparty.type)
+            .join(
+                CounterpartyMention,
+                CounterpartyMention.counterparty_id == Counterparty.id,
+            )
+            .filter(CounterpartyMention.source_kind == "zoom")
+            .filter(CounterpartyMention.source_id == row.zoom_id)
+            .order_by(CounterpartyMention.id.asc())
+            .all()
+        )
+        recent_tasks = (
+            session.query(Task.title, Task.owner_display_name)
+            .filter(Task.source_kind == TaskSourceKind.zoom)
+            .filter(Task.source_conversation_id == row.zoom_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
+        )
+        log.info(
+            "zoom_pipeline_summary",
+            zoom_id=row.zoom_id,
+            title=(row.title or "")[:80],
+            transcript_chars=report.transcript_chars,
+            detailed_chars=report.detailed_chars,
+            short_chars=report.short_chars,
+            tasks_count=len(recent_tasks),
+            tasks_titles=[t.title[:80] for t in recent_tasks][:25],
+            tasks_owners=[
+                t.owner_display_name for t in recent_tasks
+            ][:25],
+            counterparties_count=len(cp_matches),
+            counterparties=[
+                {"name": n, "type": t} for n, t in cp_matches
+            ][:25],
+            google_doc_url=row.google_doc_url,
+            errors=report.errors,
+        )
         return report
 
 

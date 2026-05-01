@@ -472,16 +472,55 @@ def _strip_llm_todo_block(text: str) -> str:
 
 def _split_for_telegram(text: str, *, limit: int = 3800) -> list[str]:
     """FR-CR-05-119 — split a long short-summary body into
-    Telegram-sized chunks (≤4096 chars per message). Splits at
-    paragraph (`\\n\\n`) boundaries when possible so each chunk
-    starts on a new section («Их сторона», «Суть», «To-Do»).
-    Falls back to a hard char split for paragraphs longer than
-    `limit`. Returns at least one chunk; empty input → []."""
+    Telegram-sized chunks (≤4096 chars per message).
+
+    FR-CR-05-126 follow-up — operator-pinned section-aware
+    behaviour: «Header + Участники + Суть + To-Do» MUST land
+    in ONE message (the overview block). Optional «🔗
+    Контрагенты» and «📄 Подробный отчёт» trailers can spill to
+    a second message. We find the first reference / trailer
+    section marker and try to use that as the split point. Only
+    when the overview itself exceeds `limit` do we fall back to
+    plain paragraph-greedy packing.
+
+    Returns at least one chunk; empty input → []."""
     if not text:
         return []
     text = text.strip()
     if len(text) <= limit:
         return [text]
+    # FR-CR-05-126 — section-aware split. Find the first marker
+    # among the optional trailers; everything before goes to
+    # chunk 1 (overview), the rest joins chunk 2.
+    overview_end_idx: int | None = None
+    for marker in ("\n\n🔗 Контрагенты", "\n\n📄 Подробный отчёт"):
+        idx = text.find(marker)
+        if idx == -1:
+            continue
+        if overview_end_idx is None or idx < overview_end_idx:
+            overview_end_idx = idx
+    if overview_end_idx is not None:
+        head = text[:overview_end_idx].rstrip()
+        tail = text[overview_end_idx:].lstrip()
+        if len(head) <= limit:
+            chunks = [head]
+            # Tail itself may also need splitting if it's long
+            # (rare — tail = «🔗 + 📄» is ~300 chars typically).
+            if len(tail) <= limit:
+                chunks.append(tail)
+            else:
+                chunks.extend(_paragraph_greedy_split(tail, limit))
+            return chunks
+        # Overview itself exceeds the limit — fall through to
+        # the plain greedy packer below. Operator's pinned
+        # contract is best-effort: huge meetings (~50 tasks)
+        # still split inside the overview, but those are rare.
+    return _paragraph_greedy_split(text, limit)
+
+
+def _paragraph_greedy_split(text: str, limit: int) -> list[str]:
+    """Plain paragraph-boundary greedy packer. Used when the
+    overview alone overflows `limit` (very long To-Do blocks)."""
     chunks: list[str] = []
     paragraphs = text.split("\n\n")
     current = ""
@@ -493,13 +532,9 @@ def _split_for_telegram(text: str, *, limit: int = 3800) -> list[str]:
         if len(candidate) <= limit:
             current = candidate
             continue
-        # Flush whatever we have and start a fresh chunk.
         if current:
             chunks.append(current)
             current = ""
-        # If a single paragraph is longer than the limit, split
-        # by hard char count (rare — task descriptions are
-        # usually <600 chars each).
         while len(p) > limit:
             cut = p.rfind(" ", 0, limit)
             if cut < int(limit * 0.6):
@@ -1525,6 +1560,52 @@ class FirefliesPipeline:
 
         row.processed_at = datetime.now(timezone.utc)
         session.flush()
+
+        # FR-CR-05-126 follow-up — single end-of-pipeline summary
+        # log so the operator can see the WHOLE cycle in one
+        # line: what was transcribed, what tasks landed, which
+        # counterparties matched, where the doc lives.
+        from app.models import Counterparty, CounterpartyMention
+
+        cp_matches = (
+            session.query(Counterparty.name, Counterparty.type)
+            .join(
+                CounterpartyMention,
+                CounterpartyMention.counterparty_id == Counterparty.id,
+            )
+            .filter(CounterpartyMention.source_kind == "fireflies")
+            .filter(CounterpartyMention.source_id == row.fireflies_id)
+            .order_by(CounterpartyMention.id.asc())
+            .all()
+        )
+        recent_tasks = (
+            session.query(Task.title, Task.owner_display_name)
+            .filter(Task.source_kind == TaskSourceKind.fireflies)
+            .filter(Task.source_conversation_id == row.fireflies_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
+        )
+        log.info(
+            "fireflies_pipeline_summary",
+            fireflies_id=row.fireflies_id,
+            title=(row.title or "")[:80],
+            transcript_chars=report.transcript_chars,
+            detailed_chars=report.detailed_chars,
+            short_chars=report.short_chars,
+            tasks_count=len(recent_tasks),
+            tasks_titles=[t.title[:80] for t in recent_tasks][:25],
+            tasks_owners=[
+                t.owner_display_name for t in recent_tasks
+            ][:25],
+            counterparties_count=len(cp_matches),
+            counterparties=[
+                {"name": n, "type": t} for n, t in cp_matches
+            ][:25],
+            google_doc_url=row.google_doc_url,
+            short_summary_recipients=report.short_summary_recipients,
+            errors=report.errors,
+        )
         return report
 
 

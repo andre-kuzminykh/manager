@@ -38,40 +38,78 @@ business-meeting transcript to a directory of known
 counterparties (FR-CR-05-125).
 
 Input (in the user prompt):
-  - The full transcript (may include Whisper noise / typos).
+  - The full transcript (Whisper-transcribed Russian + English
+    speech, EXPECT typos and phonetic errors).
   - A `directory` table: `id | name | type` of every known
     counterparty.
 
 Output via the provided tool: a list of `directory.id` values
-for ONLY the counterparties the transcript actually references.
+for the counterparties the transcript actually references.
 
-THINK CAREFULLY:
+═══════════════════════════════════════════════════════════════
+WHISPER MISHEARS THINGS. THIS IS THE MAIN JOB. (FR-CR-05-126)
+═══════════════════════════════════════════════════════════════
 
-1. Speech recognition is fuzzy. «Адног» / «АДНОК» / «Adn-OC» →
-   match «ADNOC» (id N). «Гольдман Сакс» / «Голдман» → «Goldman
-   Sachs». Treat short forms / partial spellings / accent
-   variants / Cyrillic↔Latin transliterations as the same
-   counterparty when context confirms it.
+The transcript came through speech-to-text on a noisy meeting.
+Whisper routinely:
 
-2. ONLY include counterparties the transcript actually
-   discusses or names. A passing reference («like ADNOC's
-   pilot») counts. A coincidental name match («Felix» the
-   first name vs. «Felix Capital» the fund) DOES NOT count
-   unless the surrounding text references the fund.
+- swaps similar-sounding words: «teaser» ↔ «Tether», «алимета» ↔
+  «Altimeter», «прим. кэп» ↔ «Primavera», «эдиа» ↔ «ADIA»;
+- transliterates between Cyrillic and Latin: «АДНОК» / «Адног» /
+  «Adn-OC» → «ADNOC», «Голдман Сакс» / «Гольдман» → «Goldman
+  Sachs», «Гэйтс Фронтиер» → «Gates Frontier», «Лунейт» / «Луна
+  Эйт» → «Lunate»;
+- collapses or splits multi-word names: «Се́квойя» → «Sequoia
+  Capital», «Капричорн» → «Capricorn Investment Group»,
+  «Бэттери Венчёрс» → «Battery Ventures»;
+- drops legal forms: «Atinum» → «Atinum Investment», «Mubadala»
+  → «Mubadala Investment Company».
 
-3. NEVER invent ids that aren't in the directory. Skip the
-   mention rather than guessing.
+YOUR JOB IS TO RECOGNISE THESE ANYWAY. When a transcript word
+phonetically resembles a directory entry within reasonable edit
+distance AND the surrounding sentence is about a fund / company
+(deal, intro, follow-up, term sheet, KYC, NDA, ticket size,
+round, fundraise…), prefer the match.
 
-4. Output the ids in the order they first appear in the
-   transcript so the consumer can render them in chronological
-   order.
+Worked examples (operator-pinned regressions):
 
-5. If the transcript mentions a counterparty that's NOT in the
-   directory (operator hasn't added it yet), simply omit it.
-   Don't try to add new entries — that's the operator's job
-   via the source sheet.
+  transcript: «надо отправить teaser в Tether-овый раунд»
+              (Whisper heard «teaser» where speaker said «tether»)
+  directory: 314 | Status outreach | Tether
+  → matched_ids = [314]
 
-When you find no matches, return `{"matched_ids": []}`.
+  transcript: «дозвонились до Адног, у них pilot в нефтегазе»
+  directory: 27  | Status outreach | ADNOC
+  → matched_ids = [27]
+
+  transcript: «Голдман Сакс прислали ответ»
+  directory: 102 | Outreach          | Goldman Sachs
+  → matched_ids = [102]
+
+NOT matches (anti-examples):
+
+  transcript: «Felix будет нашим SDR» (about a person named
+              Felix, not «Felix Capital» the fund)
+  → don't include Felix Capital
+  transcript: «отправили teaser deck» (industry term for a short
+              pitch deck — not the company Tether)
+  → don't include Tether unless other context confirms
+
+═══════════════════════════════════════════════════════════════
+
+OUTPUT RULES:
+
+1. NEVER invent ids that aren't in the directory. Skip rather
+   than guess.
+2. Output ids in the order the counterparty first appears in
+   the transcript.
+3. Dedupe — one id per counterparty even if mentioned multiple
+   times.
+4. If the transcript mentions a counterparty that's NOT in the
+   directory, simply omit it. Don't try to add new entries.
+5. When you find no matches at all, return
+   `{"matched_ids": []}`. Empty is a valid answer when the
+   meeting was internal-only (no external counterparties named).
 
 Respond via the `record_counterparty_matches` tool.
 """
@@ -110,6 +148,85 @@ def _render_directory(rows: list[Counterparty]) -> str:
     return "\n".join(lines)
 
 
+def _shortlist_directory_for_transcript(
+    directory: list["Counterparty"],
+    transcript: str,
+    *,
+    max_directory_rows: int = 200,
+) -> list["Counterparty"]:
+    """FR-CR-05-126 — Python-side fuzzy prefilter so the LLM
+    only sees plausible candidates instead of all 600+ rows.
+    Boosts both recall (Whisper-mangled names land in the
+    shortlist) and precision (fewer distractors).
+
+    Strategy:
+      - tokenise both the transcript and each directory name
+        into lowercase ASCII-folded word stems;
+      - score each directory row by SequenceMatcher ratio of
+        its longest name token to ANY transcript token (so a
+        single fuzzy hit is enough — operator's regression was
+        a 1-word company name «Tether» misheard as «teaser»);
+      - keep rows above a low threshold OR rows whose name is
+        a substring of any 4+ char transcript token;
+      - cap the result at `max_directory_rows` so the prompt
+        stays bounded even on transcripts that mention many
+        candidates.
+
+    Falls through to the full directory if shortlist would be
+    empty — better to send everything than to miss a match the
+    LLM would otherwise catch.
+    """
+    if not directory or not transcript:
+        return directory[:max_directory_rows]
+    import difflib
+    import re
+    import unicodedata
+
+    def _fold(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "")
+        return "".join(c for c in s if not unicodedata.combining(c)).lower()
+
+    def _tokens(s: str) -> set[str]:
+        # 3+ char alnum runs; drops noise words.
+        return set(re.findall(r"[a-zа-яё]{3,}", _fold(s)))
+
+    transcript_tokens = _tokens(transcript)
+    if not transcript_tokens:
+        return directory[:max_directory_rows]
+
+    scored: list[tuple[float, Counterparty]] = []
+    for cp in directory:
+        name_tokens = _tokens(cp.name or "")
+        if not name_tokens:
+            continue
+        # Best ratio of any name-token to any transcript-token.
+        best = 0.0
+        for n in name_tokens:
+            for t in transcript_tokens:
+                # Cheap shortcut: identical or substring → max
+                # signal (catches «Tether» ⊂ «tether» / direct).
+                if n == t or n in t or t in n:
+                    best = 1.0
+                    break
+                # Real fuzzy ratio for short tokens (saves cost
+                # on long ones — the substring check above
+                # already covered them).
+                if abs(len(n) - len(t)) <= 3:
+                    r = difflib.SequenceMatcher(None, n, t).ratio()
+                    if r > best:
+                        best = r
+            if best >= 1.0:
+                break
+        if best >= 0.78:
+            scored.append((best, cp))
+
+    if not scored:
+        return directory[:max_directory_rows]
+    # Highest-score first; cap at limit.
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [cp for _, cp in scored[:max_directory_rows]]
+
+
 def match_counterparties_in_transcript(
     session: Session,
     *,
@@ -140,22 +257,26 @@ def match_counterparties_in_transcript(
             transcript_chars=len(transcript),
         )
         return []
+    # FR-CR-05-126 — Python-side fuzzy prefilter narrows the
+    # directory to plausible candidates before the LLM call.
+    # Boosts both recall (Whisper-mangled names land in the
+    # shortlist) and precision (fewer distractors).
+    shortlist = _shortlist_directory_for_transcript(directory, transcript)
     user_prompt = (
         "directory:\n"
-        + _render_directory(directory)
+        + _render_directory(shortlist)
         + "\n\nТранскрипт встречи:\n"
         + transcript
     )
-    # FR-CR-05-126 — full pre-call trace so the operator can
-    # tell at a glance whether the LLM had the right context.
     log.info(
         "counterparty_match_call_started",
         model=model,
         reasoning_effort=reasoning_effort,
         directory_size=len(directory),
-        directory_sample=[
+        shortlist_size=len(shortlist),
+        shortlist_sample=[
             {"id": cp.id, "name": cp.name, "type": cp.type}
-            for cp in directory[:5]
+            for cp in shortlist[:8]
         ],
         transcript_chars=len(transcript),
         transcript_preview=transcript[:240],

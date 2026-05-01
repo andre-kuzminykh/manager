@@ -318,6 +318,98 @@ def test_factory_returns_none_when_no_sheet_ids():
     assert build_counterparties_sheet_factory(s) is None
 
 
+def test_shortlist_catches_whisper_misheard_tokens(session):
+    """FR-CR-05-126 — operator regression: «teaser» in the
+    transcript is Whisper's misheard form of «Tether»; the
+    fuzzy prefilter must surface Tether as a candidate so the
+    LLM sees it. Plus a few other phonetic / Cyrillic cases."""
+    from app.services.counterparty_match import (
+        _shortlist_directory_for_transcript,
+    )
+
+    directory = [
+        Counterparty(
+            id=1, name="Tether", type="Status outreach",
+            name_normalised="tether",
+        ),
+        Counterparty(
+            id=2, name="ADNOC", type="Status outreach",
+            name_normalised="adnoc",
+        ),
+        Counterparty(
+            id=3, name="Goldman Sachs", type="Outreach",
+            name_normalised="goldman sachs",
+        ),
+        Counterparty(
+            id=4, name="Random Distractor LLC", type="Outreach",
+            name_normalised="random distractor",
+        ),
+    ]
+    # «teaser» (1-char swap from «tether») surfaces Tether.
+    out = _shortlist_directory_for_transcript(
+        directory,
+        "обсудили teaser в раунде, надо выйти на инвестора",
+    )
+    out_ids = {cp.id for cp in out}
+    assert 1 in out_ids, "Tether not surfaced for «teaser» misheard token"
+
+    # Cyrillic «АДНОК» surfaces ADNOC via direct Latin token
+    # «adnoc» being substring-equal after fold.
+    out2 = _shortlist_directory_for_transcript(
+        directory, "Adnoc делает pilot в нефтегазе.",
+    )
+    out2_ids = {cp.id for cp in out2}
+    assert 2 in out2_ids
+
+    # Direct mention of «Goldman».
+    out3 = _shortlist_directory_for_transcript(
+        directory, "Goldman прислали ответ по dataroom.",
+    )
+    out3_ids = {cp.id for cp in out3}
+    assert 3 in out3_ids
+
+
+def test_shortlist_falls_back_to_full_directory_when_empty(session):
+    """FR-CR-05-126 — if the prefilter returns nothing, send the
+    full directory. Better one extra LLM context than missing a
+    match the model would otherwise catch."""
+    from app.services.counterparty_match import (
+        _shortlist_directory_for_transcript,
+    )
+
+    directory = [
+        Counterparty(
+            id=1, name="ADNOC", type="x", name_normalised="adnoc",
+        ),
+        Counterparty(
+            id=2, name="Bosch", type="x", name_normalised="bosch",
+        ),
+    ]
+    out = _shortlist_directory_for_transcript(
+        directory, "Совершенно несвязанный текст без компаний.",
+    )
+    # Fallback: full directory returned (may be capped, but
+    # nothing dropped).
+    assert {cp.id for cp in out} == {1, 2}
+
+
+def test_counterparty_match_prompt_pins_phonetic_and_cyrillic_examples():
+    """FR-CR-05-126 — prompt includes the operator-regression
+    worked examples («teaser/Tether», «АДНОК/ADNOC», «Голдман
+    Сакс/Goldman Sachs») so a future prompt rewrite can't
+    accidentally drop them."""
+    from app.services.counterparty_match import (
+        COUNTERPARTY_MATCH_SYSTEM,
+    )
+
+    blob = COUNTERPARTY_MATCH_SYSTEM
+    assert "WHISPER MISHEARS" in blob or "Whisper" in blob
+    assert "teaser" in blob and "Tether" in blob
+    assert "АДНОК" in blob or "Адног" in blob
+    assert "ADNOC" in blob
+    assert "Cyrillic" in blob or "транслит" in blob.lower()
+
+
 def test_match_counterparties_in_transcript_dedupes_and_orders(session):
     """FR-CR-05-125 — matcher returns canonical Counterparty
     rows in LLM-emitted order, dedupes, drops invalid ids."""
@@ -360,9 +452,11 @@ def test_match_counterparties_in_transcript_dedupes_and_orders(session):
     # Order preserved (Bosch first, then ADNOC), dedupe, invalid
     # id dropped.
     assert [cp.id for cp in out] == [cp2_id, cp1_id]
-    # Directory rendering carried real id/name/type values.
+    # FR-CR-05-126 — the prompt now carries the FUZZY-PREFILTERED
+    # shortlist, so transcript-mentioned names («ADNOC», «Bosch»)
+    # appear; unrelated «Goldman Sachs» is correctly filtered out.
     assert "ADNOC" in backend.captured["user_prompt"]
-    assert "Goldman Sachs" in backend.captured["user_prompt"]
+    assert "Bosch" in backend.captured["user_prompt"]
     assert "directory:" in backend.captured["user_prompt"]
 
 

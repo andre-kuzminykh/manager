@@ -506,10 +506,33 @@ class ZoomPipeline:
             ) or {}
         except Exception as e:  # noqa: BLE001
             row.last_error = f"task extraction failed: {e}"
+            log.warning(
+                "zoom_task_extraction_llm_failed",
+                zoom_id=row.zoom_id,
+                model=self._settings.fireflies_tasks_model,
+                error=str(e),
+            )
             return 0
         tasks = (data or {}).get("tasks") or []
         if not isinstance(tasks, list):
             tasks = []
+        # FR-CR-05-120 follow-up — log when we got 0 tasks back
+        # so the operator can tell «meeting was procedural, no
+        # actions» from «model rejected the call» / «prompt
+        # broke». Includes the model name for fast triage.
+        if not tasks:
+            log.info(
+                "zoom_task_extraction_returned_empty",
+                zoom_id=row.zoom_id,
+                model=self._settings.fireflies_tasks_model,
+                detailed_chars=len(row.detailed_summary or ""),
+                hint=(
+                    "either the meeting was procedural (no "
+                    "actionable items) or the LLM call returned "
+                    "an empty array — check `last_error` and the "
+                    "model name"
+                ),
+            )
         valid_ids = {e.get("slack_user_id") for e in known_employees}
         created = 0
         from app.persistence.tasks import normalize_task_title

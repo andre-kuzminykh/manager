@@ -866,10 +866,28 @@ class FirefliesPipeline:
             )
         except Exception as e:  # noqa: BLE001
             row.last_error = f"task extraction LLM failed: {e}"
+            log.warning(
+                "fireflies_task_extraction_llm_failed",
+                fireflies_id=row.fireflies_id,
+                model=self._settings.fireflies_tasks_model,
+                error=str(e),
+            )
             return 0
         tasks = (result or {}).get("tasks") or []
         if not isinstance(tasks, list):
             tasks = []
+        if not tasks:
+            log.info(
+                "fireflies_task_extraction_returned_empty",
+                fireflies_id=row.fireflies_id,
+                model=self._settings.fireflies_tasks_model,
+                detailed_chars=len(row.detailed_summary or ""),
+                hint=(
+                    "either the meeting was procedural or the "
+                    "LLM call returned []. Check last_error + "
+                    "model name (FIREFLIES_TASKS_MODEL)."
+                ),
+            )
         valid_ids = {e.get("slack_user_id") for e in known_employees}
         admin_uid = _admin_fallback_owner_id()
         created = 0

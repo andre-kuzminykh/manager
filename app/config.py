@@ -155,16 +155,17 @@ class Settings(BaseSettings):
     fireflies_short_summary_model: str = Field(
         default="gpt-5.5", alias="FIREFLIES_SHORT_SUMMARY_MODEL"
     )
-    # FR-CR-05-120 — task extraction defaults to the thinking
-    # variant of gpt-5.5. Catching every actionable item in a
-    # 30-min meeting transcript needs deeper reasoning than the
-    # default model usually does, especially around named
-    # assignees («Алине поручено …») where the model has to
-    # match a name from the transcript to a row in
-    # `known_employees` while honouring the role / notes /
-    # assistant routing rules.
+    # FR-CR-05-120 — task extraction default kept at the
+    # non-thinking gpt-5.5 because the operator's API key
+    # doesn't currently expose `gpt-5.5-thinking` (the call
+    # silently returned 0 tasks). To opt in to a reasoning
+    # variant when available, set
+    # `FIREFLIES_TASKS_MODEL=gpt-5.5-thinking` (or `o3`,
+    # `o4-mini`, etc.) in `.env`. The non-thinking variant
+    # still does the job for most meetings; rule-7 in the
+    # prompt covers the named-assignee routing.
     fireflies_tasks_model: str = Field(
-        default="gpt-5.5-thinking", alias="FIREFLIES_TASKS_MODEL"
+        default="gpt-5.5", alias="FIREFLIES_TASKS_MODEL"
     )
     fireflies_whisper_model: str = Field(
         default="whisper-1", alias="FIREFLIES_WHISPER_MODEL"

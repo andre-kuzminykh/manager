@@ -727,15 +727,14 @@ def test_detect_prompt_rejects_chat_opener_retrospective_recap():
 
 
 def test_default_models_use_gpt_5_5_everywhere():
-    """FR-CR-05-104 — operator: «давай поставим gpt-5.5
-    везде». GPT-5.5 launched 2026-Q1. All non-thinking model
-    defaults — main, date, dedup, fireflies (summary,
-    short-summary) — are gpt-5.5. FR-CR-05-120 — task
-    extraction switched to the thinking variant
-    `gpt-5.5-thinking` so the model walks the transcript +
-    employee table carefully and doesn't miss tasks / mis-
-    routes named assignees. Operators whose key doesn't have
-    access override via FIREFLIES_TASKS_MODEL=gpt-5.5 etc."""
+    """FR-CR-05-104 — operator: «давай поставим gpt-5.5 везде».
+    GPT-5.5 launched 2026-Q1. All model defaults — main, date,
+    dedup, fireflies (summary, short-summary, tasks) — bumped
+    to gpt-5.5. FR-CR-05-120 — `fireflies_tasks_model` was
+    briefly set to `gpt-5.5-thinking` but the operator's key
+    didn't expose it (silent 0-task extractions); reverted to
+    plain `gpt-5.5`. Override via `FIREFLIES_TASKS_MODEL=…`
+    once the reasoning variant is available."""
     from app.config import Settings
 
     s = Settings()
@@ -744,7 +743,7 @@ def test_default_models_use_gpt_5_5_everywhere():
     assert s.openai_dedup_model == "gpt-5.5"
     assert s.fireflies_summary_model == "gpt-5.5"
     assert s.fireflies_short_summary_model == "gpt-5.5"
-    assert s.fireflies_tasks_model == "gpt-5.5-thinking"
+    assert s.fireflies_tasks_model == "gpt-5.5"
 
 
 def test_detect_prompt_rejects_third_party_future_intent():

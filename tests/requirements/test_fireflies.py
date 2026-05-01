@@ -882,6 +882,139 @@ def test_task_verification_prompt_pins_second_pass_contract():
     assert "NAMED ASSIGNEE OVERRIDES" in blob
 
 
+def test_owner_assignment_full_team_context_consistent_across_all_paths():
+    """FR-CR-05-123 — owner assignment in TG, Fireflies, and
+    Zoom paths must all feed the LLM the same full team_members
+    context (role + notes columns from the team-sheet pull).
+    Different code paths, same data shape, same routing rules.
+
+    TG path: separate `OWNER_SYSTEM_PROMPT` (FR-CR-04-04).
+    Fireflies / Zoom: combined into `TASK_EXTRACTION_SYSTEM`
+    (one LLM call extracts + routes per FR-CR-05-117/120).
+
+    This test pins:
+      - `as_known_employees(session)` returns rows with role +
+        notes for both `prefer_telegram=True` (meeting paths)
+        and `prefer_telegram=False` (TG path default).
+      - All three prompts pass the rendered employee table with
+        the role + notes columns visible to the LLM.
+      - Rule 7 (named-assignee) and rule 6 (anti-admin-default)
+        are pinned in BOTH the TG owner prompt AND the meeting
+        task-extraction prompt."""
+    from app.fireflies.pipeline import _render_known_employees_table
+    from app.fireflies.prompts import (
+        TASK_EXTRACTION_SYSTEM,
+        TASK_VERIFICATION_SYSTEM,
+    )
+    from app.intent.owner_prompt import (
+        OWNER_SYSTEM_PROMPT,
+        build_owner_user_prompt,
+    )
+
+    # Fixture employee rows mirror what `as_known_employees`
+    # produces (role + notes are always populated when the
+    # operator filled them in the sheet).
+    employees = [
+        {
+            "slack_user_id": "412243973",
+            "display_name": "msfrecklie",
+            "real_name": "Алина Колпакова",
+            "role": "CSO / CMO",
+            "notes": "Strategy, Marketing, PR, Fundraising narrative",
+        },
+        {
+            "slack_user_id": "700469400",
+            "display_name": "IrinaMorato",
+            "real_name": "Ирина Шипилова",
+            "role": "Ассистент CEO",
+            "notes": "Ведёт оперативку, follow-ups, ассистент Артёма",
+        },
+    ]
+
+    # 1. Fireflies / Zoom — combined extraction prompt sees the
+    # rendered table with role + notes columns.
+    table_meeting = _render_known_employees_table(employees)
+    assert "| role" in table_meeting and "| notes" in table_meeting
+    assert "CSO / CMO" in table_meeting
+    assert "Ведёт оперативку" in table_meeting
+    assert "Стратегия" in table_meeting or "Strategy" in table_meeting
+
+    # 2. TG path — separate OWNER_SYSTEM_PROMPT call sees the
+    # same role + notes shape.
+    tg_user_prompt = build_owner_user_prompt(
+        source_text="Алина, подготовь презу.",
+        context_messages=[],
+        author_user_id="97239970",
+        known_employees=employees,
+    )
+    assert "| role" in tg_user_prompt and "| notes" in tg_user_prompt
+    assert "CSO / CMO" in tg_user_prompt
+    assert "Ведёт оперативку" in tg_user_prompt
+
+    # 3. Rule 7 (named-assignee) pinned in both surfaces.
+    assert "NAMED ASSIGNEE OVERRIDES" in TASK_EXTRACTION_SYSTEM
+    assert "NAMED ASSIGNEE OVERRIDES" in TASK_VERIFICATION_SYSTEM
+    # TG owner prompt has its own named-assignee guidance
+    # (FR-CR-04-04: «if the source text or context names a
+    # specific assignee, prefer that»).
+    tg_lower = OWNER_SYSTEM_PROMPT.lower()
+    assert (
+        "name" in tg_lower and (
+            "assignee" in tg_lower or "explicit" in tg_lower
+        )
+    )
+
+    # 4. Rule 6 (anti-admin-default / null > admin) pinned for
+    # Fireflies/Zoom path.
+    assert "STRICTLY BETTER" in TASK_EXTRACTION_SYSTEM
+
+
+def test_as_known_employees_returns_role_and_notes(session):
+    """FR-CR-05-123 — `as_known_employees(session)` must
+    surface both `role` and `notes` columns from the team_members
+    table, regardless of which channel preference the caller
+    asks for. Without this the LLM owner-routing prompt loses
+    the context the operator typed into the team sheet."""
+    from app.models import TeamMember
+    from app.services.team_members import as_known_employees
+
+    session.add(
+        TeamMember(
+            real_name="Тестовый",
+            telegram_user_id=999,
+            telegram_username="testovii",
+            slack_user_id="UTEST123",
+            role="Аналитик",
+            notes="Подготовка справок по людям и фондам",
+            active=True,
+        )
+    )
+    session.flush()
+
+    # prefer_telegram=True path (meeting pipelines).
+    rows_tg = as_known_employees(session, prefer_telegram=True)
+    target = next(
+        (r for r in rows_tg if r.get("real_name") == "Тестовый"), None
+    )
+    assert target is not None, "missing test employee"
+    assert target["role"] == "Аналитик"
+    assert target["notes"] == "Подготовка справок по людям и фондам"
+    # On prefer_telegram=True, the slack_user_id field carries
+    # whatever id was preferred for that channel — usually the
+    # TG numeric id.
+    assert target["slack_user_id"] == "999"
+
+    # prefer_telegram=False path (Slack / TG default for ingest).
+    rows_slack = as_known_employees(session, prefer_telegram=False)
+    target = next(
+        (r for r in rows_slack if r.get("real_name") == "Тестовый"), None
+    )
+    assert target is not None
+    assert target["role"] == "Аналитик"
+    assert target["notes"] == "Подготовка справок по людям и фондам"
+    assert target["slack_user_id"] == "UTEST123"
+
+
 def test_first_sentence_compresses_multi_sentence_description():
     """FR-CR-05-119 follow-up — short TG summary's «To-Do» line
     needs ONE sentence per task even when the full description

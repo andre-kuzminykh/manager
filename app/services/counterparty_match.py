@@ -152,21 +152,27 @@ def _shortlist_directory_for_transcript(
     directory: list["Counterparty"],
     transcript: str,
     *,
-    max_directory_rows: int = 300,
+    max_directory_rows: int = 500,
 ) -> list["Counterparty"]:
-    """FR-CR-05-126 — Python-side fuzzy prefilter so the LLM
-    only sees plausible candidates instead of all 600+ rows.
+    """FR-CR-05-126 / FR-CR-05-128 — Python-side fuzzy
+    prefilter so the LLM only sees plausible candidates instead
+    of all 600+ rows.
+
+    FR-CR-05-128 — cap raised from 300 to 500 because Russian
+    transcripts produce many incidental substring boosts
+    («капитал»→«kapital» substring-matches every «X Capital»
+    fund name at 0.95). A borderline phonetic match like
+    «Тезер»→«tether» (ratio 0.73) was getting pushed past the
+    300-row cap by these noisy 0.95 entries. 500 covers the
+    operator's 593-entry directory comfortably.
 
     Strategy:
       - tokenise both the transcript and each directory name;
       - transliterate Cyrillic → Latin so «шафлера» (Whisper)
-        matches «Schaeffler» (directory). FR-CR-05-126
-        regression: a Russian-language meeting transcript with
-        Latin-named funds was missing every match because the
-        scripts differed and SequenceMatcher rated them at ~0.3;
+        matches «Schaeffler» (directory);
       - score each directory row by SequenceMatcher ratio of
         any name token vs any transcript token;
-      - keep rows ≥ 0.65 OR substring-equal;
+      - keep rows ≥ 0.6 OR substring-equal;
       - cap the result at `max_directory_rows`.
 
     Falls through to the full directory if shortlist would be

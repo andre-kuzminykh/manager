@@ -486,6 +486,47 @@ def test_shortlist_falls_back_to_full_directory_when_empty(session):
     assert {cp.id for cp in out} == {1, 2}
 
 
+def test_shortlist_keeps_phonetic_match_under_substring_noise(session):
+    """FR-CR-05-128 — operator regression: 593-row directory +
+    Russian transcript saying «Тезер» (phonetic for «Tether»)
+    failed to surface Tether in the shortlist because hundreds
+    of incidental substring boosts (any «X Capital» row gets
+    0.95 from «капитал»→«kapital»→«apital» substring) pushed
+    Tether's borderline 0.73 phonetic ratio past the 300-row
+    cap. Cap raised to 500. Pin the inclusion so a future
+    cap-tweak doesn't regress."""
+    from app.models import Counterparty
+    from app.services.counterparty_match import (
+        _shortlist_directory_for_transcript,
+    )
+
+    # 400 «X Capital» distractors that all match «капитал» via
+    # «kapital» → substring «apital» → 0.95 boost.
+    distractors = [
+        Counterparty(
+            id=1000 + i, name=f"{name} Capital",
+            type="Financial/VC", name_normalised=f"{name.lower()} capital",
+        )
+        for i, name in enumerate([f"Fund{i:03d}" for i in range(400)])
+    ]
+    tether = Counterparty(
+        id=51396, name="Tether",
+        type="Financial/VC", name_normalised="tether",
+    )
+    directory = distractors + [tether]
+    transcript = (
+        "Артем сказал что капитал у нас есть, надо сегментировать "
+        "инвесторов и обязательно отправить апдейт Тезер по новым "
+        "контрактам. Также обсудить капитал Bosch."
+    )
+    shortlist = _shortlist_directory_for_transcript(directory, transcript)
+    in_short = [cp for cp in shortlist if cp.name == "Tether"]
+    assert in_short, (
+        f"Tether dropped from shortlist (size={len(shortlist)}); "
+        f"top 5 names={[cp.name for cp in shortlist[:5]]}"
+    )
+
+
 def test_counterparty_match_prompt_pins_phonetic_and_cyrillic_examples():
     """FR-CR-05-126 — prompt includes the operator-regression
     worked examples («teaser/Tether», «АДНОК/ADNOC», «Голдман

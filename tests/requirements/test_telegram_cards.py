@@ -194,6 +194,13 @@ def test_post_initial_card_sends_one_dm_per_recipient(session, monkeypatch):
         # No reply_to_message_id is forwarded (the source message id
         # belongs to the group, but we DM users, not the group).
         assert all("reply_to_message_id" not in m for m in sender.sent)
+        # FR-CR-05-117 — operator pinned: no «✨ New task from
+        # this message» banner above the card. Title alone is
+        # the lead. Pre-fix every initial DM card carried that
+        # noisy header.
+        for m in sender.sent:
+            assert "✨ New task" not in m["text"]
+            assert "New task from this message" not in m["text"]
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 

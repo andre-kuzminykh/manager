@@ -300,6 +300,12 @@ def test_pipeline_process_one_runs_every_step(
                 .first()
             )
             assert row is not None
+            # FR-CR-05-117 — short summary trailer pins the
+            # Google Doc URL to the end of the LLM body. Built
+            # deterministically (NOT by the LLM) so it can't be
+            # truncated mid-link or hallucinated.
+            assert "📄 Подробный отчёт:" in (row.short_summary or "")
+            assert (row.google_doc_url or "") in (row.short_summary or "")
             assert row.audio_downloaded is True
             assert row.transcribed is True
             assert row.detailed_summarised is True
@@ -856,6 +862,30 @@ def test_task_extraction_prompt_pins_role_notes_and_assistant_routing():
     assert "Артём" in blob and "Ирина" in blob
     # Speaker ≠ assignee rule pinned.
     assert "speaker" in blob.lower() or "SPEAKER" in blob
+
+
+def test_task_extraction_prompt_forbids_admin_default_owner():
+    """FR-CR-05-117 rule 6 — «прислать строку с таймингами» and
+    «уточнить сроки поездки» landed on Андрей Кузьминых (admin /
+    AI Lead) because the LLM defaulted to admin when no obvious
+    match existed. Rule 6 forbids that: null is STRICTLY BETTER
+    than picking the admin / AI Lead. This test pins the
+    operator-mandated language so a future prompt rewrite can't
+    accidentally drop it."""
+    from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
+
+    blob = TASK_EXTRACTION_SYSTEM
+    # «Null is strictly better» language pinned.
+    lower = blob.lower()
+    assert "null is strictly better" in lower or "strictly better than" in lower
+    # «admin» row called out as context-only.
+    assert "admin" in lower
+    # The rule explicitly mentions the AI Lead anti-default.
+    assert "ai lead" in lower or "lead ai" in lower
+    # «Don't pick admin unless transcript names them» framing.
+    assert "explicitly addresses" in lower or "explicitly names" in lower or (
+        "addresses them by name" in lower
+    )
 
 
 def test_pipeline_posts_tg_card_per_extracted_task(

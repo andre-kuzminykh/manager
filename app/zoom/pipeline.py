@@ -616,33 +616,13 @@ class ZoomPipeline:
                 from app.sync.task_sync import schedule_sync_task
 
                 schedule_sync_task(session, task.id)
-                # FR-CR-05-118 — DM card to admin / owner so the
-                # operator sees each Zoom-extracted task in TG,
-                # not just in the DB / Sheet. Same wiring as the
-                # Fireflies path (FR-CR-05-58).
-                if (
-                    self._sender is not None
-                    and getattr(self._sender, "enabled", False)
-                ):
-                    try:
-                        from app.telegram_bot.cards import (
-                            post_initial_card,
-                        )
-
-                        post_initial_card(
-                            sender=self._sender,
-                            session=session,
-                            task=task,
-                            chat_id=0,  # ignored — DM-only delivery
-                            reply_to_message_id=None,
-                            author_user_id=admin_uid,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        log.info(
-                            "zoom_task_card_post_failed",
-                            task_id=task.id,
-                            error=str(e),
-                        )
+                # FR-CR-05-120 follow-up — DM card posting moved
+                # to a separate `_step_post_task_cards` step that
+                # runs AFTER the short summary is sent. Operator
+                # pinned: get the meeting overview first (Суть +
+                # To-Do in one message), then dive into per-task
+                # cards. Tasks created here just sit in the
+                # session waiting for the post step.
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "zoom_task_create_failed",
@@ -653,6 +633,51 @@ class ZoomPipeline:
         row.tasks_extracted_count = created
         row.last_error = None
         return created
+
+    def _step_post_task_cards(
+        self, session: Session, row: ZoomRecording
+    ) -> int:
+        """FR-CR-05-120 follow-up — post a DM card per extracted
+        Task ROW to admin/owner. Runs AFTER `_step_send_short_
+        summary` so the operator gets the meeting overview first
+        (Суть + To-Do in one message) and then per-task cards
+        cascade in. Returns number of cards posted."""
+        if (
+            self._sender is None
+            or not getattr(self._sender, "enabled", False)
+        ):
+            return 0
+        from app.models import Task as _Task
+        from app.telegram_bot.cards import post_initial_card
+
+        admin_uid = _admin_fallback_owner_id()
+        tasks = (
+            session.query(_Task)
+            .filter(_Task.source_kind == TaskSourceKind.zoom)
+            .filter(_Task.source_conversation_id == row.zoom_id)
+            .filter(_Task.deleted_at.is_(None))
+            .order_by(_Task.id.asc())
+            .all()
+        )
+        posted = 0
+        for task in tasks:
+            try:
+                post_initial_card(
+                    sender=self._sender,
+                    session=session,
+                    task=task,
+                    chat_id=0,  # ignored — DM-only delivery
+                    reply_to_message_id=None,
+                    author_user_id=admin_uid,
+                )
+                posted += 1
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_task_card_post_failed",
+                    task_id=task.id,
+                    error=str(e),
+                )
+        return posted
 
     # --- main entry-point -------------------------------------
 
@@ -708,6 +733,18 @@ class ZoomPipeline:
             ok = self._step_short_summary(session, row)
             if not ok and row.last_error:
                 report.errors.append(row.last_error)
+
+        # FR-CR-05-120 follow-up — DM cards posted LAST so the
+        # operator sees the meeting overview message first, then
+        # individual task cards cascade in.
+        if row.detailed_summarised:
+            try:
+                self._step_post_task_cards(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_post_task_cards_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
 
         report.transcript_chars = len(row.transcript_text or "")
         report.detailed_chars = len(row.detailed_summary or "")

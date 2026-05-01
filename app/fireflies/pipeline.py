@@ -987,31 +987,11 @@ class FirefliesPipeline:
                 from app.sync.task_sync import schedule_sync_task
 
                 schedule_sync_task(session, task.id)
-                # FR-CR-05-58 — post a TG card per task so the
-                # owner / admins see them in their DM with the
-                # bot. Without this, Fireflies tasks lived only
-                # in the DB + Sheet — invisible until the next
-                # morning digest. The card carries the same
-                # interactive keyboard as live cards (Start /
-                # Edit / Mark done / Subscribe).
-                if self._sender is not None and getattr(self._sender, "enabled", False):
-                    try:
-                        from app.telegram_bot.cards import post_initial_card
-
-                        post_initial_card(
-                            sender=self._sender,
-                            session=session,
-                            task=task,
-                            chat_id=0,  # ignored — DM-only delivery
-                            reply_to_message_id=None,
-                            author_user_id=admin_uid,
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        log.info(
-                            "fireflies_task_card_post_failed",
-                            task_id=task.id,
-                            error=str(e),
-                        )
+                # FR-CR-05-120 follow-up — DM card posting moved
+                # to a separate `_step_post_task_cards` step that
+                # runs AFTER the short summary is sent (operator
+                # pinned: meeting overview first, then per-task
+                # cards). Tasks just sit in the session here.
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "fireflies_task_create_failed",
@@ -1021,6 +1001,49 @@ class FirefliesPipeline:
         row.tasks_extracted_count = created
         row.tasks_extracted = True
         return created
+
+    def _step_post_task_cards(
+        self, session: Session, row: MeetingRecording
+    ) -> int:
+        """FR-CR-05-120 follow-up — post DM card per extracted
+        Task ROW. Runs AFTER `_step_send_short_summary` so the
+        operator gets the overview first, then per-task cards.
+        Returns count of cards successfully posted."""
+        if (
+            self._sender is None
+            or not getattr(self._sender, "enabled", False)
+        ):
+            return 0
+        from app.telegram_bot.cards import post_initial_card
+
+        admin_uid = _admin_fallback_owner_id()
+        tasks = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.fireflies)
+            .filter(Task.source_conversation_id == row.fireflies_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
+        )
+        posted = 0
+        for task in tasks:
+            try:
+                post_initial_card(
+                    sender=self._sender,
+                    session=session,
+                    task=task,
+                    chat_id=0,
+                    reply_to_message_id=None,
+                    author_user_id=admin_uid,
+                )
+                posted += 1
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "fireflies_task_card_post_failed",
+                    task_id=task.id,
+                    error=str(e),
+                )
+        return posted
 
     # --- main entry ------------------------------------------
 
@@ -1096,6 +1119,15 @@ class FirefliesPipeline:
             report.errors.append(row.last_error or "short_summary_failed")
         report.short_chars = len(row.short_summary or "")
         report.short_summary_recipients = self._step_send_short_summary(row)
+        # FR-CR-05-120 follow-up — DM cards last so the operator
+        # sees the overview message first.
+        try:
+            self._step_post_task_cards(session, row)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_post_task_cards_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
 
         row.processed_at = datetime.now(timezone.utc)
         session.flush()

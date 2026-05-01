@@ -463,6 +463,103 @@ def _zoom_poll_meta(zoom_id="zm-poll-1"):
     )
 
 
+def test_zoom_short_summary_dm_arrives_before_per_task_cards(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-120 follow-up — operator pinned: meeting overview
+    DM (Суть + To-Do in one message) MUST arrive before the
+    per-task DM cards. Pre-fix the cards came first because
+    `_step_extract_tasks` posted them inline; now `_step_post_
+    task_cards` runs as the final pipeline step, after
+    `_step_send_short_summary`."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        settings = _settings_with_audio_dir()
+
+        class _StubZoomClient:
+            enabled = True
+
+            def list_recordings(self, *, limit, **kw):
+                return [_zoom_meta()]
+
+            def download_audio(self, *, url, dest_path, max_bytes):
+                with open(dest_path, "wb") as f:
+                    f.write(b"x" * 1024)
+                return 1024
+
+        monkeypatch.setattr(
+            "app.fireflies.pipeline._sniff_audio_extension",
+            lambda *a, **kw: "m4a",
+        )
+        monkeypatch.setattr(
+            "app.services.transcription.transcribe_bytes",
+            lambda **kw: "Артем сказал что Алина подготовит письмо.",
+        )
+
+        llm = _FakeLLM(
+            summary_text="Краткое описание.",
+            tasks=[
+                {"title": "Подготовить письмо",
+                 "description": "Алина - подготовит письмо инвесторам.",
+                 "owner": None, "priority": "medium"},
+                {"title": "Скоординировать тайминг",
+                 "description": "Ирина - скоординировать тайминг.",
+                 "owner": None, "priority": "medium"},
+            ],
+        )
+        sender = _FakeSender()
+        from app.zoom.pipeline import ZoomPipeline
+
+        pipeline = ZoomPipeline(
+            settings=settings,
+            client=_StubZoomClient(),
+            llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(),
+            sender=sender,
+        )
+
+        with SessionFactory() as s:
+            from app.models import TeamMember
+            s.add(
+                TeamMember(
+                    real_name="Admin", telegram_user_id=777,
+                    telegram_username="admin", active=True,
+                )
+            )
+            s.flush()
+            pipeline.process_one(s, _zoom_meta())
+            s.commit()
+
+        # Find the index of the short-summary DM (text contains
+        # «Суть:» / «To-Do:») vs per-task DM cards (have 👤
+        # owner-line marker per FR-CR-05-118 test).
+        admin_dms = [m for m in sender.sent if m["chat_id"] == 777]
+        assert admin_dms, "no admin DMs sent"
+
+        first_summary_idx = next(
+            (i for i, m in enumerate(admin_dms)
+             if "Суть" in m["text"] or "To-Do" in m["text"]),
+            None,
+        )
+        first_card_idx = next(
+            (i for i, m in enumerate(admin_dms) if "👤" in m["text"]),
+            None,
+        )
+        assert first_summary_idx is not None, "no short-summary DM"
+        assert first_card_idx is not None, "no per-task cards"
+        # FR-CR-05-120 follow-up: summary lands BEFORE the first
+        # per-task card.
+        assert first_summary_idx < first_card_idx, (
+            f"summary at {first_summary_idx}, first card at "
+            f"{first_card_idx}; expected summary < cards"
+        )
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
 def test_zoom_listener_poll_off_by_default(patched_session_scope, SessionFactory):
     """`_maybe_poll_zoom` is a no-op until `wire_zoom(enabled=True)`
     is called. Mirror of `_maybe_poll_fireflies` gating."""

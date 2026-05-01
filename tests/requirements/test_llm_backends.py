@@ -419,6 +419,104 @@ def test_openai_call_uses_completion_tokens_for_gpt5(monkeypatch):
     assert "temperature" not in captured
 
 
+def test_openai_call_passes_reasoning_effort_for_gpt5(monkeypatch):
+    """FR-CR-05-120 — operator pinned `reasoning.effort=high`
+    for task extraction so gpt-5.5 spends more think-budget on
+    each call. Only forwarded for gpt-5.x / o-series; the
+    4o-family rejects the kwarg, so the backend gates it on the
+    same model classifier as max_completion_tokens."""
+    from app.intent.llm_backends import OpenAIBackend
+
+    captured: dict = {}
+
+    class _StubChoices:
+        message = type("M", (), {"content": "{}", "tool_calls": None})()
+
+    class _StubResp:
+        choices = [_StubChoices()]
+
+    class _StubCompletions:
+        def create(self, **kw):
+            captured.update(kw)
+            return _StubResp()
+
+    class _StubChat:
+        completions = _StubCompletions()
+
+    class _StubClient:
+        chat = _StubChat()
+
+    backend = OpenAIBackend(_StubClient(), "gpt-5.5")
+    backend.call_tool(
+        system_prompt="s",
+        user_prompt="u",
+        tool_name="t",
+        tool_description="d",
+        tool_parameters={"type": "object"},
+        reasoning_effort="high",
+    )
+    assert captured.get("reasoning_effort") == "high"
+
+    # No effort → kwarg absent (server-side default kicks in).
+    captured.clear()
+    backend.call_tool(
+        system_prompt="s",
+        user_prompt="u",
+        tool_name="t",
+        tool_description="d",
+        tool_parameters={"type": "object"},
+    )
+    assert "reasoning_effort" not in captured
+
+
+def test_openai_call_drops_reasoning_effort_for_gpt4o(monkeypatch):
+    """FR-CR-05-120 — gpt-4o-family rejects `reasoning_effort`
+    (only reasoning models accept it). Same gate as
+    max_completion_tokens."""
+    from app.intent.llm_backends import OpenAIBackend
+
+    captured: dict = {}
+
+    class _StubChoices:
+        message = type("M", (), {"content": "{}", "tool_calls": None})()
+
+    class _StubResp:
+        choices = [_StubChoices()]
+
+    class _StubCompletions:
+        def create(self, **kw):
+            captured.update(kw)
+            return _StubResp()
+
+    class _StubChat:
+        completions = _StubCompletions()
+
+    class _StubClient:
+        chat = _StubChat()
+
+    backend = OpenAIBackend(_StubClient(), "gpt-4o")
+    backend.call_tool(
+        system_prompt="s",
+        user_prompt="u",
+        tool_name="t",
+        tool_description="d",
+        tool_parameters={"type": "object"},
+        reasoning_effort="high",  # operator-set, but gpt-4o ignores
+    )
+    assert "reasoning_effort" not in captured
+
+
+def test_settings_default_fireflies_tasks_reasoning_effort_high():
+    """FR-CR-05-120 — operator default. Pipelines call
+    `call_tool(..., reasoning_effort=settings.fireflies_tasks_reasoning_effort)`,
+    so this knob controls the per-call think budget for both
+    Fireflies and Zoom task extraction."""
+    from app.config import Settings
+
+    s = Settings()
+    assert s.fireflies_tasks_reasoning_effort == "high"
+
+
 def test_openai_call_uses_max_tokens_for_gpt4o(monkeypatch):
     """FR-CR-05-106 — gpt-4o still wants `max_tokens` (legacy
     name); the helper differentiates."""

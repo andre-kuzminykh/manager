@@ -863,6 +863,10 @@ class FirefliesPipeline:
                 tool_description=TASK_EXTRACTION_TOOL_DESCRIPTION,
                 tool_parameters=TASK_EXTRACTION_TOOL_PARAMETERS,
                 model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort
+                    or None
+                ),
             )
         except Exception as e:  # noqa: BLE001
             row.last_error = f"task extraction LLM failed: {e}"
@@ -870,6 +874,7 @@ class FirefliesPipeline:
                 "fireflies_task_extraction_llm_failed",
                 fireflies_id=row.fireflies_id,
                 model=self._settings.fireflies_tasks_model,
+                reasoning_effort=self._settings.fireflies_tasks_reasoning_effort,
                 error=str(e),
             )
             return 0

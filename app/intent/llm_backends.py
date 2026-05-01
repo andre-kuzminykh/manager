@@ -147,6 +147,7 @@ class AnthropicBackend:
         tool_description: str,
         tool_parameters: dict[str, Any],
         model: str | None = None,
+        reasoning_effort: str | None = None,  # noqa: ARG002 — OpenAI-only kwarg, accepted for parity
     ) -> dict[str, Any] | None:
         tool = {
             "name": tool_name,
@@ -237,6 +238,7 @@ class OpenAIBackend:
         tool_description: str,
         tool_parameters: dict[str, Any],
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any] | None:
         tool = {
             "type": "function",
@@ -273,6 +275,14 @@ class OpenAIBackend:
         if _model_uses_completion_tokens(eff_model):
             kwargs["max_completion_tokens"] = 4096
             # No temperature → defaults to 1 server-side.
+            # FR-CR-05-120 — pass `reasoning_effort` (low /
+            # medium / high) so a thinking-aware caller can ask
+            # for deeper reasoning on hard prompts. Only
+            # supported on gpt-5.x / o-series; 4o-family
+            # rejects the kwarg, so we gate on the same
+            # reasoning-style model classifier above.
+            if reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
         else:
             kwargs["max_tokens"] = 4096
             kwargs["temperature"] = 0

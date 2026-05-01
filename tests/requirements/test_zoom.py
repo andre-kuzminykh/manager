@@ -64,7 +64,8 @@ class _FakeLLM:
         return self.summary_text
 
     def call_tool(self, *, system_prompt, user_prompt, tool_name,
-                  tool_description, tool_parameters, model=None):
+                  tool_description, tool_parameters, model=None,
+                  reasoning_effort=None):
         self.call_tool_calls += 1
         return {"tasks": list(self.tasks)}
 

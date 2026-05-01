@@ -155,17 +155,20 @@ class Settings(BaseSettings):
     fireflies_short_summary_model: str = Field(
         default="gpt-5.5", alias="FIREFLIES_SHORT_SUMMARY_MODEL"
     )
-    # FR-CR-05-120 — task extraction default kept at the
-    # non-thinking gpt-5.5 because the operator's API key
-    # doesn't currently expose `gpt-5.5-thinking` (the call
-    # silently returned 0 tasks). To opt in to a reasoning
-    # variant when available, set
-    # `FIREFLIES_TASKS_MODEL=gpt-5.5-thinking` (or `o3`,
-    # `o4-mini`, etc.) in `.env`. The non-thinking variant
-    # still does the job for most meetings; rule-7 in the
-    # prompt covers the named-assignee routing.
+    # FR-CR-05-120 — task extraction stays on plain gpt-5.5
+    # (the operator's key doesn't currently expose a separate
+    # `*-thinking` SKU). Override to a reasoning model via env
+    # if one becomes available: `FIREFLIES_TASKS_MODEL=…`.
     fireflies_tasks_model: str = Field(
         default="gpt-5.5", alias="FIREFLIES_TASKS_MODEL"
+    )
+    # FR-CR-05-120 — operator pinned `reasoning.effort=high` for
+    # task extraction so gpt-5.5 spends more think-budget per
+    # call (catches more actionable items, applies rule-7
+    # named-assignee routing more consistently). Only sent to
+    # gpt-5.x / o-series; 4o-family ignores the kwarg.
+    fireflies_tasks_reasoning_effort: str = Field(
+        default="high", alias="FIREFLIES_TASKS_REASONING_EFFORT"
     )
     fireflies_whisper_model: str = Field(
         default="whisper-1", alias="FIREFLIES_WHISPER_MODEL"

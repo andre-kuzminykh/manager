@@ -503,6 +503,10 @@ class ZoomPipeline:
                     "required": ["tasks"],
                 },
                 model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort
+                    or None
+                ),
             ) or {}
         except Exception as e:  # noqa: BLE001
             row.last_error = f"task extraction failed: {e}"
@@ -510,6 +514,7 @@ class ZoomPipeline:
                 "zoom_task_extraction_llm_failed",
                 zoom_id=row.zoom_id,
                 model=self._settings.fireflies_tasks_model,
+                reasoning_effort=self._settings.fireflies_tasks_reasoning_effort,
                 error=str(e),
             )
             return 0

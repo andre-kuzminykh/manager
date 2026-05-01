@@ -213,6 +213,54 @@ def _looks_like_auto_stamp_title(title: str | None) -> bool:
     return _AUTO_STAMP_TITLE_RE.match(title.strip()) is not None
 
 
+def _build_full_tasks_section_for_doc(
+    session: "Session",
+    *,
+    source_kind: "TaskSourceKind",
+    source_conversation_id: str,
+) -> str:
+    """FR-CR-05-119 follow-up — full task list for the Google
+    Doc body. Each task gets the verbatim multi-sentence
+    description + owner + due-date + priority. Operator wants
+    the doc to be the single archived reference; the short TG
+    summary keeps a compressed one-sentence variant via
+    `_build_todo_section`. Returns "" when no tasks."""
+    from app.models import Task as _Task
+
+    tasks = (
+        session.query(_Task)
+        .filter(_Task.source_kind == source_kind)
+        .filter(_Task.source_conversation_id == source_conversation_id)
+        .filter(_Task.deleted_at.is_(None))
+        .order_by(_Task.id.asc())
+        .all()
+    )
+    if not tasks:
+        return ""
+    lines = ["", "📌 ЗАДАЧИ", ""]
+    for i, t in enumerate(tasks, 1):
+        body = (t.description or "").strip() or (t.title or "").strip()
+        lines.append(f"{i}. {body}")
+        meta_bits = []
+        owner = (t.owner_display_name or "").strip()
+        if owner:
+            meta_bits.append(f"Ответственный: {owner}")
+        if t.due_date:
+            due = t.due_date.strftime("%d.%m.%Y")
+            if t.due_time:
+                due += f" {t.due_time.strftime('%H:%M')}"
+            meta_bits.append(f"Срок: {due}")
+        priority = (
+            t.priority.value if t.priority is not None else None
+        )
+        if priority and priority != "medium":
+            meta_bits.append(f"Приоритет: {priority}")
+        if meta_bits:
+            lines.append("   " + " · ".join(meta_bits))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _build_todo_section(
     session: "Session",
     *,
@@ -616,7 +664,9 @@ class FirefliesPipeline:
 
     # --- step 4: Google Doc export ----------------------------
 
-    def _step_doc_export(self, row: MeetingRecording) -> bool:
+    def _step_doc_export(
+        self, session: Session, row: MeetingRecording
+    ) -> bool:
         if row.doc_exported and row.google_doc_url:
             return True
         if not row.detailed_summary:
@@ -634,10 +684,22 @@ class FirefliesPipeline:
             row.last_error = "Docs credentials unavailable"
             return False
         title = row.title or f"Meeting {row.fireflies_id}"
+        # FR-CR-05-119 follow-up — append the full task list to
+        # the doc body so the archived report carries verbose
+        # action items + owner / due / priority. The short TG
+        # summary keeps the compressed one-sentence variant.
+        body = row.detailed_summary
+        tasks_section = _build_full_tasks_section_for_doc(
+            session,
+            source_kind=TaskSourceKind.fireflies,
+            source_conversation_id=row.fireflies_id,
+        )
+        if tasks_section:
+            body = body.rstrip() + "\n\n" + tasks_section
         try:
             doc_id, url = docs.export_summary(
                 title=title,
-                body=row.detailed_summary,
+                body=body,
                 parent_folder_id=self._settings.fireflies_docs_folder_id,
             )
         except Exception as e:  # noqa: BLE001
@@ -976,9 +1038,12 @@ class FirefliesPipeline:
             report.errors.append(row.last_error or "detailed_summary_failed")
             return report
         report.detailed_chars = len(row.detailed_summary or "")
-        # Doc export — if it fails we still send the short
-        # summary (sans link) and extract tasks.
-        if not self._step_doc_export(row):
+        # FR-CR-05-119 follow-up: extract tasks FIRST, then export
+        # the doc with the full task list appended, then build the
+        # short summary with the compressed task list. Order:
+        # detailed → tasks → doc → short.
+        report.tasks_created = self._step_extract_tasks(session, row)
+        if not self._step_doc_export(session, row):
             log.warning(
                 "fireflies_doc_export_failed",
                 recording_id=row.id,
@@ -987,11 +1052,6 @@ class FirefliesPipeline:
             report.errors.append(row.last_error or "doc_export_failed")
         else:
             report.google_doc_url = row.google_doc_url
-        # FR-CR-05-119: extract tasks BEFORE building the short
-        # summary so the To-Do section can be populated from the
-        # actual `Task` rows (description + owner) rather than
-        # asked-from-the-LLM-twice.
-        report.tasks_created = self._step_extract_tasks(session, row)
         if not self._step_short_summary(session, row):
             log.warning(
                 "fireflies_short_summary_failed",

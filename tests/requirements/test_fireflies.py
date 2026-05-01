@@ -733,6 +733,77 @@ def test_split_for_telegram_chunks_at_paragraph_boundaries():
         assert len(c) <= 1000
 
 
+def test_build_full_tasks_section_for_doc_renders_verbose_with_meta(session):
+    """FR-CR-05-119 follow-up — Google Doc gets the FULL task
+    list (verbatim multi-sentence descriptions + owner + due +
+    priority). Distinct from the short-summary helper which
+    one-sentence-compresses. Pipeline order is detailed →
+    tasks → doc → short so by doc-export the Task rows exist."""
+    from datetime import date, time as _time
+
+    from app.fireflies.pipeline import (
+        _build_full_tasks_section_for_doc,
+    )
+    from app.models import Task, TaskPriority, TaskSourceKind, TaskStatus
+
+    # Empty case → "" so the doc body stays clean.
+    assert _build_full_tasks_section_for_doc(
+        session,
+        source_kind=TaskSourceKind.fireflies,
+        source_conversation_id="trans-empty",
+    ) == ""
+
+    session.add(
+        Task(
+            title="Подготовить письмо",
+            description=(
+                "Алина подготовит письмо инвесторам с приложенным "
+                "контрактом и базовой суммой. В тексте отметить "
+                "NDA и проверить список рассылки."
+            ),
+            priority=TaskPriority.high,
+            status=TaskStatus.todo,
+            owner_display_name="Алина",
+            due_date=date(2026, 5, 15),
+            due_time=_time(18, 0),
+            source_kind=TaskSourceKind.fireflies,
+            source_conversation_id="trans-doc",
+        )
+    )
+    session.add(
+        Task(
+            title="Скоординировать тайминг",
+            description="Ирина скоординирует тайминг рассылки.",
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+            owner_display_name="Ирина Шипилова",
+            due_date=date(2026, 5, 16),
+            source_kind=TaskSourceKind.fireflies,
+            source_conversation_id="trans-doc",
+        )
+    )
+    session.flush()
+
+    out = _build_full_tasks_section_for_doc(
+        session,
+        source_kind=TaskSourceKind.fireflies,
+        source_conversation_id="trans-doc",
+    )
+    # Section header pinned.
+    assert "📌 ЗАДАЧИ" in out
+    # Full multi-sentence description preserved (NOT compressed
+    # — that's the short-summary helper's job).
+    assert "В тексте отметить NDA" in out
+    # Owner / due / priority rendered as meta line.
+    assert "Ответственный: Алина" in out
+    assert "Срок: 15.05.2026 18:00" in out
+    assert "Приоритет: high" in out
+    # Default-medium priority NOT printed (less noise).
+    assert "Приоритет: medium" not in out
+    # Default-no-time due-date renders date-only.
+    assert "Срок: 16.05.2026" in out
+
+
 def test_first_sentence_compresses_multi_sentence_description():
     """FR-CR-05-119 follow-up — short TG summary's «To-Do» line
     needs ONE sentence per task even when the full description

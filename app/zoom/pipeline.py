@@ -283,7 +283,9 @@ class ZoomPipeline:
 
     # --- step 4: Google Doc export ----------------------------
 
-    def _step_doc_export(self, row: ZoomRecording) -> bool:
+    def _step_doc_export(
+        self, session: Session, row: ZoomRecording
+    ) -> bool:
         if row.doc_exported and row.google_doc_url:
             return True
         if not row.detailed_summary:
@@ -301,10 +303,25 @@ class ZoomPipeline:
             row.last_error = "Docs credentials unavailable"
             return False
         title = row.title or f"Zoom meeting {row.zoom_id}"
+        # FR-CR-05-119 follow-up — append the full task list to
+        # the doc body. Pipeline order is detailed → tasks → doc
+        # so by here the Task rows already exist.
+        from app.fireflies.pipeline import (
+            _build_full_tasks_section_for_doc,
+        )
+
+        body = row.detailed_summary
+        tasks_section = _build_full_tasks_section_for_doc(
+            session,
+            source_kind=TaskSourceKind.zoom,
+            source_conversation_id=row.zoom_id,
+        )
+        if tasks_section:
+            body = body.rstrip() + "\n\n" + tasks_section
         try:
             doc_id, url = docs.export_summary(
                 title=title,
-                body=row.detailed_summary,
+                body=body,
                 parent_folder_id=(
                     self._settings.zoom_docs_folder_id
                     or self._settings.fireflies_docs_folder_id
@@ -625,16 +642,16 @@ class ZoomPipeline:
         row.attempts = (row.attempts or 0) + 1
         row.processed_at = datetime.now(timezone.utc)
 
-        # FR-CR-05-119 — task extraction now runs BEFORE short
-        # summary so the deterministic To-Do section in the short
-        # summary can be populated from the actual Task rows.
-        steps = (
+        # FR-CR-05-119 follow-up — order: detailed → tasks → doc
+        # → short. Tasks must exist before the doc export so the
+        # archived report carries the verbose task list, and
+        # before the short summary so the compressed To-Do block
+        # uses the actual Task rows.
+        for label, fn in (
             ("download", self._step_download_audio),
             ("transcribe", self._step_transcribe),
             ("detailed", self._step_detailed_summary),
-            ("doc", self._step_doc_export),
-        )
-        for label, fn in steps:
+        ):
             ok = fn(row)
             if not ok:
                 if row.last_error:
@@ -645,8 +662,6 @@ class ZoomPipeline:
                 )
                 break
 
-        # Extract tasks first (before the short summary) so the
-        # short summary's To-Do reflects the actual Task rows.
         if row.detailed_summarised:
             try:
                 report.tasks_created = self._step_extract_tasks(session, row)
@@ -656,8 +671,11 @@ class ZoomPipeline:
                     zoom_id=row.zoom_id, error=str(e),
                 )
 
-        # Now build + send the short summary, using the freshly
-        # created Task rows for the To-Do block.
+        if row.detailed_summarised:
+            ok = self._step_doc_export(session, row)
+            if not ok and row.last_error:
+                report.errors.append(row.last_error)
+
         if row.detailed_summarised:
             ok = self._step_short_summary(session, row)
             if not ok and row.last_error:

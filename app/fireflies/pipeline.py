@@ -272,6 +272,48 @@ def _strip_llm_todo_block(text: str) -> str:
     return _TODO_SECTION_HEADERS_RE.sub("", text).rstrip()
 
 
+def _split_for_telegram(text: str, *, limit: int = 3800) -> list[str]:
+    """FR-CR-05-119 — split a long short-summary body into
+    Telegram-sized chunks (≤4096 chars per message). Splits at
+    paragraph (`\\n\\n`) boundaries when possible so each chunk
+    starts on a new section («Их сторона», «Суть», «To-Do»).
+    Falls back to a hard char split for paragraphs longer than
+    `limit`. Returns at least one chunk; empty input → []."""
+    if not text:
+        return []
+    text = text.strip()
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    paragraphs = text.split("\n\n")
+    current = ""
+    for p in paragraphs:
+        p = p.strip()
+        if not p:
+            continue
+        candidate = (current + "\n\n" + p) if current else p
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        # Flush whatever we have and start a fresh chunk.
+        if current:
+            chunks.append(current)
+            current = ""
+        # If a single paragraph is longer than the limit, split
+        # by hard char count (rare — task descriptions are
+        # usually <600 chars each).
+        while len(p) > limit:
+            cut = p.rfind(" ", 0, limit)
+            if cut < int(limit * 0.6):
+                cut = limit
+            chunks.append(p[:cut].rstrip())
+            p = p[cut:].lstrip()
+        current = p
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def _truncate(text: str | None, *, limit: int) -> str:
     """Trim `text` to `limit` chars without breaking mid-word
     when we can avoid it. Used to enforce the 2000-char Telegram
@@ -643,24 +685,34 @@ class FirefliesPipeline:
         from app.telegram_bot.handlers import admin_user_ids
 
         recipients = sorted(admin_user_ids())
+        # FR-CR-05-119 — split into Telegram-sized chunks because
+        # the deterministic To-Do section can grow past the
+        # 4096-char per-message limit (operator regression: 25
+        # tasks → 10 KB body). Each chunk goes as a separate DM.
+        chunks = _split_for_telegram(row.short_summary, limit=3800)
         sent = 0
         for uid in recipients:
             try:
                 uid_int = int(uid)
             except ValueError:
                 continue
-            try:
-                resp = self._sender.send_message(
-                    chat_id=uid_int, text=row.short_summary
-                )
-            except Exception as e:  # noqa: BLE001
-                log.warning(
-                    "fireflies_short_summary_send_failed",
-                    uid=uid,
-                    error=str(e),
-                )
-                continue
-            if resp and resp.get("message_id"):
+            uid_sent = 0
+            for chunk in chunks:
+                try:
+                    resp = self._sender.send_message(
+                        chat_id=uid_int, text=chunk,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "fireflies_short_summary_send_failed",
+                        uid=uid, error=str(e),
+                    )
+                    break
+                if resp and resp.get("message_id"):
+                    uid_sent += 1
+                else:
+                    break
+            if uid_sent == len(chunks):
                 sent += 1
         if sent:
             row.short_summary_sent = True

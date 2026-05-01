@@ -699,6 +699,40 @@ def test_split_audio_chunker_preserves_input_container(monkeypatch, tmp_path):
     assert any("-c" in cmd and cmd[-1].endswith(".m4a") for cmd in captured)
 
 
+def test_split_for_telegram_chunks_at_paragraph_boundaries():
+    """FR-CR-05-119 — operator regression: 25-task To-Do block
+    pushed `short_summary` to 10 KB, Telegram returned
+    «Bad Request: message is too long» and dropped the message
+    entirely. Splitter chunks at `\\n\\n` boundaries so each
+    Telegram DM stays under the 4096-char per-message cap and
+    each chunk starts on a fresh section («Их сторона», «Суть»,
+    «To-Do»)."""
+    from app.fireflies.pipeline import _split_for_telegram
+
+    # Empty / falsy → [].
+    assert _split_for_telegram("") == []
+    assert _split_for_telegram(None) == []  # type: ignore[arg-type]
+
+    # Short input → single chunk.
+    short = "ADNOC — 30.04.2026\n\nИх сторона: …\n\nСуть: blah."
+    assert _split_for_telegram(short, limit=3800) == [short]
+
+    # Long input split at paragraph boundaries.
+    para = "Это длинный параграф с разными словами " * 60  # ~2000 chars
+    body = "Header\n\n" + para + "\n\n" + para + "\n\n" + para
+    chunks = _split_for_telegram(body, limit=3800)
+    assert len(chunks) >= 2
+    for c in chunks:
+        assert len(c) <= 3800
+
+    # Single paragraph longer than the limit gets hard-split at
+    # word boundary.
+    huge = "x" * 5000
+    chunks_huge = _split_for_telegram(huge, limit=1000)
+    for c in chunks_huge:
+        assert len(c) <= 1000
+
+
 def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
     """FR-CR-05-119 — operator pinned: the To-Do section in the
     short TG summary lists every extracted Task verbatim

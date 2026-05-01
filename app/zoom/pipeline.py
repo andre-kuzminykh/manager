@@ -388,25 +388,40 @@ class ZoomPipeline:
         return True
 
     def _send_short_summary(self, row: ZoomRecording) -> int:
-        """DM the short summary to every admin uid. Returns
-        number of successful sends."""
+        """DM the short summary to every admin uid. FR-CR-05-119:
+        the deterministic To-Do block can push the body past
+        Telegram's 4096-char per-message limit, so we split into
+        chunks at paragraph boundaries and send each as a
+        separate DM. Returns the number of admins who received
+        the FULL set of chunks."""
+        from app.fireflies.pipeline import _split_for_telegram
         from app.telegram_bot.handlers import admin_user_ids
 
+        chunks = _split_for_telegram(row.short_summary or "", limit=3800)
+        if not chunks:
+            return 0
         sent = 0
         for uid in sorted(admin_user_ids()):
             if not uid.lstrip("-").isdigit():
                 continue
-            try:
-                resp = self._sender.send_message(
-                    chat_id=int(uid), text=row.short_summary or ""
-                )
+            uid_chunks = 0
+            for chunk in chunks:
+                try:
+                    resp = self._sender.send_message(
+                        chat_id=int(uid), text=chunk,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "zoom_short_summary_dm_failed",
+                        uid=uid, error=str(e),
+                    )
+                    break
                 if (resp or {}).get("message_id"):
-                    sent += 1
-            except Exception as e:  # noqa: BLE001
-                log.warning(
-                    "zoom_short_summary_dm_failed",
-                    uid=uid, error=str(e),
-                )
+                    uid_chunks += 1
+                else:
+                    break
+            if uid_chunks == len(chunks):
+                sent += 1
         row.short_summary_sent = sent > 0
         return sent
 

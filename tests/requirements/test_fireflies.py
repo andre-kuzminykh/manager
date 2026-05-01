@@ -804,6 +804,56 @@ def test_build_full_tasks_section_for_doc_renders_verbose_with_meta(session):
     assert "Срок: 16.05.2026" in out
 
 
+def test_short_summary_prompt_uses_new_dd_mm_header_format():
+    """FR-CR-05-120 — operator updated header to «DD/MM -
+    <Topic>» (was «<Topic> — DD.MM.YYYY | NN мин») and
+    flattened participants into a single «Участники:» line
+    (was a two-side «Их сторона / Наша сторона» split). New
+    canonical example pinned in the prompt."""
+    from app.fireflies.prompts import SHORT_SUMMARY_SYSTEM
+
+    blob = SHORT_SUMMARY_SYSTEM
+    assert "DD/MM" in blob
+    assert "30/04 - ADNOC" in blob
+    assert "Участники: Fabrizio Siraguzano" in blob
+    # Old format gone from the example.
+    assert "30.04.2026 | 57 мин" not in blob
+    assert "Их сторона: Fabrizio" not in blob
+
+
+def test_task_extraction_prompt_pins_topic_action_description_format():
+    """FR-CR-05-120 — operator pinned: each Task description
+    follows «<тема> - <конкретное действие>» format so the
+    short summary's To-Do can use it verbatim. Worked examples
+    pinned (Schaeffler / Draper / QIA / варанты) so a future
+    prompt rewrite can't accidentally drop the format."""
+    from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
+
+    blob = TASK_EXTRACTION_SYSTEM
+    assert "<тема> - <конкретное действие" in blob
+    assert "Schaeffler" in blob or "Шафлера" in blob
+    assert "Draper Associates" in blob
+    assert "Интро к катарскому шейху" in blob
+    assert "Варанты" in blob or "Варанты для инвесторов" in blob
+
+
+def test_task_extraction_prompt_pins_thinking_guidance():
+    """FR-CR-05-120 — operator switched task extraction to a
+    reasoning model and asked for «extract ALL tasks, don't
+    miss any». Prompt has the THINK CAREFULLY block with the
+    «8-25 tasks per 30-min meeting» heuristic and the «walk
+    the known_employees table item by item» owner-selection
+    guidance."""
+    from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
+
+    blob = TASK_EXTRACTION_SYSTEM
+    assert "THINK CAREFULLY" in blob
+    assert "8-25 tasks" in blob or "8-25" in blob
+    assert "walk the `known_employees`" in blob or (
+        "walk the known_employees" in blob
+    )
+
+
 def test_first_sentence_compresses_multi_sentence_description():
     """FR-CR-05-119 follow-up — short TG summary's «To-Do» line
     needs ONE sentence per task even when the full description
@@ -851,11 +901,13 @@ def test_first_sentence_compresses_multi_sentence_description():
     assert out.endswith("…")
 
 
-def test_build_todo_section_renders_tasks_one_sentence_with_owner(session):
-    """FR-CR-05-119 + follow-up: To-Do block items are
-    one-sentence compressions of `Task.description`, owner in
-    parens, sequential numbering, drop the section entirely if
-    no tasks were extracted, soft-deleted tasks excluded."""
+def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
+    """FR-CR-05-120: To-Do block items use the task description
+    VERBATIM (the LLM is told to write in «<topic> - <action>»
+    format already, so we trust the row content). Hard-cap at
+    350 chars guards against runaway emits. Owner in parens
+    only when set — empty owner drops the parens entirely.
+    Soft-deleted tasks excluded; no tasks → empty string."""
     from app.fireflies.pipeline import _build_todo_section
     from app.models import Task, TaskPriority, TaskSourceKind, TaskStatus
 
@@ -902,18 +954,34 @@ def test_build_todo_section_renders_tasks_one_sentence_with_owner(session):
     )
     lines = out.splitlines()
     assert lines[0] == "To-Do:"
-    # One-sentence compression — the second sentence about NDA
-    # must NOT appear.
-    assert lines[1].startswith(
-        "1) Алина подготовит письмо инвесторам"
-    )
-    assert "NDA" not in lines[1]
+    # FR-CR-05-120 — description used VERBATIM (the LLM is told
+    # to write in «<topic> - <action>» format on the Task row).
+    assert lines[1].startswith("1) Алина подготовит письмо инвесторам")
     assert "(Алина)" in lines[1]
-    # Already-one-sentence description is unchanged.
-    assert lines[2].startswith(
-        "2) Ирина скоординирует тайминг рассылки"
-    )
+    assert lines[2].startswith("2) Ирина скоординирует тайминг рассылки")
     assert "(Ирина Шипилова)" in lines[2]
+
+    # FR-CR-05-120 — empty owner drops the parens (no
+    # «(не назначен)» noise).
+    session.add(
+        Task(
+            title="Орфан",
+            description="Orphan task - сделать что-то без назначения.",
+            priority=TaskPriority.medium,
+            status=TaskStatus.todo,
+            owner_display_name=None,
+            source_kind=TaskSourceKind.fireflies,
+            source_conversation_id="trans-orphan",
+        )
+    )
+    session.flush()
+    orphan_out = _build_todo_section(
+        session,
+        source_kind=TaskSourceKind.fireflies,
+        source_conversation_id="trans-orphan",
+    ).splitlines()
+    assert orphan_out[1] == "1) Orphan task - сделать что-то без назначения."
+    assert "(не назначен)" not in "\n".join(orphan_out)
 
     # Soft-deleted tasks are excluded.
     other = Task(
@@ -1131,42 +1199,35 @@ def test_task_extraction_prompt_forbids_uid_in_description():
 
 
 def test_short_summary_prompt_pins_operator_format():
-    """FR-CR-05-117 — operator pinned the ADNOC layout as the
-    canonical short-summary shape:
+    """FR-CR-05-120 — operator updated the canonical layout:
 
-        <Тема> — DD.MM.YYYY | NN мин
+        DD/MM - <Topic>
 
-        Их сторона: …
-        Наша сторона: …
+        Участники: Имя1, Имя2, Имя3
 
         Суть: <2-4 sentences>
 
-        To-Do:
-        1) …
-        2) …
-
-    The system prompt must reference every section so the LLM
-    sticks to the format. This test is the regression guard for
-    the «🎙 Apr 30, 03:32 PM / 0 мин / без раздела «Их сторона»»
-    output we shipped before."""
+    The pipeline appends «To-Do:» from extracted Task rows; the
+    LLM stops at «Суть». Pre-FR-CR-05-120 used the longer
+    «<Тема> — DD.MM.YYYY | NN мин» header and a two-line
+    «Их сторона / Наша сторона» split; this test pins the new
+    flat single-line format.
+    """
     from app.fireflies.prompts import SHORT_SUMMARY_SYSTEM
 
     blob = SHORT_SUMMARY_SYSTEM
-    # Header shape pinned.
-    assert "DD.MM.YYYY" in blob
-    assert "NN мин" in blob
-    # Two-sided participant split.
-    assert "Их сторона" in blob
-    assert "Наша сторона" in blob
-    # «Суть» + «To-Do» sections pinned.
+    # New header shape pinned.
+    assert "DD/MM" in blob
+    assert "30/04 - ADNOC" in blob
+    # Single-line participants line pinned.
+    assert "Участники:" in blob
+    # Old two-sided split removed from the pinned example.
+    assert "Их сторона: Fabrizio" not in blob
+    assert "Наша сторона:" not in blob
+    # «Суть» kept; «To-Do» is OUT of the LLM's job.
     assert "Суть" in blob
-    assert "To-Do" in blob
-    # Worked ADNOC example pinned (canonical shape).
-    assert "ADNOC" in blob
-    # Anti-regression: explicit ban on Fireflies auto-stamps in
-    # the output.
-    assert "auto-stamp" in blob.lower() or "auto-timestamp" in blob.lower() or \
-           "auto-stamp" in blob or "Apr 30" in blob
+    # Anti-regression: ban on auto-stamps still pinned.
+    assert "auto-stamp" in blob.lower() or "Apr 30" in blob
 
 
 # --------------------------------------------------------------------------- #

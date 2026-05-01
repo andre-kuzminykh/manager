@@ -293,10 +293,22 @@ def _build_todo_section(
         return ""
     lines = ["To-Do:"]
     for i, t in enumerate(tasks, 1):
-        body = (t.description or "").strip() or (t.title or "").strip()
-        body = _first_sentence(body, limit=240)
-        owner = (t.owner_display_name or "").strip() or "не назначен"
-        lines.append(f"{i}) {body} ({owner})")
+        # FR-CR-05-120 — task descriptions are now in the
+        # operator-pinned «<topic> - <action with details>»
+        # format (enforced by TASK_EXTRACTION_SYSTEM). Use as
+        # is, just hard-cap at 350 chars so a runaway LLM emit
+        # can't push a single line over Telegram's per-message
+        # limit. Owner appended in parens only when set —
+        # «(не назначен)» is noise the operator pinned out.
+        raw = (t.description or "").strip() or (t.title or "").strip()
+        if len(raw) > 350:
+            cut = raw.rfind(" ", 0, 350)
+            raw = (raw[: cut if cut > 200 else 350]).rstrip(",;:- ") + "…"
+        owner = (t.owner_display_name or "").strip()
+        if owner:
+            lines.append(f"{i}) {raw} ({owner})")
+        else:
+            lines.append(f"{i}) {raw}")
     return "\n".join(lines)
 
 

@@ -74,70 +74,54 @@ You produce a SHORT summary of a recorded business meeting for
 posting in Telegram. Output is in RUSSIAN.
 
 ═══════════════════════════════════════════════════════════════
-CANONICAL FORMAT — operator pinned. Match this layout EXACTLY,
-including blank lines between sections and the «1)» numbered
-list style. This is the gold-standard reference example:
+CANONICAL FORMAT (FR-CR-05-120) — operator pinned. Match this
+layout EXACTLY, including blank lines between sections.
 ═══════════════════════════════════════════════════════════════
 
-ADNOC — 30.04.2026 | 57 мин
+30/04 - ADNOC
 
-Их сторона: Fabrizio Siraguzano (Technology & Innovation), Takis (инвестиции), Sean, другие
-Наша сторона: Артём Соколов, Алина, Сат, Adam Kelso, Иоганнес, другие
+Участники: Fabrizio Siraguzano, Takis, Sean
 
 Суть: Обсудили стратегическое партнёрство по внедрению робототехники Humanoid в нефтегазе ADNOC. Рассматриваются варианты ко-разработки и кастомизации продукта под задачи ADNOC, пилоты и совместная коммерциализация. ADNOC интересует не только инвестиции, а преимущественно совместное value creation и реальная операционная выгода. До вскрытия данных — вход через NDA.
 
-To-Do:
-1) Получить и подписать NDA
-2) Подготовиться к техническому due diligence
-3) Совместно сформировать перечень пилотных задач и требований к продукту
-
 ═══════════════════════════════════════════════════════════════
-END OF EXAMPLE. Every output MUST have a header line, then the
-two participant lines (or one «Участники:» line for internal
-meetings), then «Суть:», then «To-Do:». Skipping any of these
-sections is a regression.
+END OF EXAMPLE. The pipeline appends the «To-Do:» block from
+the actual extracted Task rows; you stop after «Суть».
 ═══════════════════════════════════════════════════════════════
 
-LENGTH: aim for 1200-2800 chars (UTF-8). Hard cap: 3800 chars
-(headroom under the Telegram 4096 per-message limit).
+LENGTH: «Суть» 2-4 sentences, ≤1200 chars. The pipeline appends
+the deterministic «To-Do» section + Google Doc trailer and
+chunks the whole message at 4096 chars per Telegram DM.
 
-HEADER LINE — «<Тема> — DD.MM.YYYY | NN мин»
+HEADER LINE — «DD/MM - <Topic>» (FR-CR-05-120):
 
-- Тема: REQUIRED. The BUSINESS topic, not Fireflies'/Zoom's
-  auto-timestamp («Apr 30, 03:32 PM», «May 5 at 5pm», «Zoom
-  Meeting», «<host>'s Personal Meeting Room»). When the
-  `meeting_title` field is empty or looks like one of those
-  auto-stamps, DERIVE a real topic from the participants +
-  transcript. Examples:
+- Date: REQUIRED. Format DD/MM exactly (slash, no year unless
+  the meeting was in a different year, in which case append
+  /YY). Examples: «30/04», «01/05», «15/03/24» when the
+  meeting wasn't in the current year.
+- Topic: REQUIRED. SHORT noun-phrase saying what / who the
+  meeting is about. Just the keyword:
     - external company on the call → company name («ADNOC»,
-      «Bosch», «Goldman Sachs»)
-    - candidate interview → «<имя кандидата> — Senior X»
-    - internal sync without external party → «<тема>» from the
-      first decision: «Раунд Humanoid», «Юр. вопросы Q2»
-- Date: REQUIRED. Format DD.MM.YYYY exactly (Russian operator
-  standard).
-- Duration: «| NN мин» rounded to nearest minute. DROP THE
-  «| NN мин» PART ENTIRELY when `duration_min` is empty / 0 /
-  unknown — do not ship «| 0 мин» and do not ship «| мин». In
-  that case the header collapses to «<Тема> — DD.MM.YYYY».
+      «Bosch», «Goldman Sachs», «Schaeffler»)
+    - investor sync / fundraising → «Fundraising sync», «Раунд
+      Humanoid», «Investor update»
+    - candidate interview → «<имя> - <должность>»
+    - internal team meeting → «<тема>» from the first decision
+- NEVER include Fireflies'/Zoom's auto-timestamps («Apr 30,
+  03:32 PM», «Zoom Meeting», «<host>'s Personal Meeting Room»)
+  in the topic. Derive a real topic from the participants +
+  transcript when the `meeting_title` field looks like one.
+- Drop duration entirely (the operator pinned: it's clutter for
+  a chat message; the doc has it in the meta block).
 
-PARTICIPANTS — TWO LINES (REQUIRED):
+PARTICIPANTS — SINGLE LINE (REQUIRED):
 
-- Split into «Их сторона» (external) and «Наша сторона»
-  (internal team — Humanoid people: Артём, Алина, Иоганнес,
-  Adam Kelso, Andre, Ирина, Сат, etc.). Use the
-  `internal_participants_hint` block in the user prompt to
-  decide which side each name lands on. When unsure, lean
-  external — operator can correct.
-- ≥4 names per side → list 3-4 + «другие». ≤3 names → list
-  all without «другие».
-- Roles in parens only when known from the participants
-  metadata. Don't invent.
-- If sides are 100% internal (team meeting), drop «Их сторона»
-  entirely and just label «Участники: …» (single line).
-- NEVER skip participants. If the data is sparse, list whatever
-  names you have — never replace this section with «—» or omit
-  it.
+- One line: «Участники: Имя1, Имя2, Имя3, …» (FR-CR-05-120,
+  operator pinned a flat list — no «Их сторона / Наша сторона»
+  split for the short summary). Up to ~6 most relevant
+  attendees; cap with «и другие» when the list is longer.
+- Real names from the participants metadata. NO roles in
+  parens. NEVER skip the section.
 
 «Суть» (REQUIRED, 2-4 sentences):
 
@@ -179,18 +163,64 @@ Style:
 TASK_EXTRACTION_SYSTEM = """\
 You extract ACTIONABLE TASKS from a meeting transcript.
 
+═══════════════════════════════════════════════════════════════
+THINK CAREFULLY (FR-CR-05-120). This call uses a reasoning
+model. Operator-pinned expectations:
+
+1. Read the ENTIRE transcript before emitting anything. Don't
+   stop at the first batch of explicit assignments — late-stage
+   recap, «следующие шаги», «давайте по итогам» blocks often
+   add 30-50% more tasks that the model misses on first pass.
+2. Extract EVERYTHING actionable. A 30-min business meeting
+   typically yields 8-25 tasks; if you found 3-4, re-read the
+   transcript — you missed implicit follow-ups (e.g. «надо ещё
+   подумать» / «обсудим завтра» that name a deliverable),
+   reported-back commitments («я уже договорился с X — пусть
+   пришлёт Y»), and meta-tasks («подготовить материалы для
+   следующего звонка»).
+3. For owner selection, walk the `known_employees` table item
+   by item. For each candidate, ask: does their `role` or
+   `notes` match the task's domain? Does the transcript name
+   them by name? Do their notes route through an assistant?
+   Pick the single best fit per the rules below — and when
+   the named-assignee in the transcript matches a row, that
+   row WINS regardless of role / notes / assistant rules
+   (rule 7).
+═══════════════════════════════════════════════════════════════
+
 For each task, emit:
 
 - title:        short imperative verb-phrase, ≤80 chars,
                 Russian, in infinitive («подготовить», «отправить»).
                 No filler («надо», «нужно»).
-- description:  1-3 sentences in Russian explaining context —
-                what came up in the meeting, what's the
-                deliverable, any reference / number / project
-                mentioned. Concrete: name people, projects,
-                clients, numbers verbatim from the transcript.
-                A bare «нужно сделать X» mirroring the title is
-                NOT a valid description (FR-CR-05-50).
+- description:  ONE compact line in the operator-pinned format
+                (FR-CR-05-120):
+
+                  «<тема> - <конкретное действие с деталями>»
+
+                The «тема» is the SHORT noun-phrase saying what
+                this task is about («Рассылка апдейтов по
+                Schaeffler», «Интро к катарскому шейху»,
+                «Draper Associates», «Варанты для инвесторов»).
+                The action after the dash is the imperative
+                instruction with the SPECIFIC details that
+                disambiguate it from any other similar task —
+                client / company / dollar amount / deadline /
+                exception. ≤300 chars total. Multiple clauses
+                separated by commas are fine when the task has
+                several sub-actions.
+
+                ✓ «Рассылка апдейтов по контракту Шафлера - не
+                  использовать ссылки, текст сократить, а договор
+                  и материалы прикладывать»
+                ✓ «Draper Associates - найти историю общения»
+                ✓ «Интро к катарскому шейху - написать QIA,
+                  попросить интро, Диме подготовить письмо,
+                  Ирине отправить»
+                ✓ «Варанты для инвесторов - обсуждать только на
+                  звонках с ограниченным кругом, определить кому
+                  и при каком чеке»
+
                 NEVER copy slack_user_id values from the
                 `known_employees` table into the description —
                 those numbers («462156243», «700469400», «U02XX»)

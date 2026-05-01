@@ -728,12 +728,14 @@ def test_detect_prompt_rejects_chat_opener_retrospective_recap():
 
 def test_default_models_use_gpt_5_5_everywhere():
     """FR-CR-05-104 — operator: «давай поставим gpt-5.5
-    везде». GPT-5.5 launched 2026-Q1 (operator-cited
-    https://openai.com/index/introducing-gpt-5-5/). All six
-    model defaults — main, date, dedup, fireflies (summary,
-    short-summary, tasks) — bumped to gpt-5.5. Operators
-    whose key doesn't have access yet override via the
-    matching env var (OPENAI_MODEL=gpt-4o etc.)."""
+    везде». GPT-5.5 launched 2026-Q1. All non-thinking model
+    defaults — main, date, dedup, fireflies (summary,
+    short-summary) — are gpt-5.5. FR-CR-05-120 — task
+    extraction switched to the thinking variant
+    `gpt-5.5-thinking` so the model walks the transcript +
+    employee table carefully and doesn't miss tasks / mis-
+    routes named assignees. Operators whose key doesn't have
+    access override via FIREFLIES_TASKS_MODEL=gpt-5.5 etc."""
     from app.config import Settings
 
     s = Settings()
@@ -742,7 +744,7 @@ def test_default_models_use_gpt_5_5_everywhere():
     assert s.openai_dedup_model == "gpt-5.5"
     assert s.fireflies_summary_model == "gpt-5.5"
     assert s.fireflies_short_summary_model == "gpt-5.5"
-    assert s.fireflies_tasks_model == "gpt-5.5"
+    assert s.fireflies_tasks_model == "gpt-5.5-thinking"
 
 
 def test_detect_prompt_rejects_third_party_future_intent():

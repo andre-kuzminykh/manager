@@ -1,5 +1,6 @@
 from app.models.audit import AuditLog
 from app.models.base import Base
+from app.models.counterparty import Counterparty, CounterpartyAttribute
 from app.models.daily_plan import DailyPlanItem
 from app.models.employee import Employee
 from app.models.intent import ActionDraft, ActionDraftState, IntentInference
@@ -34,6 +35,8 @@ __all__ = [
     "Base",
     "AuditLog",
     "ActionDraft",
+    "Counterparty",
+    "CounterpartyAttribute",
     "ActionDraftState",
     "DailyPlanItem",
     "Employee",

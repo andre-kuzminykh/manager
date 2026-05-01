@@ -146,6 +146,54 @@ def build_team_sheet_factory(
     return factory
 
 
+def build_counterparties_sheet_factory(
+    settings: Settings,
+) -> Callable[[], "CounterpartiesSheetSync | None"] | None:
+    """FR-CR-05-124 — factory for the counterparties directory
+    sync. Returns None when neither sheet is configured (the
+    feature is opt-in)."""
+    if not (
+        settings.counterparties_status_sheet_id
+        or settings.counterparties_outreach_sheet_id
+        or settings.counterparties_targets_sheet_id
+    ):
+        return None
+
+    def factory() -> "CounterpartiesSheetSync | None":
+        from app.sync.counterparties import CounterpartiesSheetSync
+
+        creds = _resolve_credentials(GOOGLE_SCOPES_SHEETS)
+        if creds is None:
+            return None
+
+        def _split_tabs(s: str) -> list[str]:
+            return [t.strip() for t in (s or "").split(",") if t.strip()]
+
+        name_first_tabs: list[tuple[str, str]] = []
+        if settings.counterparties_outreach_sheet_id:
+            for tab in _split_tabs(
+                settings.counterparties_outreach_tab_names
+            ):
+                name_first_tabs.append(
+                    (settings.counterparties_outreach_sheet_id, tab)
+                )
+        if settings.counterparties_targets_sheet_id:
+            for tab in _split_tabs(
+                settings.counterparties_targets_tab_names
+            ):
+                name_first_tabs.append(
+                    (settings.counterparties_targets_sheet_id, tab)
+                )
+        return CounterpartiesSheetSync(
+            credentials=creds,
+            status_spreadsheet_id=settings.counterparties_status_sheet_id,
+            status_tab_name=settings.counterparties_status_tab_name,
+            name_first_tabs=name_first_tabs,
+        )
+
+    return factory
+
+
 def build_google_tasks_factory(
     settings: Settings,
 ) -> Callable[[], GoogleTasksSyncService | None] | None:

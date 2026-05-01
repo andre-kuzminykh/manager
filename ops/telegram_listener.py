@@ -207,6 +207,25 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         log.warning("tg_listener_google_tasks_pull_setup_failed", error=str(e))
 
+    # FR-CR-05-124 — counterparties directory wipe-and-reload from
+    # the configured Google Sheets. Off when neither
+    # COUNTERPARTIES_STATUS_SHEET_ID nor _OUTREACH_SHEET_ID is set.
+    try:
+        from app.sync.factories import build_counterparties_sheet_factory
+
+        cp_factory = build_counterparties_sheet_factory(settings)
+        if cp_factory is not None:
+            listener.wire_counterparties_pull(
+                factory=cp_factory,
+                poll_interval_seconds=(
+                    settings.counterparties_poll_interval_seconds
+                ),
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "tg_listener_counterparties_setup_failed", error=str(e),
+        )
+
     # FR-CR-05-02 — register the cross-channel subscriber dispatcher
     # so transitions / edits triggered from Telegram buttons fan out
     # DMs to both Slack subscribers (via a fresh WebClient — only

@@ -72,6 +72,41 @@ class Settings(BaseSettings):
     google_team_sheets_tab_name: str = Field(
         default="Team", alias="GOOGLE_TEAM_SHEETS_TAB_NAME"
     )
+    # FR-CR-05-124 — counterparties directory pulled from two
+    # Google Sheets, wipe-and-reload semantics. Source A is the
+    # «Status outreach» tab on the investor master sheet (name
+    # in column B, type in column A, all columns captured as
+    # JSON). Source B has three tabs each with names in
+    # column A — the tab name itself becomes the type.
+    counterparties_status_sheet_id: str = Field(
+        default="", alias="COUNTERPARTIES_STATUS_SHEET_ID"
+    )
+    counterparties_status_tab_name: str = Field(
+        default="Status outreach",
+        alias="COUNTERPARTIES_STATUS_TAB_NAME",
+    )
+    counterparties_outreach_sheet_id: str = Field(
+        default="", alias="COUNTERPARTIES_OUTREACH_SHEET_ID"
+    )
+    # Comma-separated tab names on the «outreach» sheet, each
+    # becomes a `type` value on the hub.
+    counterparties_outreach_tab_names: str = Field(
+        default="Outreach,Rejections,Looking for intros",
+        alias="COUNTERPARTIES_OUTREACH_TAB_NAMES",
+    )
+    # FR-CR-05-124 follow-up — third source: investor-targets
+    # sheet with «Investor Targets» + «rejected» tabs. Name-first
+    # pattern (column A = name, tab name = type).
+    counterparties_targets_sheet_id: str = Field(
+        default="", alias="COUNTERPARTIES_TARGETS_SHEET_ID"
+    )
+    counterparties_targets_tab_names: str = Field(
+        default="Investor Targets,rejected",
+        alias="COUNTERPARTIES_TARGETS_TAB_NAMES",
+    )
+    counterparties_poll_interval_seconds: int = Field(
+        default=300, alias="COUNTERPARTIES_POLL_INTERVAL_SECONDS"
+    )
     # Service-Account auth — alternative to OAuth. Provide ONE of:
     # - GOOGLE_SERVICE_ACCOUNT_JSON: full JSON key inline (single line);
     # - GOOGLE_SERVICE_ACCOUNT_JSON_PATH: filesystem path to the key file.

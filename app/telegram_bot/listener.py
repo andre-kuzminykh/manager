@@ -312,6 +312,14 @@ class TelegramListener:
         self._tasks_sheet_pull_factory = tasks_sheet_pull_factory
         self._sheet_poll_interval = max(0, int(sheet_poll_interval_seconds))
         self._last_sheet_poll_at = 0.0
+        # FR-CR-05-124 — counterparties directory pull, wired
+        # via `wire_counterparties_pull()`. Off when the factory
+        # isn't installed (defaults to None for back-compat with
+        # listener constructors that don't pass it). Polled at
+        # its own interval, separate from the Sheets/team pulls.
+        self._counterparties_factory = None
+        self._counterparties_poll_interval = 300
+        self._last_counterparties_poll_at = 0.0
         # FR-CR-05-35 — periodic poll of the Supabase TG message
         # view. Off by default — flip via VIEW_REALTIME_ENABLED.
         self._view_realtime_enabled = bool(view_realtime_enabled)
@@ -414,6 +422,54 @@ class TelegramListener:
     @property
     def enabled(self) -> bool:
         return bool(self._token)
+
+    def wire_counterparties_pull(
+        self,
+        *,
+        factory,
+        poll_interval_seconds: int = 300,
+    ) -> None:
+        """FR-CR-05-124 — register the counterparties-sheet pull
+        factory + interval. Off until called; called once at
+        startup from `ops/telegram_listener.py` when both/either
+        of the source sheet IDs are configured."""
+        self._counterparties_factory = factory
+        self._counterparties_poll_interval = max(
+            0, int(poll_interval_seconds)
+        )
+
+    def _maybe_run_counterparties_pull(self) -> None:
+        """FR-CR-05-124 — wipe-and-reload the counterparties
+        directory on a separate cadence (default 300s) from the
+        team sheet pull. Errors are logged and swallowed — a
+        transient Sheets failure shouldn't blank the directory.
+        """
+        if self._counterparties_factory is None:
+            return
+        if self._counterparties_poll_interval <= 0:
+            return
+        now = time.time()
+        if (
+            now - self._last_counterparties_poll_at
+            < self._counterparties_poll_interval
+        ):
+            return
+        self._last_counterparties_poll_at = now
+        try:
+            sync = self._counterparties_factory()
+            if sync is None:
+                return
+            with session_scope() as s:
+                hubs, attrs = sync.pull(s)
+            if hubs or attrs:
+                log.info(
+                    "listener_counterparties_pulled",
+                    hubs=hubs, attrs=attrs,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "listener_counterparties_pull_failed", error=str(e),
+            )
 
     def _maybe_run_sheet_pulls(self) -> None:
         """FR-CR-05-28 — pull operator edits from both Sheets
@@ -871,6 +927,9 @@ class TelegramListener:
         # every tick but throttled to `sheet_poll_interval_seconds`
         # internally, so the cost is bounded.
         self._maybe_run_sheet_pulls()
+        # FR-CR-05-124 — counterparties directory wipe-and-reload
+        # on its own cadence (default 300s).
+        self._maybe_run_counterparties_pull()
         # FR-CR-05-35 — fire scheduled Supabase view poll, also
         # throttled internally.
         self._maybe_poll_source_view()

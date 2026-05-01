@@ -21,6 +21,8 @@ import math
 import os
 import shutil
 import subprocess
+import time as _trace_time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from typing import Any
@@ -41,6 +43,47 @@ from app.logging_setup import get_logger
 from app.models import MeetingRecording, Task, TaskSourceKind
 
 log = get_logger(__name__)
+
+
+@contextmanager
+def _trace_step(source: str, step: str, **ctx):
+    """FR-CR-05-122 — every pipeline step is bracketed by a
+    started/done log line so the operator can walk through a
+    rerun by `grep step_started|step_done` over the listener
+    output. Times the step in ms; on exception emits
+    `*_step_failed` with the same shape so a single grep
+    pattern covers all three outcomes.
+
+    Usage::
+
+        with _trace_step("fireflies", "transcribe", fireflies_id=…):
+            ...
+
+    Emits (with `source="fireflies"`):
+        fireflies_step_started step=transcribe fireflies_id=…
+        fireflies_step_done    step=transcribe duration_ms=N ok=True
+                                 fireflies_id=…
+
+    Failures emit `..._step_failed` and re-raise so the caller's
+    error handling stays in charge.
+    """
+    started = _trace_time.monotonic()
+    log.info(f"{source}_step_started", step=step, **ctx)
+    try:
+        yield
+    except Exception as e:  # noqa: BLE001
+        elapsed = int((_trace_time.monotonic() - started) * 1000)
+        log.warning(
+            f"{source}_step_failed",
+            step=step, duration_ms=elapsed, error=str(e), **ctx,
+        )
+        raise
+    else:
+        elapsed = int((_trace_time.monotonic() - started) * 1000)
+        log.info(
+            f"{source}_step_done",
+            step=step, duration_ms=elapsed, **ctx,
+        )
 
 
 @dataclass
@@ -1240,60 +1283,66 @@ class FirefliesPipeline:
             report.skipped_reason = "already_processed"
             return report
         row.attempts += 1
+        # FR-CR-05-122 — every step is wrapped in `_trace_step`
+        # so the listener log shows started/done bookends with
+        # `duration_ms`. Grep `fireflies_step_(started|done|failed)`
+        # to walk through a single recording's run.
+        ctx = {"fireflies_id": row.fireflies_id}
 
-        if not self._step_download_audio(row):
-            session.flush()
-            report.errors.append(row.last_error or "download_failed")
-            return report
-        if not self._step_transcribe(row):
-            session.flush()
-            report.errors.append(row.last_error or "transcribe_failed")
-            return report
+        with _trace_step("fireflies", "download", **ctx):
+            if not self._step_download_audio(row):
+                session.flush()
+                report.errors.append(row.last_error or "download_failed")
+                return report
+        with _trace_step("fireflies", "transcribe", **ctx):
+            if not self._step_transcribe(row):
+                session.flush()
+                report.errors.append(row.last_error or "transcribe_failed")
+                return report
         report.transcript_chars = len(row.transcript_text or "")
-        if not self._step_detailed_summary(row):
-            session.flush()
-            report.errors.append(row.last_error or "detailed_summary_failed")
-            return report
+        with _trace_step("fireflies", "detailed_summary", **ctx):
+            if not self._step_detailed_summary(row):
+                session.flush()
+                report.errors.append(row.last_error or "detailed_summary_failed")
+                return report
         report.detailed_chars = len(row.detailed_summary or "")
-        # FR-CR-05-119 follow-up: extract tasks FIRST, then export
-        # the doc with the full task list appended, then build the
-        # short summary with the compressed task list. Order:
-        # detailed → tasks → doc → short.
-        report.tasks_created = self._step_extract_tasks(session, row)
-        # FR-CR-05-121 — verifier pass to catch tasks the first
-        # extraction missed. Adds Task rows in the same session;
-        # `report.tasks_created` is bumped by the new total
-        # below from the row.tasks_extracted_count.
+        # FR-CR-05-119 follow-up: extract tasks FIRST, then doc
+        # with full task list, then short with compressed.
+        with _trace_step("fireflies", "extract_tasks", **ctx):
+            report.tasks_created = self._step_extract_tasks(session, row)
+        # FR-CR-05-121 — verifier pass.
         try:
-            self._step_verify_tasks(session, row)
+            with _trace_step("fireflies", "verify_tasks", **ctx):
+                self._step_verify_tasks(session, row)
         except Exception as e:  # noqa: BLE001
             log.info(
                 "fireflies_task_verification_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
         report.tasks_created = row.tasks_extracted_count or report.tasks_created
-        if not self._step_doc_export(session, row):
-            log.warning(
-                "fireflies_doc_export_failed",
-                recording_id=row.id,
-                error=row.last_error,
-            )
-            report.errors.append(row.last_error or "doc_export_failed")
-        else:
-            report.google_doc_url = row.google_doc_url
-        if not self._step_short_summary(session, row):
-            log.warning(
-                "fireflies_short_summary_failed",
-                recording_id=row.id,
-                error=row.last_error,
-            )
-            report.errors.append(row.last_error or "short_summary_failed")
+        with _trace_step("fireflies", "doc_export", **ctx):
+            if not self._step_doc_export(session, row):
+                log.warning(
+                    "fireflies_doc_export_failed",
+                    recording_id=row.id, error=row.last_error,
+                )
+                report.errors.append(row.last_error or "doc_export_failed")
+            else:
+                report.google_doc_url = row.google_doc_url
+        with _trace_step("fireflies", "short_summary", **ctx):
+            if not self._step_short_summary(session, row):
+                log.warning(
+                    "fireflies_short_summary_failed",
+                    recording_id=row.id, error=row.last_error,
+                )
+                report.errors.append(row.last_error or "short_summary_failed")
         report.short_chars = len(row.short_summary or "")
-        report.short_summary_recipients = self._step_send_short_summary(row)
-        # FR-CR-05-120 follow-up — DM cards last so the operator
-        # sees the overview message first.
+        with _trace_step("fireflies", "send_short_summary", **ctx):
+            report.short_summary_recipients = self._step_send_short_summary(row)
+        # FR-CR-05-120 follow-up — DM cards last.
         try:
-            self._step_post_task_cards(session, row)
+            with _trace_step("fireflies", "post_task_cards", **ctx):
+                self._step_post_task_cards(session, row)
         except Exception as e:  # noqa: BLE001
             log.info(
                 "fireflies_post_task_cards_unexpected_error",

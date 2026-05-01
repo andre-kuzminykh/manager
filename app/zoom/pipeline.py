@@ -853,41 +853,49 @@ class ZoomPipeline:
         row.attempts = (row.attempts or 0) + 1
         row.processed_at = datetime.now(timezone.utc)
 
-        # FR-CR-05-119 follow-up — order: detailed → tasks → doc
-        # → short. Tasks must exist before the doc export so the
-        # archived report carries the verbose task list, and
-        # before the short summary so the compressed To-Do block
-        # uses the actual Task rows.
+        # FR-CR-05-122 — every step bracketed by `_trace_step`
+        # so `grep zoom_step_(started|done|failed)` over the
+        # listener log walks through a single recording's run
+        # with `duration_ms` per step.
+        from app.fireflies.pipeline import _trace_step
+        ctx = {"zoom_id": row.zoom_id}
+
+        # FR-CR-05-119 follow-up — order: detailed → tasks →
+        # verify → doc → short → post_cards.
         for label, fn in (
             ("download", self._step_download_audio),
             ("transcribe", self._step_transcribe),
-            ("detailed", self._step_detailed_summary),
+            ("detailed_summary", self._step_detailed_summary),
         ):
-            ok = fn(row)
-            if not ok:
-                if row.last_error:
-                    report.errors.append(row.last_error)
-                log.info(
-                    "zoom_recording_step_failed",
-                    zoom_id=row.zoom_id, step=label, err=row.last_error,
-                )
-                break
+            with _trace_step("zoom", label, **ctx):
+                ok = fn(row)
+                if not ok:
+                    if row.last_error:
+                        report.errors.append(row.last_error)
+                    log.info(
+                        "zoom_recording_step_failed",
+                        zoom_id=row.zoom_id, step=label,
+                        err=row.last_error,
+                    )
+                    break
 
         if row.detailed_summarised:
             try:
-                report.tasks_created = self._step_extract_tasks(session, row)
+                with _trace_step("zoom", "extract_tasks", **ctx):
+                    report.tasks_created = self._step_extract_tasks(
+                        session, row
+                    )
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "zoom_extract_tasks_unexpected_error",
                     zoom_id=row.zoom_id, error=str(e),
                 )
 
-        # FR-CR-05-121 — verifier pass: catch missed tasks via a
-        # second LLM call that reads transcript + the just-
-        # extracted task list.
+        # FR-CR-05-121 — verifier pass.
         if row.detailed_summarised:
             try:
-                self._step_verify_tasks(session, row)
+                with _trace_step("zoom", "verify_tasks", **ctx):
+                    self._step_verify_tasks(session, row)
             except Exception as e:  # noqa: BLE001
                 log.info(
                     "zoom_task_verification_unexpected_error",
@@ -898,21 +906,22 @@ class ZoomPipeline:
         )
 
         if row.detailed_summarised:
-            ok = self._step_doc_export(session, row)
-            if not ok and row.last_error:
-                report.errors.append(row.last_error)
+            with _trace_step("zoom", "doc_export", **ctx):
+                ok = self._step_doc_export(session, row)
+                if not ok and row.last_error:
+                    report.errors.append(row.last_error)
 
         if row.detailed_summarised:
-            ok = self._step_short_summary(session, row)
-            if not ok and row.last_error:
-                report.errors.append(row.last_error)
+            with _trace_step("zoom", "short_summary", **ctx):
+                ok = self._step_short_summary(session, row)
+                if not ok and row.last_error:
+                    report.errors.append(row.last_error)
 
-        # FR-CR-05-120 follow-up — DM cards posted LAST so the
-        # operator sees the meeting overview message first, then
-        # individual task cards cascade in.
+        # FR-CR-05-120 follow-up — DM cards posted LAST.
         if row.detailed_summarised:
             try:
-                self._step_post_task_cards(session, row)
+                with _trace_step("zoom", "post_task_cards", **ctx):
+                    self._step_post_task_cards(session, row)
             except Exception as e:  # noqa: BLE001
                 log.info(
                     "zoom_post_task_cards_unexpected_error",

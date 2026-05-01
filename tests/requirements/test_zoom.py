@@ -571,6 +571,123 @@ def test_verifier_pass_adds_missed_tasks_in_zoom_pipeline(
         get_settings.cache_clear()  # type: ignore[attr-defined]
 
 
+def test_zoom_pipeline_emits_trace_lines_for_every_step(
+    patched_session_scope, SessionFactory, monkeypatch
+):
+    """FR-CR-05-122 — every pipeline step is bracketed by a
+    `zoom_step_started` / `zoom_step_done` log line so the
+    operator can walk through a single recording's run by
+    `grep zoom_step_(started|done|failed)`. Each line carries
+    the step label + zoom_id; `_done` lines also carry
+    `duration_ms`. This test pins the trace shape end-to-end."""
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
+    from app.config import get_settings
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    captured: list[dict] = []
+
+    # FR-CR-05-122 — the pipeline uses structlog (not stdlib
+    # logging), so caplog won't see the events. Patch the
+    # logger's `info` and `warning` methods to record events
+    # for assertion.
+    from app.fireflies import pipeline as _ff
+    from app.zoom import pipeline as _zoom_mod
+
+    def _capture(level):
+        def _emit(event, **fields):
+            captured.append({"level": level, "event": event, **fields})
+        return _emit
+
+    monkeypatch.setattr(_ff.log, "info", _capture("info"))
+    monkeypatch.setattr(_ff.log, "warning", _capture("warning"))
+    monkeypatch.setattr(_zoom_mod.log, "info", _capture("info"))
+    monkeypatch.setattr(_zoom_mod.log, "warning", _capture("warning"))
+    try:
+        settings = _settings_with_audio_dir()
+
+        class _StubZoomClient:
+            enabled = True
+
+            def list_recordings(self, *, limit, **kw):
+                return [_zoom_meta()]
+
+            def download_audio(self, *, url, dest_path, max_bytes):
+                with open(dest_path, "wb") as f:
+                    f.write(b"x" * 1024)
+                return 1024
+
+        monkeypatch.setattr(
+            "app.fireflies.pipeline._sniff_audio_extension",
+            lambda *a, **kw: "m4a",
+        )
+        monkeypatch.setattr(
+            "app.services.transcription.transcribe_bytes",
+            lambda **kw: "Артем сказал что Алина подготовит письмо.",
+        )
+        llm = _FakeLLM(
+            summary_text="Подробный отчёт.",
+            tasks=[{
+                "title": "Подготовить письмо",
+                "description": "Алина - подготовит письмо.",
+                "owner": None, "priority": "medium",
+            }],
+        )
+        sender = _FakeSender()
+        from app.zoom.pipeline import ZoomPipeline
+
+        pipeline = ZoomPipeline(
+            settings=settings,
+            client=_StubZoomClient(),
+            llm_backend=llm,
+            docs_factory=lambda: _FakeDocs(),
+            sender=sender,
+        )
+
+        with SessionFactory() as s:
+            from app.models import TeamMember
+            s.add(
+                TeamMember(
+                    real_name="Admin", telegram_user_id=777,
+                    telegram_username="admin", active=True,
+                )
+            )
+            s.flush()
+            pipeline.process_one(s, _zoom_meta())
+            s.commit()
+
+        events = [c["event"] for c in captured]
+        assert "zoom_step_started" in events, (
+            "no started lines: %s" % events[:20]
+        )
+        assert "zoom_step_done" in events, (
+            "no done lines: %s" % events[:20]
+        )
+        # Per-step coverage: every step name appears in BOTH
+        # started and done lines.
+        started_steps = {
+            c["step"] for c in captured if c["event"] == "zoom_step_started"
+        }
+        done_steps = {
+            c["step"] for c in captured if c["event"] == "zoom_step_done"
+        }
+        for step in (
+            "download", "transcribe", "detailed_summary",
+            "extract_tasks", "verify_tasks",
+            "doc_export", "short_summary", "post_task_cards",
+        ):
+            assert step in started_steps, f"no started for {step}"
+            assert step in done_steps, f"no done for {step}"
+        # `_done` carries duration_ms (int).
+        for c in captured:
+            if c["event"] == "zoom_step_done":
+                assert isinstance(c.get("duration_ms"), int), c
+                assert c.get("zoom_id") == "zm-1"
+        # No failed lines on the happy path.
+        assert not any(c["event"] == "zoom_step_failed" for c in captured)
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
 def test_zoom_short_summary_dm_arrives_before_per_task_cards(
     patched_session_scope, SessionFactory, monkeypatch
 ):

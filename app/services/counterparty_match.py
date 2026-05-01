@@ -152,29 +152,25 @@ def _shortlist_directory_for_transcript(
     directory: list["Counterparty"],
     transcript: str,
     *,
-    max_directory_rows: int = 200,
+    max_directory_rows: int = 300,
 ) -> list["Counterparty"]:
     """FR-CR-05-126 — Python-side fuzzy prefilter so the LLM
     only sees plausible candidates instead of all 600+ rows.
-    Boosts both recall (Whisper-mangled names land in the
-    shortlist) and precision (fewer distractors).
 
     Strategy:
-      - tokenise both the transcript and each directory name
-        into lowercase ASCII-folded word stems;
+      - tokenise both the transcript and each directory name;
+      - transliterate Cyrillic → Latin so «шафлера» (Whisper)
+        matches «Schaeffler» (directory). FR-CR-05-126
+        regression: a Russian-language meeting transcript with
+        Latin-named funds was missing every match because the
+        scripts differed and SequenceMatcher rated them at ~0.3;
       - score each directory row by SequenceMatcher ratio of
-        its longest name token to ANY transcript token (so a
-        single fuzzy hit is enough — operator's regression was
-        a 1-word company name «Tether» misheard as «teaser»);
-      - keep rows above a low threshold OR rows whose name is
-        a substring of any 4+ char transcript token;
-      - cap the result at `max_directory_rows` so the prompt
-        stays bounded even on transcripts that mention many
-        candidates.
+        any name token vs any transcript token;
+      - keep rows ≥ 0.65 OR substring-equal;
+      - cap the result at `max_directory_rows`.
 
     Falls through to the full directory if shortlist would be
-    empty — better to send everything than to miss a match the
-    LLM would otherwise catch.
+    empty — better to send everything than miss a match.
     """
     if not directory or not transcript:
         return directory[:max_directory_rows]
@@ -182,13 +178,36 @@ def _shortlist_directory_for_transcript(
     import re
     import unicodedata
 
+    # FR-CR-05-126 — Cyrillic → Latin transliteration. Standard
+    # ISO 9 / common Russian translit so «шафлера» → «shaflera»,
+    # «инвидио» → «invidio», «эдиа» → «edia», etc. Lossy but
+    # close enough that fuzzy ratio against canonical Latin
+    # names like «Schaeffler» / «Nvidia» / «ADIA» lands above
+    # the 0.65 threshold.
+    _CYR_TO_LAT = {
+        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d",
+        "е": "e", "ё": "e", "ж": "zh", "з": "z", "и": "i",
+        "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
+        "о": "o", "п": "p", "р": "r", "с": "s", "т": "t",
+        "у": "u", "ф": "f", "х": "h", "ц": "ts", "ч": "ch",
+        "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "",
+        "э": "e", "ю": "yu", "я": "ya",
+    }
+
+    def _translit(s: str) -> str:
+        return "".join(_CYR_TO_LAT.get(ch, ch) for ch in s)
+
     def _fold(s: str) -> str:
+        # NFKD-decompose accents, drop combining marks, lower,
+        # then translit any leftover Cyrillic.
         s = unicodedata.normalize("NFKD", s or "")
-        return "".join(c for c in s if not unicodedata.combining(c)).lower()
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        return _translit(s.lower())
 
     def _tokens(s: str) -> set[str]:
-        # 3+ char alnum runs; drops noise words.
-        return set(re.findall(r"[a-zа-яё]{3,}", _fold(s)))
+        # Latin-only tokens after the fold (translit puts
+        # Cyrillic → Latin already). 3+ char alnum runs.
+        return set(re.findall(r"[a-z0-9]{3,}", _fold(s)))
 
     transcript_tokens = _tokens(transcript)
     if not transcript_tokens:
@@ -199,30 +218,29 @@ def _shortlist_directory_for_transcript(
         name_tokens = _tokens(cp.name or "")
         if not name_tokens:
             continue
-        # Best ratio of any name-token to any transcript-token.
         best = 0.0
         for n in name_tokens:
             for t in transcript_tokens:
-                # Cheap shortcut: identical or substring → max
-                # signal (catches «Tether» ⊂ «tether» / direct).
-                if n == t or n in t or t in n:
+                if n == t or (len(n) >= 4 and n in t) or (
+                    len(t) >= 4 and t in n
+                ):
                     best = 1.0
                     break
-                # Real fuzzy ratio for short tokens (saves cost
-                # on long ones — the substring check above
-                # already covered them).
-                if abs(len(n) - len(t)) <= 3:
+                # Length-aware ratio: accept looser match for
+                # short names (Tether 6 → tether 6 → swap of
+                # «teaser» 6 yields 0.83; «шафлер» 6 →
+                # «shafler» 7 vs «schaeffler» 10 yields 0.7).
+                if abs(len(n) - len(t)) <= max(3, len(n) // 2):
                     r = difflib.SequenceMatcher(None, n, t).ratio()
                     if r > best:
                         best = r
             if best >= 1.0:
                 break
-        if best >= 0.78:
+        if best >= 0.65:
             scored.append((best, cp))
 
     if not scored:
         return directory[:max_directory_rows]
-    # Highest-score first; cap at limit.
     scored.sort(key=lambda x: x[0], reverse=True)
     return [cp for _, cp in scored[:max_directory_rows]]
 

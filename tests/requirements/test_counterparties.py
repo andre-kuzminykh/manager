@@ -318,6 +318,47 @@ def test_factory_returns_none_when_no_sheet_ids():
     assert build_counterparties_sheet_factory(s) is None
 
 
+def test_shortlist_translits_cyrillic_transcript_to_latin_directory(session):
+    """FR-CR-05-126 follow-up — operator regression on a real
+    Russian-language Zoom meeting: transcript said «шафлера»
+    (Whisper for «Schaeffler») and «инвидио» (Whisper for
+    «Nvidia»), but the directory has «Schaeffler» and «Nvidia»
+    in Latin. SequenceMatcher between Cyrillic and Latin tokens
+    rated those pairs at ~0.3 because the alphabets differ.
+    Fix: transliterate Cyrillic → Latin before fuzzy match so
+    «шафлера» → «shaflera» which scores ≥ 0.65 vs «schaeffler»."""
+    from app.services.counterparty_match import (
+        _shortlist_directory_for_transcript,
+    )
+
+    directory = [
+        Counterparty(
+            id=1, name="Schaeffler", type="Status outreach",
+            name_normalised="schaeffler",
+        ),
+        Counterparty(
+            id=2, name="Nvidia", type="Status outreach",
+            name_normalised="nvidia",
+        ),
+        Counterparty(
+            id=3, name="ADIA", type="Status outreach",
+            name_normalised="adia",
+        ),
+        Counterparty(
+            id=4, name="Random Distractor LLC", type="Outreach",
+            name_normalised="random distractor",
+        ),
+    ]
+    out = _shortlist_directory_for_transcript(
+        directory,
+        "обсудили шафлера, потом инвидио прислал ответ. эдия тоже на связи.",
+    )
+    out_ids = {cp.id for cp in out}
+    assert 1 in out_ids, "Schaeffler not surfaced for «шафлера»"
+    assert 2 in out_ids, "Nvidia not surfaced for «инвидио»"
+    assert 3 in out_ids, "ADIA not surfaced for «эдия»"
+
+
 def test_shortlist_catches_whisper_misheard_tokens(session):
     """FR-CR-05-126 — operator regression: «teaser» in the
     transcript is Whisper's misheard form of «Tether»; the

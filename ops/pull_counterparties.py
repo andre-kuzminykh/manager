@@ -69,13 +69,31 @@ def main() -> int:
         return 2
 
     if args.dry_run:
-        # Dump what each tab would yield, no DB writes.
+        # Dump what each tab would yield, no DB writes. Errors
+        # per tab are logged and skipped — same gracefulness as
+        # the real pull (FR-CR-05-124 follow-up: Excel-uploaded
+        # files in Drive return 400 «not supported for this
+        # document», don't take the whole dry-run down with
+        # them).
+        from googleapiclient.errors import HttpError
+
         records: list[dict] = []
-        records.extend(sync._read_status_outreach())  # noqa: SLF001
-        for sheet_id, tab in sync._name_first_tabs:  # noqa: SLF001
-            records.extend(
-                sync._read_name_first_tab(sheet_id, tab)  # noqa: SLF001
+        try:
+            records.extend(sync._read_status_outreach())  # noqa: SLF001
+        except HttpError as e:  # noqa: BLE001
+            log.warning(
+                "counterparties_status_unreachable", error=str(e),
             )
+        for sheet_id, tab in sync._name_first_tabs:  # noqa: SLF001
+            try:
+                records.extend(
+                    sync._read_name_first_tab(sheet_id, tab)  # noqa: SLF001
+                )
+            except HttpError as e:  # noqa: BLE001
+                log.warning(
+                    "counterparties_tab_unreachable",
+                    sheet_id=sheet_id, tab=tab, error=str(e),
+                )
         log.info(
             "counterparties_dry_run",
             total_records=len(records),

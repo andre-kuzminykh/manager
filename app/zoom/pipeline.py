@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -488,21 +488,93 @@ class ZoomPipeline:
                 priority = TaskPriority(t.get("priority") or "medium")
             except ValueError:
                 priority = TaskPriority.medium
-            session.add(
-                Task(
-                    title=title,
+            owner_display_name = None
+            if owner_uid and known_employees:
+                for e in known_employees:
+                    if e.get("slack_user_id") == owner_uid:
+                        owner_display_name = (
+                            e.get("real_name")
+                            or e.get("display_name")
+                            or owner_uid
+                        )
+                        break
+            try:
+                task = Task(
+                    title=title[:10_000],
                     description=(t.get("description") or "").strip() or None,
                     priority=priority,
                     status=TaskStatus.todo,
                     owner_user_id=owner_uid,
+                    owner_display_name=owner_display_name,
                     due_date=today,
+                    due_time=time(18, 0),  # FR-CR-05-63
                     is_current_week=True,
                     source_kind=TaskSourceKind.zoom,
-                    source_permalink=row.zoom_share_url or row.google_doc_url,
+                    # FR-CR-05-118 — wire join key so
+                    # `JOIN zoom_recordings ON
+                    #   z.zoom_id = t.source_conversation_id`
+                    # finds the originating meeting. Mirrors
+                    # the Fireflies path (FR-CR-05-39).
+                    source_conversation_id=row.zoom_id,
+                    source_message_ts=row.zoom_id,
+                    source_permalink=row.zoom_share_url
+                    or row.google_doc_url,
                     created_by_slack_user_id=admin_uid,
                 )
-            )
-            created += 1
+                session.add(task)
+                session.flush()
+                # Initial status history row (None → todo).
+                from app.models import TaskStatusHistory
+
+                session.add(
+                    TaskStatusHistory(
+                        task_id=task.id,
+                        from_status=None,
+                        to_status=TaskStatus.todo,
+                        changed_by_slack_user_id=admin_uid,
+                        reason="zoom_extracted",
+                        at=datetime.now(timezone.utc),
+                    )
+                )
+                created += 1
+                # Schedule Sheets / Google Tasks sync after the
+                # outer commit lands.
+                from app.sync.task_sync import schedule_sync_task
+
+                schedule_sync_task(session, task.id)
+                # FR-CR-05-118 — DM card to admin / owner so the
+                # operator sees each Zoom-extracted task in TG,
+                # not just in the DB / Sheet. Same wiring as the
+                # Fireflies path (FR-CR-05-58).
+                if (
+                    self._sender is not None
+                    and getattr(self._sender, "enabled", False)
+                ):
+                    try:
+                        from app.telegram_bot.cards import (
+                            post_initial_card,
+                        )
+
+                        post_initial_card(
+                            sender=self._sender,
+                            session=session,
+                            task=task,
+                            chat_id=0,  # ignored — DM-only delivery
+                            reply_to_message_id=None,
+                            author_user_id=admin_uid,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        log.info(
+                            "zoom_task_card_post_failed",
+                            task_id=task.id,
+                            error=str(e),
+                        )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "zoom_task_create_failed",
+                    title=title[:80],
+                    error=str(e),
+                )
         row.tasks_extracted = True
         row.tasks_extracted_count = created
         row.last_error = None

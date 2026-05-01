@@ -79,6 +79,10 @@ class _FakeDocs:
 
 
 class _FakeSender:
+    enabled = True  # FR-CR-05-118 — `post_initial_card` short-
+    # circuits when `sender.enabled` is falsy, so the task-card
+    # DMs would silently no-op without this flag.
+
     def __init__(self):
         self.sent = []
 
@@ -293,12 +297,34 @@ def test_zoom_pipeline_runs_every_step_and_creates_zoom_source_tasks(
 
             tasks = s.query(Task).all()
             assert len(tasks) == 1
-            assert tasks[0].source_kind == TaskSourceKind.zoom
-            assert tasks[0].source_permalink == "https://zoom.us/rec/share/abc"
-            assert tasks[0].title.lower().startswith("подготовить follow-up")
+            t = tasks[0]
+            assert t.source_kind == TaskSourceKind.zoom
+            assert t.source_permalink == "https://zoom.us/rec/share/abc"
+            assert t.title.lower().startswith("подготовить follow-up")
+            # FR-CR-05-118 — source_conversation_id MUST be the
+            # zoom_id so the join `JOIN zoom_recordings z ON
+            # z.zoom_id = t.source_conversation_id` finds the
+            # originating meeting. Pre-fix this was NULL and
+            # every join returned 0 rows.
+            assert t.source_conversation_id == row.zoom_id
+            assert t.source_message_ts == row.zoom_id
+            # FR-CR-05-118 — Zoom-extracted tasks default to 18:00
+            # deadline same as Fireflies (FR-CR-05-63).
+            from datetime import time as _time
+            assert t.due_time == _time(18, 0)
 
-        # Short summary DM was sent to admin.
+        # FR-CR-05-118 — Short summary DM (one) AND a per-task
+        # DM card (one per extracted task) were sent. Pre-fix
+        # only the short summary went out — operator never saw
+        # individual task cards in TG.
         assert any(m["chat_id"] == 777 for m in sender.sent)
+        # At least the summary + one task card → ≥2 messages
+        # to the admin's DM.
+        admin_dms = [m for m in sender.sent if m["chat_id"] == 777]
+        assert len(admin_dms) >= 2, (
+            "expected short summary + ≥1 task card DMs, "
+            f"got {len(admin_dms)}"
+        )
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 

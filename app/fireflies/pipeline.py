@@ -456,6 +456,48 @@ def _create_meeting_draft(
     return draft
 
 
+def _wipe_pending_meeting_drafts(
+    session: "Session",
+    *,
+    source_kind: str,
+    conversation_id: str,
+) -> int:
+    """FR-CR-05-128 — delete unconfirmed (proposed / edited)
+    ActionDraft rows for a given meeting before a rerun re-
+    creates them. CONFIRMED drafts are kept (the operator's ✅
+    is sacred — re-running should never undo a previously
+    approved task). IGNORED / EXPIRED stay too (audit trail of
+    what was rejected). Returns the number deleted.
+    """
+    from app.models import ActionDraft, ActionDraftState
+
+    rows = (
+        session.query(ActionDraft)
+        .filter(ActionDraft.state.in_(
+            [ActionDraftState.proposed, ActionDraftState.edited]
+        ))
+        .all()
+    )
+    deleted = 0
+    for d in rows:
+        pending = (d.payload or {}).get("_pending") or {}
+        if (pending.get("source_kind") or "") != source_kind:
+            continue
+        if (pending.get("conversation_id") or "") != conversation_id:
+            continue
+        session.delete(d)
+        deleted += 1
+    if deleted:
+        session.flush()
+        log.info(
+            "meeting_pending_drafts_wiped",
+            source_kind=source_kind,
+            conversation_id=conversation_id,
+            count=deleted,
+        )
+    return deleted
+
+
 def _meeting_drafts(
     session: "Session",
     *,
@@ -1353,6 +1395,14 @@ class FirefliesPipeline:
         admin_uid = _admin_fallback_owner_id()
         created = 0
         today = date.today()
+        # FR-CR-05-128 — `--rerun` resets the row's flags but
+        # leaves old unconfirmed drafts in DB; wipe them before
+        # re-extracting so the operator doesn't get duplicate
+        # widgets. Confirmed / ignored drafts are kept.
+        _wipe_pending_meeting_drafts(
+            session, source_kind="fireflies",
+            conversation_id=row.fireflies_id,
+        )
         # FR-CR-05-128 — one inference per meeting-extract pass.
         try:
             _, inference_id = _create_meeting_inference(

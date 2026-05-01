@@ -651,33 +651,9 @@ class ZoomPipeline:
             )
         valid_ids = {e.get("slack_user_id") for e in known_employees}
         created = 0
-        from app.fireflies.pipeline import (
-            _create_meeting_draft,
-            _create_meeting_inference,
-        )
         from app.persistence.tasks import normalize_task_title
 
         today = datetime.now(timezone.utc).date()
-        # FR-CR-05-128 — meeting tasks ship as ActionDraft rows
-        # (operator-pinned approval flow); Task is materialised
-        # only after ✅ in the confirm widget.
-        try:
-            _, inference_id = _create_meeting_inference(
-                session,
-                source_kind="zoom",
-                conversation_id=row.zoom_id,
-                title=row.title,
-                transcript_excerpt=row.transcript_text or "",
-                pass_label="zoom_extract",
-                raw_extraction=[t for t in tasks if isinstance(t, dict)],
-            )
-        except Exception as e:  # noqa: BLE001
-            row.last_error = f"meeting inference persistence failed: {e}"
-            log.warning(
-                "zoom_meeting_inference_persist_failed",
-                zoom_id=row.zoom_id, error=str(e),
-            )
-            return 0
         for t in tasks:
             if not isinstance(t, dict):
                 continue
@@ -693,7 +669,10 @@ class ZoomPipeline:
                 owner_uid = None
             if owner_uid is None and admin_uid:
                 owner_uid = admin_uid
-            priority_raw = (t.get("priority") or "medium")
+            try:
+                priority = TaskPriority(t.get("priority") or "medium")
+            except ValueError:
+                priority = TaskPriority.medium
             owner_display_name = None
             if owner_uid and known_employees:
                 for e in known_employees:
@@ -705,43 +684,59 @@ class ZoomPipeline:
                         )
                         break
             try:
-                draft_payload = {
-                    "title": title[:10_000],
-                    "description": (t.get("description") or "").strip() or None,
-                    "owner_user_id": owner_uid,
-                    "owner_display_name": owner_display_name,
-                    "priority": (
-                        priority_raw
-                        if priority_raw in {"low", "medium", "high", "urgent"}
-                        else "medium"
-                    ),
-                    "due_date": today.isoformat(),
-                    "due_time": "18:00",
-                }
-                pending = {
-                    "source_kind": "zoom",
-                    "conversation_id": row.zoom_id,
-                    "message_ts": row.zoom_id,
-                    "thread_ts": None,
-                    "permalink": row.zoom_share_url or row.google_doc_url,
-                    "fallback_author": admin_uid,
-                    "context_snapshot_id": None,
-                    "source_chat_id": 0,
-                    "source_message_id": 0,
-                    "source_text": (row.title or "")[:10_000],
-                }
-                _create_meeting_draft(
-                    session,
-                    inference_id=inference_id,
-                    payload=draft_payload,
-                    pending=pending,
-                    admin_uid=admin_uid,
-                    slack_message_ts=row.zoom_id,
+                task = Task(
+                    title=title[:10_000],
+                    description=(t.get("description") or "").strip() or None,
+                    priority=priority,
+                    status=TaskStatus.todo,
+                    owner_user_id=owner_uid,
+                    owner_display_name=owner_display_name,
+                    due_date=today,
+                    due_time=time(18, 0),  # FR-CR-05-63
+                    is_current_week=True,
+                    source_kind=TaskSourceKind.zoom,
+                    # FR-CR-05-118 — wire join key so
+                    # `JOIN zoom_recordings ON
+                    #   z.zoom_id = t.source_conversation_id`
+                    # finds the originating meeting. Mirrors
+                    # the Fireflies path (FR-CR-05-39).
+                    source_conversation_id=row.zoom_id,
+                    source_message_ts=row.zoom_id,
+                    source_permalink=row.zoom_share_url
+                    or row.google_doc_url,
+                    created_by_slack_user_id=admin_uid,
+                )
+                session.add(task)
+                session.flush()
+                # Initial status history row (None → todo).
+                from app.models import TaskStatusHistory
+
+                session.add(
+                    TaskStatusHistory(
+                        task_id=task.id,
+                        from_status=None,
+                        to_status=TaskStatus.todo,
+                        changed_by_slack_user_id=admin_uid,
+                        reason="zoom_extracted",
+                        at=datetime.now(timezone.utc),
+                    )
                 )
                 created += 1
+                # Schedule Sheets / Google Tasks sync after the
+                # outer commit lands.
+                from app.sync.task_sync import schedule_sync_task
+
+                schedule_sync_task(session, task.id)
+                # FR-CR-05-120 follow-up — DM card posting moved
+                # to a separate `_step_post_task_cards` step that
+                # runs AFTER the short summary is sent. Operator
+                # pinned: get the meeting overview first (Суть +
+                # To-Do in one message), then dive into per-task
+                # cards. Tasks created here just sit in the
+                # session waiting for the post step.
             except Exception as e:  # noqa: BLE001
                 log.warning(
-                    "zoom_task_draft_create_failed",
+                    "zoom_task_create_failed",
                     title=title[:80],
                     error=str(e),
                 )
@@ -753,36 +748,40 @@ class ZoomPipeline:
     def _step_verify_tasks(
         self, session: Session, row: ZoomRecording
     ) -> int:
-        """FR-CR-05-121 / FR-CR-05-128 — second LLM pass on
-        ActionDraft rows for the meeting. Symmetric to the
-        Fireflies verifier; reuses the same prompt + tool
-        schema."""
-        from app.fireflies.pipeline import (
-            _create_meeting_draft,
-            _create_meeting_inference,
-            _meeting_drafts,
-        )
+        """FR-CR-05-121 — second LLM pass to catch tasks missed
+        by `_step_extract_tasks`. Symmetric to the Fireflies
+        verifier; reuses the same prompt + tool schema."""
         from app.fireflies.prompts import (
             TASK_EXTRACTION_TOOL_DESCRIPTION as _DESC,
             TASK_EXTRACTION_TOOL_NAME as _NAME,
             TASK_EXTRACTION_TOOL_PARAMETERS as _PARAMS,
             TASK_VERIFICATION_SYSTEM,
         )
+        from app.models import (
+            Task,
+            TaskPriority,
+            TaskSourceKind,
+            TaskStatus,
+            TaskStatusHistory,
+        )
         from app.persistence.tasks import normalize_task_title
         from app.services.team_members import as_known_employees
+        from app.sync.task_sync import schedule_sync_task
 
         if not row.transcript_text or not row.detailed_summary:
             return 0
-        existing_drafts = _meeting_drafts(
-            session,
-            source_kind="zoom",
-            conversation_id=row.zoom_id,
+        existing = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.zoom)
+            .filter(Task.source_conversation_id == row.zoom_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
         )
         existing_block = "\n".join(
-            f"- {(d.payload or {}).get('title','')}: "
-            f"{((d.payload or {}).get('description') or '')[:300]} "
-            f"[owner={(d.payload or {}).get('owner_display_name') or '—'}]"
-            for d in existing_drafts
+            f"- {t.title}: {(t.description or '')[:300]} "
+            f"[owner={t.owner_display_name or '—'}]"
+            for t in existing
         ) or "  (no tasks were extracted on the first pass)"
         try:
             known_employees = as_known_employees(session)
@@ -824,7 +823,7 @@ class ZoomPipeline:
         log.info(
             "zoom_task_verification_done",
             zoom_id=row.zoom_id,
-            existing_count=len(existing_drafts),
+            existing_count=len(existing),
             newly_added=len(new_tasks),
             new_titles=[
                 (t.get("title") or "")[:80]
@@ -840,22 +839,6 @@ class ZoomPipeline:
         admin_uid = _admin_fallback_owner_id()
         today = datetime.now(timezone.utc).date()
         added = 0
-        try:
-            _, verify_inference_id = _create_meeting_inference(
-                session,
-                source_kind="zoom",
-                conversation_id=row.zoom_id,
-                title=row.title,
-                transcript_excerpt=row.transcript_text or "",
-                pass_label="zoom_verify",
-                raw_extraction=[t for t in new_tasks if isinstance(t, dict)],
-            )
-        except Exception as e:  # noqa: BLE001
-            log.info(
-                "zoom_verify_inference_persist_failed",
-                zoom_id=row.zoom_id, error=str(e),
-            )
-            return 0
         for t in new_tasks:
             if not isinstance(t, dict):
                 continue
@@ -881,45 +864,46 @@ class ZoomPipeline:
                             or owner_uid
                         )
                         break
-            priority_raw = (t.get("priority") or "medium")
             try:
-                draft_payload = {
-                    "title": title[:10_000],
-                    "description": (t.get("description") or "").strip() or None,
-                    "owner_user_id": owner_uid,
-                    "owner_display_name": owner_display_name,
-                    "priority": (
-                        priority_raw
-                        if priority_raw in {"low", "medium", "high", "urgent"}
-                        else "medium"
+                priority = TaskPriority(t.get("priority") or "medium")
+            except ValueError:
+                priority = TaskPriority.medium
+            try:
+                task = Task(
+                    title=title[:10_000],
+                    description=(t.get("description") or "").strip() or None,
+                    priority=priority,
+                    status=TaskStatus.todo,
+                    owner_user_id=owner_uid,
+                    owner_display_name=owner_display_name,
+                    due_date=today,
+                    due_time=time(18, 0),
+                    is_current_week=True,
+                    source_kind=TaskSourceKind.zoom,
+                    source_conversation_id=row.zoom_id,
+                    source_message_ts=row.zoom_id,
+                    source_permalink=(
+                        row.zoom_share_url or row.google_doc_url
                     ),
-                    "due_date": today.isoformat(),
-                    "due_time": "18:00",
-                }
-                pending = {
-                    "source_kind": "zoom",
-                    "conversation_id": row.zoom_id,
-                    "message_ts": row.zoom_id,
-                    "thread_ts": None,
-                    "permalink": row.zoom_share_url or row.google_doc_url,
-                    "fallback_author": admin_uid,
-                    "context_snapshot_id": None,
-                    "source_chat_id": 0,
-                    "source_message_id": 0,
-                    "source_text": (row.title or "")[:10_000],
-                }
-                _create_meeting_draft(
-                    session,
-                    inference_id=verify_inference_id,
-                    payload=draft_payload,
-                    pending=pending,
-                    admin_uid=admin_uid,
-                    slack_message_ts=row.zoom_id,
+                    created_by_slack_user_id=admin_uid,
                 )
+                session.add(task)
+                session.flush()
+                session.add(
+                    TaskStatusHistory(
+                        task_id=task.id,
+                        from_status=None,
+                        to_status=TaskStatus.todo,
+                        changed_by_slack_user_id=admin_uid,
+                        reason="zoom_verified",
+                        at=datetime.now(timezone.utc),
+                    )
+                )
+                schedule_sync_task(session, task.id)
                 added += 1
             except Exception as e:  # noqa: BLE001
                 log.warning(
-                    "zoom_task_verify_draft_failed",
+                    "zoom_task_verify_create_failed",
                     title=title[:80], error=str(e),
                 )
         if added:
@@ -929,48 +913,44 @@ class ZoomPipeline:
     def _step_post_task_cards(
         self, session: Session, row: ZoomRecording
     ) -> int:
-        """FR-CR-05-120 / FR-CR-05-128 — post a CONFIRM WIDGET
-        per extracted ActionDraft to admin/owner. Runs AFTER
-        `_step_send_short_summary` so the operator gets the
-        meeting overview first (Суть + To-Do in one message)
-        and then per-task widgets cascade in. Operator-pinned
-        approval flow: meeting tasks must be ✅-confirmed in TG
-        before they materialise as Task rows + sync to Sheets,
-        same contract as TG-ingested tasks."""
+        """FR-CR-05-120 follow-up — post a DM card per extracted
+        Task ROW to admin/owner. Runs AFTER `_step_send_short_
+        summary` so the operator gets the meeting overview first
+        (Суть + To-Do in one message) and then per-task cards
+        cascade in. Returns number of cards posted."""
         if (
             self._sender is None
             or not getattr(self._sender, "enabled", False)
         ):
             return 0
-        from app.fireflies.pipeline import _meeting_drafts
-        from app.telegram_bot.cards import post_draft_confirmation
+        from app.models import Task as _Task
+        from app.telegram_bot.cards import post_initial_card
 
         admin_uid = _admin_fallback_owner_id()
-        drafts = _meeting_drafts(
-            session,
-            source_kind="zoom",
-            conversation_id=row.zoom_id,
-            include_states=("proposed", "edited"),
+        tasks = (
+            session.query(_Task)
+            .filter(_Task.source_kind == TaskSourceKind.zoom)
+            .filter(_Task.source_conversation_id == row.zoom_id)
+            .filter(_Task.deleted_at.is_(None))
+            .order_by(_Task.id.asc())
+            .all()
         )
         posted = 0
-        for draft in drafts:
-            payload = draft.payload or {}
-            owner_uid = payload.get("owner_user_id")
+        for task in tasks:
             try:
-                post_draft_confirmation(
+                post_initial_card(
                     sender=self._sender,
                     session=session,
-                    draft=draft,
-                    source_chat_id=0,
-                    source_message_id=0,
+                    task=task,
+                    chat_id=0,  # ignored — DM-only delivery
+                    reply_to_message_id=None,
                     author_user_id=admin_uid,
-                    owner_user_id=owner_uid,
                 )
                 posted += 1
             except Exception as e:  # noqa: BLE001
                 log.info(
-                    "zoom_task_widget_post_failed",
-                    draft_id=draft.id,
+                    "zoom_task_card_post_failed",
+                    task_id=task.id,
                     error=str(e),
                 )
         return posted

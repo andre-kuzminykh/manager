@@ -323,33 +323,40 @@ def _build_full_tasks_section_for_doc(
     source_kind: "TaskSourceKind",
     source_conversation_id: str,
 ) -> str:
-    """FR-CR-05-119 / FR-CR-05-128 — full task list for the
-    Google Doc body, sourced from the meeting's pending
-    ActionDrafts (approval-gated; operator-pinned). Each entry
-    gets the verbatim multi-sentence description + owner +
-    due-date + priority. Returns "" when no drafts were
-    created."""
-    drafts = _meeting_drafts(
-        session,
-        source_kind=source_kind.value if hasattr(source_kind, "value") else str(source_kind),
-        conversation_id=source_conversation_id,
+    """FR-CR-05-119 follow-up — full task list for the Google
+    Doc body. Each task gets the verbatim multi-sentence
+    description + owner + due-date + priority. Operator wants
+    the doc to be the single archived reference; the short TG
+    summary keeps a compressed one-sentence variant via
+    `_build_todo_section`. Returns "" when no tasks."""
+    from app.models import Task as _Task
+
+    tasks = (
+        session.query(_Task)
+        .filter(_Task.source_kind == source_kind)
+        .filter(_Task.source_conversation_id == source_conversation_id)
+        .filter(_Task.deleted_at.is_(None))
+        .order_by(_Task.id.asc())
+        .all()
     )
-    if not drafts:
+    if not tasks:
         return ""
     lines = ["", "📌 ЗАДАЧИ", ""]
-    for i, d in enumerate(drafts, 1):
-        v = _draft_render_view(d)
-        body = (v["description"] or "").strip() or v["title"]
+    for i, t in enumerate(tasks, 1):
+        body = (t.description or "").strip() or (t.title or "").strip()
         lines.append(f"{i}. {body}")
         meta_bits = []
-        if v["owner_display_name"]:
-            meta_bits.append(f"Ответственный: {v['owner_display_name']}")
-        if v["due_date"]:
-            due = v["due_date"].strftime("%d.%m.%Y")
-            if v["due_time"]:
-                due += f" {v['due_time'].strftime('%H:%M')}"
+        owner = (t.owner_display_name or "").strip()
+        if owner:
+            meta_bits.append(f"Ответственный: {owner}")
+        if t.due_date:
+            due = t.due_date.strftime("%d.%m.%Y")
+            if t.due_time:
+                due += f" {t.due_time.strftime('%H:%M')}"
             meta_bits.append(f"Срок: {due}")
-        priority = v["priority"]
+        priority = (
+            t.priority.value if t.priority is not None else None
+        )
         if priority and priority != "medium":
             meta_bits.append(f"Приоритет: {priority}")
         if meta_bits:
@@ -358,209 +365,38 @@ def _build_full_tasks_section_for_doc(
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _create_meeting_inference(
-    session: "Session",
-    *,
-    source_kind: str,
-    conversation_id: str,
-    title: str | None,
-    transcript_excerpt: str,
-    pass_label: str,
-    raw_extraction: list[dict] | None = None,
-) -> tuple[int, int]:
-    """FR-CR-05-128 — persist one ContextSnapshot + one
-    IntentInference for a meeting LLM extraction pass. Returns
-    `(snapshot_id, inference_id)` so callers can stamp drafts
-    with the inference_id (NOT NULL on `action_drafts`).
-
-    `pass_label` is a free-form string («fireflies_extract»,
-    «zoom_verify», …) that lands in `inference.reasoning` for
-    audit. `raw_extraction` is the LLM's tool-call output
-    (list of task dicts), persisted on `inference.raw["tasks"]`
-    so the operator can replay the run later.
-    """
-    from datetime import datetime, timezone
-
-    from app.models import ContextSnapshot, IntentInference
-    from app.models.intent import IntentType as IntentTypeEnum
-
-    snap = ContextSnapshot(
-        conversation_id=str(conversation_id),
-        source_ts=str(conversation_id),
-        thread_ts=None,
-        source_message={
-            "kind": source_kind,
-            "title": title or "",
-            "transcript_excerpt": (transcript_excerpt or "")[:4000],
-        },
-        history_before=[],
-        thread_messages=[],
-    )
-    session.add(snap)
-    session.flush()
-    inference = IntentInference(
-        context_snapshot_id=snap.id,
-        intent=IntentTypeEnum.create_task,
-        confidence=1.0,
-        invocation_type="passive",
-        reasoning=pass_label,
-        raw={"tasks": raw_extraction or []},
-    )
-    session.add(inference)
-    session.flush()
-    log.info(
-        "meeting_inference_persisted",
-        source_kind=source_kind,
-        conversation_id=conversation_id,
-        pass_label=pass_label,
-        snapshot_id=snap.id,
-        inference_id=inference.id,
-        raw_task_count=len(raw_extraction or []),
-    )
-    _ = datetime.now(timezone.utc)  # silence unused import
-    return snap.id, inference.id
-
-
-def _create_meeting_draft(
-    session: "Session",
-    *,
-    inference_id: int,
-    payload: dict,
-    pending: dict,
-    admin_uid: str | None,
-    slack_message_ts: str | None,
-):
-    """FR-CR-05-128 — build one ActionDraft for a meeting-
-    extracted task. `payload` carries the canonical task fields
-    (title/description/owner_user_id/owner_display_name/priority/
-    due_date/due_time); `pending` carries source-routing fields
-    (source_kind, conversation_id, message_ts, permalink,
-    fallback_author) so `handle_confirm_draft` can build the
-    Task with the right `source_*` fields when the operator
-    presses ✅."""
-    from app.models import ActionDraft, ActionDraftState
-    from app.models.intent import IntentType as IntentTypeEnum
-
-    full_payload = dict(payload)
-    full_payload["_pending"] = dict(pending)
-    draft = ActionDraft(
-        inference_id=inference_id,
-        intent=IntentTypeEnum.create_task,
-        state=ActionDraftState.proposed,
-        payload=full_payload,
-        created_by_slack_user_id=admin_uid,
-        slack_message_ts=slack_message_ts,
-    )
-    session.add(draft)
-    session.flush()
-    return draft
-
-
-def _meeting_drafts(
-    session: "Session",
-    *,
-    source_kind: str,
-    conversation_id: str,
-    include_states: tuple[str, ...] = ("proposed", "edited", "confirmed"),
-) -> list:
-    """FR-CR-05-128 — fetch ActionDraft rows attached to a given
-    meeting, ordered by id (creation order). Drafts carry their
-    `_pending.source_kind` + `_pending.conversation_id` in
-    `payload`; we filter on those JSON fields. `include_states`
-    excludes ignored / expired / failed drafts so the To-Do list
-    + doc render only show LIVE proposals.
-
-    Operator-pinned approval contract: meeting-extracted tasks
-    arrive as confirm-widgets in TG (just like TG-ingested
-    tasks); only after ✅ does the draft turn into a real Task
-    row + Sheets sync. Read paths therefore source from drafts,
-    not from `tasks` directly.
-    """
-    from app.models import ActionDraft, ActionDraftState
-
-    state_enum = [ActionDraftState(s) for s in include_states]
-    rows = (
-        session.query(ActionDraft)
-        .filter(ActionDraft.state.in_(state_enum))
-        .order_by(ActionDraft.id.asc())
-        .all()
-    )
-    out: list = []
-    for d in rows:
-        payload = d.payload or {}
-        pending = payload.get("_pending") or {}
-        if (pending.get("source_kind") or "") != source_kind:
-            continue
-        if (pending.get("conversation_id") or "") != conversation_id:
-            continue
-        out.append(d)
-    return out
-
-
-def _draft_render_view(draft) -> dict[str, "Any"]:
-    """FR-CR-05-128 — read-side projection of an ActionDraft so
-    the To-Do / Doc renderers don't need to know about JSON
-    payload shape. Mirrors the field set the old Task-based
-    helpers used."""
-    from datetime import date as _date, time as _time
-
-    payload = draft.payload or {}
-    title = (payload.get("title") or "").strip()
-    description = (payload.get("description") or "").strip() or None
-    owner_user_id = payload.get("owner_user_id")
-    owner_display_name = (payload.get("owner_display_name") or "").strip() or None
-    priority = (payload.get("priority") or "medium").strip() or "medium"
-    due_date = None
-    raw_due_date = payload.get("due_date")
-    if isinstance(raw_due_date, str) and raw_due_date:
-        try:
-            due_date = _date.fromisoformat(raw_due_date[:10])
-        except ValueError:
-            due_date = None
-    due_time = None
-    raw_due_time = payload.get("due_time")
-    if isinstance(raw_due_time, str) and raw_due_time:
-        try:
-            hh, mm = raw_due_time.split(":")[:2]
-            due_time = _time(int(hh), int(mm))
-        except (ValueError, TypeError):
-            due_time = None
-    return {
-        "id": draft.id,
-        "title": title,
-        "description": description,
-        "owner_user_id": owner_user_id,
-        "owner_display_name": owner_display_name,
-        "priority": priority,
-        "due_date": due_date,
-        "due_time": due_time,
-    }
-
-
 def _build_todo_section(
     session: "Session",
     *,
     source_kind: "TaskSourceKind",
     source_conversation_id: str,
 ) -> str:
-    """FR-CR-05-119 / FR-CR-05-128 — render the To-Do block from
-    the meeting's pending ActionDraft rows (operator-pinned
-    approval flow: meeting tasks live as drafts until confirmed
-    in TG). Sorted by creation order so the operator sees the
-    same sequence as the confirm widgets arriving in DM.
+    """FR-CR-05-119 — render the To-Do block from the actual
+    `Task` rows extracted for this recording. Items are
+    compressed to ONE sentence (FR-CR-05-119 follow-up): the
+    short TG summary stays scannable while the full multi-
+    sentence description lives on the per-task DM card the
+    operator gets via `post_initial_card`. Sorted by creation
+    order so the operator sees the same sequence as the DM
+    cards arriving in TG.
 
-    Returns "" when no drafts were created (operator pinned:
+    Returns "" when no tasks were extracted (operator pinned:
     drop the section entirely instead of an empty header).
     """
-    drafts = _meeting_drafts(
-        session,
-        source_kind=source_kind.value if hasattr(source_kind, "value") else str(source_kind),
-        conversation_id=source_conversation_id,
+    from app.models import Task as _Task
+
+    tasks = (
+        session.query(_Task)
+        .filter(_Task.source_kind == source_kind)
+        .filter(_Task.source_conversation_id == source_conversation_id)
+        .filter(_Task.deleted_at.is_(None))
+        .order_by(_Task.id.asc())
+        .all()
     )
-    if not drafts:
+    if not tasks:
         return ""
     lines = ["To-Do:"]
-    for i, d in enumerate(drafts, 1):
+    for i, t in enumerate(tasks, 1):
         # FR-CR-05-120 — task descriptions are now in the
         # operator-pinned «<topic> - <action with details>»
         # format (enforced by TASK_EXTRACTION_SYSTEM). Use as
@@ -568,12 +404,11 @@ def _build_todo_section(
         # can't push a single line over Telegram's per-message
         # limit. Owner appended in parens only when set —
         # «(не назначен)» is noise the operator pinned out.
-        v = _draft_render_view(d)
-        raw = (v["description"] or "").strip() or v["title"]
+        raw = (t.description or "").strip() or (t.title or "").strip()
         if len(raw) > 350:
             cut = raw.rfind(" ", 0, 350)
             raw = (raw[: cut if cut > 200 else 350]).rstrip(",;:- ") + "…"
-        owner = v["owner_display_name"] or ""
+        owner = (t.owner_display_name or "").strip()
         if owner:
             lines.append(f"{i}) {raw} ({owner})")
         else:
@@ -1353,24 +1188,6 @@ class FirefliesPipeline:
         admin_uid = _admin_fallback_owner_id()
         created = 0
         today = date.today()
-        # FR-CR-05-128 — one inference per meeting-extract pass.
-        try:
-            _, inference_id = _create_meeting_inference(
-                session,
-                source_kind="fireflies",
-                conversation_id=row.fireflies_id,
-                title=row.title,
-                transcript_excerpt=row.transcript_text or "",
-                pass_label="fireflies_extract",
-                raw_extraction=[t for t in tasks if isinstance(t, dict)],
-            )
-        except Exception as e:  # noqa: BLE001
-            row.last_error = f"meeting inference persistence failed: {e}"
-            log.warning(
-                "fireflies_meeting_inference_persist_failed",
-                fireflies_id=row.fireflies_id, error=str(e),
-            )
-            return 0
         for t in tasks:
             if not isinstance(t, dict):
                 continue
@@ -1422,50 +1239,53 @@ class FirefliesPipeline:
                         )
                         break
             try:
-                # FR-CR-05-128 — meeting tasks now arrive as
-                # ActionDraft rows; the actual Task is created
-                # only after the operator presses ✅ in the
-                # confirm widget (same contract as TG-ingested
-                # tasks). NO Sheets-sync scheduling here, NO
-                # TaskStatusHistory — that all happens lazily
-                # via `handle_confirm_draft`.
-                draft_payload = {
-                    "title": title[:10_000],
-                    "description": description,
-                    "owner_user_id": owner_user_id,
-                    "owner_display_name": owner_display_name,
-                    "priority": (
-                        priority
-                        if priority in {"low", "medium", "high", "urgent"}
-                        else "medium"
-                    ),
-                    "due_date": today.isoformat(),
-                    "due_time": "18:00",
-                }
-                pending = {
-                    "source_kind": "fireflies",
-                    "conversation_id": row.fireflies_id,
-                    "message_ts": row.fireflies_id,
-                    "thread_ts": None,
-                    "permalink": row.fireflies_share_url,
-                    "fallback_author": admin_uid,
-                    "context_snapshot_id": None,
-                    "source_chat_id": 0,
-                    "source_message_id": 0,
-                    "source_text": (row.title or "")[:10_000],
-                }
-                _create_meeting_draft(
-                    session,
-                    inference_id=inference_id,
-                    payload=draft_payload,
-                    pending=pending,
-                    admin_uid=admin_uid,
-                    slack_message_ts=row.fireflies_id,
+                from app.models import TaskPriority, TaskStatus
+
+                task_status = TaskStatus.todo  # due=today → todo per FR-CR-04
+                task = Task(
+                    title=title[:10_000],
+                    description=description,
+                    owner_user_id=owner_user_id,
+                    owner_display_name=owner_display_name,
+                    priority=TaskPriority(priority) if priority in {p.value for p in TaskPriority} else TaskPriority.medium,
+                    due_date=today,  # FR-CR-05-39: meeting tasks default to today
+                    due_time=time(18, 0),  # FR-CR-05-63: default 18:00 deadline
+                    status=task_status,
+                    is_current_week=True,
+                    source_kind=TaskSourceKind.fireflies,
+                    source_conversation_id=row.fireflies_id,
+                    source_message_ts=row.fireflies_id,
+                    source_permalink=row.fireflies_share_url,
+                    created_by_slack_user_id=admin_uid,
+                )
+                session.add(task)
+                session.flush()
+                # Initial history row (None → todo).
+                from app.models import TaskStatusHistory
+
+                session.add(
+                    TaskStatusHistory(
+                        task_id=task.id,
+                        from_status=None,
+                        to_status=task_status,
+                        changed_by_slack_user_id=admin_uid,
+                        reason="fireflies_extracted",
+                        at=datetime.now(timezone.utc),
+                    )
                 )
                 created += 1
+                # Schedule sheet sync.
+                from app.sync.task_sync import schedule_sync_task
+
+                schedule_sync_task(session, task.id)
+                # FR-CR-05-120 follow-up — DM card posting moved
+                # to a separate `_step_post_task_cards` step that
+                # runs AFTER the short summary is sent (operator
+                # pinned: meeting overview first, then per-task
+                # cards). Tasks just sit in the session here.
             except Exception as e:  # noqa: BLE001
                 log.warning(
-                    "fireflies_task_draft_create_failed",
+                    "fireflies_task_create_failed",
                     title=title[:80],
                     error=str(e),
                 )
@@ -1476,31 +1296,40 @@ class FirefliesPipeline:
     def _step_verify_tasks(
         self, session: Session, row: MeetingRecording
     ) -> int:
-        """FR-CR-05-121 / FR-CR-05-128 — second LLM pass to catch
-        tasks missed by `_step_extract_tasks`. Reads the
-        transcript + already-extracted ActionDraft rows and
-        asks the verifier prompt for any newly-missed actionable
-        items. New drafts are appended to the same session;
-        returns count. Idempotency: caller short-circuits via
-        `row.attempts` and the per-recording bookmarking;
-        re-running is safe because the verifier is told to skip
-        duplicates."""
+        """FR-CR-05-121 — second LLM pass to catch tasks missed
+        by `_step_extract_tasks`. Reads the transcript +
+        already-extracted Task rows and asks the verifier
+        prompt for any newly-missed actionable items. New rows
+        are added to the same session; returns count.
+        Idempotency: caller short-circuits via `row.attempts`
+        and the per-recording bookmarking; re-running is safe
+        because the verifier is told to skip duplicates."""
         from app.fireflies.prompts import TASK_VERIFICATION_SYSTEM
+        from app.models import (
+            Task,
+            TaskPriority,
+            TaskSourceKind,
+            TaskStatus,
+            TaskStatusHistory,
+        )
         from app.persistence.tasks import normalize_task_title
         from app.services.team_members import as_known_employees
+        from app.sync.task_sync import schedule_sync_task
 
         if not row.transcript_text or not row.detailed_summary:
             return 0
-        existing_drafts = _meeting_drafts(
-            session,
-            source_kind="fireflies",
-            conversation_id=row.fireflies_id,
+        existing = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.fireflies)
+            .filter(Task.source_conversation_id == row.fireflies_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
         )
         existing_block = "\n".join(
-            f"- {(d.payload or {}).get('title','')}: "
-            f"{((d.payload or {}).get('description') or '')[:300]} "
-            f"[owner={(d.payload or {}).get('owner_display_name') or '—'}]"
-            for d in existing_drafts
+            f"- {t.title}: {(t.description or '')[:300]} "
+            f"[owner={t.owner_display_name or '—'}]"
+            for t in existing
         ) or "  (no tasks were extracted on the first pass)"
         try:
             known_employees = as_known_employees(session, prefer_telegram=True)
@@ -1542,7 +1371,7 @@ class FirefliesPipeline:
         log.info(
             "fireflies_task_verification_done",
             fireflies_id=row.fireflies_id,
-            existing_count=len(existing_drafts),
+            existing_count=len(existing),
             newly_added=len(new_tasks),
             new_titles=[
                 (t.get("title") or "")[:80]
@@ -1558,22 +1387,6 @@ class FirefliesPipeline:
         admin_uid = _admin_fallback_owner_id()
         today = date.today()
         added = 0
-        try:
-            _, verify_inference_id = _create_meeting_inference(
-                session,
-                source_kind="fireflies",
-                conversation_id=row.fireflies_id,
-                title=row.title,
-                transcript_excerpt=row.transcript_text or "",
-                pass_label="fireflies_verify",
-                raw_extraction=[t for t in new_tasks if isinstance(t, dict)],
-            )
-        except Exception as e:  # noqa: BLE001
-            log.info(
-                "fireflies_verify_inference_persist_failed",
-                fireflies_id=row.fireflies_id, error=str(e),
-            )
-            return 0
         for t in new_tasks:
             if not isinstance(t, dict):
                 continue
@@ -1604,43 +1417,44 @@ class FirefliesPipeline:
                         )
                         break
             try:
-                draft_payload = {
-                    "title": title[:10_000],
-                    "description": description,
-                    "owner_user_id": owner_uid,
-                    "owner_display_name": owner_display_name,
-                    "priority": (
-                        priority_raw
-                        if priority_raw in {"low", "medium", "high", "urgent"}
-                        else "medium"
-                    ),
-                    "due_date": today.isoformat(),
-                    "due_time": "18:00",
-                }
-                pending = {
-                    "source_kind": "fireflies",
-                    "conversation_id": row.fireflies_id,
-                    "message_ts": row.fireflies_id,
-                    "thread_ts": None,
-                    "permalink": row.fireflies_share_url,
-                    "fallback_author": admin_uid,
-                    "context_snapshot_id": None,
-                    "source_chat_id": 0,
-                    "source_message_id": 0,
-                    "source_text": (row.title or "")[:10_000],
-                }
-                _create_meeting_draft(
-                    session,
-                    inference_id=verify_inference_id,
-                    payload=draft_payload,
-                    pending=pending,
-                    admin_uid=admin_uid,
-                    slack_message_ts=row.fireflies_id,
+                priority = (
+                    TaskPriority(priority_raw)
+                    if priority_raw in {p.value for p in TaskPriority}
+                    else TaskPriority.medium
                 )
+                task = Task(
+                    title=title[:10_000],
+                    description=description,
+                    owner_user_id=owner_uid,
+                    owner_display_name=owner_display_name,
+                    priority=priority,
+                    due_date=today,
+                    due_time=time(18, 0),
+                    status=TaskStatus.todo,
+                    is_current_week=True,
+                    source_kind=TaskSourceKind.fireflies,
+                    source_conversation_id=row.fireflies_id,
+                    source_message_ts=row.fireflies_id,
+                    source_permalink=row.fireflies_share_url,
+                    created_by_slack_user_id=admin_uid,
+                )
+                session.add(task)
+                session.flush()
+                session.add(
+                    TaskStatusHistory(
+                        task_id=task.id,
+                        from_status=None,
+                        to_status=TaskStatus.todo,
+                        changed_by_slack_user_id=admin_uid,
+                        reason="fireflies_verified",
+                        at=datetime.now(timezone.utc),
+                    )
+                )
+                schedule_sync_task(session, task.id)
                 added += 1
             except Exception as e:  # noqa: BLE001
                 log.warning(
-                    "fireflies_task_verify_draft_failed",
+                    "fireflies_task_verify_create_failed",
                     title=title[:80], error=str(e),
                 )
         if added:
@@ -1650,48 +1464,42 @@ class FirefliesPipeline:
     def _step_post_task_cards(
         self, session: Session, row: MeetingRecording
     ) -> int:
-        """FR-CR-05-120 / FR-CR-05-128 — post a CONFIRM WIDGET
-        per extracted draft (operator-pinned approval flow:
-        meeting tasks must be approved in TG just like TG-
-        ingested tasks; pre-128 they posted as final cards
-        which felt «already pressed»). Reuses
-        `post_draft_confirmation` so the ✅/✏️/❌ keyboard +
-        callback handling is identical to the TG path. Runs
-        AFTER `_step_send_short_summary` so the operator gets
-        the overview first, then per-task widgets."""
+        """FR-CR-05-120 follow-up — post DM card per extracted
+        Task ROW. Runs AFTER `_step_send_short_summary` so the
+        operator gets the overview first, then per-task cards.
+        Returns count of cards successfully posted."""
         if (
             self._sender is None
             or not getattr(self._sender, "enabled", False)
         ):
             return 0
-        from app.telegram_bot.cards import post_draft_confirmation
+        from app.telegram_bot.cards import post_initial_card
 
         admin_uid = _admin_fallback_owner_id()
-        drafts = _meeting_drafts(
-            session,
-            source_kind="fireflies",
-            conversation_id=row.fireflies_id,
-            include_states=("proposed", "edited"),
+        tasks = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.fireflies)
+            .filter(Task.source_conversation_id == row.fireflies_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
         )
         posted = 0
-        for draft in drafts:
-            payload = draft.payload or {}
-            owner_uid = payload.get("owner_user_id")
+        for task in tasks:
             try:
-                post_draft_confirmation(
+                post_initial_card(
                     sender=self._sender,
                     session=session,
-                    draft=draft,
-                    source_chat_id=0,
-                    source_message_id=0,
+                    task=task,
+                    chat_id=0,
+                    reply_to_message_id=None,
                     author_user_id=admin_uid,
-                    owner_user_id=owner_uid,
                 )
                 posted += 1
             except Exception as e:  # noqa: BLE001
                 log.info(
-                    "fireflies_task_widget_post_failed",
-                    draft_id=draft.id,
+                    "fireflies_task_card_post_failed",
+                    task_id=task.id,
                     error=str(e),
                 )
         return posted

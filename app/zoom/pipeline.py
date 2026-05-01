@@ -654,17 +654,10 @@ class ZoomPipeline:
         from app.fireflies.pipeline import (
             _create_meeting_draft,
             _create_meeting_inference,
-            _wipe_pending_meeting_drafts,
         )
         from app.persistence.tasks import normalize_task_title
 
         today = datetime.now(timezone.utc).date()
-        # FR-CR-05-128 — wipe stale unconfirmed drafts before
-        # re-extracting (idempotency on `--rerun`).
-        _wipe_pending_meeting_drafts(
-            session, source_kind="zoom",
-            conversation_id=row.zoom_id,
-        )
         # FR-CR-05-128 — meeting tasks ship as ActionDraft rows
         # (operator-pinned approval flow); Task is materialised
         # only after ✅ in the confirm widget.

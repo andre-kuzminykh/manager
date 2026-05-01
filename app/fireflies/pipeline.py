@@ -256,6 +256,66 @@ def _looks_like_auto_stamp_title(title: str | None) -> bool:
     return _AUTO_STAMP_TITLE_RE.match(title.strip()) is not None
 
 
+def _build_counterparties_section_for_doc(
+    session: "Session",
+    *,
+    source_kind: str,
+    source_id: str,
+) -> str:
+    """FR-CR-05-125 — render the matched-counterparties block
+    for the Google Doc. One-line-per-counterparty: «<name> —
+    <type>». Returns "" when nothing matched (Doc body stays
+    clean)."""
+    from app.models import Counterparty, CounterpartyMention
+
+    rows = (
+        session.query(Counterparty)
+        .join(
+            CounterpartyMention,
+            CounterpartyMention.counterparty_id == Counterparty.id,
+        )
+        .filter(CounterpartyMention.source_kind == source_kind)
+        .filter(CounterpartyMention.source_id == source_id)
+        .order_by(CounterpartyMention.id.asc())
+        .all()
+    )
+    if not rows:
+        return ""
+    lines = ["", "🔗 КОНТРАГЕНТЫ", ""]
+    for cp in rows:
+        type_ = (cp.type or "").strip()
+        suffix = f" — {type_}" if type_ else ""
+        lines.append(f"• {cp.name}{suffix}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _build_counterparties_section_for_short_summary(
+    session: "Session",
+    *,
+    source_kind: str,
+    source_id: str,
+) -> str:
+    """FR-CR-05-125 — single-line counterparty block for the
+    short TG summary. Comma-separated names (no types — keeps
+    the message scannable). Returns "" when no matches."""
+    from app.models import Counterparty, CounterpartyMention
+
+    rows = (
+        session.query(Counterparty)
+        .join(
+            CounterpartyMention,
+            CounterpartyMention.counterparty_id == Counterparty.id,
+        )
+        .filter(CounterpartyMention.source_kind == source_kind)
+        .filter(CounterpartyMention.source_id == source_id)
+        .order_by(CounterpartyMention.id.asc())
+        .all()
+    )
+    if not rows:
+        return ""
+    return "🔗 Контрагенты: " + ", ".join(cp.name for cp in rows)
+
+
 def _build_full_tasks_section_for_doc(
     session: "Session",
     *,
@@ -719,6 +779,67 @@ class FirefliesPipeline:
 
     # --- step 4: Google Doc export ----------------------------
 
+    def _step_match_counterparties(
+        self, session: Session, row: MeetingRecording
+    ) -> int:
+        """FR-CR-05-125 — match counterparty mentions in the
+        transcript against the canonical directory and persist
+        the link rows. Returns the count of matches.
+
+        Idempotency on rerun: deletes existing mention rows for
+        this `(source_kind, source_id)` first so the new set
+        replaces the old without UNIQUE violations.
+
+        Empty directory (operator hasn't run pull yet) → silent
+        skip, the doc/summary just don't carry the section.
+        """
+        from app.models import CounterpartyMention
+        from app.services.counterparty_match import (
+            match_counterparties_in_transcript,
+        )
+
+        if not row.transcript_text:
+            return 0
+        try:
+            matches = match_counterparties_in_transcript(
+                session,
+                transcript=row.transcript_text,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort
+                    or None
+                ),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "fireflies_counterparty_match_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+            return 0
+        # Replace existing mentions (idempotent rerun).
+        session.query(CounterpartyMention).filter(
+            CounterpartyMention.source_kind == "fireflies",
+            CounterpartyMention.source_id == row.fireflies_id,
+        ).delete()
+        session.flush()
+        for cp in matches:
+            session.add(
+                CounterpartyMention(
+                    counterparty_id=cp.id,
+                    source_kind="fireflies",
+                    source_id=row.fireflies_id,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+        session.flush()
+        log.info(
+            "fireflies_counterparty_match_done",
+            fireflies_id=row.fireflies_id,
+            matched=len(matches),
+        )
+        return len(matches)
+
     def _step_doc_export(
         self, session: Session, row: MeetingRecording
     ) -> bool:
@@ -740,10 +861,17 @@ class FirefliesPipeline:
             return False
         title = row.title or f"Meeting {row.fireflies_id}"
         # FR-CR-05-119 follow-up — append the full task list to
-        # the doc body so the archived report carries verbose
-        # action items + owner / due / priority. The short TG
-        # summary keeps the compressed one-sentence variant.
+        # the doc body. FR-CR-05-125 — also append the matched
+        # counterparties block. Tasks first (operator's primary
+        # action items), counterparties below (reference).
         body = row.detailed_summary
+        cp_section = _build_counterparties_section_for_doc(
+            session,
+            source_kind="fireflies",
+            source_id=row.fireflies_id,
+        )
+        if cp_section:
+            body = body.rstrip() + "\n\n" + cp_section
         tasks_section = _build_full_tasks_section_for_doc(
             session,
             source_kind=TaskSourceKind.fireflies,
@@ -815,6 +943,16 @@ class FirefliesPipeline:
         )
         if todo:
             body = body.rstrip() + "\n\n" + todo
+        # FR-CR-05-125 — single-line «🔗 Контрагенты: name1,
+        # name2» appended after To-Do, before the doc-link
+        # trailer. Only emitted when matches exist.
+        cp_line = _build_counterparties_section_for_short_summary(
+            session,
+            source_kind="fireflies",
+            source_id=row.fireflies_id,
+        )
+        if cp_line:
+            body = body.rstrip() + "\n\n" + cp_line
         # FR-CR-05-117 — Google Doc trailer deterministic; never
         # gets truncated mid-link.
         if row.google_doc_url:
@@ -1306,6 +1444,17 @@ class FirefliesPipeline:
                 report.errors.append(row.last_error or "detailed_summary_failed")
                 return report
         report.detailed_chars = len(row.detailed_summary or "")
+        # FR-CR-05-125 — match counterparty mentions against the
+        # canonical directory before doc/summary generation so
+        # both surfaces can render the «🔗 Контрагенты» block.
+        try:
+            with _trace_step("fireflies", "match_counterparties", **ctx):
+                self._step_match_counterparties(session, row)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_counterparty_match_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
         # FR-CR-05-119 follow-up: extract tasks FIRST, then doc
         # with full task list, then short with compressed.
         with _trace_step("fireflies", "extract_tasks", **ctx):

@@ -318,6 +318,154 @@ def test_factory_returns_none_when_no_sheet_ids():
     assert build_counterparties_sheet_factory(s) is None
 
 
+def test_match_counterparties_in_transcript_dedupes_and_orders(session):
+    """FR-CR-05-125 — matcher returns canonical Counterparty
+    rows in LLM-emitted order, dedupes, drops invalid ids."""
+    from app.services.counterparty_match import (
+        match_counterparties_in_transcript,
+    )
+
+    # Seed a directory.
+    cp1 = Counterparty(
+        name="ADNOC", type="Status outreach", name_normalised="adnoc",
+    )
+    cp2 = Counterparty(
+        name="Bosch", type="Status outreach", name_normalised="bosch",
+    )
+    cp3 = Counterparty(
+        name="Goldman Sachs", type="Outreach",
+        name_normalised="goldman sachs",
+    )
+    session.add_all([cp1, cp2, cp3])
+    session.flush()
+    cp1_id, cp2_id, cp3_id = cp1.id, cp2.id, cp3.id
+
+    class _StubLLM:
+        def __init__(self, returned_ids):
+            self.returned = returned_ids
+            self.captured = None
+
+        def call_tool(self, **kw):
+            self.captured = kw
+            return {"matched_ids": self.returned}
+
+    # LLM returns ids in order with a duplicate + an invalid id.
+    backend = _StubLLM([cp2_id, cp1_id, cp1_id, 99999])
+    out = match_counterparties_in_transcript(
+        session,
+        transcript="Сегодня обсуждали ADNOC, потом Bosch.",
+        llm_backend=backend,
+        model="gpt-5.5",
+    )
+    # Order preserved (Bosch first, then ADNOC), dedupe, invalid
+    # id dropped.
+    assert [cp.id for cp in out] == [cp2_id, cp1_id]
+    # Directory rendering carried real id/name/type values.
+    assert "ADNOC" in backend.captured["user_prompt"]
+    assert "Goldman Sachs" in backend.captured["user_prompt"]
+    assert "directory:" in backend.captured["user_prompt"]
+
+
+def test_match_counterparties_returns_empty_on_llm_failure(session):
+    """FR-CR-05-125 — LLM call exception → empty list, never
+    propagates. Pipeline keeps going without the 🔗 section."""
+    from app.services.counterparty_match import (
+        match_counterparties_in_transcript,
+    )
+
+    session.add(
+        Counterparty(
+            name="ADNOC", type="Status outreach", name_normalised="adnoc",
+        )
+    )
+    session.flush()
+
+    class _BoomLLM:
+        def call_tool(self, **kw):
+            raise RuntimeError("model down")
+
+    out = match_counterparties_in_transcript(
+        session,
+        transcript="ADNOC something",
+        llm_backend=_BoomLLM(),
+        model="gpt-5.5",
+    )
+    assert out == []
+
+
+def test_match_counterparties_skips_when_directory_empty(session):
+    """FR-CR-05-125 — empty directory → no LLM call, returns
+    []. Operator hasn't pulled from sheets yet; pipeline runs
+    fine, just without the 🔗 section."""
+    from app.services.counterparty_match import (
+        match_counterparties_in_transcript,
+    )
+
+    class _NoCallLLM:
+        def call_tool(self, **kw):
+            raise AssertionError("LLM should not be called on empty dir")
+
+    out = match_counterparties_in_transcript(
+        session,
+        transcript="ADNOC big talk",
+        llm_backend=_NoCallLLM(),
+        model="gpt-5.5",
+    )
+    assert out == []
+
+
+def test_build_counterparties_section_renders_doc_and_short_summary(session):
+    """FR-CR-05-125 — both helpers query `counterparty_mentions`
+    and render canonical names. Doc form has 🔗 КОНТРАГЕНТЫ
+    header + bullet list with type. Short-summary form is a
+    single line with comma-separated names."""
+    from app.fireflies.pipeline import (
+        _build_counterparties_section_for_doc,
+        _build_counterparties_section_for_short_summary,
+    )
+    from app.models import CounterpartyMention
+
+    cp_a = Counterparty(
+        name="ADNOC", type="Status outreach", name_normalised="adnoc",
+    )
+    cp_b = Counterparty(
+        name="Bosch", type="Outreach", name_normalised="bosch",
+    )
+    session.add_all([cp_a, cp_b])
+    session.flush()
+    session.add_all([
+        CounterpartyMention(
+            counterparty_id=cp_a.id, source_kind="fireflies",
+            source_id="trans-x",
+        ),
+        CounterpartyMention(
+            counterparty_id=cp_b.id, source_kind="fireflies",
+            source_id="trans-x",
+        ),
+    ])
+    session.flush()
+
+    doc = _build_counterparties_section_for_doc(
+        session, source_kind="fireflies", source_id="trans-x",
+    )
+    assert "🔗 КОНТРАГЕНТЫ" in doc
+    assert "• ADNOC — Status outreach" in doc
+    assert "• Bosch — Outreach" in doc
+
+    short = _build_counterparties_section_for_short_summary(
+        session, source_kind="fireflies", source_id="trans-x",
+    )
+    assert short == "🔗 Контрагенты: ADNOC, Bosch"
+
+    # No matches → empty string.
+    assert _build_counterparties_section_for_doc(
+        session, source_kind="fireflies", source_id="trans-other",
+    ) == ""
+    assert _build_counterparties_section_for_short_summary(
+        session, source_kind="fireflies", source_id="trans-other",
+    ) == ""
+
+
 def test_settings_outreach_tab_names_default_split_correctly():
     """FR-CR-05-124 — comma-separated tab names default to the
     three operator-pinned ones."""

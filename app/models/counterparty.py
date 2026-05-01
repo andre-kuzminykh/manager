@@ -91,4 +91,43 @@ class CounterpartyAttribute(Base):
     )
 
 
-__all__ = ["Counterparty", "CounterpartyAttribute"]
+class CounterpartyMention(Base):
+    """FR-CR-05-125 — junction row linking one recording (Fire-
+    flies / Zoom) to a counterparty the LLM matched in the
+    transcript. UNIQUE(source_kind, source_id, counterparty_id)
+    so re-runs replace earlier mentions cleanly.
+
+    `source_id` carries the platform-native recording UUID
+    (`fireflies_id` or `zoom_id`) so we don't need two nullable
+    foreign keys for the two meeting sources.
+    """
+
+    __tablename__ = "counterparty_mentions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_kind", "source_id", "counterparty_id",
+            name="uq_counterparty_mentions_source_cp",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    counterparty_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("counterparties.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    context: Mapped[str | None] = mapped_column(
+        "context", String(2048), nullable=True
+    )
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    counterparty: Mapped[Counterparty] = relationship("Counterparty")
+
+
+__all__ = ["Counterparty", "CounterpartyAttribute", "CounterpartyMention"]

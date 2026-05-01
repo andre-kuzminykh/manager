@@ -304,13 +304,20 @@ class ZoomPipeline:
             return False
         title = row.title or f"Zoom meeting {row.zoom_id}"
         # FR-CR-05-119 follow-up — append the full task list to
-        # the doc body. Pipeline order is detailed → tasks → doc
-        # so by here the Task rows already exist.
+        # the doc body. FR-CR-05-125 — also append the matched
+        # counterparties block. Pipeline order is detailed →
+        # match → tasks → doc so both already exist by here.
         from app.fireflies.pipeline import (
+            _build_counterparties_section_for_doc,
             _build_full_tasks_section_for_doc,
         )
 
         body = row.detailed_summary
+        cp_section = _build_counterparties_section_for_doc(
+            session, source_kind="zoom", source_id=row.zoom_id,
+        )
+        if cp_section:
+            body = body.rstrip() + "\n\n" + cp_section
         tasks_section = _build_full_tasks_section_for_doc(
             session,
             source_kind=TaskSourceKind.zoom,
@@ -374,6 +381,7 @@ class ZoomPipeline:
         # FR-CR-05-119 — drop any LLM-emitted To-Do section so we
         # can append the deterministic one. Also strip markdown.
         from app.fireflies.pipeline import (
+            _build_counterparties_section_for_short_summary,
             _build_todo_section,
             _strip_llm_todo_block,
         )
@@ -389,6 +397,13 @@ class ZoomPipeline:
         )
         if todo:
             text = text.rstrip() + "\n\n" + todo
+        # FR-CR-05-125 — single-line «🔗 Контрагенты» after the
+        # To-Do block.
+        cp_line = _build_counterparties_section_for_short_summary(
+            session, source_kind="zoom", source_id=row.zoom_id,
+        )
+        if cp_line:
+            text = text.rstrip() + "\n\n" + cp_line
         # FR-CR-05-117 — Google Doc trailer (deterministic).
         if row.google_doc_url:
             text = (
@@ -441,6 +456,57 @@ class ZoomPipeline:
                 sent += 1
         row.short_summary_sent = sent > 0
         return sent
+
+    def _step_match_counterparties(
+        self, session: Session, row: ZoomRecording
+    ) -> int:
+        """FR-CR-05-125 — symmetric with the Fireflies match step.
+        Replaces existing mention rows for this `(source_kind=
+        'zoom', source_id=zoom_id)` and inserts the new set."""
+        from app.models import CounterpartyMention
+        from app.services.counterparty_match import (
+            match_counterparties_in_transcript,
+        )
+
+        if not row.transcript_text:
+            return 0
+        try:
+            matches = match_counterparties_in_transcript(
+                session,
+                transcript=row.transcript_text,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort
+                    or None
+                ),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "zoom_counterparty_match_unexpected_error",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            return 0
+        session.query(CounterpartyMention).filter(
+            CounterpartyMention.source_kind == "zoom",
+            CounterpartyMention.source_id == row.zoom_id,
+        ).delete()
+        session.flush()
+        for cp in matches:
+            session.add(
+                CounterpartyMention(
+                    counterparty_id=cp.id,
+                    source_kind="zoom",
+                    source_id=row.zoom_id,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+        session.flush()
+        log.info(
+            "zoom_counterparty_match_done",
+            zoom_id=row.zoom_id, matched=len(matches),
+        )
+        return len(matches)
 
     # --- step 6: extract tasks --------------------------------
 
@@ -878,6 +944,19 @@ class ZoomPipeline:
                         err=row.last_error,
                     )
                     break
+
+        # FR-CR-05-125 — match counterparties before tasks +
+        # doc + short so all three surfaces can render the
+        # «🔗 Контрагенты» block.
+        if row.detailed_summarised:
+            try:
+                with _trace_step("zoom", "match_counterparties", **ctx):
+                    self._step_match_counterparties(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_counterparty_match_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
 
         if row.detailed_summarised:
             try:

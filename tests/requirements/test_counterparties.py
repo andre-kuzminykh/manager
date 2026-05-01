@@ -205,12 +205,10 @@ def test_pull_wipes_existing_rows_before_reloading(session, monkeypatch):
 
 
 def test_pull_dedupes_same_name_in_status_outreach(session, monkeypatch):
-    """FR-CR-05-124 — `(name_normalised, type)` unique. The same
-    canonical name appearing twice on the same tab (operator
-    typo / merger duplicates) collapses to one hub with two
-    satellites — except `(counterparty_id, source)` is also
-    unique, so on the SAME source the second wins as a single
-    satellite."""
+    """FR-CR-05-124 — same canonical name twice on the same tab
+    (operator typo / legal-form variants) collapses to one hub
+    with one satellite (UNIQUE(counterparty_id, source) takes
+    care of the second satellite)."""
     sync = _make_sync(
         monkeypatch,
         status_data={
@@ -228,6 +226,60 @@ def test_pull_dedupes_same_name_in_status_outreach(session, monkeypatch):
     rows = session.query(Counterparty).all()
     assert rows[0].name == "Goldman Sachs Inc."
     assert rows[0].name_normalised == "goldman sachs"
+
+
+def test_pull_dedupes_same_name_across_different_types(session, monkeypatch):
+    """FR-CR-05-126 follow-up — operator regression: «Balderton»
+    appears in both «Outreach» and «Rejections» tabs; «Tencent»
+    in «Outreach» and «Strategic». Pre-fix the hub had two rows
+    with same name but different `type`. Now one hub per
+    canonical name, satellites per source so per-tab metadata
+    still survives."""
+    from app.sync import counterparties as _cp_mod
+
+    full_data = {
+        ("outreach-sheet", "Outreach"): [
+            ["name"], ["Balderton"], ["Tencent"],
+        ],
+        ("outreach-sheet", "Rejections"): [
+            ["name"], ["Balderton"],
+        ],
+        ("status-sheet", "Status outreach"): [
+            ["type", "name"],
+            ["Strategic", "Tencent"],
+        ],
+    }
+    monkeypatch.setattr(
+        _cp_mod, "build", lambda *a, **kw: _StubSheetsService(full_data)
+    )
+    sync = CounterpartiesSheetSync(
+        credentials=object(),
+        status_spreadsheet_id="status-sheet",
+        status_tab_name="Status outreach",
+        name_first_tabs=[
+            ("outreach-sheet", "Outreach"),
+            ("outreach-sheet", "Rejections"),
+        ],
+    )
+    hubs, attrs = sync.pull(session)
+    # 2 hubs (Balderton + Tencent), each with 2 satellites
+    # (the two sources where they appeared).
+    assert hubs == 2
+    assert attrs == 4
+
+    cp_rows = (
+        session.query(Counterparty).order_by(Counterparty.name).all()
+    )
+    names = sorted(cp.name for cp in cp_rows)
+    assert names == ["Balderton", "Tencent"]
+    # Each canonical hub has multiple satellites pointing to it.
+    balderton = next(c for c in cp_rows if c.name == "Balderton")
+    sources = sorted(
+        a.source for a in session.query(CounterpartyAttribute)
+        .filter(CounterpartyAttribute.counterparty_id == balderton.id)
+        .all()
+    )
+    assert sources == ["Outreach", "Rejections"]
 
 
 def test_pull_empty_input_does_not_wipe_directory(session, monkeypatch):

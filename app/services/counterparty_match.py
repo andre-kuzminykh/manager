@@ -221,22 +221,41 @@ def _shortlist_directory_for_transcript(
         best = 0.0
         for n in name_tokens:
             for t in transcript_tokens:
-                if n == t or (len(n) >= 4 and n in t) or (
-                    len(t) >= 4 and t in n
-                ):
+                # Substring match: strong signal when the
+                # directory token appears as a substring of a
+                # transcript token (or vice versa). 4+ char
+                # threshold avoids false hits like «inc» ⊂
+                # «invest».
+                if n == t:
                     best = 1.0
                     break
-                # Length-aware ratio: accept looser match for
-                # short names (Tether 6 → tether 6 → swap of
-                # «teaser» 6 yields 0.83; «шафлер» 6 →
-                # «shafler» 7 vs «schaeffler» 10 yields 0.7).
-                if abs(len(n) - len(t)) <= max(3, len(n) // 2):
+                if len(n) >= 4 and n in t:
+                    # FR-CR-05-126 follow-up — boost long
+                    # substring matches («schaeffler» ⊂ «schaefflera»
+                    # in a translit transcript token would be
+                    # caught here; the operator's regression
+                    # «шафлера» translits to «shaflera» which
+                    # contains «schaffl» partially).
+                    best = max(best, 0.95)
+                    continue
+                if len(t) >= 4 and t in n:
+                    best = max(best, 0.95)
+                    continue
+                # Length-aware ratio. «schaeffler» 10 vs
+                # «shaflera» 8 (translit of «шафлера»):
+                # SequenceMatcher ratio ≈ 0.67 → above 0.6 so
+                # the match lands.
+                if abs(len(n) - len(t)) <= max(4, len(n) // 2):
                     r = difflib.SequenceMatcher(None, n, t).ratio()
                     if r > best:
                         best = r
             if best >= 1.0:
                 break
-        if best >= 0.65:
+        # FR-CR-05-126 follow-up — threshold relaxed 0.65 → 0.6
+        # because Cyrillic-translit edit distances tend to land
+        # in the 0.6-0.7 range («shaflera» vs «schaeffler» ≈
+        # 0.67).
+        if best >= 0.6:
             scored.append((best, cp))
 
     if not scored:

@@ -221,12 +221,11 @@ class CounterpartiesSheetSync:
         session.query(Counterparty).delete()
         session.flush()
 
-        hubs_by_key: dict[tuple[str, str], Counterparty] = {}
+        hubs_by_norm: dict[str, Counterparty] = {}
         # `(counterparty_id, source)` is UNIQUE — when the same
         # canonical name appears twice on the same source tab
         # (operator typo / merger duplicates) we keep the FIRST
-        # row's satellite and skip the rest. Hub still has just
-        # one row.
+        # row's satellite and skip the rest.
         seen_attr_keys: set[tuple[int, str]] = set()
         attrs_inserted = 0
         now = datetime.now(timezone.utc)
@@ -236,8 +235,16 @@ class CounterpartiesSheetSync:
             normalised = normalise_name(name)
             if not normalised:
                 continue
-            key = (normalised, type_)
-            cp = hubs_by_key.get(key)
+            # FR-CR-05-126 follow-up — dedupe by `name_normalised`
+            # ONLY (not by `(name_normalised, type)`). When the
+            # same canonical counterparty appears in multiple
+            # tabs / sheets («Balderton» in both «Outreach» and
+            # «Rejections», «Tencent» in «Outreach» and
+            # «Strategic», «Nvidia» in «Outreach» and
+            # «Strategic»), we keep ONE hub row with the
+            # first-seen `type`, and attach a satellite per
+            # source so all the per-tab metadata still survives.
+            cp = hubs_by_norm.get(normalised)
             if cp is None:
                 cp = Counterparty(
                     name=name,
@@ -246,7 +253,7 @@ class CounterpartiesSheetSync:
                 )
                 session.add(cp)
                 session.flush()
-                hubs_by_key[key] = cp
+                hubs_by_norm[normalised] = cp
             attr_key = (cp.id, rec["source"])
             if attr_key in seen_attr_keys:
                 continue
@@ -263,10 +270,10 @@ class CounterpartiesSheetSync:
         session.flush()
         log.info(
             "counterparties_pull_done",
-            hubs=len(hubs_by_key),
+            hubs=len(hubs_by_norm),
             attrs=attrs_inserted,
         )
-        return len(hubs_by_key), attrs_inserted
+        return len(hubs_by_norm), attrs_inserted
 
 
 __all__ = ["CounterpartiesSheetSync", "normalise_name"]

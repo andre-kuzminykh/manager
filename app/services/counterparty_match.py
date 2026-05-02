@@ -40,8 +40,8 @@ counterparties (FR-CR-05-125).
 Input (in the user prompt):
   - The full transcript (Whisper-transcribed Russian + English
     speech, EXPECT typos and phonetic errors).
-  - A `directory` table: `id | name | type` of every known
-    counterparty.
+  - A `directory` table: `id | name` of every known
+    counterparty (FR-CR-05-132 — `type` removed).
 
 Output via the provided tool: a list of `directory.id` values
 for the counterparties the transcript actually references.
@@ -227,8 +227,9 @@ Input (in the user prompt):
   - `mentions`: a numbered list of strings the previous LLM
     extracted from the transcript verbatim («Тезер»,
     «Bauer/Dart», «Шафлер»…).
-  - `directory`: `id | type | name` for every known
-    counterparty.
+  - `directory`: `id | name` for every known counterparty
+    (FR-CR-05-132 — `type` removed; one canonical row per
+    counterparty).
 
 ═══════════════════════════════════════════════════════════════
 PHONETIC + CYRILLIC↔LATIN MATCHING IS THE WHOLE JOB.
@@ -303,14 +304,15 @@ _CYR_TO_LAT = {
 
 
 def _render_directory(rows: list[Counterparty]) -> str:
-    """Compact directory rendering for the user prompt. Three
-    columns: id | type | name. Notes / status / etc. live on
-    the satellite — the matcher doesn't need them."""
-    lines = ["  id    | type                       | name"]
+    """Compact directory rendering for the user prompt. Two
+    columns: id | name. FR-CR-05-132 — `type` removed from the
+    hub; whatever satellite attributes the operator captured
+    (status, role, notes) stay there and the matcher doesn't
+    need them."""
+    lines = ["  id    | name"]
     for cp in rows:
-        type_ = (cp.type or "")[:26]
         name = (cp.name or "")[:200]
-        lines.append(f"  {cp.id:<5} | {type_:<26} | {name}")
+        lines.append(f"  {cp.id:<5} | {name}")
     return "\n".join(lines)
 
 
@@ -462,7 +464,7 @@ def match_counterparties_in_transcript(
         return []
     directory = (
         session.query(Counterparty)
-        .order_by(Counterparty.type, Counterparty.name)
+        .order_by(Counterparty.name)
         .all()
     )
     if not directory:
@@ -497,7 +499,7 @@ def match_counterparties_in_transcript(
         directory_size=len(directory),
         shortlist_size=len(shortlist),
         shortlist_sample=[
-            {"id": cp.id, "name": cp.name, "type": cp.type}
+            {"id": cp.id, "name": cp.name}
             for cp in shortlist[:8]
         ],
         transcript_chars=len(transcript),
@@ -516,7 +518,7 @@ def match_counterparties_in_transcript(
             event="counterparty_match_call_started",
             **_start_log_payload,
             shortlist_full=[
-                {"id": cp.id, "name": cp.name, "type": cp.type}
+                {"id": cp.id, "name": cp.name}
                 for cp in shortlist
             ],
             user_prompt_full=user_prompt,
@@ -813,7 +815,8 @@ You rewrite task titles + descriptions so every counterparty
 mention uses the CANONICAL name from the directory.
 
 Input (in the user prompt):
-  - `directory`: `id | type | name` for every known counterparty.
+  - `directory`: `id | name` for every known counterparty
+    (FR-CR-05-132 — `type` removed).
   - `tasks`: numbered list `[id]: title // description`.
 
 Output via JSON: list of rewritten tasks. Each entry must have

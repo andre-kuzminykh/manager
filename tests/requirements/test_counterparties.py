@@ -128,7 +128,15 @@ def test_pull_loads_status_outreach_with_jsonb_attributes(session, monkeypatch):
 
     rows = session.query(Counterparty).order_by(Counterparty.name).all()
     assert {r.name for r in rows} == {"ADNOC", "Bosch"}
-    assert {r.type for r in rows} == {"investor", "client"}
+    # FR-CR-05-132 — `type` removed from hub. Sheet's column-A
+    # category label now lives on the satellite under its
+    # header name («type» here, since that's what the sheet
+    # called the column).
+    sat_types = {
+        a.attributes.get("type")
+        for a in session.query(CounterpartyAttribute).all()
+    }
+    assert sat_types == {"investor", "client"}
 
     # Satellite carries every column from the sheet.
     adnoc_attrs = (
@@ -142,9 +150,11 @@ def test_pull_loads_status_outreach_with_jsonb_attributes(session, monkeypatch):
     assert adnoc.attributes["comments"] == "DD in progress"
 
 
-def test_pull_loads_outreach_tabs_with_tab_name_as_type(session, monkeypatch):
-    """FR-CR-05-124 source B — three tabs. Field A=name, the TAB
-    NAME becomes the `type` value on the hub."""
+def test_pull_loads_outreach_tabs_with_tab_name_as_source(session, monkeypatch):
+    """FR-CR-05-124 / FR-CR-05-132 — three tabs. Field A=name,
+    the TAB NAME becomes the satellite's `source` label (was
+    mirrored on the hub as `type`; column dropped in
+    FR-CR-05-132)."""
     sync = _make_sync(
         monkeypatch,
         status_data={},
@@ -172,10 +182,20 @@ def test_pull_loads_outreach_tabs_with_tab_name_as_type(session, monkeypatch):
         session.query(Counterparty).order_by(Counterparty.name).all()
     )
     by_name = {r.name: r for r in rows}
-    assert by_name["Felix Capital"].type == "Outreach"
-    assert by_name["Supernova"].type == "Outreach"
-    assert by_name["Nvidia"].type == "Rejections"
-    assert by_name["Goldman Sachs"].type == "Looking for intros"
+    # FR-CR-05-132 — tab name now lives on the satellite as
+    # `source`, not on the hub as `type`.
+    sources_by_hub = {}
+    for hub in rows:
+        sat = (
+            session.query(CounterpartyAttribute)
+            .filter(CounterpartyAttribute.counterparty_id == hub.id)
+            .one()
+        )
+        sources_by_hub[hub.name] = sat.source
+    assert sources_by_hub["Felix Capital"] == "Outreach"
+    assert sources_by_hub["Supernova"] == "Outreach"
+    assert sources_by_hub["Nvidia"] == "Rejections"
+    assert sources_by_hub["Goldman Sachs"] == "Looking for intros"
 
 
 def test_pull_wipes_existing_rows_before_reloading(session, monkeypatch):
@@ -185,7 +205,6 @@ def test_pull_wipes_existing_rows_before_reloading(session, monkeypatch):
     # Seed with stale data the next pull should erase.
     stale = Counterparty(
         name="StaleCo",
-        type="investor",
         name_normalised="staleco",
     )
     session.add(stale)
@@ -303,7 +322,7 @@ def test_pull_empty_input_does_not_wipe_directory(session, monkeypatch):
     directory. Protects against a transient API failure
     blanking the directory."""
     seed = Counterparty(
-        name="KeepMe", type="investor", name_normalised="keepme",
+        name="KeepMe", name_normalised="keepme",
     )
     session.add(seed)
     session.flush()
@@ -360,10 +379,20 @@ def test_pull_loads_targets_sheet_alongside_outreach(session, monkeypatch):
         session.query(Counterparty).order_by(Counterparty.name).all()
     )
     by_name = {r.name: r for r in rows}
-    assert by_name["Felix Capital"].type == "Outreach"
-    assert by_name["Hyperloop Ventures"].type == "Investor Targets"
-    assert by_name["XYZ Fund"].type == "Investor Targets"
-    assert by_name["Old Fund"].type == "rejected"
+    # FR-CR-05-132 — tab labels live on the satellite as
+    # `source` (one row per (hub, source) pair).
+    src_by_hub = {}
+    for hub in rows:
+        sat = (
+            session.query(CounterpartyAttribute)
+            .filter(CounterpartyAttribute.counterparty_id == hub.id)
+            .one()
+        )
+        src_by_hub[hub.name] = sat.source
+    assert src_by_hub["Felix Capital"] == "Outreach"
+    assert src_by_hub["Hyperloop Ventures"] == "Investor Targets"
+    assert src_by_hub["XYZ Fund"] == "Investor Targets"
+    assert src_by_hub["Old Fund"] == "rejected"
     # Captured attributes from the targets sheet survive in
     # the satellite.
     targets_attrs = (
@@ -400,19 +429,19 @@ def test_shortlist_translits_cyrillic_transcript_to_latin_directory(session):
 
     directory = [
         Counterparty(
-            id=1, name="Schaeffler", type="Status outreach",
+            id=1, name="Schaeffler",
             name_normalised="schaeffler",
         ),
         Counterparty(
-            id=2, name="Nvidia", type="Status outreach",
+            id=2, name="Nvidia",
             name_normalised="nvidia",
         ),
         Counterparty(
-            id=3, name="ADIA", type="Status outreach",
+            id=3, name="ADIA",
             name_normalised="adia",
         ),
         Counterparty(
-            id=4, name="Random Distractor LLC", type="Outreach",
+            id=4, name="Random Distractor LLC",
             name_normalised="random distractor",
         ),
     ]
@@ -437,19 +466,19 @@ def test_shortlist_catches_whisper_misheard_tokens(session):
 
     directory = [
         Counterparty(
-            id=1, name="Tether", type="Status outreach",
+            id=1, name="Tether",
             name_normalised="tether",
         ),
         Counterparty(
-            id=2, name="ADNOC", type="Status outreach",
+            id=2, name="ADNOC",
             name_normalised="adnoc",
         ),
         Counterparty(
-            id=3, name="Goldman Sachs", type="Outreach",
+            id=3, name="Goldman Sachs",
             name_normalised="goldman sachs",
         ),
         Counterparty(
-            id=4, name="Random Distractor LLC", type="Outreach",
+            id=4, name="Random Distractor LLC",
             name_normalised="random distractor",
         ),
     ]
@@ -487,10 +516,10 @@ def test_shortlist_falls_back_to_full_directory_when_empty(session):
 
     directory = [
         Counterparty(
-            id=1, name="ADNOC", type="x", name_normalised="adnoc",
+            id=1, name="ADNOC", name_normalised="adnoc",
         ),
         Counterparty(
-            id=2, name="Bosch", type="x", name_normalised="bosch",
+            id=2, name="Bosch", name_normalised="bosch",
         ),
     ]
     out = _shortlist_directory_for_transcript(
@@ -519,14 +548,12 @@ def test_shortlist_keeps_phonetic_match_under_substring_noise(session):
     # «kapital» → substring «apital» → 0.95 boost.
     distractors = [
         Counterparty(
-            id=1000 + i, name=f"{name} Capital",
-            type="Financial/VC", name_normalised=f"{name.lower()} capital",
+            id=1000 + i, name=f"{name} Capital", name_normalised=f"{name.lower()} capital",
         )
         for i, name in enumerate([f"Fund{i:03d}" for i in range(400)])
     ]
     tether = Counterparty(
-        id=51396, name="Tether",
-        type="Financial/VC", name_normalised="tether",
+        id=51396, name="Tether", name_normalised="tether",
     )
     directory = distractors + [tether]
     transcript = (
@@ -568,13 +595,13 @@ def test_match_counterparties_in_transcript_dedupes_and_orders(session):
 
     # Seed a directory.
     cp1 = Counterparty(
-        name="ADNOC", type="Status outreach", name_normalised="adnoc",
+        name="ADNOC", name_normalised="adnoc",
     )
     cp2 = Counterparty(
-        name="Bosch", type="Status outreach", name_normalised="bosch",
+        name="Bosch", name_normalised="bosch",
     )
     cp3 = Counterparty(
-        name="Goldman Sachs", type="Outreach",
+        name="Goldman Sachs",
         name_normalised="goldman sachs",
     )
     session.add_all([cp1, cp2, cp3])
@@ -618,7 +645,7 @@ def test_match_counterparties_returns_empty_on_llm_failure(session):
 
     session.add(
         Counterparty(
-            name="ADNOC", type="Status outreach", name_normalised="adnoc",
+            name="ADNOC", name_normalised="adnoc",
         )
     )
     session.flush()
@@ -669,10 +696,10 @@ def test_build_counterparties_section_renders_doc_and_short_summary(session):
     from app.models import CounterpartyMention
 
     cp_a = Counterparty(
-        name="ADNOC", type="Status outreach", name_normalised="adnoc",
+        name="ADNOC", name_normalised="adnoc",
     )
     cp_b = Counterparty(
-        name="Bosch", type="Outreach", name_normalised="bosch",
+        name="Bosch", name_normalised="bosch",
     )
     session.add_all([cp_a, cp_b])
     session.flush()
@@ -692,8 +719,10 @@ def test_build_counterparties_section_renders_doc_and_short_summary(session):
         session, source_kind="fireflies", source_id="trans-x",
     )
     assert "🔗 КОНТРАГЕНТЫ" in doc
-    assert "• ADNOC — Status outreach" in doc
-    assert "• Bosch — Outreach" in doc
+    # FR-CR-05-132 — `type` removed; doc lists canonical names
+    # only (no « — <type>» suffix).
+    assert "• ADNOC" in doc
+    assert "• Bosch" in doc
 
     short = _build_counterparties_section_for_short_summary(
         session, source_kind="fireflies", source_id="trans-x",
@@ -860,10 +889,10 @@ def test_canonicalize_task_content_via_llm_rewrites_phonetic_variants():
     )
 
     directory = [
-        Counterparty(id=1, name="Tether", type="VC", name_normalised="tether"),
-        Counterparty(id=2, name="Bauerdart", type="VC", name_normalised="bauerdart"),
-        Counterparty(id=3, name="Felix Capital", type="VC", name_normalised="felix capital"),
-        Counterparty(id=4, name="Jabal", type="VC", name_normalised="jabal"),
+        Counterparty(id=1, name="Tether", name_normalised="tether"),
+        Counterparty(id=2, name="Bauerdart", name_normalised="bauerdart"),
+        Counterparty(id=3, name="Felix Capital", name_normalised="felix capital"),
+        Counterparty(id=4, name="Jabal", name_normalised="jabal"),
     ]
     tasks = [
         {"id": 10, "title": "Отправить апдейт Тезер",
@@ -917,7 +946,7 @@ def test_canonicalize_task_content_handles_llm_failure_gracefully():
     )
 
     directory = [
-        Counterparty(id=1, name="Tether", type="VC", name_normalised="tether"),
+        Counterparty(id=1, name="Tether", name_normalised="tether"),
     ]
     tasks = [{"id": 1, "title": "x", "description": "y"}]
 

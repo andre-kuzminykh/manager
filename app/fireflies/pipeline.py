@@ -304,11 +304,11 @@ def _build_counterparties_section_for_doc(
     )
     if not rows:
         return ""
+    # FR-CR-05-132 — `type` removed from the hub; doc section is
+    # just the canonical name list.
     lines = ["", "🔗 КОНТРАГЕНТЫ", ""]
     for cp in rows:
-        type_ = (cp.type or "").strip()
-        suffix = f" — {type_}" if type_ else ""
-        lines.append(f"• {cp.name}{suffix}")
+        lines.append(f"• {cp.name}")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -1104,7 +1104,7 @@ class FirefliesPipeline:
             return 0
         directory = (
             session.query(Counterparty)
-            .order_by(Counterparty.type, Counterparty.name)
+            .order_by(Counterparty.name)
             .all()
         )
         if not directory:
@@ -2237,7 +2237,7 @@ class FirefliesPipeline:
         from app.models import Counterparty, CounterpartyMention
 
         cp_matches = (
-            session.query(Counterparty.name, Counterparty.type)
+            session.query(Counterparty.name)
             .join(
                 CounterpartyMention,
                 CounterpartyMention.counterparty_id == Counterparty.id,
@@ -2266,9 +2266,7 @@ class FirefliesPipeline:
                 t.owner_display_name for t in recent_tasks
             ][:25],
             counterparties_count=len(cp_matches),
-            counterparties=[
-                {"name": n, "type": t} for n, t in cp_matches
-            ][:25],
+            counterparties=[{"name": row_[0]} for row_ in cp_matches][:25],
             google_doc_url=row.google_doc_url,
             short_summary_recipients=report.short_summary_recipients,
             errors=report.errors,

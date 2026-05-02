@@ -191,8 +191,7 @@ erDiagram
     Counterparty {
         int id PK
         string name
-        string type "Outreach | Status outreach | Rejections | ..."
-        string name_normalised UK "fold + translit + strip parens"
+        string name_normalised UK "fold + translit + strip parens (FR-CR-05-132)"
     }
 
     CounterpartyAttribute {

@@ -541,7 +541,7 @@ class ZoomPipeline:
             return 0
         directory = (
             session.query(Counterparty)
-            .order_by(Counterparty.type, Counterparty.name)
+            .order_by(Counterparty.name)
             .all()
         )
         if not directory:
@@ -1435,7 +1435,7 @@ class ZoomPipeline:
         from app.models import Counterparty, CounterpartyMention
 
         cp_matches = (
-            session.query(Counterparty.name, Counterparty.type)
+            session.query(Counterparty.name)
             .join(
                 CounterpartyMention,
                 CounterpartyMention.counterparty_id == Counterparty.id,
@@ -1464,9 +1464,7 @@ class ZoomPipeline:
                 t.owner_display_name for t in recent_tasks
             ][:25],
             counterparties_count=len(cp_matches),
-            counterparties=[
-                {"name": n, "type": t} for n, t in cp_matches
-            ][:25],
+            counterparties=[{"name": row_[0]} for row_ in cp_matches][:25],
             google_doc_url=row.google_doc_url,
             errors=report.errors,
         )

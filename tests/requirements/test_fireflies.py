@@ -1777,11 +1777,11 @@ def test_build_whisper_bias_prompt_packs_team_and_counterparties(session):
                    telegram_user_id=333, active=False),
     ])
     session.add_all([
-        Counterparty(name="Tether", type="Outreach",
+        Counterparty(name="Tether",
                      name_normalised="tether"),
-        Counterparty(name="Schaeffler", type="Outreach",
+        Counterparty(name="Schaeffler",
                      name_normalised="schaeffler"),
-        Counterparty(name="ADNOC", type="Outreach",
+        Counterparty(name="ADNOC",
                      name_normalised="adnoc"),
     ])
     session.flush()
@@ -1827,7 +1827,7 @@ def test_build_whisper_bias_prompt_caps_at_max_chars(session):
     # 50 long-name counterparties pushes well past any cap.
     for i in range(50):
         session.add(Counterparty(
-            name=f"VeryLongCompanyName{i:02d}", type="Outreach",
+            name=f"VeryLongCompanyName{i:02d}",
             name_normalised=f"verylongcompanyname{i:02d}",
         ))
     session.flush()
@@ -1934,7 +1934,7 @@ def test_fireflies_pipeline_passes_whisper_bias_prompt(
                 active=True,
             ))
             s.add(Counterparty(
-                name="Tether", type="Outreach",
+                name="Tether",
                 name_normalised="tether",
             ))
             s.flush()

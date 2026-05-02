@@ -1,11 +1,14 @@
-"""FR-CR-05-124 — pull counterparties from two Google Sheets
-into the `counterparties` hub + `counterparty_attrs` satellite.
+"""FR-CR-05-124 / FR-CR-05-132 — pull counterparties from two
+Google Sheets into the `counterparties` hub +
+`counterparty_attrs` satellite.
 
 Two source patterns:
 
 A) **Status outreach** (single tab on the investor sheet):
-   - Column A: `type` (operator-defined category, e.g.
-     «investor», «client», «partner»).
+   - Column A: source-tab category label (e.g. «Financial/VC»,
+     «Strategic»). Captured into the satellite's JSON payload
+     under the header-row column name; NOT stored as a
+     first-class hub column anymore (FR-CR-05-132).
    - Column B: `name` (canonical counterparty name).
    - All other columns: captured into the satellite's JSONB
      payload using the header-row labels as keys.
@@ -13,8 +16,10 @@ A) **Status outreach** (single tab on the investor sheet):
 B) **Outreach / Rejections / Looking for intros** (three tabs
    on a separate sheet):
    - Column A: `name` (canonical name, only field operator uses).
-   - The TAB NAME becomes the `type` (so an entry in the
-     «Rejections» tab gets `type="Rejections"`).
+   - The TAB NAME (formerly the `type`) is captured into the
+     satellite's `source` field — so an entry seen on the
+     «Rejections» tab gets a satellite row with
+     `source="Rejections"`.
    - Other columns are captured into the satellite when present.
 
 Sync semantics: **wipe-and-replace**. Each pull deletes every
@@ -24,11 +29,11 @@ reflects the current state of the sheets, no leftover stale
 rows. The migration's `ON DELETE CASCADE` on the FK makes the
 wipe a single statement.
 
-Match key: `(name_normalised, type)` UNIQUE — case-insensitive,
-ASCII-folded form of the name. Two satellite rows can attach to
-the same hub if the operator listed the same counterparty in
-multiple tabs (rare but possible, e.g. moved from Outreach to
-Rejections).
+Match key: `name_normalised` UNIQUE (FR-CR-05-132) —
+case-insensitive, ASCII-folded form of the name. The same
+canonical counterparty appearing on multiple tabs collapses to
+ONE hub row; each tab attaches its own satellite row so all
+per-source metadata still survives.
 """
 from __future__ import annotations
 
@@ -119,10 +124,9 @@ class CounterpartiesSheetSync:
     ) -> None:
         """`name_first_tabs` is a list of `(sheet_id, tab_name)`
         pairs — each pair is a sheet/tab where column A is the
-        canonical name and the tab name itself becomes the
-        `type` on the hub. Lets the operator add new sources
-        without changing code (FR-CR-05-124 follow-up after a
-        third sheet was added)."""
+        canonical name and the tab name becomes the satellite's
+        `source` label (FR-CR-05-132 — formerly mirrored as
+        `type` on the hub; now hub-side is name only)."""
         self._service = build(
             "sheets", "v4", credentials=credentials,
             cache_discovery=False,
@@ -151,9 +155,12 @@ class CounterpartiesSheetSync:
         return list(resp.get("values") or [])
 
     def _read_status_outreach(self) -> list[dict[str, Any]]:
-        """Return list of `{name, type, attributes}` from the
-        Status outreach tab. Field A = type, field B = name,
-        all other columns join into `attributes` keyed by header.
+        """Return list of `{name, attributes}` from the Status
+        outreach tab. Field B = name; field A (operator's
+        category label, e.g. «Financial/VC») and every other
+        column join into `attributes` keyed by header.
+        FR-CR-05-132 — `type` no longer surfaces as a hub
+        column; it lives in `attributes` under its header name.
         """
         if not self._status_id:
             return []
@@ -166,7 +173,6 @@ class CounterpartiesSheetSync:
             if not row or all(not (c or "").strip() for c in row):
                 continue
             cells = list(row) + [""] * (len(header) - len(row))
-            type_ = (cells[0] or "").strip() if len(cells) > 0 else ""
             name = (cells[1] or "").strip() if len(cells) > 1 else ""
             if not name:
                 continue
@@ -178,7 +184,6 @@ class CounterpartiesSheetSync:
             }
             out.append({
                 "name": name,
-                "type": type_ or "uncategorised",
                 "attributes": attrs,
                 "source": self._status_tab,
             })
@@ -187,9 +192,11 @@ class CounterpartiesSheetSync:
     def _read_name_first_tab(
         self, sheet_id: str, tab: str
     ) -> list[dict[str, Any]]:
-        """Return list of `{name, type=tab, attributes}` from the
-        given name-first tab. Field A is the canonical name;
-        other columns are captured into the satellite's JSONB."""
+        """Return list of `{name, attributes, source}` from the
+        given name-first tab. Field A is the canonical name; the
+        tab name becomes the satellite's `source` label
+        (FR-CR-05-132 — used to be mirrored on the hub as `type`,
+        no longer)."""
         if not sheet_id:
             return []
         rows = self._read_tab(sheet_id, tab)
@@ -210,7 +217,6 @@ class CounterpartiesSheetSync:
             }
             out.append({
                 "name": name,
-                "type": tab,
                 "attributes": attrs,
                 "source": tab,
             })
@@ -260,24 +266,20 @@ class CounterpartiesSheetSync:
         now = datetime.now(timezone.utc)
         for rec in records:
             name = rec["name"]
-            type_ = rec["type"]
             normalised = normalise_name(name)
             if not normalised:
                 continue
-            # FR-CR-05-126 follow-up — dedupe by `name_normalised`
-            # ONLY (not by `(name_normalised, type)`). When the
-            # same canonical counterparty appears in multiple
-            # tabs / sheets («Balderton» in both «Outreach» and
-            # «Rejections», «Tencent» in «Outreach» and
-            # «Strategic», «Nvidia» in «Outreach» and
-            # «Strategic»), we keep ONE hub row with the
-            # first-seen `type`, and attach a satellite per
-            # source so all the per-tab metadata still survives.
+            # FR-CR-05-132 — dedupe by `name_normalised` ONLY.
+            # When the same canonical counterparty appears in
+            # multiple tabs / sheets («Balderton» in both
+            # «Outreach» and «Rejections», «Tencent» in
+            # «Outreach» and «Strategic»), we keep ONE hub row
+            # and attach a satellite per source so all the
+            # per-tab metadata still survives.
             cp = hubs_by_norm.get(normalised)
             if cp is None:
                 cp = Counterparty(
                     name=name,
-                    type=type_,
                     name_normalised=normalised,
                 )
                 session.add(cp)

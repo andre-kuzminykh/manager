@@ -33,13 +33,20 @@ from app.models.base import Base, TimestampMixin
 
 
 class Counterparty(Base, TimestampMixin):
-    """Hub: identity row for one counterparty."""
+    """Hub: identity row for one counterparty.
+
+    FR-CR-05-132 — `type` column removed. Operator-pinned: one
+    canonical row per real counterparty, identified solely by
+    `name_normalised`. Source-tab labels (formerly stored on the
+    hub as `type`) live on the satellite as part of the
+    per-source attributes payload.
+    """
 
     __tablename__ = "counterparties"
     __table_args__ = (
         UniqueConstraint(
-            "name_normalised", "type",
-            name="uq_counterparties_name_norm_type",
+            "name_normalised",
+            name="uq_counterparties_name_normalised",
         ),
     )
 
@@ -47,7 +54,6 @@ class Counterparty(Base, TimestampMixin):
         Integer, primary_key=True, autoincrement=True
     )
     name: Mapped[str] = mapped_column(String(512), nullable=False)
-    type: Mapped[str] = mapped_column(String(64), nullable=False)
     name_normalised: Mapped[str] = mapped_column(
         String(512), nullable=False, index=True
     )

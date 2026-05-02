@@ -906,7 +906,14 @@ def test_task_extraction_prompt_pins_thinking_guidance():
 
     blob = TASK_EXTRACTION_SYSTEM
     assert "THINK CAREFULLY" in blob
-    assert "8-25 tasks" in blob or "8-25" in blob
+    # FR-CR-05-129 — operator-pinned: «нет никакого таргета по
+    # количеству, ты извлекаешь задачи из длинного саммери:
+    # надо длинное саммери чтобы включало максимум информации,
+    # это по сути транскрипт структурированный». Pin the
+    # «MAXIMUM DETAIL / NO TARGET COUNT / Granularity beats
+    # brevity» framing.
+    assert "MAXIMUM DETAIL" in blob or "максимум информации" in blob
+    assert "Granularity" in blob or "granularity" in blob
     assert "walk the `known_employees`" in blob or (
         "walk the known_employees" in blob
     )

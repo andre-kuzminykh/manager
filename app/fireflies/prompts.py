@@ -12,9 +12,32 @@ You produce a DETAILED, structured summary of a recorded
 business meeting based on the verbatim transcript. Output is in
 RUSSIAN.
 
-Length: 3000-10000 chars. Aim for thoroughness over brevity —
-this lands in a Google Doc for later reference, not a chat
-message.
+═══════════════════════════════════════════════════════════════
+FR-CR-05-129 — operator-pinned: «надо длинное саммери чтобы
+включало максимум информации, это по сути транскрипт
+структурированный».
+
+The detailed summary is the GROUND TRUTH downstream — task
+extraction, doc archive, and operator review all read this.
+DO NOT compress out specifics. Treat the output as a
+STRUCTURED TRANSCRIPT, not a recap:
+
+- Every counterparty / fund mentioned by name MUST appear in
+  the body, with the surrounding context («Felix Capital —
+  обсудили готовность увеличить чек до 30 млн с условием
+  обсуждения варантов на звонке»).
+- Every concrete number, deadline, dollar amount, percentage,
+  decision, person, contract, disagreement, follow-up plan —
+  preserved verbatim or near-verbatim.
+- Every implicit follow-up («надо подумать», «вернёмся на
+  звонке», «обсудим завтра») — surfaced explicitly in the
+  ОБСУЖДЕНИЕ section so the task-extractor downstream can pick
+  it up.
+
+Length: 6000-15000 chars (was 3000-10000 before FR-CR-05-129
+— bumped because operator's runs were missing items the
+extractor needs). Better to over-include than under-include.
+═══════════════════════════════════════════════════════════════
 
 Structure:
 
@@ -26,12 +49,17 @@ Structure:
   📊 КЛЮЧЕВЫЕ РЕШЕНИЯ
   • <bullet 1>
   • <bullet 2>
+  (Включи КАЖДОЕ принятое решение, даже промежуточное —
+  «договорились на следующий звонок обсудить X».)
 
   💬 ОБСУЖДЕНИЕ
   • <тема 1>: подробный пересказ — что обсуждалось, кто что
-    предложил, какие аргументы были, к чему пришли.
+    предложил, какие аргументы были, к чему пришли. Перечисли
+    ВСЕ упомянутые компании / фонды / лица с контекстом
+    (зачем упомянули, что решили).
   • <тема 2>: …
-  (3-7 тем, каждая в 2-5 предложениях)
+  (5-15+ тем, каждая в 3-7 предложениях. Лучше больше тем с
+   деталями чем меньше тем, но каждая длинная.)
 
   ⚠ ОТКРЫТЫЕ ВОПРОСЫ
   • <unresolved 1>
@@ -39,20 +67,16 @@ Structure:
 
 FR-CR-05-119: do NOT emit a «СЛЕДУЮЩИЕ ШАГИ» / «Action items» /
 «Tasks» / «To-Do» section. Action items are extracted as
-separate Task rows by a different prompt and surfaced to the
-operator as Telegram cards + the «To-Do» section of the short
-summary. Putting them in the doc too creates duplication and a
-risk of mismatch when the operator edits a task. Keep this body
-to meeting context only.
+separate Task rows by a different prompt. Keep this body to
+meeting context only.
 
 Style:
 - Третье лицо. «Андрей предложил…», «команда договорилась…».
-- Без воды. Не пересказывай мелкие реплики дословно — выжимай
-  суть.
 - Имена участников из секции «Участники» используй как есть.
 - Никаких твоих комментариев / выводов от первого лица.
 - Никаких выдуманных фактов: всё что в саммари должно быть в
-  транскрипте. Если чего-то нет, опусти раздел.
+  транскрипте.
+- НЕ ВЫРЕЗАЙ детали — лучше длиннее но полнее.
 
 FORMATTING (FR-CR-05-117):
 - PLAIN TEXT ONLY. NO MARKDOWN. The summary is pasted into a
@@ -167,20 +191,35 @@ TASK_EXTRACTION_SYSTEM = """\
 You extract ACTIONABLE TASKS from a meeting transcript.
 
 ═══════════════════════════════════════════════════════════════
-THINK CAREFULLY (FR-CR-05-120). This call uses a reasoning
-model. Operator-pinned expectations:
+THINK CAREFULLY (FR-CR-05-120 / FR-CR-05-129). This call uses
+a reasoning model. Operator-pinned expectations:
 
 1. Read the ENTIRE transcript before emitting anything. Don't
    stop at the first batch of explicit assignments — late-stage
    recap, «следующие шаги», «давайте по итогам» blocks often
    add 30-50% more tasks that the model misses on first pass.
-2. Extract EVERYTHING actionable. A 30-min business meeting
-   typically yields 8-25 tasks; if you found 3-4, re-read the
-   transcript — you missed implicit follow-ups (e.g. «надо ещё
-   подумать» / «обсудим завтра» that name a deliverable),
-   reported-back commitments («я уже договорился с X — пусть
-   пришлёт Y»), and meta-tasks («подготовить материалы для
-   следующего звонка»).
+2. EXTRACT MAXIMUM DETAIL (FR-CR-05-129 — operator-pinned:
+   «мне всегда надо максимум информации вычленить и задачи по
+   ним — если что-то отсутствует, это критично»). NO TARGET
+   COUNT — emit one task per distinct actionable item, no
+   matter how small. Granularity beats brevity:
+     • SEPARATE task per counterparty mentioned
+       («Felix Capital — отправить апдейт» AND «Felix Capital —
+       назначить звонок» = two tasks, not one).
+     • SEPARATE task per distinct deliverable, even when the
+       transcript mentions them in one sentence («подготовить
+       follow-up по Insight Partners» AND «отправить апдейт TPP»
+       are two tasks even if said back-to-back).
+     • SEPARATE task per actor, even on the same topic
+       (Дима — обсудить с QIA + Алина — подготовить материалы =
+       two tasks).
+     • IMPLICIT follow-ups count: «надо ещё подумать», «обсудим
+       завтра», «я уже договорился с X», «пусть пришлёт Y» —
+       all become tasks.
+     • Meta-tasks count: «подготовить материалы для следующего
+       звонка», «обновить статусы», «согласовать формулировки».
+   Better to emit specific over-detailed tasks than over-
+   summarised vague ones.
 3. For owner selection, walk the `known_employees` table item
    by item. For each candidate, ask: does their `role` or
    `notes` match the task's domain? Does the transcript name

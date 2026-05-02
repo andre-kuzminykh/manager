@@ -609,6 +609,15 @@ def _dedupe_meeting_tasks(
     # match. Falls back to full-description ratio ≥ 0.92 when
     # topic prefix is missing (no « - » in either) — catches
     # legacy tasks not in the operator-pinned shape.
+    # FR-CR-05-129 follow-up — operator-pinned «мне всегда надо
+    # максимум информации». Dedup must be CONSERVATIVE: same
+    # topic-prefix is NOT enough («Felix Capital — отправить
+    # апдейт» and «Felix Capital — назначить звонок» share the
+    # prefix but are two distinct actions). Require BOTH:
+    #   - topic-prefix exact match, AND
+    #   - description ratio ≥ 0.85 (full body similarity)
+    # Or fallback when no topic prefix:
+    #   - description ratio ≥ 0.90 alone
     for i, kept in enumerate(tasks):
         if kept.id in dropped_ids:
             continue
@@ -620,17 +629,20 @@ def _dedupe_meeting_tasks(
             cand_prefix = _topic_prefix(cand)
             cand_desc = _fold((cand.description or "").strip())
             reason = ""
-            if kept_prefix and cand_prefix and kept_prefix == cand_prefix:
-                reason = "topic_prefix_match"
+            desc_ratio = (
+                difflib.SequenceMatcher(None, kept_desc, cand_desc).ratio()
+                if kept_desc and cand_desc else 0.0
+            )
+            if (
+                kept_prefix and cand_prefix
+                and kept_prefix == cand_prefix
+                and desc_ratio >= 0.85
+            ):
+                reason = "topic_prefix_and_desc_match"
             elif (
-                # No topic prefix on either — fall back to full
-                # description ratio ≥ 0.92 (very tight).
                 not kept_prefix
                 and not cand_prefix
-                and kept_desc
-                and cand_desc
-                and difflib.SequenceMatcher(None, kept_desc, cand_desc).ratio()
-                >= 0.92
+                and desc_ratio >= 0.90
             ):
                 reason = "description_fuzzy_match"
             if reason:

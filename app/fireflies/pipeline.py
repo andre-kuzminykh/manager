@@ -1372,16 +1372,12 @@ class FirefliesPipeline:
         )
         if todo:
             body = body.rstrip() + "\n\n" + todo
-        # FR-CR-05-125 — single-line «🔗 Контрагенты: name1,
-        # name2» appended after To-Do, before the doc-link
-        # trailer. Only emitted when matches exist.
-        cp_line = _build_counterparties_section_for_short_summary(
-            session,
-            source_kind="fireflies",
-            source_id=row.fireflies_id,
-        )
-        if cp_line:
-            body = body.rstrip() + "\n\n" + cp_line
+        # FR-CR-05-129 follow-up — operator-pinned: «не пиши
+        # 'контрагенты' в коротком сообщении». The 🔗
+        # Контрагенты row is removed; the canonical names are
+        # already in the task topic-prefixes via
+        # `_step_canonicalize_task_names`, so listing them
+        # again is duplication.
         # FR-CR-05-127 — operator-pinned: the «DD/MM - <Topic>»
         # header becomes an HTML hyperlink to the Google Doc.
         # Replaces the old «📄 Подробный отчёт: <url>» trailer

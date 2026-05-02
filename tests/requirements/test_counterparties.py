@@ -721,3 +721,37 @@ def test_settings_outreach_tab_names_default_split_correctly():
         if t.strip()
     ]
     assert tabs == ["Outreach", "Rejections", "Looking for intros"]
+
+
+def test_canonicalize_text_no_double_substring_cascade():
+    """FR-CR-05-129 follow-up — operator regression: rewriting
+    «Insight Partners ...» with mapping «Insight → Insight
+    Partners» produced «Insight Partners Partners» (cascade
+    substring). Fix: regex with negative lookahead against the
+    canonical's tail when the mention is a prefix of canonical.
+
+    Other replaces (mention ≠ prefix of canonical) keep their
+    word-boundary behaviour."""
+    from app.services.counterparty_match import canonicalize_text
+
+    mapping = {
+        "Insight": "Insight Partners",
+        "Тезер": "Tether",
+        "Bauer/Dart": "Bauerdart",
+    }
+    # «Insight Partners» already canonical → no double.
+    assert canonicalize_text(
+        "подготовить follow-up Insight Partners по отказу", mapping
+    ) == "подготовить follow-up Insight Partners по отказу"
+    # «Insight» alone → expanded.
+    assert canonicalize_text(
+        "Insight отказали", mapping
+    ) == "Insight Partners отказали"
+    # Cyrillic mention → Latin canonical.
+    assert canonicalize_text(
+        "отправить апдейт Тезер", mapping
+    ) == "отправить апдейт Tether"
+    # «Bauer/Dart» (slash-rendered) → canonical without slash.
+    assert canonicalize_text(
+        "Bauer/Dart - пригласить в офис", mapping
+    ) == "Bauerdart - пригласить в офис"

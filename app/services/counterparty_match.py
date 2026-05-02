@@ -803,6 +803,14 @@ def canonicalize_text(
     eaten by a shorter one («Bauer»). Case-insensitive replace
     that preserves the canonical name's casing as written in
     the directory.
+
+    FR-CR-05-129 follow-up — when the mention is a PREFIX of
+    the canonical name («Insight» mention, «Insight Partners»
+    canonical), avoid the cascade «Insight Partners» →
+    «Insight Partners Partners» by adding a negative-lookahead
+    against the canonical's tail. The mention is replaced only
+    when NOT already adjacent to the canonical's remaining
+    tokens.
     """
     if not text or not mention_to_canonical:
         return text
@@ -817,6 +825,23 @@ def canonicalize_text(
         if not mention or not canonical:
             continue
         if mention == canonical:
+            continue
+        # FR-CR-05-129 follow-up — skip the replace when the
+        # CANONICAL is already in the text right where we'd
+        # substitute (avoids «Insight Partners Partners»).
+        # Build the lookahead from the canonical's tail.
+        if canonical.lower().startswith(mention.lower() + " "):
+            tail = canonical[len(mention):]
+            tail_pattern = re.escape(tail)
+            try:
+                pattern = re.compile(
+                    r"(?<!\w)" + re.escape(mention)
+                    + r"(?!\w)(?!" + tail_pattern + r")",
+                    flags=re.IGNORECASE,
+                )
+                out = pattern.sub(canonical, out)
+            except re.error:
+                continue
             continue
         try:
             pattern = re.compile(

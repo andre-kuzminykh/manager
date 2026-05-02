@@ -413,7 +413,6 @@ class ZoomPipeline:
         # FR-CR-05-119 — drop any LLM-emitted To-Do section so we
         # can append the deterministic one. Also strip markdown.
         from app.fireflies.pipeline import (
-            _build_counterparties_section_for_short_summary,
             _build_todo_section,
             _strip_llm_todo_block,
         )
@@ -429,11 +428,8 @@ class ZoomPipeline:
         )
         if todo:
             text = text.rstrip() + "\n\n" + todo
-        cp_line = _build_counterparties_section_for_short_summary(
-            session, source_kind="zoom", source_id=row.zoom_id,
-        )
-        if cp_line:
-            text = text.rstrip() + "\n\n" + cp_line
+        # FR-CR-05-129 follow-up — drop «🔗 Контрагенты»
+        # row (operator-pinned).
         # FR-CR-05-127 — title becomes an HTML hyperlink to the
         # Google Doc; the «📄 Подробный отчёт: <url>» trailer is
         # gone (replaced by the wrap on the first line). Sent

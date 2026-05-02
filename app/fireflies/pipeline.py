@@ -1136,16 +1136,34 @@ class FirefliesPipeline:
                 fireflies_id=row.fireflies_id, error=str(e),
             )
             return 0
-        # Persist mention→canonical mapping on the recording so
-        # the canonicalize step can pick it up.
+        # Persist mention→canonical-NAME mapping on the
+        # recording (the canonicalize step rewrites by name,
+        # never id, so it survives directory wipe-and-replace).
         by_id = {cp.id: cp for cp in directory}
         mention_to_canonical: dict[str, str] = {}
+        canonical_norms: set[str] = set()
         for mention, cid in mention_to_id.items():
             if cid is not None and cid in by_id:
-                mention_to_canonical[mention] = by_id[cid].name
-        # Stash in row.extra-style storage.
+                cp = by_id[cid]
+                mention_to_canonical[mention] = cp.name
+                if cp.name_normalised:
+                    canonical_norms.add(cp.name_normalised)
         if not hasattr(row, "_fr_canonical_map"):
             row.__dict__["_fr_canonical_map"] = mention_to_canonical
+
+        # FR-CR-05-129 follow-up — RACE FIX: Pass-2 may take
+        # several minutes (high reasoning + 502 retries). The
+        # listener's auto-pull (every 5 min) wipes-and-replaces
+        # the directory mid-flight, invalidating the snapshot's
+        # ids. We re-fetch FRESH ids by `name_normalised` right
+        # before insert and skip any whose hub no longer exists.
+        from app.models import Counterparty as _Counterparty
+        fresh = (
+            session.query(_Counterparty.id, _Counterparty.name_normalised)
+            .filter(_Counterparty.name_normalised.in_(canonical_norms))
+            .all()
+        )
+        norm_to_fresh_id: dict[str, int] = {n: i for i, n in fresh}
 
         # Replace existing CounterpartyMention rows (idempotent rerun).
         session.query(CounterpartyMention).filter(
@@ -1154,13 +1172,21 @@ class FirefliesPipeline:
         ).delete()
         session.flush()
         unique_ids: set[int] = set()
-        for cid in mention_to_id.values():
-            if cid is None or cid in unique_ids:
+        skipped_stale = 0
+        for mention, cid in mention_to_id.items():
+            if cid is None or cid not in by_id:
                 continue
-            unique_ids.add(cid)
+            cp = by_id[cid]
+            fresh_id = norm_to_fresh_id.get(cp.name_normalised or "")
+            if fresh_id is None:
+                skipped_stale += 1
+                continue
+            if fresh_id in unique_ids:
+                continue
+            unique_ids.add(fresh_id)
             session.add(
                 CounterpartyMention(
-                    counterparty_id=cid,
+                    counterparty_id=fresh_id,
                     source_kind="fireflies",
                     source_id=row.fireflies_id,
                     created_at=datetime.now(timezone.utc),
@@ -1172,6 +1198,7 @@ class FirefliesPipeline:
             fireflies_id=row.fireflies_id,
             mentions=len(mentions),
             matched=len(unique_ids),
+            skipped_stale_after_pull_race=skipped_stale,
         )
         return len(unique_ids)
 

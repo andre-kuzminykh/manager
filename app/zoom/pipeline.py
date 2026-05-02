@@ -558,11 +558,27 @@ class ZoomPipeline:
             return 0
         by_id = {cp.id: cp for cp in directory}
         mention_to_canonical: dict[str, str] = {}
+        canonical_norms: set[str] = set()
         for mention, cid in mention_to_id.items():
             if cid is not None and cid in by_id:
-                mention_to_canonical[mention] = by_id[cid].name
+                cp = by_id[cid]
+                mention_to_canonical[mention] = cp.name
+                if cp.name_normalised:
+                    canonical_norms.add(cp.name_normalised)
         if not hasattr(row, "_zm_canonical_map"):
             row.__dict__["_zm_canonical_map"] = mention_to_canonical
+
+        # FR-CR-05-129 follow-up — RACE FIX: refetch fresh ids
+        # by name_normalised before insert so the listener
+        # auto-pull (mid-flight wipe-and-replace) doesn't
+        # invalidate our snapshot's ids.
+        from app.models import Counterparty as _Counterparty
+        fresh = (
+            session.query(_Counterparty.id, _Counterparty.name_normalised)
+            .filter(_Counterparty.name_normalised.in_(canonical_norms))
+            .all()
+        )
+        norm_to_fresh_id: dict[str, int] = {n: i for i, n in fresh}
 
         session.query(CounterpartyMention).filter(
             CounterpartyMention.source_kind == "zoom",
@@ -570,13 +586,21 @@ class ZoomPipeline:
         ).delete()
         session.flush()
         unique_ids: set[int] = set()
-        for cid in mention_to_id.values():
-            if cid is None or cid in unique_ids:
+        skipped_stale = 0
+        for mention, cid in mention_to_id.items():
+            if cid is None or cid not in by_id:
                 continue
-            unique_ids.add(cid)
+            cp = by_id[cid]
+            fresh_id = norm_to_fresh_id.get(cp.name_normalised or "")
+            if fresh_id is None:
+                skipped_stale += 1
+                continue
+            if fresh_id in unique_ids:
+                continue
+            unique_ids.add(fresh_id)
             session.add(
                 CounterpartyMention(
-                    counterparty_id=cid,
+                    counterparty_id=fresh_id,
                     source_kind="zoom",
                     source_id=row.zoom_id,
                     created_at=datetime.now(timezone.utc),
@@ -587,6 +611,7 @@ class ZoomPipeline:
             "zoom_counterparty_match_done",
             zoom_id=row.zoom_id,
             mentions=len(mentions), matched=len(unique_ids),
+            skipped_stale_after_pull_race=skipped_stale,
         )
         return len(unique_ids)
 

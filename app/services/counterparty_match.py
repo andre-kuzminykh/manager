@@ -864,22 +864,34 @@ def fuzzy_extend_canonical_map(
         if token.lower() in seen_tokens:
             continue
         seen_tokens.add(token.lower())
-        token_fold = _fold(token)
-        if not token_fold or len(token_fold) < 4:
-            continue
-        # Find the best directory match.
+        # FR-CR-05-129 follow-up — composite tokens like
+        # «Jamal/Jabal» or «Boutert/Bauerdart» (the LLM
+        # combined two phonetic variants with `/`). Split on
+        # `/` `-` separators and fuzzy-match EACH piece.
+        # Replace the whole composite with the best match.
+        candidates = [token]
+        if "/" in token or "-" in token:
+            candidates.extend(
+                p for p in re.split(r"[/\-]+", token) if len(p) >= 4
+            )
         best_cp: "Counterparty" | None = None
         best_ratio = 0.0
-        for fold_name, cp in by_fold.items():
-            if abs(len(fold_name) - len(token_fold)) > 3:
+        for piece in candidates:
+            piece_fold = _fold(piece)
+            if not piece_fold or len(piece_fold) < 4:
                 continue
-            r = difflib.SequenceMatcher(None, fold_name, token_fold).ratio()
-            if r > best_ratio:
-                best_ratio = r
-                best_cp = cp
+            for fold_name, cp in by_fold.items():
+                if abs(len(fold_name) - len(piece_fold)) > 3:
+                    continue
+                r = difflib.SequenceMatcher(
+                    None, fold_name, piece_fold
+                ).ratio()
+                if r > best_ratio:
+                    best_ratio = r
+                    best_cp = cp
         if best_cp is not None and best_ratio >= ratio_threshold:
-            # Don't overwrite if mapping for this token already
-            # exists (e.g. from LLM Pass 2).
+            # Map the FULL surface form (incl. composite) to
+            # canonical so canonicalize_text rewrites in one shot.
             if token not in out:
                 out[token] = best_cp.name
     return out

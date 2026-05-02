@@ -757,6 +757,35 @@ def test_canonicalize_text_no_double_substring_cascade():
     ) == "Bauerdart - пригласить в офис"
 
 
+def test_fuzzy_extend_handles_composite_slash_tokens():
+    """FR-CR-05-129 follow-up — operator regression: extract
+    LLM combined phonetic variants with `/` («Jamal/Jabal»,
+    «Boutert/Bauerdart»). The composite-token regex captures
+    the whole thing and ratio against single-name canonical
+    («jabal» 5 chars vs «jamal/jabal» 11 chars) bombs by
+    length-diff filter.
+
+    Fix: split composite tokens on `/`, `-`; fuzzy-match each
+    piece; pick best canonical; map the WHOLE composite to
+    that canonical so canonicalize_text rewrites in one shot."""
+    from app.models import Counterparty
+    from app.services.counterparty_match import fuzzy_extend_canonical_map
+
+    directory = [
+        Counterparty(id=1, name="Jabal", type="VC", name_normalised="jabal"),
+        Counterparty(id=2, name="Bauerdart", type="VC", name_normalised="bauerdart"),
+    ]
+    text = (
+        "Уточнить график demo с Jamal/Jabal в Лондоне. "
+        "Пригласить Boutert/Bauerdart на demo."
+    )
+    extended = fuzzy_extend_canonical_map(text, directory, {})
+    assert "Jamal/Jabal" in extended
+    assert extended["Jamal/Jabal"] == "Jabal"
+    assert "Boutert/Bauerdart" in extended
+    assert extended["Boutert/Bauerdart"] == "Bauerdart"
+
+
 def test_fuzzy_extend_canonical_map_catches_jamal_jabal_class():
     """FR-CR-05-129 follow-up — operator regression: the
     transcript-side LLM Pass 1 caught «Jabal» but the separate

@@ -1244,7 +1244,7 @@ class FirefliesPipeline:
         )
         before_size = len(mapping)
         mapping = fuzzy_extend_canonical_map(
-            task_corpus, directory, mapping, ratio_threshold=0.8,
+            task_corpus, directory, mapping, ratio_threshold=0.72,
         )
         added = len(mapping) - before_size
         if added:

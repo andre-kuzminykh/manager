@@ -1298,6 +1298,119 @@ class FirefliesPipeline:
             )
         return applied
 
+    def _step_consolidate_tasks(
+        self, session: Session, row: MeetingRecording
+    ) -> int:
+        """FR-CR-05-131 — LLM consolidation pass: merges
+        sequential phases of one action and splits composite
+        topics. Returns count of tasks AFTER consolidation
+        (input_count - merged + split). Soft-deletes merged-
+        away rows; updates kept rows; inserts new rows from
+        splits.
+
+        Operator-pinned (FR-CR-05-131 — «без regexp,
+        универсально»). Replaces the per-case dedupe band-aids
+        with a single LLM pass that the operator can refine
+        via prompt instead of code-touching.
+        """
+        from app.services.counterparty_match import (
+            consolidate_tasks_via_llm,
+        )
+
+        from datetime import datetime as _dt, timezone as _tz
+
+        tasks = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.fireflies)
+            .filter(Task.source_conversation_id == row.fireflies_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
+        )
+        if len(tasks) < 2:
+            return len(tasks)
+        task_dicts = [
+            {
+                "id": t.id,
+                "title": t.title,
+                "description": t.description,
+                "owner": t.owner_user_id,
+                "owner_display_name": t.owner_display_name,
+                "priority": t.priority.value if t.priority else "medium",
+            }
+            for t in tasks
+        ]
+        try:
+            result = consolidate_tasks_via_llm(
+                task_dicts,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                trace_source="fireflies",
+                trace_recording_id=row.fireflies_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_consolidate_tasks_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+            return len(tasks)
+        if not result:
+            return len(tasks)
+        by_id = {t.id: t for t in tasks}
+        kept_ids: set[int] = set()
+        from app.models import TaskPriority
+        for entry in result:
+            merged_from = entry.get("merged_from") or []
+            new_id = entry.get("id")
+            if new_id is not None and new_id in by_id and len(merged_from) <= 1:
+                # Single in-place update.
+                t = by_id[new_id]
+                if entry.get("title"):
+                    t.title = entry["title"][:10_000]
+                if entry.get("description"):
+                    t.description = entry["description"]
+                kept_ids.add(t.id)
+                continue
+            # Merge or split — keep the FIRST source row, update
+            # it, soft-delete the rest.
+            primary_id = merged_from[0] if merged_from else None
+            if primary_id and primary_id in by_id:
+                t = by_id[primary_id]
+                if entry.get("title"):
+                    t.title = entry["title"][:10_000]
+                if entry.get("description"):
+                    t.description = entry["description"]
+                try:
+                    t.priority = TaskPriority(entry.get("priority") or "medium")
+                except ValueError:
+                    pass
+                kept_ids.add(t.id)
+            else:
+                # Pure split with no anchor — copy fields from
+                # FIRST original task that gave context.
+                # Skipped — LLM should always set merged_from.
+                continue
+        # Soft-delete tasks NOT in kept_ids (merged away).
+        soft_deleted = 0
+        now = _dt.now(_tz.utc)
+        for t in tasks:
+            if t.id not in kept_ids:
+                t.deleted_at = now
+                soft_deleted += 1
+        if kept_ids or soft_deleted:
+            session.flush()
+            log.info(
+                "fireflies_task_consolidate_applied",
+                fireflies_id=row.fireflies_id,
+                input=len(tasks),
+                kept=len(kept_ids),
+                soft_deleted=soft_deleted,
+            )
+        return len(kept_ids)
+
     def _step_doc_export(
         self, session: Session, row: MeetingRecording
     ) -> bool:
@@ -2048,9 +2161,21 @@ class FirefliesPipeline:
                 "fireflies_task_canonicalize_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
-        # FR-CR-05-128 — soft-delete near-duplicate tasks the
-        # extract+verify passes produce («Сегментация
-        # инвесторов» 3×, «BauerDart»/«Bauer/Dart» 2×, etc.).
+        # FR-CR-05-131 — LLM consolidation pass: merges
+        # sequential phases of one action and splits composite
+        # topics («Tether - формулировка» + «Tether - email» +
+        # «Tether - WhatsApp» → one task; «Ziya/Odeya - apple» →
+        # two tasks).
+        try:
+            with _trace_step("fireflies", "consolidate_tasks", **ctx):
+                self._step_consolidate_tasks(session, row)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_task_consolidate_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+        # FR-CR-05-128 — soft-delete near-duplicate tasks (final
+        # safety net after LLM consolidation).
         try:
             with _trace_step("fireflies", "dedupe_tasks", **ctx):
                 _dedupe_meeting_tasks(

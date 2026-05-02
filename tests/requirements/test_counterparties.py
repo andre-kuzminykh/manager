@@ -757,6 +757,96 @@ def test_canonicalize_text_no_double_substring_cascade():
     ) == "Bauerdart - пригласить в офис"
 
 
+def test_consolidate_tasks_merges_sequential_phases_and_splits_composites():
+    """FR-CR-05-131 — operator-pinned: «без regexp,
+    универсально». A 4th LLM pass merges sequential phases of
+    one action («Tether — формулировка» + «Tether — email» +
+    «Tether — WhatsApp») and splits composite topics
+    («Ziya/Odeya» → 2 separate tasks per entity)."""
+    from app.services.counterparty_match import (
+        consolidate_tasks_via_llm,
+    )
+
+    tasks = [
+        {"id": 1, "title": "Tether формулировка апдейта",
+         "description": "Tether - сформулировать аккуратный апдейт по Schaeffler",
+         "owner": "U1", "owner_display_name": "Алина", "priority": "medium"},
+        {"id": 2, "title": "Tether email во вторник",
+         "description": "Tether - отправить email-апдейт во вторник",
+         "owner": "U1", "owner_display_name": "Алина", "priority": "medium"},
+        {"id": 3, "title": "Tether WhatsApp",
+         "description": "Tether - короткое сообщение в WhatsApp после email",
+         "owner": "U1", "owner_display_name": "Алина", "priority": "medium"},
+        {"id": 4, "title": "Ziya/Odeya - обновить",
+         "description": "Ziya/Odeya - продолжить общение по двум контактам",
+         "owner": "U2", "owner_display_name": "Дима", "priority": "medium"},
+        {"id": 5, "title": "Felix Capital чек 30 млн",
+         "description": "Felix Capital - проверить готовность к 30 млн",
+         "owner": "U3", "owner_display_name": "Дима", "priority": "high"},
+    ]
+
+    class _StubLLM:
+        def complete_text(self, **kw):
+            import json as _json
+            # Stub: merges 1+2+3 (Tether), splits 4 (Ziya/Odeya),
+            # leaves 5 unchanged.
+            return _json.dumps({"consolidated": [
+                {"id": None, "merged_from": [1, 2, 3],
+                 "title": "Отправить апдейт Tether",
+                 "description": "Tether - email во вторник + дублирование в WhatsApp",
+                 "owner": "U1", "priority": "medium"},
+                {"id": None, "merged_from": [4],
+                 "title": "Ziya - продолжить общение",
+                 "description": "Ziya - продолжить общение",
+                 "owner": "U2", "priority": "medium"},
+                {"id": None, "merged_from": [4],
+                 "title": "Odeya - выяснить статус",
+                 "description": "Odeya - выяснить почему пропали",
+                 "owner": "U2", "priority": "medium"},
+                {"id": 5, "merged_from": [5],
+                 "title": "Felix Capital чек 30 млн",
+                 "description": "Felix Capital - проверить готовность к 30 млн",
+                 "owner": "U3", "priority": "high"},
+            ]})
+
+    out = consolidate_tasks_via_llm(
+        tasks, llm_backend=_StubLLM(), model="gpt-5.5",
+        reasoning_effort="high",
+    )
+    # 5 in → 4 out (3 Tether merged into 1; 1 Ziya/Odeya split
+    # into 2; Felix unchanged) = 4 entries.
+    assert len(out) == 4
+    titles = [o["title"] for o in out]
+    assert "Отправить апдейт Tether" in titles
+    assert any(t.startswith("Ziya") for t in titles)
+    assert any(t.startswith("Odeya") for t in titles)
+    # Original Felix preserved with id=5.
+    felix = [o for o in out if o["id"] == 5]
+    assert len(felix) == 1
+    # `merged_from` tracks the original ids.
+    tether = [o for o in out if "Tether" in o["title"]][0]
+    assert sorted(tether["merged_from"]) == [1, 2, 3]
+
+
+def test_consolidate_tasks_returns_input_on_llm_failure():
+    """LLM raise / parse-error → returns the input list
+    unchanged (no data loss)."""
+    from app.services.counterparty_match import (
+        consolidate_tasks_via_llm,
+    )
+
+    tasks = [{"id": 1, "title": "x", "description": "y", "owner": "U1"}]
+
+    class _BadLLM:
+        def complete_text(self, **kw):
+            return "broken {{{ not json"
+
+    out = consolidate_tasks_via_llm(
+        tasks, llm_backend=_BadLLM(), model="gpt-5.5",
+    )
+    assert out == tasks
+
+
 def test_canonicalize_task_content_via_llm_rewrites_phonetic_variants():
     """FR-CR-05-130 — operator-pinned: «без regexp, как
     универсальное решение». A 3rd LLM pass replaces every

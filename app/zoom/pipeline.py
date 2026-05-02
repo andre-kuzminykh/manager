@@ -716,6 +716,100 @@ class ZoomPipeline:
             )
         return applied
 
+    def _step_consolidate_tasks(
+        self, session: Session, row: ZoomRecording
+    ) -> int:
+        """FR-CR-05-131 — LLM consolidation pass (mirror of
+        Fireflies). Merges sequential-phase tasks and splits
+        composite topics."""
+        from datetime import datetime as _dt, timezone as _tz
+
+        from app.services.counterparty_match import (
+            consolidate_tasks_via_llm,
+        )
+
+        tasks = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.zoom)
+            .filter(Task.source_conversation_id == row.zoom_id)
+            .filter(Task.deleted_at.is_(None))
+            .order_by(Task.id.asc())
+            .all()
+        )
+        if len(tasks) < 2:
+            return len(tasks)
+        task_dicts = [
+            {
+                "id": t.id,
+                "title": t.title,
+                "description": t.description,
+                "owner": t.owner_user_id,
+                "owner_display_name": t.owner_display_name,
+                "priority": t.priority.value if t.priority else "medium",
+            }
+            for t in tasks
+        ]
+        try:
+            result = consolidate_tasks_via_llm(
+                task_dicts,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                trace_source="zoom",
+                trace_recording_id=row.zoom_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_consolidate_tasks_unexpected_error",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            return len(tasks)
+        if not result:
+            return len(tasks)
+        by_id = {t.id: t for t in tasks}
+        kept_ids: set[int] = set()
+        for entry in result:
+            merged_from = entry.get("merged_from") or []
+            new_id = entry.get("id")
+            if new_id is not None and new_id in by_id and len(merged_from) <= 1:
+                t = by_id[new_id]
+                if entry.get("title"):
+                    t.title = entry["title"][:10_000]
+                if entry.get("description"):
+                    t.description = entry["description"]
+                kept_ids.add(t.id)
+                continue
+            primary_id = merged_from[0] if merged_from else None
+            if primary_id and primary_id in by_id:
+                t = by_id[primary_id]
+                if entry.get("title"):
+                    t.title = entry["title"][:10_000]
+                if entry.get("description"):
+                    t.description = entry["description"]
+                try:
+                    t.priority = TaskPriority(entry.get("priority") or "medium")
+                except ValueError:
+                    pass
+                kept_ids.add(t.id)
+        soft_deleted = 0
+        now = _dt.now(_tz.utc)
+        for t in tasks:
+            if t.id not in kept_ids:
+                t.deleted_at = now
+                soft_deleted += 1
+        if kept_ids or soft_deleted:
+            session.flush()
+            log.info(
+                "zoom_task_consolidate_applied",
+                zoom_id=row.zoom_id,
+                input=len(tasks),
+                kept=len(kept_ids),
+                soft_deleted=soft_deleted,
+            )
+        return len(kept_ids)
+
     # --- step 6: extract tasks --------------------------------
 
     def _step_extract_tasks(
@@ -1268,7 +1362,18 @@ class ZoomPipeline:
                     "zoom_task_canonicalize_unexpected_error",
                     zoom_id=row.zoom_id, error=str(e),
                 )
-        # FR-CR-05-128 — dedupe near-duplicate Tasks.
+        # FR-CR-05-131 — LLM consolidation: merge sequential
+        # phases + split composite topics.
+        if row.detailed_summarised:
+            try:
+                with _trace_step("zoom", "consolidate_tasks", **ctx):
+                    self._step_consolidate_tasks(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_task_consolidate_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+        # FR-CR-05-128 — final near-duplicate safety net.
         if row.detailed_summarised:
             try:
                 from app.fireflies.pipeline import _dedupe_meeting_tasks

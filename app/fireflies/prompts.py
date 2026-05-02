@@ -343,13 +343,26 @@ OWNER SELECTION RULES (read carefully — operator-specific):
    owner when the transcript explicitly says they'll do it
    themselves («я сделаю», «I'll handle»).
 
-4. NEVER pick the «AI Lead» / «Lead AI» row for non-AI work.
-   That role is for AI / ML deliverables specifically. Routine
-   business tasks (presentations, client follow-ups, contract
-   prep, scheduling) go to whoever owns the domain per their
-   role / notes — typically a CEO Office / project manager /
-   ops role; if such a row's NOTES name them as principal's
-   assistant, use rule 2.
+4. ROLE / NOTES IS THE DOMAIN GATE (FR-CR-05-131 —
+   operator-pinned: «надо понять как вызывается из таблицы
+   Team, без костылей универсально»). For each candidate row
+   in `known_employees`, ask:
+
+     «Does this teammate's `role` AND `notes` describe the
+      domain of the task being assigned?»
+
+   If a row's role is e.g. «AI Lead / ML Eng» and the task is
+   fundraising / IR / contract / scheduling — the row is NOT
+   a domain match, regardless of whether the transcript
+   addressed them verbally. Reject it. Same logic for any
+   role: a «Designer» row doesn't get tax-prep tasks; a
+   «Recruiter» row doesn't get fundraising follow-ups.
+
+   Domain matching uses the OPERATOR-MAINTAINED Team sheet's
+   `role` and `notes` columns ONLY. Never a hardcoded list of
+   names — those columns are how the operator tells you who
+   handles what. If the operator left a row's notes blank,
+   that row has no claim to any task domain; reject it.
 
 5. When NOBODY's role / notes match AND no name was uttered,
    leave owner null. Downstream falls back to the admin uid;

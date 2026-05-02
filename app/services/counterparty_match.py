@@ -867,6 +867,211 @@ Respond as a JSON object: `{"rewritten": [{"id": <int>, "title_rewritten": ..., 
 """
 
 
+CONSOLIDATE_TASKS_SYSTEM = """\
+You receive a list of meeting-extracted tasks and consolidate
+them into a clean, non-overlapping set. Output the cleaned
+list. PRESERVE every distinct piece of operator-actionable
+information; only collapse near-duplicates that describe THE
+SAME single deliverable.
+
+Operator-pinned (FR-CR-05-131): «мне всегда надо максимум
+информации» — granularity beats brevity. Don't over-merge.
+But sequential phases of one action OR composite topics
+(two unrelated counterparties slammed together) DO need
+fixing.
+
+═══════════════════════════════════════════════════════════════
+WHEN TO MERGE TWO TASKS INTO ONE
+═══════════════════════════════════════════════════════════════
+
+Two tasks should be merged if they describe sequential phases
+of the SAME deliverable on the SAME counterparty / topic where
+the second is a precondition / continuation that adds no new
+operator-actionable detail. Combine descriptions, keep the
+broader scope.
+
+Examples to MERGE:
+  • «Tether — формулировка апдейта» + «Tether — отправить
+    email во вторник» + «Tether — короткое сообщение в
+    WhatsApp» → ONE task «Tether — отправить апдейт по email
+    во вторник + продублировать в WhatsApp».
+  • «Bauerdart — найти главного человека» + «Bauerdart —
+    организовать встречу при согласии» → ONE task «Bauerdart
+    — пригласить главного человека на demo в офис».
+  • «Felix Capital — добавить в список кандидатов» + «Felix
+    Capital — подготовить письмо» + «Felix Capital — на
+    звонке проверить чек 30 млн» → ONE task «Felix Capital —
+    подготовить письмо и вывести на звонок про чек 30 млн и
+    варант».
+
+Do NOT merge if:
+  • Different counterparties («Felix Capital» vs «Supernova»).
+  • Different verbs that produce DIFFERENT artefacts
+    («подготовить письмо» AND «подготовить справку»).
+  • Different owners.
+
+═══════════════════════════════════════════════════════════════
+WHEN TO SPLIT ONE TASK INTO TWO
+═══════════════════════════════════════════════════════════════
+
+If a task's topic is a COMPOSITE of two unrelated entities
+(e.g. «Ziya/Odeya», «Lunate/Antonov + Lunate/Tokarev»), split
+into one task per entity. Each gets its own description.
+
+Don't split if the entity is genuinely one thing
+(«TWG global» is a single fund — don't split «global»;
+«Bauer/Dart» is one company name with a slash; «Schaeffler/
+Bosch» is the contract context, not two separate task topics).
+
+═══════════════════════════════════════════════════════════════
+OUTPUT
+═══════════════════════════════════════════════════════════════
+
+Respond as a JSON object:
+  `{"consolidated": [{"id": <int|null>,
+                       "merged_from": [<int>, ...],
+                       "title": <str>,
+                       "description": <str>,
+                       "owner": <slack_user_id|null>,
+                       "priority": "low"|"medium"|"high"|"urgent"}, ...]}`
+
+- `id`: original task id when output is a single existing task
+  (no merge / no split). `null` for new merged or split tasks.
+- `merged_from`: list of input ids that this output covers.
+  For split: `[<original_id>]` (one input → multiple outputs).
+  For merge: `[<id1>, <id2>, ...]`.
+  For unchanged: `[<id>]`.
+- `title`: imperative verb-phrase, ≤80 chars, RU.
+- `description`: «<тема-или-фонд> - <verb action with details>»
+  format (FR-CR-05-128).
+- `owner`: slack_user_id from the original task (preserve when
+  merging same-owner tasks; null when conflict / unknown).
+"""
+
+
+def consolidate_tasks_via_llm(
+    tasks: list[dict],
+    *,
+    llm_backend: Any,
+    model: str,
+    reasoning_effort: str | None = None,
+    trace_source: str | None = None,
+    trace_recording_id: str | None = None,
+) -> list[dict]:
+    """FR-CR-05-131 — LLM consolidation pass: merges sequential
+    phases of one action and splits composite topics. Returns
+    the cleaned list. Each entry has `merged_from` so the
+    pipeline can mirror the merge into the DB (soft-delete
+    the merged-into-others, update the kept one).
+
+    `tasks` shape: `[{id, title, description, owner,
+    owner_display_name, priority}, ...]`.
+
+    Empty / parse-failure → returns the input unchanged.
+    """
+    import json as _json
+
+    from app.services.trace_log import trace_event
+
+    if not tasks:
+        return list(tasks)
+    tasks_block = "\n".join(
+        f"  [{t['id']}] {(t.get('owner_display_name') or t.get('owner') or '—')}: "
+        f"{(t.get('title') or '').strip()} // "
+        f"{(t.get('description') or '').strip()[:300]}"
+        for t in tasks if t.get("id") is not None
+    )
+    user_prompt = "tasks:\n" + tasks_block
+    _start = dict(
+        model=model, reasoning_effort=reasoning_effort,
+        tasks_count=len(tasks),
+        prompt_chars=len(user_prompt),
+    )
+    log.info("consolidate_tasks_call_started", **_start)
+    if trace_source:
+        trace_event(
+            source=trace_source, recording_id=trace_recording_id,
+            event="consolidate_tasks_call_started",
+            **_start, system_prompt=CONSOLIDATE_TASKS_SYSTEM,
+            user_prompt_full=user_prompt,
+        )
+    try:
+        text = llm_backend.complete_text(
+            system_prompt=CONSOLIDATE_TASKS_SYSTEM,
+            user_prompt=user_prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            response_format={"type": "json_object"},
+        ) or ""
+    except Exception as e:  # noqa: BLE001
+        log.warning("consolidate_tasks_llm_failed",
+                    model=model, error=str(e))
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="consolidate_tasks_llm_failed",
+                        model=model, error=str(e))
+        return list(tasks)
+    try:
+        result = _json.loads(text) if text else {}
+    except _json.JSONDecodeError:
+        log.warning("consolidate_tasks_json_parse_failed",
+                    text_preview=text[:200])
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="consolidate_tasks_json_parse_failed",
+                        text_preview=text[:500])
+        return list(tasks)
+    if not isinstance(result, dict):
+        return list(tasks)
+    items = result.get("consolidated") or []
+    if not isinstance(items, list):
+        return list(tasks)
+    valid_ids = {t["id"] for t in tasks}
+    out: list[dict] = []
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        title = (entry.get("title") or "").strip()
+        if not title:
+            continue
+        merged_raw = entry.get("merged_from")
+        if isinstance(merged_raw, list):
+            merged_from = [
+                m for m in merged_raw
+                if isinstance(m, int) and m in valid_ids
+            ]
+        else:
+            merged_from = []
+        out.append({
+            "id": entry.get("id") if isinstance(entry.get("id"), int) else None,
+            "merged_from": merged_from,
+            "title": title[:10_000],
+            "description": (entry.get("description") or "").strip(),
+            "owner": entry.get("owner"),
+            "priority": entry.get("priority") or "medium",
+        })
+    log.info(
+        "consolidate_tasks_done",
+        input_count=len(tasks),
+        output_count=len(out),
+        merged_count=sum(1 for o in out if len(o["merged_from"]) > 1),
+        split_count=sum(
+            1 for o in out
+            if len(o["merged_from"]) == 1 and o["id"] is None
+        ),
+    )
+    if trace_source:
+        trace_event(
+            source=trace_source, recording_id=trace_recording_id,
+            event="consolidate_tasks_done",
+            input_count=len(tasks),
+            output_count=len(out),
+            samples=out[:25],
+            raw_response_full=result,
+        )
+    return out
+
+
 def canonicalize_task_content_via_llm(
     tasks: list[dict],
     directory: list["Counterparty"],
@@ -1164,10 +1369,12 @@ __all__ = [
     "COUNTERPARTY_EXTRACT_SYSTEM",
     "COUNTERPARTY_RESOLVE_SYSTEM",
     "CANONICALIZE_TASKS_SYSTEM",
+    "CONSOLIDATE_TASKS_SYSTEM",
     "match_counterparties_in_transcript",
     "extract_counterparty_mentions",
     "resolve_mentions_to_directory",
     "canonicalize_task_content_via_llm",
+    "consolidate_tasks_via_llm",
     "canonicalize_text",
     "fuzzy_extend_canonical_map",
 ]

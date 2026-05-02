@@ -755,3 +755,51 @@ def test_canonicalize_text_no_double_substring_cascade():
     assert canonicalize_text(
         "Bauer/Dart - пригласить в офис", mapping
     ) == "Bauerdart - пригласить в офис"
+
+
+def test_fuzzy_extend_canonical_map_catches_jamal_jabal_class():
+    """FR-CR-05-129 follow-up — operator regression: the
+    transcript-side LLM Pass 1 caught «Jabal» but the separate
+    task-extract LLM later wrote «Jamal» in a task description.
+    Pass-2 mapping had `{Jabal: Jabal}` only — canonicalize
+    didn't rewrite «Jamal». Python fuzzy fallback runs over
+    task content tokens and adds entries for any directory
+    name within ratio ≥ 0.8 (post-translit)."""
+    from app.models import Counterparty
+    from app.services.counterparty_match import fuzzy_extend_canonical_map
+
+    directory = [
+        Counterparty(id=1, name="Jabal", type="VC", name_normalised="jabal"),
+        Counterparty(id=2, name="Tether", type="VC", name_normalised="tether"),
+        Counterparty(id=3, name="Bauerdart", type="VC", name_normalised="bauerdart"),
+        Counterparty(id=4, name="Schaeffler", type="VC", name_normalised="schaeffler"),
+    ]
+    text = (
+        "Уточнить график демо с Jamal в Лондоне. "
+        "Пригласить Бауэрдарта на демо."
+    )
+    extended = fuzzy_extend_canonical_map(text, directory, {})
+    # Jamal → Jabal (ratio 0.8, the operator regression).
+    assert "Jamal" in extended
+    assert extended["Jamal"] == "Jabal"
+    # Бауэрдарта (declined Cyrillic) → Bauerdart (ratio ~0.84).
+    assert any(v == "Bauerdart" for v in extended.values())
+    # Generic verbs / nouns (capitalized at sentence start) NOT
+    # added to mapping — fuzzy ratio against company names is
+    # too low. «Уточнить», «Пригласить» etc. don't match.
+    assert "Уточнить" not in extended
+    assert "Пригласить" not in extended
+
+
+def test_fuzzy_extend_preserves_existing_map():
+    """Existing entries (from Pass 2 LLM) must not be
+    overwritten or removed by the fuzzy pass."""
+    from app.models import Counterparty
+    from app.services.counterparty_match import fuzzy_extend_canonical_map
+
+    directory = [
+        Counterparty(id=1, name="Tether", type="VC", name_normalised="tether"),
+    ]
+    existing = {"Тезер": "Tether"}
+    extended = fuzzy_extend_canonical_map("blah blah", directory, existing)
+    assert extended == existing

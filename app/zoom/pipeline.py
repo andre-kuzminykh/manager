@@ -615,9 +615,14 @@ class ZoomPipeline:
         self, session: Session, row: ZoomRecording
     ) -> int:
         """FR-CR-05-129 — rewrite Task title/description for
-        this Zoom recording using the Pass-2 canonical mapping
-        stashed on row by `_step_match_counterparties`."""
-        from app.services.counterparty_match import canonicalize_text
+        this Zoom recording using the Pass-2 mapping + Python
+        fuzzy fallback over task content (catches phonetic
+        forms the task-extract LLM produced that Pass 1
+        didn't see)."""
+        from app.models import Counterparty
+        from app.services.counterparty_match import (
+            canonicalize_text, fuzzy_extend_canonical_map,
+        )
         from app.services.trace_log import trace_event
 
         mapping: dict[str, str] = (
@@ -625,8 +630,6 @@ class ZoomPipeline:
             or row.__dict__.get("_zm_canonical_map", {})
             or {}
         )
-        if not mapping:
-            return 0
         tasks = (
             session.query(Task)
             .filter(Task.source_kind == TaskSourceKind.zoom)
@@ -634,6 +637,27 @@ class ZoomPipeline:
             .filter(Task.deleted_at.is_(None))
             .all()
         )
+        if not tasks:
+            return 0
+        directory = session.query(Counterparty).all()
+        task_corpus = "\n".join(
+            (t.title or "") + "\n" + (t.description or "")
+            for t in tasks
+        )
+        before_size = len(mapping)
+        mapping = fuzzy_extend_canonical_map(
+            task_corpus, directory, mapping, ratio_threshold=0.8,
+        )
+        added = len(mapping) - before_size
+        if added:
+            log.info(
+                "zoom_task_fuzzy_canonical_added",
+                zoom_id=row.zoom_id,
+                added=added,
+                added_keys=list(mapping.keys())[before_size:],
+            )
+        if not mapping:
+            return 0
         rewrites: list[dict] = []
         for t in tasks:
             new_title = canonicalize_text(t.title, mapping)

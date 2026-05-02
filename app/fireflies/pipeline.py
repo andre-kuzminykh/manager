@@ -1210,11 +1210,16 @@ class FirefliesPipeline:
         «Bauer/Dart», «Тензор», «Жамаль») is replaced with the
         canonical name from the directory («Tether»,
         «Bauerdart», «Tencent», «Jabal»). Uses the mapping
-        stashed on the row by `_step_match_counterparties`.
-
-        Returns count of tasks rewritten.
+        stashed on the row by `_step_match_counterparties`,
+        EXTENDED with a Python-only fuzzy fallback over task
+        content (catches phonetic forms the task-extract LLM
+        introduced that Pass 1 didn't see — operator regression
+        «Jamal в task description, Jabal в Pass 1»).
         """
-        from app.services.counterparty_match import canonicalize_text
+        from app.models import Counterparty
+        from app.services.counterparty_match import (
+            canonicalize_text, fuzzy_extend_canonical_map,
+        )
         from app.services.trace_log import trace_event
 
         mapping: dict[str, str] = (
@@ -1222,8 +1227,6 @@ class FirefliesPipeline:
             or row.__dict__.get("_fr_canonical_map", {})
             or {}
         )
-        if not mapping:
-            return 0
         tasks = (
             session.query(Task)
             .filter(Task.source_kind == TaskSourceKind.fireflies)
@@ -1231,6 +1234,28 @@ class FirefliesPipeline:
             .filter(Task.deleted_at.is_(None))
             .all()
         )
+        if not tasks:
+            return 0
+        # Extend mapping with fuzzy hits in task content.
+        directory = session.query(Counterparty).all()
+        task_corpus = "\n".join(
+            (t.title or "") + "\n" + (t.description or "")
+            for t in tasks
+        )
+        before_size = len(mapping)
+        mapping = fuzzy_extend_canonical_map(
+            task_corpus, directory, mapping, ratio_threshold=0.8,
+        )
+        added = len(mapping) - before_size
+        if added:
+            log.info(
+                "fireflies_task_fuzzy_canonical_added",
+                fireflies_id=row.fireflies_id,
+                added=added,
+                added_keys=list(mapping.keys())[before_size:],
+            )
+        if not mapping:
+            return 0
         rewrites: list[dict] = []
         for t in tasks:
             new_title = canonicalize_text(t.title, mapping)

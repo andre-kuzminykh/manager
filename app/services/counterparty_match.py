@@ -287,6 +287,21 @@ COUNTERPARTY_RESOLVE_TOOL_PARAMETERS: dict[str, Any] = {
 }
 
 
+# FR-CR-05-126 / -129 — module-level Cyrillic→Latin map, used
+# both by the fuzzy prefilter inside the matcher AND by the
+# fuzzy fallback that extends the canonical-rewrite map over
+# task content (`fuzzy_extend_canonical_map`).
+_CYR_TO_LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d",
+    "е": "e", "ё": "e", "ж": "zh", "з": "z", "и": "i",
+    "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
+    "о": "o", "п": "p", "р": "r", "с": "s", "т": "t",
+    "у": "u", "ф": "f", "х": "h", "ц": "ts", "ч": "ch",
+    "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "",
+    "э": "e", "ю": "yu", "я": "ya",
+}
+
+
 def _render_directory(rows: list[Counterparty]) -> str:
     """Compact directory rendering for the user prompt. Three
     columns: id | type | name. Notes / status / etc. live on
@@ -793,6 +808,83 @@ def resolve_mentions_to_directory(
     return out
 
 
+def fuzzy_extend_canonical_map(
+    text: str | None,
+    directory: list["Counterparty"],
+    existing_map: dict[str, str],
+    *,
+    ratio_threshold: float = 0.8,
+) -> dict[str, str]:
+    """FR-CR-05-129 follow-up — Python-only fuzzy pass that
+    finds words in `text` that phonetically match a directory
+    canonical name (after Cyrillic→Latin translit) and extends
+    the existing mention→canonical mapping. Catches cases the
+    LLM-driven Pass 1+Pass 2 missed because the EXTRACT TASKS
+    LLM (separate call) saw a different surface form than the
+    transcript-extract pass.
+
+    Operator regression: «Jamal» appeared in task description
+    even though Pass 1+2 correctly mapped «Jabal» from
+    transcript. Different LLM call wrote «Jamal» — fuzzy
+    fallback catches it: ratio(«jamal», «jabal»)=0.8.
+
+    Returns a NEW map (existing entries preserved). Word-
+    boundary tokenisation; only catches Cap-First or ALL-CAPS
+    tokens 4-25 chars long (filters generic verbs / nouns).
+    """
+    import difflib
+    import re
+    import unicodedata
+
+    if not text or not directory:
+        return dict(existing_map)
+    out: dict[str, str] = dict(existing_map)
+    existing_lc = {k.lower() for k in existing_map}
+
+    def _fold(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "")
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        s = "".join(_CYR_TO_LAT.get(ch, ch) for ch in s.lower())
+        return s.strip()
+
+    # Build a folded-name → canonical-row index over the directory.
+    by_fold: dict[str, "Counterparty"] = {}
+    for cp in directory:
+        f = _fold(cp.name or "")
+        if f and len(f) >= 4:
+            by_fold.setdefault(f, cp)
+
+    # Tokenise text. Keep CapFirst / ALLCAPS tokens 4-25 chars,
+    # filter known mention surface forms already in the map.
+    seen_tokens: set[str] = set()
+    for m in re.finditer(r"[A-ZА-ЯЁ][\wА-Яа-яёЁ/\-\.]{3,24}", text):
+        token = m.group(0)
+        if token.lower() in existing_lc:
+            continue
+        if token.lower() in seen_tokens:
+            continue
+        seen_tokens.add(token.lower())
+        token_fold = _fold(token)
+        if not token_fold or len(token_fold) < 4:
+            continue
+        # Find the best directory match.
+        best_cp: "Counterparty" | None = None
+        best_ratio = 0.0
+        for fold_name, cp in by_fold.items():
+            if abs(len(fold_name) - len(token_fold)) > 3:
+                continue
+            r = difflib.SequenceMatcher(None, fold_name, token_fold).ratio()
+            if r > best_ratio:
+                best_ratio = r
+                best_cp = cp
+        if best_cp is not None and best_ratio >= ratio_threshold:
+            # Don't overwrite if mapping for this token already
+            # exists (e.g. from LLM Pass 2).
+            if token not in out:
+                out[token] = best_cp.name
+    return out
+
+
 def canonicalize_text(
     text: str | None,
     mention_to_canonical: dict[str, str],
@@ -865,4 +957,5 @@ __all__ = [
     "extract_counterparty_mentions",
     "resolve_mentions_to_directory",
     "canonicalize_text",
+    "fuzzy_extend_canonical_map",
 ]

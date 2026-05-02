@@ -136,6 +136,157 @@ COUNTERPARTY_MATCH_TOOL_PARAMETERS: dict[str, Any] = {
 }
 
 
+# ============================================================
+# FR-CR-05-129 — two-pass canonical name resolution
+# ============================================================
+
+COUNTERPARTY_EXTRACT_SYSTEM = """\
+You are a transcript-reader. Your ONE job: list every
+COUNTERPARTY mention in this business-meeting transcript,
+verbatim as it appears (including Whisper-mangled phonetic
+forms).
+
+A counterparty is a COMPANY / FUND / INVESTOR / CLIENT /
+ORGANISATION name. NOT person names of internal speakers,
+NOT generic terms like «инвесторы», «фонд», «раунд».
+
+═══════════════════════════════════════════════════════════════
+EXTRACT EVERY DISTINCT FORM, PHONETIC OR NOT.
+
+Whisper transcripts contain MANY phonetic / Cyrillic-Latin
+variants of the same fund. Your job is to LIST THEM ALL —
+matching them to canonical names is a separate downstream step.
+
+Examples (one transcript, multiple forms of the same entity):
+
+  «Тезер»              ← Whisper-phonetic for Tether
+  «тезер»              ← lowercase / re-mention
+  «teaser»             ← Whisper sometimes hears it Latin
+  «Tether»             ← if speaker said it Latin
+
+  «Bauer/Dart»         ← Whisper-rendered with slash
+  «BauerDart»          ← compound
+  «Баутерт»            ← phonetic Cyrillic
+  «Bower/Баутерт»      ← mixed
+
+  «Шафлер» / «Schaeffler» / «Шаффлер»
+
+  «Голдман» / «Голдман Сакс» / «Goldman Sachs»
+
+  «Адног» / «АДНОК» / «ADNOC»
+
+LIST EVERY UNIQUE STRING. Don't try to merge them — that's
+the next pass. Don't normalize case. Don't translit. Just
+copy the surface form from the transcript.
+═══════════════════════════════════════════════════════════════
+
+OUTPUT RULES:
+
+1. Return all distinct surface forms (case-sensitive). If the
+   transcript has «Тезер» twice and «тезер» once, return
+   {«Тезер», «тезер»} (two entries).
+2. Skip generic words: «инвестор», «фонд», «компания»,
+   «раунд», «контракт», «клиент» without a brand name.
+3. Skip first names of internal Humanoid team members —
+   they're speakers, not counterparties.
+4. Empty list is valid (internal-only meeting): `{"mentions": []}`.
+
+Respond via the `record_counterparty_mentions` tool.
+"""
+
+
+COUNTERPARTY_EXTRACT_TOOL_NAME = "record_counterparty_mentions"
+COUNTERPARTY_EXTRACT_TOOL_DESCRIPTION = (
+    "Record every distinct counterparty mention surface form "
+    "from the meeting transcript."
+)
+COUNTERPARTY_EXTRACT_TOOL_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "mentions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Distinct surface forms (case-sensitive) of "
+                "counterparty mentions in the transcript. "
+                "Include phonetic variants verbatim."
+            ),
+        },
+    },
+    "required": ["mentions"],
+}
+
+
+COUNTERPARTY_RESOLVE_SYSTEM = """\
+You map each counterparty MENTION (as it appears in a meeting
+transcript, possibly Whisper-mangled) to a directory entry's
+canonical id — or to `null` when the directory has no entry
+for it.
+
+Input (in the user prompt):
+  - `mentions`: a numbered list of strings the previous LLM
+    extracted from the transcript verbatim («Тезер»,
+    «Bauer/Dart», «Шафлер»…).
+  - `directory`: `id | type | name` for every known
+    counterparty.
+
+═══════════════════════════════════════════════════════════════
+PHONETIC + CYRILLIC↔LATIN MATCHING IS THE WHOLE JOB.
+
+For each mention, find the directory entry that's the same
+underlying entity, even if spelling differs:
+  - «Тезер»       → «Tether» (phonetic Cyrillic of Tether)
+  - «teaser»      → «Tether» (Whisper one-off swap)
+  - «Bauer/Dart»  → «Bauerdart» (slash-rendered compound)
+  - «Баутерт»     → «Bauerdart» (Cyrillic phonetic)
+  - «Шафлер»      → «Schaeffler»
+  - «Голдман»     → «Goldman Sachs»
+  - «Адног»       → «ADNOC»
+
+Multiple mentions can resolve to the SAME directory id (that's
+the point — Whisper's phonetic variants are the same entity).
+
+Map to `null` ONLY when no directory entry plausibly matches.
+NEVER invent ids.
+═══════════════════════════════════════════════════════════════
+
+OUTPUT RULES:
+
+1. Return one entry per input mention (preserve order).
+2. Each entry is `{"mention": <input string>, "directory_id":
+   <int|null>}`.
+3. Same directory id may appear multiple times if multiple
+   mentions resolve to it.
+4. NEVER guess an id that's not in the directory.
+
+Respond via the `record_resolved_mentions` tool.
+"""
+
+
+COUNTERPARTY_RESOLVE_TOOL_NAME = "record_resolved_mentions"
+COUNTERPARTY_RESOLVE_TOOL_DESCRIPTION = (
+    "Record the directory id each counterparty mention "
+    "resolves to (or null if no match)."
+)
+COUNTERPARTY_RESOLVE_TOOL_PARAMETERS: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "matches": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "mention": {"type": "string"},
+                    "directory_id": {"type": ["integer", "null"]},
+                },
+                "required": ["mention", "directory_id"],
+            },
+        },
+    },
+    "required": ["matches"],
+}
+
+
 def _render_directory(rows: list[Counterparty]) -> str:
     """Compact directory rendering for the user prompt. Three
     columns: id | type | name. Notes / status / etc. live on
@@ -423,10 +574,233 @@ def match_counterparties_in_transcript(
     return out
 
 
+def extract_counterparty_mentions(
+    transcript: str,
+    *,
+    llm_backend: Any,
+    model: str,
+    reasoning_effort: str | None = None,
+    trace_source: str | None = None,
+    trace_recording_id: str | None = None,
+) -> list[str]:
+    """FR-CR-05-129 Pass 1 — list every counterparty mention
+    surface form in the transcript verbatim («Тезер»,
+    «Bauer/Dart», «Шафлер»). Doesn't try to match anything;
+    that's Pass 2. Returns a deduped list preserving first-
+    appearance order.
+    """
+    from app.services.trace_log import trace_event
+
+    if not transcript:
+        return []
+    user_prompt = "Транскрипт встречи:\n" + transcript
+    _start = dict(model=model, reasoning_effort=reasoning_effort,
+                  transcript_chars=len(transcript))
+    log.info("counterparty_extract_call_started", **_start)
+    if trace_source:
+        trace_event(source=trace_source, recording_id=trace_recording_id,
+                    event="counterparty_extract_call_started",
+                    **_start, system_prompt=COUNTERPARTY_EXTRACT_SYSTEM,
+                    user_prompt_preview=user_prompt[:1000])
+    try:
+        result = llm_backend.call_tool(
+            system_prompt=COUNTERPARTY_EXTRACT_SYSTEM,
+            user_prompt=user_prompt,
+            tool_name=COUNTERPARTY_EXTRACT_TOOL_NAME,
+            tool_description=COUNTERPARTY_EXTRACT_TOOL_DESCRIPTION,
+            tool_parameters=COUNTERPARTY_EXTRACT_TOOL_PARAMETERS,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("counterparty_extract_llm_failed",
+                    model=model, error=str(e))
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="counterparty_extract_llm_failed",
+                        model=model, error=str(e))
+        return []
+    raw = result.get("mentions") or []
+    if not isinstance(raw, list):
+        raw = []
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in raw:
+        if not isinstance(m, str):
+            continue
+        m = m.strip()
+        if not m or m.lower() in seen:
+            continue
+        seen.add(m.lower())
+        out.append(m)
+    log.info(
+        "counterparty_extract_done",
+        mentions_count=len(out),
+        mentions_sample=out[:25],
+    )
+    if trace_source:
+        trace_event(source=trace_source, recording_id=trace_recording_id,
+                    event="counterparty_extract_done",
+                    mentions_count=len(out),
+                    mentions=out, raw_response_full=result)
+    return out
+
+
+def resolve_mentions_to_directory(
+    mentions: list[str],
+    directory: list[Counterparty],
+    *,
+    llm_backend: Any,
+    model: str,
+    reasoning_effort: str | None = None,
+    trace_source: str | None = None,
+    trace_recording_id: str | None = None,
+) -> dict[str, int | None]:
+    """FR-CR-05-129 Pass 2 — for each Pass-1 mention, ask the
+    LLM which directory id it resolves to (or null when no
+    match). Returns a mention → directory_id mapping, deduped.
+    Uses the FULL directory in the prompt (no fuzzy shortlist
+    — Pass 1 already filtered the universe down to actual
+    mentions).
+    """
+    from app.services.trace_log import trace_event
+
+    if not mentions:
+        return {}
+    if not directory:
+        return {m: None for m in mentions}
+    mentions_block = "\n".join(
+        f"  {i+1}. {m}" for i, m in enumerate(mentions)
+    )
+    user_prompt = (
+        "mentions:\n" + mentions_block
+        + "\n\ndirectory:\n" + _render_directory(directory)
+    )
+    _start = dict(
+        model=model, reasoning_effort=reasoning_effort,
+        mentions_count=len(mentions),
+        directory_size=len(directory),
+        prompt_chars=len(user_prompt),
+    )
+    log.info("counterparty_resolve_call_started", **_start)
+    if trace_source:
+        trace_event(
+            source=trace_source, recording_id=trace_recording_id,
+            event="counterparty_resolve_call_started",
+            **_start, mentions=mentions,
+            system_prompt=COUNTERPARTY_RESOLVE_SYSTEM,
+            user_prompt_full=user_prompt,
+        )
+    try:
+        result = llm_backend.call_tool(
+            system_prompt=COUNTERPARTY_RESOLVE_SYSTEM,
+            user_prompt=user_prompt,
+            tool_name=COUNTERPARTY_RESOLVE_TOOL_NAME,
+            tool_description=COUNTERPARTY_RESOLVE_TOOL_DESCRIPTION,
+            tool_parameters=COUNTERPARTY_RESOLVE_TOOL_PARAMETERS,
+            model=model,
+            reasoning_effort=reasoning_effort,
+        ) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("counterparty_resolve_llm_failed",
+                    model=model, error=str(e))
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="counterparty_resolve_llm_failed",
+                        model=model, error=str(e))
+        return {m: None for m in mentions}
+    matches = result.get("matches") or []
+    if not isinstance(matches, list):
+        matches = []
+    valid_ids = {cp.id for cp in directory}
+    by_id = {cp.id: cp for cp in directory}
+    out: dict[str, int | None] = {}
+    for entry in matches:
+        if not isinstance(entry, dict):
+            continue
+        mention = entry.get("mention")
+        cid = entry.get("directory_id")
+        if not isinstance(mention, str):
+            continue
+        if cid is not None and cid not in valid_ids:
+            cid = None
+        out[mention] = cid
+    # Fill in any mentions the LLM forgot to map.
+    for m in mentions:
+        if m not in out:
+            out[m] = None
+    resolved_mapping = [
+        {
+            "mention": m,
+            "directory_id": cid,
+            "canonical_name": (by_id[cid].name if cid else None),
+        }
+        for m, cid in out.items()
+    ]
+    log.info(
+        "counterparty_resolve_done",
+        mentions_count=len(mentions),
+        resolved_count=sum(1 for v in out.values() if v is not None),
+        unresolved_count=sum(1 for v in out.values() if v is None),
+        sample=resolved_mapping[:10],
+    )
+    if trace_source:
+        trace_event(
+            source=trace_source, recording_id=trace_recording_id,
+            event="counterparty_resolve_done",
+            resolved_count=sum(1 for v in out.values() if v is not None),
+            unresolved_count=sum(1 for v in out.values() if v is None),
+            mapping=resolved_mapping,
+            raw_response_full=result,
+        )
+    return out
+
+
+def canonicalize_text(
+    text: str | None,
+    mention_to_canonical: dict[str, str],
+) -> str | None:
+    """FR-CR-05-129 — replace each Pass-1 mention with its
+    canonical directory name in `text`, longest-mention-first
+    so a longer surface form («Bauer/Dart») isn't partially
+    eaten by a shorter one («Bauer»). Case-insensitive replace
+    that preserves the canonical name's casing as written in
+    the directory.
+    """
+    if not text or not mention_to_canonical:
+        return text
+    import re
+
+    # Sort by length DESC so longer surface forms replace first.
+    items = sorted(
+        mention_to_canonical.items(), key=lambda x: -len(x[0])
+    )
+    out = text
+    for mention, canonical in items:
+        if not mention or not canonical:
+            continue
+        if mention == canonical:
+            continue
+        try:
+            pattern = re.compile(
+                r"(?<!\w)" + re.escape(mention) + r"(?!\w)",
+                flags=re.IGNORECASE,
+            )
+            out = pattern.sub(canonical, out)
+        except re.error:
+            continue
+    return out
+
+
 __all__ = [
     "COUNTERPARTY_MATCH_SYSTEM",
     "COUNTERPARTY_MATCH_TOOL_NAME",
     "COUNTERPARTY_MATCH_TOOL_DESCRIPTION",
     "COUNTERPARTY_MATCH_TOOL_PARAMETERS",
+    "COUNTERPARTY_EXTRACT_SYSTEM",
+    "COUNTERPARTY_RESOLVE_SYSTEM",
     "match_counterparties_in_transcript",
+    "extract_counterparty_mentions",
+    "resolve_mentions_to_directory",
+    "canonicalize_text",
 ]

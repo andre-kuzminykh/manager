@@ -1053,53 +1053,114 @@ class FirefliesPipeline:
     def _step_match_counterparties(
         self, session: Session, row: MeetingRecording
     ) -> int:
-        """FR-CR-05-125 — match counterparty mentions in the
-        transcript against the canonical directory and persist
-        the link rows. Returns the count of matches.
+        """FR-CR-05-125 / FR-CR-05-129 — TWO-PASS canonical
+        counterparty resolution.
+
+        Pass 1 (`extract_counterparty_mentions`) reads the
+        transcript and lists every distinct counterparty
+        mention surface form verbatim («Тезер», «Bauer/Dart»,
+        «Шафлер»…) — no directory in the prompt.
+
+        Pass 2 (`resolve_mentions_to_directory`) takes those
+        mentions + the full directory and returns a
+        `mention → directory_id|None` mapping. Multiple
+        phonetic forms can resolve to the same id.
+
+        The mapping is also stashed on the MeetingRecording row
+        so the post-extract `_step_canonicalize_task_names`
+        step can rewrite Task descriptions / titles using the
+        canonical names from the directory.
 
         Idempotency on rerun: deletes existing mention rows for
-        this `(source_kind, source_id)` first so the new set
-        replaces the old without UNIQUE violations.
-
-        Empty directory (operator hasn't run pull yet) → silent
-        skip, the doc/summary just don't carry the section.
+        this `(source_kind, source_id)` first.
         """
-        from app.models import CounterpartyMention
+        from app.models import Counterparty, CounterpartyMention
         from app.services.counterparty_match import (
-            match_counterparties_in_transcript,
+            extract_counterparty_mentions,
+            resolve_mentions_to_directory,
         )
 
         if not row.transcript_text:
             return 0
+        directory = (
+            session.query(Counterparty)
+            .order_by(Counterparty.type, Counterparty.name)
+            .all()
+        )
+        if not directory:
+            log.info(
+                "fireflies_counterparty_match_skipped_empty_directory",
+                fireflies_id=row.fireflies_id,
+            )
+            return 0
+        # Pass 1.
         try:
-            matches = match_counterparties_in_transcript(
-                session,
-                transcript=row.transcript_text,
+            mentions = extract_counterparty_mentions(
+                row.transcript_text,
                 llm_backend=self._llm,
                 model=self._settings.fireflies_tasks_model,
                 reasoning_effort=(
-                    self._settings.fireflies_tasks_reasoning_effort
-                    or None
+                    self._settings.fireflies_tasks_reasoning_effort or None
                 ),
                 trace_source="fireflies",
                 trace_recording_id=row.fireflies_id,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(
-                "fireflies_counterparty_match_unexpected_error",
+                "fireflies_counterparty_extract_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
             return 0
-        # Replace existing mentions (idempotent rerun).
+        if not mentions:
+            log.info(
+                "fireflies_counterparty_no_mentions_in_transcript",
+                fireflies_id=row.fireflies_id,
+            )
+            return 0
+        # Pass 2.
+        try:
+            mention_to_id = resolve_mentions_to_directory(
+                mentions,
+                directory,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                trace_source="fireflies",
+                trace_recording_id=row.fireflies_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "fireflies_counterparty_resolve_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+            return 0
+        # Persist mention→canonical mapping on the recording so
+        # the canonicalize step can pick it up.
+        by_id = {cp.id: cp for cp in directory}
+        mention_to_canonical: dict[str, str] = {}
+        for mention, cid in mention_to_id.items():
+            if cid is not None and cid in by_id:
+                mention_to_canonical[mention] = by_id[cid].name
+        # Stash in row.extra-style storage.
+        if not hasattr(row, "_fr_canonical_map"):
+            row.__dict__["_fr_canonical_map"] = mention_to_canonical
+
+        # Replace existing CounterpartyMention rows (idempotent rerun).
         session.query(CounterpartyMention).filter(
             CounterpartyMention.source_kind == "fireflies",
             CounterpartyMention.source_id == row.fireflies_id,
         ).delete()
         session.flush()
-        for cp in matches:
+        unique_ids: set[int] = set()
+        for cid in mention_to_id.values():
+            if cid is None or cid in unique_ids:
+                continue
+            unique_ids.add(cid)
             session.add(
                 CounterpartyMention(
-                    counterparty_id=cp.id,
+                    counterparty_id=cid,
                     source_kind="fireflies",
                     source_id=row.fireflies_id,
                     created_at=datetime.now(timezone.utc),
@@ -1109,9 +1170,72 @@ class FirefliesPipeline:
         log.info(
             "fireflies_counterparty_match_done",
             fireflies_id=row.fireflies_id,
-            matched=len(matches),
+            mentions=len(mentions),
+            matched=len(unique_ids),
         )
-        return len(matches)
+        return len(unique_ids)
+
+    def _step_canonicalize_task_names(
+        self, session: Session, row: MeetingRecording
+    ) -> int:
+        """FR-CR-05-129 — rewrite Task title/description for
+        this meeting so each Whisper-mangled mention («Тезер»,
+        «Bauer/Dart», «Тензор», «Жамаль») is replaced with the
+        canonical name from the directory («Tether»,
+        «Bauerdart», «Tencent», «Jabal»). Uses the mapping
+        stashed on the row by `_step_match_counterparties`.
+
+        Returns count of tasks rewritten.
+        """
+        from app.services.counterparty_match import canonicalize_text
+        from app.services.trace_log import trace_event
+
+        mapping: dict[str, str] = (
+            getattr(row, "_fr_canonical_map", None)
+            or row.__dict__.get("_fr_canonical_map", {})
+            or {}
+        )
+        if not mapping:
+            return 0
+        tasks = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.fireflies)
+            .filter(Task.source_conversation_id == row.fireflies_id)
+            .filter(Task.deleted_at.is_(None))
+            .all()
+        )
+        rewrites: list[dict] = []
+        for t in tasks:
+            new_title = canonicalize_text(t.title, mapping)
+            new_desc = canonicalize_text(t.description, mapping)
+            changes = {}
+            if new_title and new_title != t.title:
+                changes["title_before"] = t.title
+                changes["title_after"] = new_title
+                t.title = new_title
+            if new_desc and new_desc != t.description:
+                changes["desc_before"] = (t.description or "")[:100]
+                changes["desc_after"] = new_desc[:100]
+                t.description = new_desc
+            if changes:
+                changes["task_id"] = t.id
+                rewrites.append(changes)
+        if rewrites:
+            session.flush()
+            log.info(
+                "fireflies_task_canonical_rewrite_done",
+                fireflies_id=row.fireflies_id,
+                rewritten=len(rewrites),
+                mapping_size=len(mapping),
+            )
+            trace_event(
+                source="fireflies", recording_id=row.fireflies_id,
+                event="task_canonical_rewrite_done",
+                rewritten=len(rewrites),
+                mapping=mapping,
+                samples=rewrites[:20],
+            )
+        return len(rewrites)
 
     def _step_doc_export(
         self, session: Session, row: MeetingRecording
@@ -1297,6 +1421,28 @@ class FirefliesPipeline:
             return row.tasks_extracted_count or 0
         if not row.transcript_text:
             return 0
+        # FR-CR-05-129 — operator regression: rerun reset
+        # `tasks_extracted=False` flag but the previous run's
+        # Task rows stayed in DB, so each rerun stacks tasks
+        # (87 → 145 → 200+). Soft-delete prior tasks for this
+        # meeting before re-extracting.
+        from datetime import datetime as _dt, timezone as _tz
+        prior = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.fireflies)
+            .filter(Task.source_conversation_id == row.fireflies_id)
+            .filter(Task.deleted_at.is_(None))
+            .all()
+        )
+        for t in prior:
+            t.deleted_at = _dt.now(_tz.utc)
+        if prior:
+            session.flush()
+            log.info(
+                "fireflies_extract_wiped_prior_tasks",
+                fireflies_id=row.fireflies_id,
+                wiped=len(prior),
+            )
         from app.services.team_members import as_known_employees
 
         try:
@@ -1792,6 +1938,20 @@ class FirefliesPipeline:
         except Exception as e:  # noqa: BLE001
             log.info(
                 "fireflies_task_verification_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+        # FR-CR-05-129 — canonicalize task descriptions /
+        # titles using the Pass-2 mention→directory mapping
+        # stashed on row by `_step_match_counterparties`. So
+        # «Teaser - …» / «Тезер - …» / «Tezer - …» all become
+        # «Tether - …», and the dedupe step (next) collapses
+        # the now-identical topic prefixes.
+        try:
+            with _trace_step("fireflies", "canonicalize_task_names", **ctx):
+                self._step_canonicalize_task_names(session, row)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_task_canonicalize_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
         # FR-CR-05-128 — soft-delete near-duplicate tasks the

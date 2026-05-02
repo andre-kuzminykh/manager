@@ -494,44 +494,89 @@ class ZoomPipeline:
     def _step_match_counterparties(
         self, session: Session, row: ZoomRecording
     ) -> int:
-        """FR-CR-05-125 — symmetric with the Fireflies match step.
-        Replaces existing mention rows for this `(source_kind=
-        'zoom', source_id=zoom_id)` and inserts the new set."""
-        from app.models import CounterpartyMention
+        """FR-CR-05-125 / FR-CR-05-129 — TWO-PASS canonical
+        counterparty resolution (symmetric with Fireflies)."""
+        from app.models import Counterparty, CounterpartyMention
         from app.services.counterparty_match import (
-            match_counterparties_in_transcript,
+            extract_counterparty_mentions,
+            resolve_mentions_to_directory,
         )
 
         if not row.transcript_text:
             return 0
+        directory = (
+            session.query(Counterparty)
+            .order_by(Counterparty.type, Counterparty.name)
+            .all()
+        )
+        if not directory:
+            log.info(
+                "zoom_counterparty_match_skipped_empty_directory",
+                zoom_id=row.zoom_id,
+            )
+            return 0
         try:
-            matches = match_counterparties_in_transcript(
-                session,
-                transcript=row.transcript_text,
+            mentions = extract_counterparty_mentions(
+                row.transcript_text,
                 llm_backend=self._llm,
                 model=self._settings.fireflies_tasks_model,
                 reasoning_effort=(
-                    self._settings.fireflies_tasks_reasoning_effort
-                    or None
+                    self._settings.fireflies_tasks_reasoning_effort or None
                 ),
                 trace_source="zoom",
                 trace_recording_id=row.zoom_id,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(
-                "zoom_counterparty_match_unexpected_error",
+                "zoom_counterparty_extract_unexpected_error",
                 zoom_id=row.zoom_id, error=str(e),
             )
             return 0
+        if not mentions:
+            log.info(
+                "zoom_counterparty_no_mentions_in_transcript",
+                zoom_id=row.zoom_id,
+            )
+            return 0
+        try:
+            mention_to_id = resolve_mentions_to_directory(
+                mentions,
+                directory,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                trace_source="zoom",
+                trace_recording_id=row.zoom_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "zoom_counterparty_resolve_unexpected_error",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            return 0
+        by_id = {cp.id: cp for cp in directory}
+        mention_to_canonical: dict[str, str] = {}
+        for mention, cid in mention_to_id.items():
+            if cid is not None and cid in by_id:
+                mention_to_canonical[mention] = by_id[cid].name
+        if not hasattr(row, "_zm_canonical_map"):
+            row.__dict__["_zm_canonical_map"] = mention_to_canonical
+
         session.query(CounterpartyMention).filter(
             CounterpartyMention.source_kind == "zoom",
             CounterpartyMention.source_id == row.zoom_id,
         ).delete()
         session.flush()
-        for cp in matches:
+        unique_ids: set[int] = set()
+        for cid in mention_to_id.values():
+            if cid is None or cid in unique_ids:
+                continue
+            unique_ids.add(cid)
             session.add(
                 CounterpartyMention(
-                    counterparty_id=cp.id,
+                    counterparty_id=cid,
                     source_kind="zoom",
                     source_id=row.zoom_id,
                     created_at=datetime.now(timezone.utc),
@@ -540,9 +585,66 @@ class ZoomPipeline:
         session.flush()
         log.info(
             "zoom_counterparty_match_done",
-            zoom_id=row.zoom_id, matched=len(matches),
+            zoom_id=row.zoom_id,
+            mentions=len(mentions), matched=len(unique_ids),
         )
-        return len(matches)
+        return len(unique_ids)
+
+    def _step_canonicalize_task_names(
+        self, session: Session, row: ZoomRecording
+    ) -> int:
+        """FR-CR-05-129 — rewrite Task title/description for
+        this Zoom recording using the Pass-2 canonical mapping
+        stashed on row by `_step_match_counterparties`."""
+        from app.services.counterparty_match import canonicalize_text
+        from app.services.trace_log import trace_event
+
+        mapping: dict[str, str] = (
+            getattr(row, "_zm_canonical_map", None)
+            or row.__dict__.get("_zm_canonical_map", {})
+            or {}
+        )
+        if not mapping:
+            return 0
+        tasks = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.zoom)
+            .filter(Task.source_conversation_id == row.zoom_id)
+            .filter(Task.deleted_at.is_(None))
+            .all()
+        )
+        rewrites: list[dict] = []
+        for t in tasks:
+            new_title = canonicalize_text(t.title, mapping)
+            new_desc = canonicalize_text(t.description, mapping)
+            changes = {}
+            if new_title and new_title != t.title:
+                changes["title_before"] = t.title
+                changes["title_after"] = new_title
+                t.title = new_title
+            if new_desc and new_desc != t.description:
+                changes["desc_before"] = (t.description or "")[:100]
+                changes["desc_after"] = new_desc[:100]
+                t.description = new_desc
+            if changes:
+                changes["task_id"] = t.id
+                rewrites.append(changes)
+        if rewrites:
+            session.flush()
+            log.info(
+                "zoom_task_canonical_rewrite_done",
+                zoom_id=row.zoom_id,
+                rewritten=len(rewrites),
+                mapping_size=len(mapping),
+            )
+            trace_event(
+                source="zoom", recording_id=row.zoom_id,
+                event="task_canonical_rewrite_done",
+                rewritten=len(rewrites),
+                mapping=mapping,
+                samples=rewrites[:20],
+            )
+        return len(rewrites)
 
     # --- step 6: extract tasks --------------------------------
 
@@ -552,12 +654,32 @@ class ZoomPipeline:
         """Run gpt-5.5 over the detailed summary to extract
         action items, materialise as Task rows with
         source_kind=zoom + source_permalink=share_url. Returns
-        the count of new Tasks."""
+        the count of new Tasks.
+
+        FR-CR-05-129 — wipe prior Task rows for this recording
+        before re-extracting so `--rerun` doesn't stack 100s of
+        tasks across reruns."""
         if row.tasks_extracted:
             return row.tasks_extracted_count or 0
         if not row.detailed_summary:
             row.last_error = "no detailed summary for task extraction"
             return 0
+        prior = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.zoom)
+            .filter(Task.source_conversation_id == row.zoom_id)
+            .filter(Task.deleted_at.is_(None))
+            .all()
+        )
+        for t in prior:
+            t.deleted_at = datetime.now(timezone.utc)
+        if prior:
+            session.flush()
+            log.info(
+                "zoom_extract_wiped_prior_tasks",
+                zoom_id=row.zoom_id,
+                wiped=len(prior),
+            )
 
         # Same as Fireflies: feed known_employees so the LLM
         # routes owner_user_id to a real teammate.
@@ -1053,6 +1175,18 @@ class ZoomPipeline:
             except Exception as e:  # noqa: BLE001
                 log.info(
                     "zoom_task_verification_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+        # FR-CR-05-129 — canonicalize task names from the Pass-2
+        # mapping BEFORE dedupe, so all phonetic variants of
+        # the same counterparty share one topic-prefix.
+        if row.detailed_summarised:
+            try:
+                with _trace_step("zoom", "canonicalize_task_names", **ctx):
+                    self._step_canonicalize_task_names(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_task_canonicalize_unexpected_error",
                     zoom_id=row.zoom_id, error=str(e),
                 )
         # FR-CR-05-128 — dedupe near-duplicate Tasks.

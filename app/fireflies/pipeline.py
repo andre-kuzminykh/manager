@@ -1170,6 +1170,15 @@ class FirefliesPipeline:
                     canonical_norms.add(cp.name_normalised)
         if not hasattr(row, "_fr_canonical_map"):
             row.__dict__["_fr_canonical_map"] = mention_to_canonical
+        # FR-CR-05-133 — stash unresolved mentions on the row so
+        # the post-match `_step_enroll_unresolved` can post the
+        # «Track this entity?» widget without re-running Pass 1
+        # / Pass 2.
+        unresolved = [
+            mention for mention, cid in mention_to_id.items()
+            if cid is None
+        ]
+        row.__dict__["_fr_unresolved_mentions"] = unresolved
 
         # FR-CR-05-129 follow-up — RACE FIX: Pass-2 may take
         # several minutes (high reasoning + 502 retries). The
@@ -1221,6 +1230,53 @@ class FirefliesPipeline:
             skipped_stale_after_pull_race=skipped_stale,
         )
         return len(unique_ids)
+
+    def _step_enroll_unresolved(
+        self, session: Session, row: MeetingRecording
+    ) -> int:
+        """FR-CR-05-133 — for every unresolved counterparty
+        mention surfaced by `_step_match_counterparties` (Pass 2
+        returned `directory_id is None`), post a stage-1 widget
+        «Track «<name>»? [Yes] [No]» to each admin recipient's
+        Telegram DM. Idempotent on rerun via UNIQUE constraint
+        on `(source_kind, source_id, mention_normalised,
+        user_id)`.
+
+        Returns the number of widgets actually posted (excludes
+        skipped-existing + send failures).
+        """
+        unresolved = (
+            row.__dict__.get("_fr_unresolved_mentions") or []
+        )
+        if not unresolved or self._sender is None or not getattr(
+            self._sender, "enabled", False
+        ):
+            return 0
+        from app.telegram_bot.handlers import admin_user_ids
+
+        recipients_raw = sorted(admin_user_ids())
+        recipient_ids: list[int] = []
+        for uid in recipients_raw:
+            try:
+                recipient_ids.append(int(uid))
+            except (TypeError, ValueError):
+                continue
+        if not recipient_ids:
+            return 0
+
+        from app.services.counterparty_enrollment import (
+            post_enrollment_prompts,
+        )
+
+        result = post_enrollment_prompts(
+            session,
+            sender=self._sender,
+            source_kind="fireflies",
+            source_id=row.fireflies_id,
+            unresolved_mentions=unresolved,
+            recipient_user_ids=recipient_ids,
+        )
+        return result.posted
 
     def _step_canonicalize_task_names(
         self, session: Session, row: MeetingRecording
@@ -2132,6 +2188,19 @@ class FirefliesPipeline:
         except Exception as e:  # noqa: BLE001
             log.info(
                 "fireflies_counterparty_match_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+        # FR-CR-05-133 — for every unresolved mention surfaced
+        # by Pass 2, post a «Track this entity?» widget to each
+        # admin recipient. Failures here MUST NOT break the
+        # rest of the pipeline (the meeting summary still goes
+        # out even if enrollment fails entirely).
+        try:
+            with _trace_step("fireflies", "enroll_unresolved", **ctx):
+                self._step_enroll_unresolved(session, row)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_enroll_unresolved_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
         # FR-CR-05-119 follow-up: extract tasks FIRST, then doc

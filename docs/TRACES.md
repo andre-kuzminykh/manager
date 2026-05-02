@@ -128,6 +128,17 @@ No dedicated events — only `_step_done step=detailed_summary` with `duration_m
 | `fireflies_counterparty_match_done` / `zoom_counterparty_match_done` | `matched`, `<recording-id>` | Pipeline-side after-match log. |
 | `fireflies_counterparty_match_unexpected_error` / `zoom_counterparty_match_unexpected_error` | `error`, `<recording-id>` | Caught + non-fatal (pipeline continues without 🔗 block). |
 
+### Step 4b — counterparty enrollment widgets (FR-CR-05-133)
+| Event | Fields | When |
+|---|---|---|
+| `counterparty_enrollment_posted` | `unique_mentions`, `recipients`, `posted`, `skipped_existing`, `failed`, `<recording-id>` | After `_step_enroll_unresolved` finishes a pass. `skipped_existing` counts UNIQUE-constraint hits (rerun-idempotent). |
+| `counterparty_enrollment_send_failed` | `prompt_id`, `uid`, `error` | Telegram `sendMessage` raised for one widget; row stays in DB without `yesno_message_id`. |
+| `counterparty_enrollment_yes` | `prompt_id`, `mention` | Operator clicked Yes; row → `awaiting_context`. |
+| `counterparty_enrollment_no` | `prompt_id`, `mention` | Operator clicked No; row → `declined`; no Counterparty write. |
+| `counterparty_enrollment_skip` | `prompt_id`, `mention`, `counterparty_id` | Operator clicked Skip in stage-2; row → `completed_skipped`; Counterparty hub created without satellite. |
+| `counterparty_enrollment_completed_with_context` | `prompt_id`, `mention`, `counterparty_id`, `context_chars` | Operator sent text/voice context; row → `completed_added`; Counterparty hub + `telegram_enrollment` satellite created. |
+| `counterparty_enrollment_yes_edit_failed` / `..._no_edit_failed` / `..._skip_edit_failed` / `..._context_edit_failed` | `prompt_id`, `error` | Telegram `editMessageText` raised; state transition still committed. |
+
 ### Step 5 — task extraction (first pass)
 | Event | Fields | When |
 |---|---|---|

@@ -602,6 +602,13 @@ class ZoomPipeline:
                     canonical_norms.add(cp.name_normalised)
         if not hasattr(row, "_zm_canonical_map"):
             row.__dict__["_zm_canonical_map"] = mention_to_canonical
+        # FR-CR-05-133 — stash unresolved mentions for the
+        # post-match enrollment step (mirror of fireflies).
+        unresolved = [
+            mention for mention, cid in mention_to_id.items()
+            if cid is None
+        ]
+        row.__dict__["_zm_unresolved_mentions"] = unresolved
 
         # FR-CR-05-129 follow-up — RACE FIX: refetch fresh ids
         # by name_normalised before insert so the listener
@@ -649,6 +656,45 @@ class ZoomPipeline:
             skipped_stale_after_pull_race=skipped_stale,
         )
         return len(unique_ids)
+
+    def _step_enroll_unresolved(
+        self, session: Session, row: ZoomRecording
+    ) -> int:
+        """FR-CR-05-133 — mirror of fireflies. Posts the
+        «Track «<name>»? [Yes] [No]» widget to admin DMs for
+        every unresolved counterparty mention from Pass 2."""
+        unresolved = (
+            row.__dict__.get("_zm_unresolved_mentions") or []
+        )
+        if not unresolved or self._sender is None or not getattr(
+            self._sender, "enabled", False
+        ):
+            return 0
+        from app.telegram_bot.handlers import admin_user_ids
+
+        recipients_raw = sorted(admin_user_ids())
+        recipient_ids: list[int] = []
+        for uid in recipients_raw:
+            try:
+                recipient_ids.append(int(uid))
+            except (TypeError, ValueError):
+                continue
+        if not recipient_ids:
+            return 0
+
+        from app.services.counterparty_enrollment import (
+            post_enrollment_prompts,
+        )
+
+        result = post_enrollment_prompts(
+            session,
+            sender=self._sender,
+            source_kind="zoom",
+            source_id=row.zoom_id,
+            unresolved_mentions=unresolved,
+            recipient_user_ids=recipient_ids,
+        )
+        return result.posted
 
     def _step_canonicalize_task_names(
         self, session: Session, row: ZoomRecording
@@ -1325,6 +1371,17 @@ class ZoomPipeline:
             except Exception as e:  # noqa: BLE001
                 log.info(
                     "zoom_counterparty_match_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+            # FR-CR-05-133 — enrollment widgets for unresolved
+            # mentions (mirror of fireflies). Failures here MUST
+            # NOT break the rest of the pipeline.
+            try:
+                with _trace_step("zoom", "enroll_unresolved", **ctx):
+                    self._step_enroll_unresolved(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_enroll_unresolved_unexpected_error",
                     zoom_id=row.zoom_id, error=str(e),
                 )
 

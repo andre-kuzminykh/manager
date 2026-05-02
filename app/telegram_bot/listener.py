@@ -55,6 +55,9 @@ from app.telegram_bot.keyboards import (
     ACTION_DELETE,
     ACTION_DONE,
     ACTION_EDIT,
+    ACTION_ENROLL_NO,
+    ACTION_ENROLL_SKIP,
+    ACTION_ENROLL_YES,
     ACTION_IGNORE,
     ACTION_START,
     ACTION_SUBSCRIBE,
@@ -1229,6 +1232,15 @@ class TelegramListener:
         if outcome is None:
             return
 
+        # FR-CR-05-133 — enrollment widgets edit themselves in
+        # place inside the dispatcher path; nothing further to
+        # render. Yes additionally registers a PendingQuestion
+        # so the next text/voice reply lands back here.
+        if action in (
+            ACTION_ENROLL_YES, ACTION_ENROLL_NO, ACTION_ENROLL_SKIP,
+        ):
+            return
+
         # FR-CR-04-32 — Confirm / Reject re-render every draft widget
         # in place. Returned tuple is `(task_or_none, draft)`.
         if action == ACTION_CONFIRM:
@@ -1318,7 +1330,105 @@ class TelegramListener:
             return tg_handlers.handle_ignore_draft(
                 session, draft_id=entity_id, actor=actor
             )
+        # FR-CR-05-133 — counterparty enrollment widgets.
+        if action == ACTION_ENROLL_YES:
+            return self._handle_enroll_yes(
+                session, prompt_id=entity_id, actor=actor
+            )
+        if action == ACTION_ENROLL_NO:
+            return self._handle_enroll_no(
+                session, prompt_id=entity_id, actor=actor
+            )
+        if action == ACTION_ENROLL_SKIP:
+            return self._handle_enroll_skip(
+                session, prompt_id=entity_id, actor=actor
+            )
         log.info("telegram_unknown_action", action=action)
+        return None
+
+    # ---- enrollment widget handlers (FR-CR-05-133) -----------
+
+    def _handle_enroll_yes(
+        self,
+        session: Session,
+        *,
+        prompt_id: int,
+        actor: str,
+    ) -> None:
+        """Edit the stage-1 widget into the stage-2 «send context
+        or skip» widget; register an in-memory PendingQuestion so
+        the next text/voice reply from this user in this chat
+        completes the prompt with context."""
+        from app.services.counterparty_enrollment import handle_yes
+
+        try:
+            actor_uid = int(actor)
+        except (TypeError, ValueError):
+            actor_uid = None
+        row = handle_yes(
+            session,
+            sender=self._sender,
+            prompt_id=prompt_id,
+            actor_user_id=actor_uid,
+        )
+        if row is None or actor_uid is None:
+            return None
+        # Register pending so the reply is recognised as
+        # «context for prompt». Re-uses PendingRegistry's task_id
+        # field to carry the prompt id (action discriminates).
+        anchor_msg_id = (
+            row.context_message_id or row.yesno_message_id
+        )
+        if anchor_msg_id:
+            self._pending.register(
+                action="enroll_context",
+                task_id=row.id,
+                chat_id=int(row.chat_id),
+                user_id=actor_uid,
+                prompt_message_id=int(anchor_msg_id),
+            )
+        return None
+
+    def _handle_enroll_no(
+        self,
+        session: Session,
+        *,
+        prompt_id: int,
+        actor: str,
+    ) -> None:
+        from app.services.counterparty_enrollment import handle_no
+
+        try:
+            actor_uid = int(actor)
+        except (TypeError, ValueError):
+            actor_uid = None
+        handle_no(
+            session,
+            sender=self._sender,
+            prompt_id=prompt_id,
+            actor_user_id=actor_uid,
+        )
+        return None
+
+    def _handle_enroll_skip(
+        self,
+        session: Session,
+        *,
+        prompt_id: int,
+        actor: str,
+    ) -> None:
+        from app.services.counterparty_enrollment import handle_skip
+
+        try:
+            actor_uid = int(actor)
+        except (TypeError, ValueError):
+            actor_uid = None
+        handle_skip(
+            session,
+            sender=self._sender,
+            prompt_id=prompt_id,
+            actor_user_id=actor_uid,
+        )
         return None
 
     # ---- conversation flows (Mark done with artifact, Edit) -------------
@@ -1706,6 +1816,28 @@ class TelegramListener:
                     "telegram_edit_draft_replace_widget_failed",
                     draft_id=draft.id,
                     error=str(e),
+                )
+        elif pending.action == "enroll_context":
+            # FR-CR-05-133 — operator's reply (text or
+            # transcribed voice) is the context for an
+            # enrollment prompt. complete_with_context creates
+            # the Counterparty + satellite and edits the widget
+            # in place to a confirmation.
+            from app.services.counterparty_enrollment import (
+                complete_with_context,
+            )
+
+            done = complete_with_context(
+                session,
+                sender=self._sender,
+                prompt_id=int(pending.task_id),
+                context_text=reply_text,
+                actor_user_id=int(actor),
+            )
+            if done is None:
+                log.info(
+                    "telegram_enrollment_context_no_row",
+                    prompt_id=pending.task_id,
                 )
         else:
             log.info("telegram_unknown_pending_action", action=pending.action)

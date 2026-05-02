@@ -24,6 +24,15 @@ ACTION_DELETE = "delete"
 ACTION_EDIT = "edit"
 ACTION_SUBSCRIBE = "subscribe"
 ACTION_UNSUBSCRIBE = "unsubscribe"
+# FR-CR-05-133 — enrollment widget for unresolved counterparty
+# mentions. Three buttons across two stages:
+#   stage 1: ACTION_ENROLL_YES / ACTION_ENROLL_NO
+#   stage 2 (after Yes): ACTION_ENROLL_SKIP (or a free-text /
+#   voice reply, which goes through PendingRegistry instead)
+# entity_id in the callback_data is `CounterpartyPrompt.id`.
+ACTION_ENROLL_YES = "enroll_yes"
+ACTION_ENROLL_NO = "enroll_no"
+ACTION_ENROLL_SKIP = "enroll_skip"
 
 
 def _btn(text: str, action: str, entity_id: int) -> dict[str, Any]:
@@ -104,6 +113,39 @@ def task_card_keyboard(
         rows.append(sub_row)
 
     return {"inline_keyboard": rows}
+
+
+def enrollment_yesno_keyboard(*, prompt_id: int) -> dict[str, Any]:
+    """FR-CR-05-133 stage 1 — «Track this entity?» widget.
+
+    English-only labels (operator-pinned). Layout: [Yes] [No]
+    side-by-side; tapping either tags the row in the DB and
+    edits the message in place to the next stage / a terminal
+    note. `prompt_id` is `CounterpartyPrompt.id`.
+    """
+    return {
+        "inline_keyboard": [
+            _row(
+                _btn("Yes", ACTION_ENROLL_YES, prompt_id),
+                _btn("No", ACTION_ENROLL_NO, prompt_id),
+            )
+        ]
+    }
+
+
+def enrollment_skip_keyboard(*, prompt_id: int) -> dict[str, Any]:
+    """FR-CR-05-133 stage 2 — «Send text or voice context, or
+    Skip» widget.
+
+    Skip is a single button. Text / voice replies are picked up
+    by the in-memory `PendingRegistry` (registered when stage 1
+    Yes was clicked). English-only label (operator-pinned).
+    """
+    return {
+        "inline_keyboard": [
+            _row(_btn("Skip", ACTION_ENROLL_SKIP, prompt_id)),
+        ]
+    }
 
 
 def parse_callback_data(data: str) -> tuple[str, int] | None:

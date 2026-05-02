@@ -210,6 +210,22 @@ erDiagram
         text context
     }
 
+    CounterpartyPrompt {
+        int id PK
+        string source_kind "fireflies | zoom"
+        string source_id "= meeting recording id"
+        string mention_text "verbatim Pass-1 surface form"
+        string mention_normalised "fold + translit"
+        bigint chat_id
+        bigint user_id
+        bigint yesno_message_id
+        bigint context_message_id
+        string status "pending_yesno | awaiting_context | completed_added | completed_skipped | declined (FR-CR-05-133)"
+        text context_text
+        int created_counterparty_id FK
+        timestamp responded_at
+    }
+
     TeamMember {
         int id PK
         string real_name

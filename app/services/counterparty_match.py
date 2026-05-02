@@ -78,12 +78,6 @@ Worked examples (operator-pinned regressions):
   directory: 314 | Status outreach | Tether
   → matched_ids = [314]
 
-  transcript: «отправить апдейт Тезер несмотря на отказ»
-              (Russian phonetic for Tether — pronounced «тэзер»;
-              Whisper renders it «Тезер» in Cyrillic)
-  directory: 314 | Financial/VC | tether
-  → matched_ids = [314]
-
   transcript: «дозвонились до Адног, у них pilot в нефтегазе»
   directory: 27  | Status outreach | ADNOC
   → matched_ids = [27]
@@ -91,26 +85,6 @@ Worked examples (operator-pinned regressions):
   transcript: «Голдман Сакс прислали ответ»
   directory: 102 | Outreach          | Goldman Sachs
   → matched_ids = [102]
-
-═══════════════════════════════════════════════════════════════
-PHONETIC MATCHING IS NON-NEGOTIABLE (FR-CR-05-128).
-
-When a transcript word is a Cyrillic / phonetic spelling of a
-Latin company name, MATCH IT. The Whisper output is always
-imperfect — your job is to bridge:
-
-  «Тезер» / «Тизер» / «Тетер» / «teaser» / «teser»  → Tether
-  «Шафлера» / «Шеффлер» / «Schaeffler»              → Schaeffler
-  «Адног» / «АДНОК» / «ADNOC»                       → ADNOC
-  «Голдман Сакс» / «Гольдман» / «Голдман»           → Goldman Sachs
-  «Себек» / «Sequoia» / «Се́квойя»                   → Sequoia Capital
-  «Эдиа» / «ADIA»                                   → ADIA
-
-If the directory has the entry, match it. ONLY skip when the
-transcript context disambiguates AGAINST the company (e.g.
-«отправили teaser deck» — industry term, not Tether unless the
-sentence also names Tether explicitly).
-═══════════════════════════════════════════════════════════════
 
 NOT matches (anti-examples):
 
@@ -346,7 +320,12 @@ def match_counterparties_in_transcript(
         + "\n\nТранскрипт встречи:\n"
         + transcript
     )
-    _start_payload = dict(
+    # FR-CR-05-128 — diagnose «X в таблице есть, в матче не»:
+    # the trace MUST show whether the entry made it into the
+    # shortlist + the LLM saw it. Log the FULL shortlist (id +
+    # name only) and the FULL prompt to the trace file (NOT the
+    # docker logs — too noisy), and the FULL LLM raw response.
+    _start_log_payload = dict(
         model=model,
         reasoning_effort=reasoning_effort,
         directory_size=len(directory),
@@ -359,10 +338,24 @@ def match_counterparties_in_transcript(
         transcript_preview=transcript[:240],
         prompt_chars=len(user_prompt),
     )
-    log.info("counterparty_match_call_started", **_start_payload)
+    log.info("counterparty_match_call_started", **_start_log_payload)
     if trace_source:
-        trace_event(source=trace_source, recording_id=trace_recording_id,
-                    event="counterparty_match_call_started", **_start_payload)
+        # Trace gets the FULL detail (file is per-recording, not
+        # rotated) — no truncation on shortlist, full prompt
+        # body, full transcript. Operator can `cat traces/...
+        # | jq '.fields.shortlist_full'` to verify Tether-class
+        # entries are actually being sent to the LLM.
+        trace_event(
+            source=trace_source, recording_id=trace_recording_id,
+            event="counterparty_match_call_started",
+            **_start_log_payload,
+            shortlist_full=[
+                {"id": cp.id, "name": cp.name, "type": cp.type}
+                for cp in shortlist
+            ],
+            user_prompt_full=user_prompt,
+            system_prompt=COUNTERPARTY_MATCH_SYSTEM,
+        )
     try:
         result = llm_backend.call_tool(
             system_prompt=COUNTERPARTY_MATCH_SYSTEM,
@@ -391,16 +384,23 @@ def match_counterparties_in_transcript(
     matched_ids = [
         i for i in raw_ids if isinstance(i, int) and i in valid_ids
     ]
-    _ret_payload = dict(
+    _ret_log = dict(
         raw_ids_count=len(raw_ids),
         valid_ids_count=len(matched_ids),
         invalid_ids=invalid_ids[:10],
         raw_ids_sample=raw_ids[:10],
     )
-    log.info("counterparty_match_llm_returned", **_ret_payload)
+    log.info("counterparty_match_llm_returned", **_ret_log)
     if trace_source:
-        trace_event(source=trace_source, recording_id=trace_recording_id,
-                    event="counterparty_match_llm_returned", **_ret_payload)
+        # Trace gets the full LLM response so the operator can
+        # see exactly what came back (was Tether returned and
+        # filtered out? did the LLM return a different id?).
+        trace_event(
+            source=trace_source, recording_id=trace_recording_id,
+            event="counterparty_match_llm_returned",
+            **_ret_log,
+            raw_response_full=result,
+        )
     if not matched_ids:
         return []
     by_id = {cp.id: cp for cp in directory}

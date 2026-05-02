@@ -743,40 +743,34 @@ class ZoomPipeline:
             "\nИзвестные сотрудники:\n"
             f"{emp_table}\n\nПодробный отчёт:\n{row.detailed_summary}"
         )
+        # FR-CR-05-129 — JSON-mode (no tools) so reasoning works.
+        prompt_user = (
+            "Return JSON: `{\"tasks\": [{\"title\": ..., "
+            "\"description\": ..., \"owner\": ..., "
+            "\"priority\": ...}, ...]}`. Empty list ok.\n\n"
+            + prompt_user
+        )
         try:
-            data = self._llm.call_tool(  # type: ignore[attr-defined]
+            text = self._llm.complete_text(  # type: ignore[attr-defined]
                 system_prompt=MEETING_TASKS_PROMPT,
                 user_prompt=prompt_user,
-                tool_name="record_meeting_tasks",
-                tool_description="Extract action items from a meeting.",
-                tool_parameters={
-                    "type": "object",
-                    "properties": {
-                        "tasks": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "title": {"type": "string"},
-                                    "description": {"type": "string"},
-                                    "owner": {"type": ["string", "null"]},
-                                    "priority": {
-                                        "type": "string",
-                                        "enum": ["low", "medium", "high", "urgent"],
-                                    },
-                                },
-                                "required": ["title"],
-                            },
-                        }
-                    },
-                    "required": ["tasks"],
-                },
                 model=self._settings.fireflies_tasks_model,
                 reasoning_effort=(
                     self._settings.fireflies_tasks_reasoning_effort
                     or None
                 ),
-            ) or {}
+                response_format={"type": "json_object"},
+            ) or ""
+            try:
+                import json as _json
+                data = _json.loads(text) if text else {}
+            except _json.JSONDecodeError:
+                log.warning(
+                    "zoom_task_extraction_json_parse_failed",
+                    zoom_id=row.zoom_id,
+                    text_preview=text[:200],
+                )
+                data = {}
         except Exception as e:  # noqa: BLE001
             row.last_error = f"task extraction failed: {e}"
             log.warning(
@@ -978,19 +972,34 @@ class ZoomPipeline:
             "Транскрипт встречи:\n"
             + row.transcript_text
         )
+        # FR-CR-05-129 — JSON-mode.
+        prompt_user = (
+            "Return JSON: `{\"tasks\": [{\"title\": ..., "
+            "\"description\": ..., \"owner\": ..., "
+            "\"priority\": ...}, ...]}`. Empty list ok.\n\n"
+            + prompt_user
+        )
         try:
-            data = self._llm.call_tool(  # type: ignore[attr-defined]
+            text = self._llm.complete_text(  # type: ignore[attr-defined]
                 system_prompt=TASK_VERIFICATION_SYSTEM,
                 user_prompt=prompt_user,
-                tool_name=_NAME,
-                tool_description=_DESC,
-                tool_parameters=_PARAMS,
                 model=self._settings.fireflies_tasks_model,
                 reasoning_effort=(
                     self._settings.fireflies_tasks_reasoning_effort
                     or None
                 ),
-            ) or {}
+                response_format={"type": "json_object"},
+            ) or ""
+            try:
+                import json as _json
+                data = _json.loads(text) if text else {}
+            except _json.JSONDecodeError:
+                log.warning(
+                    "zoom_task_verification_json_parse_failed",
+                    zoom_id=row.zoom_id,
+                    text_preview=text[:200],
+                )
+                data = {}
         except Exception as e:  # noqa: BLE001
             log.info(
                 "zoom_task_verification_failed",

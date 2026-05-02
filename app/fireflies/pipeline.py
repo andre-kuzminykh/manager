@@ -1522,19 +1522,30 @@ class FirefliesPipeline:
             + "\nТранскрипт встречи:\n"
             + row.transcript_text
         )
+        # FR-CR-05-129 — switch to JSON-mode (complete_text +
+        # response_format) instead of call_tool, mirroring the
+        # counterparty matcher's switch. Avoids the gpt-5.5
+        # «reasoning_effort + function tools» 400 in chat/
+        # completions; retry-without-reasoning was returning
+        # `raw_count=0` because the LLM without reasoning is
+        # too shallow for granular task extraction.
+        user_prompt = (
+            "Return JSON: `{\"tasks\": [{\"title\": ..., "
+            "\"description\": ..., \"owner\": ..., "
+            "\"priority\": ...}, ...]}`. Empty list ok.\n\n"
+            + user_prompt
+        )
         try:
-            result = self._llm.call_tool(  # type: ignore[attr-defined]
+            text = self._llm.complete_text(  # type: ignore[attr-defined]
                 system_prompt=TASK_EXTRACTION_SYSTEM,
                 user_prompt=user_prompt,
-                tool_name=TASK_EXTRACTION_TOOL_NAME,
-                tool_description=TASK_EXTRACTION_TOOL_DESCRIPTION,
-                tool_parameters=TASK_EXTRACTION_TOOL_PARAMETERS,
                 model=self._settings.fireflies_tasks_model,
                 reasoning_effort=(
                     self._settings.fireflies_tasks_reasoning_effort
                     or None
                 ),
-            )
+                response_format={"type": "json_object"},
+            ) or ""
         except Exception as e:  # noqa: BLE001
             row.last_error = f"task extraction LLM failed: {e}"
             log.warning(
@@ -1545,6 +1556,17 @@ class FirefliesPipeline:
                 error=str(e),
             )
             return 0
+        # FR-CR-05-129 — parse JSON response (was tool result).
+        try:
+            import json as _json
+            result = _json.loads(text) if text else {}
+        except _json.JSONDecodeError:
+            log.warning(
+                "fireflies_task_extraction_json_parse_failed",
+                fireflies_id=row.fireflies_id,
+                text_preview=text[:200],
+            )
+            result = {}
         tasks = (result or {}).get("tasks") or []
         if not isinstance(tasks, list):
             tasks = []
@@ -1750,25 +1772,40 @@ class FirefliesPipeline:
             "Транскрипт встречи:\n"
             + row.transcript_text
         )
+        # FR-CR-05-129 — JSON-mode (same fix as extract step).
+        user_prompt = (
+            "Return JSON: `{\"tasks\": [{\"title\": ..., "
+            "\"description\": ..., \"owner\": ..., "
+            "\"priority\": ...}, ...]}`. Empty list ok.\n\n"
+            + user_prompt
+        )
         try:
-            result = self._llm.call_tool(  # type: ignore[attr-defined]
+            text = self._llm.complete_text(  # type: ignore[attr-defined]
                 system_prompt=TASK_VERIFICATION_SYSTEM,
                 user_prompt=user_prompt,
-                tool_name=TASK_EXTRACTION_TOOL_NAME,
-                tool_description=TASK_EXTRACTION_TOOL_DESCRIPTION,
-                tool_parameters=TASK_EXTRACTION_TOOL_PARAMETERS,
                 model=self._settings.fireflies_tasks_model,
                 reasoning_effort=(
                     self._settings.fireflies_tasks_reasoning_effort
                     or None
                 ),
-            )
+                response_format={"type": "json_object"},
+            ) or ""
         except Exception as e:  # noqa: BLE001
             log.info(
                 "fireflies_task_verification_failed",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
             return 0
+        try:
+            import json as _json
+            result = _json.loads(text) if text else {}
+        except _json.JSONDecodeError:
+            log.warning(
+                "fireflies_task_verification_json_parse_failed",
+                fireflies_id=row.fireflies_id,
+                text_preview=text[:200],
+            )
+            result = {}
         new_tasks = (result or {}).get("tasks") or []
         if not isinstance(new_tasks, list):
             new_tasks = []

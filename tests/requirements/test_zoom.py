@@ -59,18 +59,27 @@ class _FakeLLM:
         self.call_tool_calls = 0
 
     def complete_text(self, *, system_prompt, user_prompt, model=None,
-                      temperature=0.2):
+                      temperature=0.2, reasoning_effort=None,
+                      response_format=None):
         self.complete_text_calls += 1
+        # FR-CR-05-129 — task extract / verifier now use JSON-
+        # mode complete_text. Discriminate via system prompt.
+        import json as _json
+        if "SECOND-PASS verifier" in (system_prompt or ""):
+            return _json.dumps({"tasks": []})
+        if (
+            "Extract action items" in (system_prompt or "")
+            or "ACTIONABLE TASKS" in (system_prompt or "")
+            or "extract ACTIONABLE TASKS" in (system_prompt or "")
+        ):
+            return _json.dumps({"tasks": list(self.tasks)})
         return self.summary_text
 
     def call_tool(self, *, system_prompt, user_prompt, tool_name,
                   tool_description, tool_parameters, model=None,
                   reasoning_effort=None):
+        # Back-compat for any leftover call_tool sites.
         self.call_tool_calls += 1
-        # FR-CR-05-121 — verifier pass uses TASK_VERIFICATION_SYSTEM
-        # which mentions «SECOND-PASS verifier». Fake it by
-        # returning an empty list so existing tests don't double-
-        # count tasks.
         if "SECOND-PASS verifier" in (system_prompt or ""):
             return {"tasks": []}
         return {"tasks": list(self.tasks)}
@@ -514,18 +523,34 @@ def test_verifier_pass_adds_missed_tasks_in_zoom_pipeline(
                 self.call_tool_calls = 0
 
             def complete_text(self, *, system_prompt, user_prompt,
-                              model=None, temperature=0.2):
+                              model=None, temperature=0.2,
+                              reasoning_effort=None,
+                              response_format=None):
                 self.complete_text_calls += 1
+                import json as _json
+                # FR-CR-05-129 — task extract / verifier on JSON-mode.
+                if "SECOND-PASS verifier" in (system_prompt or ""):
+                    return _json.dumps({"tasks": [{
+                        "title": "Прислать фоллоу-ап",
+                        "description": "Дима - прислать фоллоу-ап.",
+                        "owner": None, "priority": "medium",
+                    }]})
+                if (
+                    "Extract action items" in (system_prompt or "")
+                    or "ACTIONABLE TASKS" in (system_prompt or "")
+                    or "extract ACTIONABLE TASKS" in (system_prompt or "")
+                ):
+                    return _json.dumps({"tasks": [{
+                        "title": "Подготовить письмо",
+                        "description": "Алина - подготовит письмо.",
+                        "owner": None, "priority": "medium",
+                    }]})
                 return self.summary_text
 
             def call_tool(self, *, system_prompt, user_prompt, tool_name,
                           tool_description, tool_parameters, model=None,
                           reasoning_effort=None):
                 self.call_tool_calls += 1
-                # First pass extracts «Подготовить письмо»; the
-                # verifier (recognised by the SECOND-PASS framing
-                # in its system prompt) catches «Прислать
-                # фоллоу-ап» which the first pass missed.
                 if "SECOND-PASS verifier" in (system_prompt or ""):
                     return {"tasks": [{
                         "title": "Прислать фоллоу-ап",

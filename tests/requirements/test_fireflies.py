@@ -116,19 +116,29 @@ class _FakeLLM:
         self.complete_calls: list[str] = []
         self.tool_calls: list[str] = []
 
-    def complete_text(self, *, system_prompt, user_prompt, model=None, temperature=0.2):
+    def complete_text(self, *, system_prompt, user_prompt,
+                      model=None, temperature=0.2,
+                      reasoning_effort=None, response_format=None):
         self.complete_calls.append(system_prompt[:40])
-        # Use first 30 chars of system prompt as discriminator.
-        if "DETAILED" in system_prompt or "ДЕТАЛЬНЫЙ" in system_prompt or "DETAILED" in system_prompt.upper():
+        # FR-CR-05-129 — task extract / verifier now use JSON-
+        # mode complete_text instead of call_tool. Detect via
+        # system prompt keywords and return a JSON string.
+        import json as _json
+        if "SECOND-PASS verifier" in (system_prompt or ""):
+            return _json.dumps({"tasks": []})
+        if (
+            "extract ACTIONABLE TASKS" in (system_prompt or "")
+            or "ACTIONABLE TASKS" in (system_prompt or "")
+            or "Extract action items" in (system_prompt or "")
+        ):
+            return _json.dumps({"tasks": list(self.tasks)})
+        if "DETAILED" in system_prompt or "ДЕТАЛЬНЫЙ" in system_prompt:
             return self.detailed
         return self.short
 
     def call_tool(self, *, system_prompt, tool_name, **kw):
+        # Back-compat: kept for any other call sites.
         self.tool_calls.append(tool_name)
-        # FR-CR-05-121 — verifier pass returns empty by default
-        # so existing tests don't double-count tasks. Tests that
-        # specifically exercise the verifier instantiate
-        # `_VerifyingFakeLLM` (see below).
         if "SECOND-PASS verifier" in (system_prompt or ""):
             return {"tasks": []}
         return {"tasks": list(self.tasks)}

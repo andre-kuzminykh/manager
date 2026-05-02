@@ -356,12 +356,20 @@ class OpenAIBackend:
         user_prompt: str,
         model: str | None = None,
         temperature: float = 0.2,
+        reasoning_effort: str | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
-        """FR-CR-05-39 / -107 — plain-text completion for the
-        Fireflies summariser. Returns the model's text response,
-        or empty string on failure. Reasoning models (gpt-5.x /
-        o-series) reject custom temperature; we drop the kwarg
-        for them."""
+        """FR-CR-05-39 / -107 / -129 — plain-text completion for
+        the Fireflies summariser. Returns the model's text
+        response, or empty string on failure.
+
+        FR-CR-05-129 — `reasoning_effort` + `response_format`
+        passthrough so callers that need structured JSON output
+        WITH reasoning (counterparty extract / resolve passes)
+        can sidestep the tools+reasoning incompat that
+        chat/completions has on gpt-5.5. Plain completions +
+        json_object response_format works with reasoning_effort.
+        """
         eff_model = model or self._model
         kwargs: dict[str, Any] = dict(
             model=eff_model,
@@ -372,15 +380,35 @@ class OpenAIBackend:
         )
         if not _model_uses_completion_tokens(eff_model):
             kwargs["temperature"] = temperature
+        else:
+            if reasoning_effort:
+                kwargs["reasoning_effort"] = reasoning_effort
+        if response_format is not None:
+            kwargs["response_format"] = response_format
         try:
             resp = self._client.chat.completions.create(**kwargs)
         except Exception as e:  # noqa: BLE001
-            # Reasoning model rejected temperature; retry without.
+            msg = str(e)
             if (
-                "temperature" in str(e)
-                and "temperature" in kwargs
+                "temperature" in msg and "temperature" in kwargs
             ):
                 kwargs.pop("temperature", None)
+                try:
+                    resp = self._client.chat.completions.create(**kwargs)
+                except Exception:  # noqa: BLE001
+                    return ""
+            elif (
+                "reasoning_effort" in msg and "reasoning_effort" in kwargs
+            ):
+                kwargs.pop("reasoning_effort", None)
+                try:
+                    resp = self._client.chat.completions.create(**kwargs)
+                except Exception:  # noqa: BLE001
+                    return ""
+            elif (
+                "response_format" in msg and "response_format" in kwargs
+            ):
+                kwargs.pop("response_format", None)
                 try:
                     resp = self._client.chat.completions.create(**kwargs)
                 except Exception:  # noqa: BLE001

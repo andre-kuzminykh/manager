@@ -191,7 +191,7 @@ OUTPUT RULES:
    they're speakers, not counterparties.
 4. Empty list is valid (internal-only meeting): `{"mentions": []}`.
 
-Respond via the `record_counterparty_mentions` tool.
+Respond as a JSON object: `{"mentions": ["<verbatim>", ...]}`.
 """
 
 
@@ -259,7 +259,7 @@ OUTPUT RULES:
    mentions resolve to it.
 4. NEVER guess an id that's not in the directory.
 
-Respond via the `record_resolved_mentions` tool.
+Respond as a JSON object: `{"matches": [{"mention": <input>, "directory_id": <int|null>}, ...]}`.
 """
 
 
@@ -585,15 +585,28 @@ def extract_counterparty_mentions(
 ) -> list[str]:
     """FR-CR-05-129 Pass 1 — list every counterparty mention
     surface form in the transcript verbatim («Тезер»,
-    «Bauer/Dart», «Шафлер»). Doesn't try to match anything;
-    that's Pass 2. Returns a deduped list preserving first-
-    appearance order.
+    «Bauer/Dart», «Шафлер»). Returns a deduped list preserving
+    first-appearance order.
+
+    FR-CR-05-129 follow-up — uses `complete_text` with JSON
+    response_format + `reasoning_effort` instead of `call_tool`
+    because gpt-5.5 in /v1/chat/completions rejects
+    «reasoning_effort + function tools» (400 Bad Request) and
+    the retry-without-reasoning-effort path leaves the LLM too
+    shallow to phonetically match «Тезер» / «Bauer/Dart» style
+    Whisper-mangled forms.
     """
+    import json as _json
+
     from app.services.trace_log import trace_event
 
     if not transcript:
         return []
-    user_prompt = "Транскрипт встречи:\n" + transcript
+    user_prompt = (
+        "Return JSON: `{\"mentions\": [\"<verbatim mention>\", ...]}`."
+        " Empty list ok.\n\nТранскрипт встречи:\n"
+        + transcript
+    )
     _start = dict(model=model, reasoning_effort=reasoning_effort,
                   transcript_chars=len(transcript))
     log.info("counterparty_extract_call_started", **_start)
@@ -603,15 +616,13 @@ def extract_counterparty_mentions(
                     **_start, system_prompt=COUNTERPARTY_EXTRACT_SYSTEM,
                     user_prompt_preview=user_prompt[:1000])
     try:
-        result = llm_backend.call_tool(
+        text = llm_backend.complete_text(
             system_prompt=COUNTERPARTY_EXTRACT_SYSTEM,
             user_prompt=user_prompt,
-            tool_name=COUNTERPARTY_EXTRACT_TOOL_NAME,
-            tool_description=COUNTERPARTY_EXTRACT_TOOL_DESCRIPTION,
-            tool_parameters=COUNTERPARTY_EXTRACT_TOOL_PARAMETERS,
             model=model,
             reasoning_effort=reasoning_effort,
-        ) or {}
+            response_format={"type": "json_object"},
+        ) or ""
     except Exception as e:  # noqa: BLE001
         log.warning("counterparty_extract_llm_failed",
                     model=model, error=str(e))
@@ -619,6 +630,18 @@ def extract_counterparty_mentions(
             trace_event(source=trace_source, recording_id=trace_recording_id,
                         event="counterparty_extract_llm_failed",
                         model=model, error=str(e))
+        return []
+    try:
+        result = _json.loads(text) if text else {}
+    except _json.JSONDecodeError:
+        log.warning("counterparty_extract_json_parse_failed",
+                    text_preview=text[:200])
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="counterparty_extract_json_parse_failed",
+                        text_preview=text[:500])
+        return []
+    if not isinstance(result, dict):
         return []
     raw = result.get("mentions") or []
     if not isinstance(raw, list):
@@ -672,7 +695,11 @@ def resolve_mentions_to_directory(
     mentions_block = "\n".join(
         f"  {i+1}. {m}" for i, m in enumerate(mentions)
     )
+    import json as _json
+
     user_prompt = (
+        "Return JSON: `{\"matches\": [{\"mention\": ..., "
+        "\"directory_id\": <int|null>}, ...]}`.\n\n"
         "mentions:\n" + mentions_block
         + "\n\ndirectory:\n" + _render_directory(directory)
     )
@@ -692,15 +719,13 @@ def resolve_mentions_to_directory(
             user_prompt_full=user_prompt,
         )
     try:
-        result = llm_backend.call_tool(
+        text = llm_backend.complete_text(
             system_prompt=COUNTERPARTY_RESOLVE_SYSTEM,
             user_prompt=user_prompt,
-            tool_name=COUNTERPARTY_RESOLVE_TOOL_NAME,
-            tool_description=COUNTERPARTY_RESOLVE_TOOL_DESCRIPTION,
-            tool_parameters=COUNTERPARTY_RESOLVE_TOOL_PARAMETERS,
             model=model,
             reasoning_effort=reasoning_effort,
-        ) or {}
+            response_format={"type": "json_object"},
+        ) or ""
     except Exception as e:  # noqa: BLE001
         log.warning("counterparty_resolve_llm_failed",
                     model=model, error=str(e))
@@ -708,6 +733,18 @@ def resolve_mentions_to_directory(
             trace_event(source=trace_source, recording_id=trace_recording_id,
                         event="counterparty_resolve_llm_failed",
                         model=model, error=str(e))
+        return {m: None for m in mentions}
+    try:
+        result = _json.loads(text) if text else {}
+    except _json.JSONDecodeError:
+        log.warning("counterparty_resolve_json_parse_failed",
+                    text_preview=text[:200])
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="counterparty_resolve_json_parse_failed",
+                        text_preview=text[:500])
+        return {m: None for m in mentions}
+    if not isinstance(result, dict):
         return {m: None for m in mentions}
     matches = result.get("matches") or []
     if not isinstance(matches, list):

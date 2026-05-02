@@ -1165,14 +1165,14 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
         source_kind=TaskSourceKind.fireflies,
         source_conversation_id="trans-ok",
     )
-    lines = out.splitlines()
-    assert lines[0] == "To-Do:"
-    # FR-CR-05-120 — description used VERBATIM (the LLM is told
-    # to write in «<topic> - <action>» format on the Task row).
-    assert lines[1].startswith("1) Алина подготовит письмо инвесторам")
-    assert "(Алина)" in lines[1]
-    assert lines[2].startswith("2) Ирина скоординирует тайминг рассылки")
-    assert "(Ирина Шипилова)" in lines[2]
+    # FR-CR-05-128 — items separated by blank lines so the
+    # splitter chunks BETWEEN tasks, not mid-text. Find each
+    # numbered item anywhere in the output.
+    assert "To-Do:" in out
+    assert "1) Алина подготовит письмо инвесторам" in out
+    assert "(Алина)" in out
+    assert "2) Ирина скоординирует тайминг рассылки" in out
+    assert "(Ирина Шипилова)" in out
 
     # FR-CR-05-120 — empty owner drops the parens (no
     # «(не назначен)» noise).
@@ -1192,9 +1192,9 @@ def test_build_todo_section_renders_tasks_verbatim_with_owner(session):
         session,
         source_kind=TaskSourceKind.fireflies,
         source_conversation_id="trans-orphan",
-    ).splitlines()
-    assert orphan_out[1] == "1) Orphan task - сделать что-то без назначения."
-    assert "(не назначен)" not in "\n".join(orphan_out)
+    )
+    assert "1) Orphan task - сделать что-то без назначения." in orphan_out
+    assert "(не назначен)" not in orphan_out
 
     # Soft-deleted tasks are excluded.
     other = Task(

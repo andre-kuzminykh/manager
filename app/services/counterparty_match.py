@@ -78,6 +78,12 @@ Worked examples (operator-pinned regressions):
   directory: 314 | Status outreach | Tether
   → matched_ids = [314]
 
+  transcript: «отправить апдейт Тезер несмотря на отказ»
+              (Russian phonetic for Tether — pronounced «тэзер»;
+              Whisper renders it «Тезер» in Cyrillic)
+  directory: 314 | Financial/VC | tether
+  → matched_ids = [314]
+
   transcript: «дозвонились до Адног, у них pilot в нефтегазе»
   directory: 27  | Status outreach | ADNOC
   → matched_ids = [27]
@@ -85,6 +91,26 @@ Worked examples (operator-pinned regressions):
   transcript: «Голдман Сакс прислали ответ»
   directory: 102 | Outreach          | Goldman Sachs
   → matched_ids = [102]
+
+═══════════════════════════════════════════════════════════════
+PHONETIC MATCHING IS NON-NEGOTIABLE (FR-CR-05-128).
+
+When a transcript word is a Cyrillic / phonetic spelling of a
+Latin company name, MATCH IT. The Whisper output is always
+imperfect — your job is to bridge:
+
+  «Тезер» / «Тизер» / «Тетер» / «teaser» / «teser»  → Tether
+  «Шафлера» / «Шеффлер» / «Schaeffler»              → Schaeffler
+  «Адног» / «АДНОК» / «ADNOC»                       → ADNOC
+  «Голдман Сакс» / «Гольдман» / «Голдман»           → Goldman Sachs
+  «Себек» / «Sequoia» / «Се́квойя»                   → Sequoia Capital
+  «Эдиа» / «ADIA»                                   → ADIA
+
+If the directory has the entry, match it. ONLY skip when the
+transcript context disambiguates AGAINST the company (e.g.
+«отправили teaser deck» — industry term, not Tether unless the
+sentence also names Tether explicitly).
+═══════════════════════════════════════════════════════════════
 
 NOT matches (anti-examples):
 

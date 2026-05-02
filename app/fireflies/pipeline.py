@@ -436,27 +436,27 @@ def _build_todo_section(
     )
     if not tasks:
         return ""
-    lines = ["To-Do:"]
+    items: list[str] = []
     for i, t in enumerate(tasks, 1):
         owner = (t.owner_display_name or "").strip()
         if compact:
-            # FR-CR-05-128 — title-only fallback so the overview
-            # message fits in one Telegram DM. Full descriptions
-            # still ship via the Doc + per-task DM cards.
             raw = (t.title or "").strip() or (t.description or "").strip()
         else:
-            # FR-CR-05-120 — task descriptions are now in the
-            # operator-pinned «<topic> - <action with details>»
-            # format. Use verbatim, hard-cap at 350 chars.
             raw = (t.description or "").strip() or (t.title or "").strip()
             if len(raw) > 350:
                 cut = raw.rfind(" ", 0, 350)
                 raw = (raw[: cut if cut > 200 else 350]).rstrip(",;:- ") + "…"
         if owner:
-            lines.append(f"{i}) {raw} ({owner})")
+            items.append(f"{i}) {raw} ({owner})")
         else:
-            lines.append(f"{i}) {raw}")
-    return "\n".join(lines)
+            items.append(f"{i}) {raw}")
+    # FR-CR-05-128 follow-up — operator regression: splitter was
+    # cutting mid-task because the entire To-Do block was a
+    # single paragraph («\n» between items). Use «\n\n» between
+    # the «To-Do:» header and items, and between items, so
+    # `_paragraph_greedy_split` treats each task as its own
+    # paragraph and splits BETWEEN tasks rather than mid-text.
+    return "To-Do:\n\n" + "\n\n".join(items)
 
 
 def _first_sentence(text: str, *, limit: int = 240) -> str:

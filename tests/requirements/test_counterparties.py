@@ -757,78 +757,161 @@ def test_canonicalize_text_no_double_substring_cascade():
     ) == "Bauerdart - пригласить в офис"
 
 
-def test_fuzzy_extend_handles_composite_slash_tokens():
-    """FR-CR-05-129 follow-up — operator regression: extract
-    LLM combined phonetic variants with `/` («Jamal/Jabal»,
-    «Boutert/Bauerdart»). The composite-token regex captures
-    the whole thing and ratio against single-name canonical
-    («jabal» 5 chars vs «jamal/jabal» 11 chars) bombs by
-    length-diff filter.
-
-    Fix: split composite tokens on `/`, `-`; fuzzy-match each
-    piece; pick best canonical; map the WHOLE composite to
-    that canonical so canonicalize_text rewrites in one shot."""
+def test_canonicalize_task_content_via_llm_rewrites_phonetic_variants():
+    """FR-CR-05-130 — operator-pinned: «без regexp, как
+    универсальное решение». A 3rd LLM pass replaces every
+    phonetic / Cyrillic / composite mention in task
+    title/description with the canonical directory name.
+    Rewrites only entries that actually changed.
+    """
     from app.models import Counterparty
-    from app.services.counterparty_match import fuzzy_extend_canonical_map
+    from app.services.counterparty_match import (
+        canonicalize_task_content_via_llm,
+    )
 
     directory = [
-        Counterparty(id=1, name="Jabal", type="VC", name_normalised="jabal"),
+        Counterparty(id=1, name="Tether", type="VC", name_normalised="tether"),
         Counterparty(id=2, name="Bauerdart", type="VC", name_normalised="bauerdart"),
+        Counterparty(id=3, name="Felix Capital", type="VC", name_normalised="felix capital"),
+        Counterparty(id=4, name="Jabal", type="VC", name_normalised="jabal"),
     ]
-    text = (
-        "Уточнить график demo с Jamal/Jabal в Лондоне. "
-        "Пригласить Boutert/Bauerdart на demo."
-    )
-    extended = fuzzy_extend_canonical_map(text, directory, {})
-    assert "Jamal/Jabal" in extended
-    assert extended["Jamal/Jabal"] == "Jabal"
-    assert "Boutert/Bauerdart" in extended
-    assert extended["Boutert/Bauerdart"] == "Bauerdart"
-
-
-def test_fuzzy_extend_canonical_map_catches_jamal_jabal_class():
-    """FR-CR-05-129 follow-up — operator regression: the
-    transcript-side LLM Pass 1 caught «Jabal» but the separate
-    task-extract LLM later wrote «Jamal» in a task description.
-    Pass-2 mapping had `{Jabal: Jabal}` only — canonicalize
-    didn't rewrite «Jamal». Python fuzzy fallback runs over
-    task content tokens and adds entries for any directory
-    name within ratio ≥ 0.8 (post-translit)."""
-    from app.models import Counterparty
-    from app.services.counterparty_match import fuzzy_extend_canonical_map
-
-    directory = [
-        Counterparty(id=1, name="Jabal", type="VC", name_normalised="jabal"),
-        Counterparty(id=2, name="Tether", type="VC", name_normalised="tether"),
-        Counterparty(id=3, name="Bauerdart", type="VC", name_normalised="bauerdart"),
-        Counterparty(id=4, name="Schaeffler", type="VC", name_normalised="schaeffler"),
+    tasks = [
+        {"id": 10, "title": "Отправить апдейт Тезер",
+         "description": "Тезер - email во вторник"},
+        {"id": 11, "title": "Пригласить Bowerdorf на демо",
+         "description": "Bowerdorf - офис, кофе, робот"},
+        {"id": 12, "title": "Felix CapitalG чек 30 млн",
+         "description": "Felix CapitalG - проверить готовность"},
+        {"id": 13, "title": "Demo Jamal/Jabal в Лондоне",
+         "description": "Jamal/Jabal - график на пнд-вт"},
+        {"id": 14, "title": "Сегментация",  # no counterparty
+         "description": "Сегментация - разделить инвесторов"},
     ]
-    text = (
-        "Уточнить график демо с Jamal в Лондоне. "
-        "Пригласить Бауэрдарта на демо."
+
+    class _StubLLM:
+        def complete_text(self, **kw):
+            import json as _json
+            # Stub: pretend the LLM canonicalised every variant.
+            return _json.dumps({"rewritten": [
+                {"id": 10, "title_rewritten": "Отправить апдейт Tether",
+                 "description_rewritten": "Tether - email во вторник"},
+                {"id": 11, "title_rewritten": "Пригласить Bauerdart на демо",
+                 "description_rewritten": "Bauerdart - офис, кофе, робот"},
+                {"id": 12, "title_rewritten": "Felix Capital чек 30 млн",
+                 "description_rewritten": "Felix Capital - проверить готовность"},
+                {"id": 13, "title_rewritten": "Demo Jabal в Лондоне",
+                 "description_rewritten": "Jabal - график на пнд-вт"},
+                # id 14 unchanged — LLM may omit OR re-emit.
+                {"id": 14, "title_rewritten": "Сегментация",
+                 "description_rewritten": "Сегментация - разделить инвесторов"},
+            ]})
+
+    out = canonicalize_task_content_via_llm(
+        tasks, directory, llm_backend=_StubLLM(), model="gpt-5.5",
+        reasoning_effort="high",
     )
-    extended = fuzzy_extend_canonical_map(text, directory, {})
-    # Jamal → Jabal (ratio 0.8, the operator regression).
-    assert "Jamal" in extended
-    assert extended["Jamal"] == "Jabal"
-    # Бауэрдарта (declined Cyrillic) → Bauerdart (ratio ~0.84).
-    assert any(v == "Bauerdart" for v in extended.values())
-    # Generic verbs / nouns (capitalized at sentence start) NOT
-    # added to mapping — fuzzy ratio against company names is
-    # too low. «Уточнить», «Пригласить» etc. don't match.
-    assert "Уточнить" not in extended
-    assert "Пригласить" not in extended
+    # All 4 with mentions changed; id=14 unchanged so not in `out`.
+    assert set(out.keys()) == {10, 11, 12, 13}
+    assert out[10]["title"] == "Отправить апдейт Tether"
+    assert out[11]["title"] == "Пригласить Bauerdart на демо"
+    assert out[12]["title"] == "Felix Capital чек 30 млн"
+    assert out[13]["title"] == "Demo Jabal в Лондоне"
 
 
-def test_fuzzy_extend_preserves_existing_map():
-    """Existing entries (from Pass 2 LLM) must not be
-    overwritten or removed by the fuzzy pass."""
+def test_canonicalize_task_content_handles_llm_failure_gracefully():
+    """LLM raise / parse-error → empty dict, pipeline keeps
+    tasks unchanged."""
     from app.models import Counterparty
-    from app.services.counterparty_match import fuzzy_extend_canonical_map
+    from app.services.counterparty_match import (
+        canonicalize_task_content_via_llm,
+    )
 
     directory = [
         Counterparty(id=1, name="Tether", type="VC", name_normalised="tether"),
     ]
-    existing = {"Тезер": "Tether"}
-    extended = fuzzy_extend_canonical_map("blah blah", directory, existing)
-    assert extended == existing
+    tasks = [{"id": 1, "title": "x", "description": "y"}]
+
+    class _BadLLM:
+        def complete_text(self, **kw):
+            return "not json {{{ broken"
+
+    out = canonicalize_task_content_via_llm(
+        tasks, directory, llm_backend=_BadLLM(), model="gpt-5.5",
+    )
+    assert out == {}
+
+
+def test_extract_zoom_participants_via_llm():
+    """FR-CR-05-130 — extract team-side participants from a Zoom
+    transcript by LLM lookup against the team_members table.
+    Returns canonical real_names in first-appearance order,
+    deduped, filtered to known members only."""
+    from app.services.zoom_participants import (
+        extract_zoom_participants_via_llm,
+    )
+
+    transcript = (
+        "Артём предложил пройтись по списку. Алина уточнила про "
+        "контракт Schaeffler. Дима добавил по Felix Capital. "
+        "Ира и Алина согласились с подходом."
+    )
+    team = [
+        {"real_name": "Артём Соколов", "role": "CEO", "notes": ""},
+        {"real_name": "Алина Колпакова", "role": "IR", "notes": ""},
+        {"real_name": "Дима Дроздов", "role": "Investments", "notes": ""},
+        {"real_name": "Ирина Шипилова", "role": "COO", "notes": ""},
+        {"real_name": "Эксперт", "role": "External", "notes": ""},
+    ]
+
+    class _StubLLM:
+        def complete_text(self, **kw):
+            import json as _json
+            return _json.dumps({"participants": [
+                "Артём Соколов",
+                "Алина Колпакова",
+                "Дима Дроздов",
+                "Ирина Шипилова",
+            ]})
+
+    out = extract_zoom_participants_via_llm(
+        transcript, team, llm_backend=_StubLLM(), model="gpt-5.5",
+        reasoning_effort="high",
+    )
+    assert out == [
+        "Артём Соколов", "Алина Колпакова",
+        "Дима Дроздов", "Ирина Шипилова",
+    ]
+    # External speaker not in team_members must NOT leak through.
+    assert "Эксперт" not in out
+
+
+def test_extract_zoom_participants_drops_unknown_names():
+    """LLM might hallucinate names — filter against canonical
+    team_members.real_name set."""
+    from app.services.zoom_participants import (
+        extract_zoom_participants_via_llm,
+    )
+
+    team = [
+        {"real_name": "Алина", "role": "IR", "notes": ""},
+    ]
+
+    class _StubLLM:
+        def complete_text(self, **kw):
+            import json as _json
+            return _json.dumps({"participants": [
+                "Алина", "Random Person", "Алинна",
+            ]})
+
+    out = extract_zoom_participants_via_llm(
+        "...", team, llm_backend=_StubLLM(), model="gpt-5.5",
+    )
+    assert out == ["Алина"]
+
+
+# FR-CR-05-130 — operator-pinned removal of regex/SequenceMatcher
+# band-aid fuzzy fallback («без regexp, как универсальное
+# решение»). Replaced by `canonicalize_task_content_via_llm`
+# (LLM Pass 3). The legacy `fuzzy_extend_canonical_map` helper
+# is kept in the module only as a soft fallback; tests pinning
+# its specific behaviour are deleted with the band-aid.

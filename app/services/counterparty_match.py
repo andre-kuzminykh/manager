@@ -808,6 +808,193 @@ def resolve_mentions_to_directory(
     return out
 
 
+CANONICALIZE_TASKS_SYSTEM = """\
+You rewrite task titles + descriptions so every counterparty
+mention uses the CANONICAL name from the directory.
+
+Input (in the user prompt):
+  - `directory`: `id | type | name` for every known counterparty.
+  - `tasks`: numbered list `[id]: title // description`.
+
+Output via JSON: list of rewritten tasks. Each entry must have
+`id`, `title_rewritten`, `description_rewritten`. PRESERVE the
+order. PRESERVE everything that's not a counterparty mention
+(actions, owners, dates, amounts) verbatim. Replace ONLY
+phonetic / mangled / Cyrillic variants of counterparty names
+with the canonical Latin name from the directory.
+
+═══════════════════════════════════════════════════════════════
+EXAMPLES (operator-pinned phonetic mishears):
+
+  task: «Bowerdorf - пригласить на демо»
+    directory has: «Bauerdart»
+  → rewritten: «Bauerdart - пригласить на демо»
+
+  task: «Felix CapitalG - проверить чек»
+    directory has: «Felix Capital»
+  → rewritten: «Felix Capital - проверить чек»
+
+  task: «Jamal/Jabal - график демо»
+    directory has: «Jabal»
+  → rewritten: «Jabal - график демо»
+
+  task: «отправить апдейт Тезер»
+    directory has: «Tether»
+  → rewritten: «отправить апдейт Tether»
+
+  task: «Согласовать формулировку Шафлер»
+    directory has: «Schaeffler»
+  → rewritten: «Согласовать формулировку Schaeffler»
+
+  task: «Подготовить follow-up по Insight»
+    directory has: «Insight Partners»
+  → rewritten: «Подготовить follow-up по Insight Partners»
+═══════════════════════════════════════════════════════════════
+
+OUTPUT RULES:
+
+1. Don't add or remove tasks. Same count, same order.
+2. Don't invent new counterparties. If a mention doesn't match
+   any directory row, leave it as-is.
+3. Don't change action verbs, dates, amounts, owners, or any
+   non-counterparty word.
+4. Use the canonical directory NAME exactly as written
+   (case-sensitive).
+5. When the input task text already uses the canonical name,
+   leave the title/description untouched.
+
+Respond as a JSON object: `{"rewritten": [{"id": <int>, "title_rewritten": ..., "description_rewritten": ...}, ...]}`.
+"""
+
+
+def canonicalize_task_content_via_llm(
+    tasks: list[dict],
+    directory: list["Counterparty"],
+    *,
+    llm_backend: Any,
+    model: str,
+    reasoning_effort: str | None = None,
+    trace_source: str | None = None,
+    trace_recording_id: str | None = None,
+) -> dict[int, dict[str, str]]:
+    """FR-CR-05-130 — universal LLM rewrite of task content
+    to use canonical directory names.
+
+    `tasks` is a list of dicts: `[{id, title, description}, ...]`.
+    Returns mapping `{id: {title, description}}` of rewrites
+    (only entries that actually changed).
+
+    Replaces the FR-CR-05-129 regex+SequenceMatcher fuzzy
+    fallback (operator: «мне надо без regexp это делать, а
+    как универсальное решение, там еще будет куча других слов,
+    я тут костылями не обойдусь»). LLM with reasoning handles
+    every phonetic / Cyrillic / composite variant universally.
+    """
+    import json as _json
+
+    from app.services.trace_log import trace_event
+
+    if not tasks or not directory:
+        return {}
+    tasks_block = "\n".join(
+        f"  [{t['id']}]: {(t.get('title') or '').strip()} // "
+        f"{(t.get('description') or '').strip()[:300]}"
+        for t in tasks if t.get("id") is not None
+    )
+    user_prompt = (
+        "directory:\n"
+        + _render_directory(directory)
+        + "\n\ntasks:\n"
+        + tasks_block
+    )
+    _start = dict(
+        model=model, reasoning_effort=reasoning_effort,
+        tasks_count=len(tasks),
+        directory_size=len(directory),
+        prompt_chars=len(user_prompt),
+    )
+    log.info("canonicalize_tasks_call_started", **_start)
+    if trace_source:
+        trace_event(
+            source=trace_source, recording_id=trace_recording_id,
+            event="canonicalize_tasks_call_started",
+            **_start, system_prompt=CANONICALIZE_TASKS_SYSTEM,
+            user_prompt_full=user_prompt,
+        )
+    try:
+        text = llm_backend.complete_text(
+            system_prompt=CANONICALIZE_TASKS_SYSTEM,
+            user_prompt=user_prompt,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            response_format={"type": "json_object"},
+        ) or ""
+    except Exception as e:  # noqa: BLE001
+        log.warning("canonicalize_tasks_llm_failed",
+                    model=model, error=str(e))
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="canonicalize_tasks_llm_failed",
+                        model=model, error=str(e))
+        return {}
+    try:
+        result = _json.loads(text) if text else {}
+    except _json.JSONDecodeError:
+        log.warning("canonicalize_tasks_json_parse_failed",
+                    text_preview=text[:200])
+        if trace_source:
+            trace_event(source=trace_source, recording_id=trace_recording_id,
+                        event="canonicalize_tasks_json_parse_failed",
+                        text_preview=text[:500])
+        return {}
+    if not isinstance(result, dict):
+        return {}
+    items = result.get("rewritten") or []
+    if not isinstance(items, list):
+        items = []
+    out: dict[int, dict[str, str]] = {}
+    by_id = {t["id"]: t for t in tasks if t.get("id") is not None}
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        tid = entry.get("id")
+        if not isinstance(tid, int) or tid not in by_id:
+            continue
+        new_title = (entry.get("title_rewritten") or "").strip()
+        new_desc = (entry.get("description_rewritten") or "").strip()
+        old = by_id[tid]
+        changes: dict[str, str] = {}
+        if new_title and new_title != (old.get("title") or "").strip():
+            changes["title"] = new_title
+        if new_desc and new_desc != (old.get("description") or "").strip():
+            changes["description"] = new_desc
+        if changes:
+            out[tid] = changes
+    log.info(
+        "canonicalize_tasks_done",
+        rewritten=len(out),
+        sample=[
+            {"id": tid, "title": ch.get("title"), "desc_preview": (ch.get("description") or "")[:80]}
+            for tid, ch in list(out.items())[:5]
+        ],
+    )
+    if trace_source:
+        trace_event(
+            source=trace_source, recording_id=trace_recording_id,
+            event="canonicalize_tasks_done",
+            rewritten=len(out),
+            samples=[
+                {"id": tid, **ch}
+                for tid, ch in list(out.items())[:20]
+            ],
+            raw_response_full=result,
+        )
+    return out
+
+
+# --- legacy regex fuzzy (kept for reference / soft fallback) ---
+
+
 def fuzzy_extend_canonical_map(
     text: str | None,
     directory: list["Counterparty"],
@@ -854,10 +1041,21 @@ def fuzzy_extend_canonical_map(
         if f and len(f) >= 4:
             by_fold.setdefault(f, cp)
 
-    # Tokenise text. Keep CapFirst / ALLCAPS tokens 4-25 chars,
-    # filter known mention surface forms already in the map.
+    # Tokenise text. Capture 1-3 CapFirst words in a row so
+    # multi-word company names («Felix Capital», «Insight
+    # Partners», «Goldman Sachs», «TWG global») land as ONE
+    # token AND can be fuzzy-matched against multi-word
+    # canonical names. FR-CR-05-129 follow-up — operator
+    # regression: «Felix CapitalG» didn't canonicalize because
+    # single-word capture split it into «Felix» (5 chars) and
+    # «CapitalG» (8) — neither alone fuzzy-matches «felix
+    # capital» (13).
     seen_tokens: set[str] = set()
-    for m in re.finditer(r"[A-ZА-ЯЁ][\wА-Яа-яёЁ/\-\.]{3,24}", text):
+    token_re = re.compile(
+        r"[A-ZА-ЯЁ][\wА-Яа-яёЁ/\-\.]{2,24}"
+        r"(?:\s+[A-ZА-ЯЁ][\wА-Яа-яёЁ/\-\.]+){0,2}"
+    )
+    for m in token_re.finditer(text):
         token = m.group(0)
         if token.lower() in existing_lc:
             continue
@@ -965,9 +1163,11 @@ __all__ = [
     "COUNTERPARTY_MATCH_TOOL_PARAMETERS",
     "COUNTERPARTY_EXTRACT_SYSTEM",
     "COUNTERPARTY_RESOLVE_SYSTEM",
+    "CANONICALIZE_TASKS_SYSTEM",
     "match_counterparties_in_transcript",
     "extract_counterparty_mentions",
     "resolve_mentions_to_directory",
+    "canonicalize_task_content_via_llm",
     "canonicalize_text",
     "fuzzy_extend_canonical_map",
 ]

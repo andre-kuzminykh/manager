@@ -385,8 +385,47 @@ class ZoomPipeline:
         if not row.detailed_summary:
             row.last_error = "no detailed summary for short summary"
             return False
+        # FR-CR-05-130 — operator-pinned: «надо «участники» для
+        # встреч по зуму вычленять из списка Team». LLM reads
+        # the transcript + team_members and emits the team-side
+        # real-name participants. Falls back to row.participants
+        # (Zoom API metadata) if the LLM call fails or no team
+        # members are configured.
+        team_participants: list[str] = []
+        try:
+            from app.services.team_members import as_known_employees
+            from app.services.zoom_participants import (
+                extract_zoom_participants_via_llm,
+            )
+            tm_rows = as_known_employees(session, prefer_telegram=True)
+            if tm_rows and row.transcript_text:
+                team_participants = extract_zoom_participants_via_llm(
+                    row.transcript_text,
+                    [
+                        {
+                            "real_name": (e.get("real_name") or "").strip(),
+                            "role": e.get("role") or "",
+                            "notes": e.get("notes") or "",
+                        }
+                        for e in tm_rows
+                    ],
+                    llm_backend=self._llm,
+                    model=self._settings.fireflies_tasks_model,
+                    reasoning_effort=(
+                        self._settings.fireflies_tasks_reasoning_effort
+                        or None
+                    ),
+                    trace_source="zoom",
+                    trace_recording_id=row.zoom_id,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_participants_unexpected_error",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+        effective_participants = team_participants or list(row.participants or [])
         participants_block = "\n".join(
-            f"  - {p}" for p in (row.participants or []) if p
+            f"  - {p}" for p in effective_participants if p
         ) or "  (нет данных)"
         meta_line = (
             f"meeting_title: {row.title or ''}\n"
@@ -614,22 +653,15 @@ class ZoomPipeline:
     def _step_canonicalize_task_names(
         self, session: Session, row: ZoomRecording
     ) -> int:
-        """FR-CR-05-129 — rewrite Task title/description for
-        this Zoom recording using the Pass-2 mapping + Python
-        fuzzy fallback over task content (catches phonetic
-        forms the task-extract LLM produced that Pass 1
-        didn't see)."""
+        """FR-CR-05-129 / FR-CR-05-130 — universal LLM rewrite
+        of task title/description to canonical names. Replaces
+        the regex+SequenceMatcher fuzzy fallback (operator: «без
+        regexp, как универсальное решение»)."""
         from app.models import Counterparty
         from app.services.counterparty_match import (
-            canonicalize_text, fuzzy_extend_canonical_map,
+            canonicalize_task_content_via_llm,
         )
-        from app.services.trace_log import trace_event
 
-        mapping: dict[str, str] = (
-            getattr(row, "_zm_canonical_map", None)
-            or row.__dict__.get("_zm_canonical_map", {})
-            or {}
-        )
         tasks = (
             session.query(Task)
             .filter(Task.source_kind == TaskSourceKind.zoom)
@@ -640,56 +672,49 @@ class ZoomPipeline:
         if not tasks:
             return 0
         directory = session.query(Counterparty).all()
-        task_corpus = "\n".join(
-            (t.title or "") + "\n" + (t.description or "")
-            for t in tasks
-        )
-        before_size = len(mapping)
-        mapping = fuzzy_extend_canonical_map(
-            task_corpus, directory, mapping, ratio_threshold=0.7,
-        )
-        added = len(mapping) - before_size
-        if added:
-            log.info(
-                "zoom_task_fuzzy_canonical_added",
-                zoom_id=row.zoom_id,
-                added=added,
-                added_keys=list(mapping.keys())[before_size:],
-            )
-        if not mapping:
+        if not directory:
             return 0
-        rewrites: list[dict] = []
-        for t in tasks:
-            new_title = canonicalize_text(t.title, mapping)
-            new_desc = canonicalize_text(t.description, mapping)
-            changes = {}
-            if new_title and new_title != t.title:
-                changes["title_before"] = t.title
-                changes["title_after"] = new_title
-                t.title = new_title
-            if new_desc and new_desc != t.description:
-                changes["desc_before"] = (t.description or "")[:100]
-                changes["desc_after"] = new_desc[:100]
-                t.description = new_desc
-            if changes:
-                changes["task_id"] = t.id
-                rewrites.append(changes)
-        if rewrites:
+        task_dicts = [
+            {"id": t.id, "title": t.title, "description": t.description}
+            for t in tasks
+        ]
+        try:
+            rewrites_map = canonicalize_task_content_via_llm(
+                task_dicts,
+                directory,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                trace_source="zoom",
+                trace_recording_id=row.zoom_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_canonicalize_tasks_unexpected_error",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            return 0
+        applied = 0
+        by_id = {t.id: t for t in tasks}
+        for tid, ch in rewrites_map.items():
+            t = by_id.get(tid)
+            if not t:
+                continue
+            if "title" in ch:
+                t.title = ch["title"]
+            if "description" in ch:
+                t.description = ch["description"]
+            applied += 1
+        if applied:
             session.flush()
             log.info(
-                "zoom_task_canonical_rewrite_done",
+                "zoom_task_canonical_rewrite_applied",
                 zoom_id=row.zoom_id,
-                rewritten=len(rewrites),
-                mapping_size=len(mapping),
+                applied=applied,
             )
-            trace_event(
-                source="zoom", recording_id=row.zoom_id,
-                event="task_canonical_rewrite_done",
-                rewritten=len(rewrites),
-                mapping=mapping,
-                samples=rewrites[:20],
-            )
-        return len(rewrites)
+        return applied
 
     # --- step 6: extract tasks --------------------------------
 

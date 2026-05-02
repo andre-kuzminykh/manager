@@ -618,6 +618,14 @@ def _dedupe_meeting_tasks(
     #   - description ratio ≥ 0.85 (full body similarity)
     # Or fallback when no topic prefix:
     #   - description ratio ≥ 0.90 alone
+    # FR-CR-05-129 follow-up — operator wants pairs like
+    # «tether - email» + «tether - WhatsApp» (same task,
+    # different channel) collapsed; same for «Felix Capital -
+    # call» + «Felix Capital - check size», «Nvidia -
+    # write doc» + «Nvidia - edit doc». These have same topic
+    # prefix but description ratio ~0.5-0.7. Threshold lowered
+    # 0.85 → 0.55 so related-action pairs merge but truly
+    # unrelated topic-prefix collisions don't.
     for i, kept in enumerate(tasks):
         if kept.id in dropped_ids:
             continue
@@ -636,7 +644,7 @@ def _dedupe_meeting_tasks(
             if (
                 kept_prefix and cand_prefix
                 and kept_prefix == cand_prefix
-                and desc_ratio >= 0.85
+                and desc_ratio >= 0.55
             ):
                 reason = "topic_prefix_and_desc_match"
             elif (
@@ -1217,28 +1225,25 @@ class FirefliesPipeline:
     def _step_canonicalize_task_names(
         self, session: Session, row: MeetingRecording
     ) -> int:
-        """FR-CR-05-129 — rewrite Task title/description for
-        this meeting so each Whisper-mangled mention («Тезер»,
-        «Bauer/Dart», «Тензор», «Жамаль») is replaced with the
-        canonical name from the directory («Tether»,
-        «Bauerdart», «Tencent», «Jabal»). Uses the mapping
-        stashed on the row by `_step_match_counterparties`,
-        EXTENDED with a Python-only fuzzy fallback over task
-        content (catches phonetic forms the task-extract LLM
-        introduced that Pass 1 didn't see — operator regression
-        «Jamal в task description, Jabal в Pass 1»).
+        """FR-CR-05-129 / FR-CR-05-130 — rewrite Task
+        title/description so every counterparty mention uses
+        the canonical name from the directory.
+
+        FR-CR-05-130 — operator-pinned: «мне надо без regexp
+        это делать, а как универсальное решение». The previous
+        regex+SequenceMatcher fuzzy fallback couldn't handle
+        every phonetic variant universally («Felix CapitalG»,
+        «Jamal/Jabal» composite tokens, multi-word names). We
+        now run a 3rd LLM pass: feed the task list + directory,
+        get back canonicalised title/description per task. The
+        LLM with reasoning handles every form the prior passes
+        missed without per-case regex band-aids.
         """
         from app.models import Counterparty
         from app.services.counterparty_match import (
-            canonicalize_text, fuzzy_extend_canonical_map,
+            canonicalize_task_content_via_llm,
         )
-        from app.services.trace_log import trace_event
 
-        mapping: dict[str, str] = (
-            getattr(row, "_fr_canonical_map", None)
-            or row.__dict__.get("_fr_canonical_map", {})
-            or {}
-        )
         tasks = (
             session.query(Task)
             .filter(Task.source_kind == TaskSourceKind.fireflies)
@@ -1248,58 +1253,50 @@ class FirefliesPipeline:
         )
         if not tasks:
             return 0
-        # Extend mapping with fuzzy hits in task content.
         directory = session.query(Counterparty).all()
-        task_corpus = "\n".join(
-            (t.title or "") + "\n" + (t.description or "")
-            for t in tasks
-        )
-        before_size = len(mapping)
-        mapping = fuzzy_extend_canonical_map(
-            task_corpus, directory, mapping, ratio_threshold=0.7,
-        )
-        added = len(mapping) - before_size
-        if added:
-            log.info(
-                "fireflies_task_fuzzy_canonical_added",
-                fireflies_id=row.fireflies_id,
-                added=added,
-                added_keys=list(mapping.keys())[before_size:],
-            )
-        if not mapping:
+        if not directory:
             return 0
-        rewrites: list[dict] = []
-        for t in tasks:
-            new_title = canonicalize_text(t.title, mapping)
-            new_desc = canonicalize_text(t.description, mapping)
-            changes = {}
-            if new_title and new_title != t.title:
-                changes["title_before"] = t.title
-                changes["title_after"] = new_title
-                t.title = new_title
-            if new_desc and new_desc != t.description:
-                changes["desc_before"] = (t.description or "")[:100]
-                changes["desc_after"] = new_desc[:100]
-                t.description = new_desc
-            if changes:
-                changes["task_id"] = t.id
-                rewrites.append(changes)
-        if rewrites:
+        task_dicts = [
+            {"id": t.id, "title": t.title, "description": t.description}
+            for t in tasks
+        ]
+        try:
+            rewrites_map = canonicalize_task_content_via_llm(
+                task_dicts,
+                directory,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                trace_source="fireflies",
+                trace_recording_id=row.fireflies_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_canonicalize_tasks_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+            return 0
+        applied = 0
+        by_id = {t.id: t for t in tasks}
+        for tid, ch in rewrites_map.items():
+            t = by_id.get(tid)
+            if not t:
+                continue
+            if "title" in ch:
+                t.title = ch["title"]
+            if "description" in ch:
+                t.description = ch["description"]
+            applied += 1
+        if applied:
             session.flush()
             log.info(
-                "fireflies_task_canonical_rewrite_done",
+                "fireflies_task_canonical_rewrite_applied",
                 fireflies_id=row.fireflies_id,
-                rewritten=len(rewrites),
-                mapping_size=len(mapping),
+                applied=applied,
             )
-            trace_event(
-                source="fireflies", recording_id=row.fireflies_id,
-                event="task_canonical_rewrite_done",
-                rewritten=len(rewrites),
-                mapping=mapping,
-                samples=rewrites[:20],
-            )
-        return len(rewrites)
+        return applied
 
     def _step_doc_export(
         self, session: Session, row: MeetingRecording

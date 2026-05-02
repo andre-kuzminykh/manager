@@ -813,7 +813,7 @@ def fuzzy_extend_canonical_map(
     directory: list["Counterparty"],
     existing_map: dict[str, str],
     *,
-    ratio_threshold: float = 0.72,
+    ratio_threshold: float = 0.7,
 ) -> dict[str, str]:
     """FR-CR-05-129 follow-up — Python-only fuzzy pass that
     finds words in `text` that phonetically match a directory

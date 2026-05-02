@@ -239,8 +239,15 @@ class CounterpartiesSheetSync:
             return 0, 0
 
         # Wipe — cascade drops the satellite rows.
-        session.query(CounterpartyAttribute).delete()
-        session.query(Counterparty).delete()
+        # FR-CR-05-128 — explicit `synchronize_session=False`
+        # forces the bulk `DELETE FROM` to fire as raw SQL even
+        # when the listener auto-pull and the manual CLI race.
+        # Without this, a partially-stale session can short-
+        # circuit the delete and leave orphan rows; the next
+        # insert pass then duplicates them via name_normalised.
+        session.query(CounterpartyAttribute).delete(synchronize_session=False)
+        session.query(Counterparty).delete(synchronize_session=False)
+        session.expire_all()
         session.flush()
 
         hubs_by_norm: dict[str, Counterparty] = {}

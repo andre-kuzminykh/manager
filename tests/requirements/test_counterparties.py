@@ -20,18 +20,33 @@ from app.sync.counterparties import CounterpartiesSheetSync, normalise_name
 
 
 def test_normalise_name_strips_accents_and_legal_forms():
-    """FR-CR-05-124 — name normalisation must collapse the
-    common variants speech recognition produces vs the canonical
-    form on the sheet (case, whitespace, accents, legal forms)."""
+    """FR-CR-05-124 / FR-CR-05-128 — name normalisation must
+    collapse common variants: case, whitespace, accents, legal
+    forms, parenthetical notes, AND Cyrillic↔Latin variants of
+    the same name (so the dedupe-by-name_normalised pull catches
+    «Tencent» / «Тенсент» on one hub instead of two)."""
     assert normalise_name("ADNOC") == "adnoc"
     assert normalise_name("  ADNOC  ") == "adnoc"
     assert normalise_name("Goldman Sachs Inc.") == "goldman sachs"
     assert normalise_name("Goldman Sachs, LLC") == "goldman sachs"
-    # Cyrillic legal forms.
-    assert normalise_name("Сбербанк ПАО") == "сбербанк"
-    assert normalise_name("Газпром АО") == "газпром"
+    # FR-CR-05-128 — Cyrillic → Latin so cross-script duplicates
+    # collapse. «Сбербанк ПАО» → «sberbank pao» → strip «pao» →
+    # «sberbank».
+    assert normalise_name("Сбербанк ПАО") == "sberbank"
+    assert normalise_name("Газпром АО") == "gazprom"
+    # Cyrillic-only entries land on Latin keys.
+    assert normalise_name("Тенсент") == "tensent"  # phonetic key
     # Accents stripped.
     assert normalise_name("Société Générale") == "societe generale"
+    # FR-CR-05-128 — parenthetical notes stripped (operator uses
+    # parens for contact / source notes that vary across the
+    # same canonical entity).
+    assert normalise_name("Sequoia Capital (Лучиана)") == "sequoia capital"
+    assert normalise_name("MGX Fund (via Guy Hamelin)") == "mgx fund"
+    assert (
+        normalise_name("BBB (British Business Bank) (via Brent)")
+        == "bbb"
+    )
     # Empty / None safe.
     assert normalise_name("") == ""
     assert normalise_name(None) == ""

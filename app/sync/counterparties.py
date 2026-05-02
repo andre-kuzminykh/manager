@@ -48,20 +48,36 @@ from app.models import Counterparty, CounterpartyAttribute
 log = get_logger(__name__)
 
 
+_CYR_TO_LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d",
+    "е": "e", "ё": "e", "ж": "zh", "з": "z", "и": "i",
+    "й": "y", "к": "k", "л": "l", "м": "m", "н": "n",
+    "о": "o", "п": "p", "р": "r", "с": "s", "т": "t",
+    "у": "u", "ф": "f", "х": "h", "ц": "ts", "ч": "ch",
+    "ш": "sh", "щ": "sch", "ъ": "", "ы": "y", "ь": "",
+    "э": "e", "ю": "yu", "я": "ya",
+}
+
+
 def normalise_name(s: str | None) -> str:
-    """FR-CR-05-124 — produce a fuzzy-match-friendly form of a
-    counterparty name. Used as the unique key on the hub and
-    later as the lookup key when matching transcript mentions.
+    """FR-CR-05-124 / FR-CR-05-128 — produce a fuzzy-match-
+    friendly form of a counterparty name. Used as the unique
+    key on the hub and later as the lookup key when matching
+    transcript mentions.
 
     Strategy:
       - NFKD-normalise (decompose accents into base + combining).
       - Drop combining marks (so «ё» → «е», «é» → «e»).
       - Lowercase.
+      - FR-CR-05-128 — strip parenthesised content. Operator
+        uses parens for contact / source notes («Sequoia Capital
+        (Лучиана)», «MGX Fund (via Guy Hamelin)»). Same
+        underlying entity → must collapse to one hub.
+      - FR-CR-05-128 — Cyrillic → Latin translit so «Голдман
+        Сакс» and «Goldman Sachs» land on the same hub.
       - Collapse whitespace runs and strip.
       - Drop trailing «inc.» / «llc» / «ltd» / «ооо» / «ао» /
-        «pjsc» / «jsc» — common legal-form suffixes that vary
-        between mentions in speech vs the canonical form on the
-        sheet.
+        «pjsc» / «jsc» / «llp» — common legal-form suffixes.
     """
     if not s:
         return ""
@@ -70,13 +86,19 @@ def normalise_name(s: str | None) -> str:
         c for c in decomposed if not unicodedata.combining(c)
     )
     lowered = no_marks.lower()
-    collapsed = re.sub(r"\s+", " ", lowered).strip()
-    # Strip trailing legal forms — case-insensitive already (we
-    # lowercased), so this is a plain regex.
+    # FR-CR-05-128 — strip parenthesised notes. Both `(...)` and
+    # `[...]` flavours; nested parens (rare) lose the outer
+    # frame too.
+    no_parens = re.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*", " ", lowered)
+    # FR-CR-05-128 — Cyrillic → Latin so cross-script duplicates
+    # («Тенсент» / «Tencent», «Голдман Сакс» / «Goldman Sachs»)
+    # collapse to one canonical key.
+    translit = "".join(_CYR_TO_LAT.get(c, c) for c in no_parens)
+    collapsed = re.sub(r"\s+", " ", translit).strip()
     suffix_re = re.compile(
         r"[\s,]*(?:inc\.?|llc|ltd\.?|corp\.?|co\.?|gmbh|"
         r"sa\.?|ag|s\.?p\.?a\.?|pjsc|jsc|plc|"
-        r"ооо|оао|зао|пао|ао|llp)\.?$"
+        r"ooo|oao|zao|pao|ao|llp)\.?$"
     )
     return suffix_re.sub("", collapsed).strip()
 

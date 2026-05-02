@@ -1055,9 +1055,31 @@ class ZoomPipeline:
                     "zoom_task_verification_unexpected_error",
                     zoom_id=row.zoom_id, error=str(e),
                 )
+        # FR-CR-05-128 — dedupe near-duplicate Tasks.
+        if row.detailed_summarised:
+            try:
+                from app.fireflies.pipeline import _dedupe_meeting_tasks
+                with _trace_step("zoom", "dedupe_tasks", **ctx):
+                    _dedupe_meeting_tasks(
+                        session,
+                        source_kind=TaskSourceKind.zoom,
+                        conversation_id=row.zoom_id,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_task_dedupe_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+        # Recount after dedupe.
+        from app.models import Task as _Task
         report.tasks_created = (
-            row.tasks_extracted_count or report.tasks_created
+            session.query(_Task)
+            .filter(_Task.source_kind == TaskSourceKind.zoom)
+            .filter(_Task.source_conversation_id == row.zoom_id)
+            .filter(_Task.deleted_at.is_(None))
+            .count()
         )
+        row.tasks_extracted_count = report.tasks_created
 
         if row.detailed_summarised:
             with _trace_step("zoom", "doc_export", **ctx):
@@ -1088,12 +1110,11 @@ class ZoomPipeline:
         report.google_doc_url = row.google_doc_url
 
         # FR-CR-05-126 — single end-of-pipeline summary log.
-        from app.models import (
-            Counterparty,
-            CounterpartyMention,
-            Task,
-            TaskSourceKind,
-        )
+        # NB: Task / TaskSourceKind are imported at module level
+        # (line 44); a local re-import here would create a
+        # local binding and shadow earlier references in
+        # process_one (UnboundLocalError).
+        from app.models import Counterparty, CounterpartyMention
 
         cp_matches = (
             session.query(Counterparty.name, Counterparty.type)

@@ -1971,10 +1971,20 @@ def test_short_summary_compact_todo_when_overview_overflows(
             "контекста и деталей чтобы превысить лимит и проверить "
             "работу компактного fallback. " * 2
         )
+        # FR-CR-05-128 — distinct topics + distinct titles so
+        # the dedupe step doesn't collapse them.
+        topics = [
+            "Felix Capital", "Insight Partners", "Tether",
+            "TPP", "NVIDIA", "Primavera", "Schaeffler",
+            "Goldman Sachs", "QIA", "ADIA", "Bowerdart",
+            "Sequoia", "Sentinel", "Trinity", "Lunate",
+            "Capricorn", "Endeavor", "Mubadala", "Atinum",
+            "MGX Fund", "Battery Ventures", "Gates Frontier",
+        ]
         tasks = [
             {
-                "title": f"Задача {i+1:02d}",
-                "description": f"Тема{i+1:02d} - {rich_desc}",
+                "title": f"Задача про {topics[i]}",
+                "description": f"{topics[i]} - {rich_desc}",
                 "owner": "777",
                 "priority": "medium",
             }
@@ -2010,8 +2020,8 @@ def test_short_summary_compact_todo_when_overview_overflows(
         )
         # All 22 task descriptions present.
         for i in range(22):
-            assert f"Задача {i+1:02d}" in body or f"Тема{i+1:02d}" in body, (
-                f"missing task {i+1:02d} from verbose To-Do"
+            assert topics[i] in body, (
+                f"missing topic {topics[i]!r} from verbose To-Do"
             )
         # Each delivered chunk to admin fits Telegram's 4096-cap.
         admin_msgs = [m for m in sender.sent if m["chat_id"] == 777]

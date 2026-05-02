@@ -542,6 +542,134 @@ def _wrap_short_summary_with_doc_link(body: str, doc_url: str) -> str:
     return f'<a href="{safe_url}">{safe_first}</a>{safe_rest}'
 
 
+def _dedupe_meeting_tasks(
+    session: "Session",
+    *,
+    source_kind: "TaskSourceKind",
+    conversation_id: str,
+) -> list[tuple[int, int, str]]:
+    """FR-CR-05-128 — soft-delete near-duplicate Tasks the
+    extract+verify passes produce for one meeting. Operator
+    regression: 50-min fundraising sync emitted 48 tasks with
+    «Сегментация инвесторов» 3×, «BauerDart» 2×, «Felix Capital
+    и Supernova» 2×, etc.
+
+    Two heuristics, applied in order:
+
+    1. **Topic-prefix exact match.** Each task description is in
+       the operator-pinned `<topic> - <verb action>` shape. The
+       substring before the first « - » is the topic; identical
+       topics (case-insensitive, NFKD-folded) ⇒ duplicate.
+
+    2. **Title fuzzy match.** `SequenceMatcher.ratio()` on
+       lower-cased titles ≥ 0.85 ⇒ duplicate. Catches
+       «BauerDart» vs «Bauer/Dart» style variants.
+
+    Keeps the EARLIER task (lower id from extract pass —
+    usually richer descriptions), soft-deletes the LATER.
+    Returns the deletion plan `[(kept_id, dropped_id, reason)]`.
+    """
+    import difflib
+    import unicodedata
+    from datetime import datetime, timezone
+
+    from app.models import Task as _Task
+
+    tasks = (
+        session.query(_Task)
+        .filter(_Task.source_kind == source_kind)
+        .filter(_Task.source_conversation_id == conversation_id)
+        .filter(_Task.deleted_at.is_(None))
+        .order_by(_Task.id.asc())
+        .all()
+    )
+    if len(tasks) < 2:
+        return []
+
+    def _fold(s: str) -> str:
+        s = unicodedata.normalize("NFKD", s or "")
+        s = "".join(c for c in s if not unicodedata.combining(c))
+        return s.lower().strip()
+
+    def _topic_prefix(t: "_Task") -> str:
+        body = (t.description or t.title or "").strip()
+        if " - " in body:
+            head = body.split(" - ", 1)[0]
+        else:
+            head = body
+        return _fold(head)
+
+    plan: list[tuple[int, int, str]] = []
+    dropped_ids: set[int] = set()
+    # FR-CR-05-128 — operator-pinned: tasks share a topic prefix
+    # if and only if they reference the same counterparty /
+    # subject. Title fuzzy was too aggressive («Задача про
+    # Felix» vs «Задача про NVIDIA» share «Задача про» prefix
+    # and tripped 0.85 ratio); restrict to topic-prefix exact
+    # match. Falls back to full-description ratio ≥ 0.92 when
+    # topic prefix is missing (no « - » in either) — catches
+    # legacy tasks not in the operator-pinned shape.
+    for i, kept in enumerate(tasks):
+        if kept.id in dropped_ids:
+            continue
+        kept_prefix = _topic_prefix(kept)
+        kept_desc = _fold((kept.description or "").strip())
+        for cand in tasks[i + 1:]:
+            if cand.id in dropped_ids:
+                continue
+            cand_prefix = _topic_prefix(cand)
+            cand_desc = _fold((cand.description or "").strip())
+            reason = ""
+            if kept_prefix and cand_prefix and kept_prefix == cand_prefix:
+                reason = "topic_prefix_match"
+            elif (
+                # No topic prefix on either — fall back to full
+                # description ratio ≥ 0.92 (very tight).
+                not kept_prefix
+                and not cand_prefix
+                and kept_desc
+                and cand_desc
+                and difflib.SequenceMatcher(None, kept_desc, cand_desc).ratio()
+                >= 0.92
+            ):
+                reason = "description_fuzzy_match"
+            if reason:
+                cand.deleted_at = datetime.now(timezone.utc)
+                dropped_ids.add(cand.id)
+                plan.append((kept.id, cand.id, reason))
+    if plan:
+        session.flush()
+        kind_str = (
+            source_kind.value if hasattr(source_kind, "value") else str(source_kind)
+        )
+        log.info(
+            "meeting_task_dedupe_done",
+            source_kind=kind_str,
+            conversation_id=conversation_id,
+            dropped=len(plan),
+            kept=len(tasks) - len(plan),
+            sample=[
+                {"kept_id": k, "dropped_id": d, "reason": r}
+                for k, d, r in plan[:10]
+            ],
+        )
+        try:
+            from app.services.trace_log import trace_event
+            trace_event(
+                source=kind_str, recording_id=conversation_id,
+                event="task_dedupe_done",
+                dropped=len(plan),
+                kept=len(tasks) - len(plan),
+                plan=[
+                    {"kept_id": k, "dropped_id": d, "reason": r}
+                    for k, d, r in plan
+                ],
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return plan
+
+
 def _split_for_telegram(text: str, *, limit: int = 3800) -> list[str]:
     """FR-CR-05-119 — split a long short-summary body into
     Telegram-sized chunks (≤4096 chars per message).
@@ -1666,7 +1794,31 @@ class FirefliesPipeline:
                 "fireflies_task_verification_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
-        report.tasks_created = row.tasks_extracted_count or report.tasks_created
+        # FR-CR-05-128 — soft-delete near-duplicate tasks the
+        # extract+verify passes produce («Сегментация
+        # инвесторов» 3×, «BauerDart»/«Bauer/Dart» 2×, etc.).
+        try:
+            with _trace_step("fireflies", "dedupe_tasks", **ctx):
+                _dedupe_meeting_tasks(
+                    session,
+                    source_kind=TaskSourceKind.fireflies,
+                    conversation_id=row.fireflies_id,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_task_dedupe_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+        # Recount after dedupe.
+        from app.models import Task as _Task
+        report.tasks_created = (
+            session.query(_Task)
+            .filter(_Task.source_kind == TaskSourceKind.fireflies)
+            .filter(_Task.source_conversation_id == row.fireflies_id)
+            .filter(_Task.deleted_at.is_(None))
+            .count()
+        )
+        row.tasks_extracted_count = report.tasks_created
         with _trace_step("fireflies", "doc_export", **ctx):
             if not self._step_doc_export(session, row):
                 log.warning(

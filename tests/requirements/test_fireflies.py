@@ -879,11 +879,20 @@ def test_task_extraction_prompt_pins_topic_action_description_format():
     from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
 
     blob = TASK_EXTRACTION_SYSTEM
-    assert "<тема> - <конкретное действие" in blob
+    # FR-CR-05-128 — format pinned with stronger language: subject
+    # comes FIRST, verb after the dash. The literal «<тема-или-фонд>»
+    # placeholder is in the prompt now.
+    assert "<тема-или-фонд>" in blob
+    assert "<глагол-действие" in blob
     assert "Schaeffler" in blob or "Шафлера" in blob
     assert "Draper Associates" in blob
     assert "Интро к катарскому шейху" in blob
     assert "Варанты" in blob or "Варанты для инвесторов" in blob
+    # FR-CR-05-128 — anti-examples pin the subject-first contract.
+    assert (
+        "starts with verb" in blob.lower()
+        or "starts with verb" in blob
+    )
 
 
 def test_task_extraction_prompt_pins_thinking_guidance():
@@ -1934,18 +1943,13 @@ def test_fireflies_pipeline_passes_whisper_bias_prompt(
 def test_short_summary_compact_todo_when_overview_overflows(
     patched_session_scope, SessionFactory, monkeypatch
 ):
-    """FR-CR-05-128 — operator-pinned, repeatedly: «Header +
-    Участники + Суть + To-Do» MUST land in ONE Telegram DM
-    (≤4096 chars). When the verbose To-Do block (FR-CR-05-120
-    «<topic> - <action with details>» format) would push the
-    body past the cap, the pipeline rebuilds the To-Do in
-    COMPACT mode (title-only with owner) so it fits. Full
-    descriptions still ship via the Doc + per-task DM cards.
-
-    Reproduces the operator regression: 22 fundraising-sync
-    tasks with rich descriptions blew past 4000 chars and the
-    splitter cut between «Суть» and «To-Do», breaking the
-    contract."""
+    """FR-CR-05-128 follow-up — operator pinned «не надо всё
+    вмещать в одно сообщение, если не вмещается, то след
+    сообщение». Verbose To-Do is preserved; the splitter
+    chunks into multiple Telegram DMs when overview exceeds
+    4096 chars. Each chunk fits ≤4096; verbose description
+    text survives across the chunks; all 22 tasks land
+    somewhere in the delivered chunks."""
     monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "777")
     from app.config import get_settings
 
@@ -1999,32 +2003,29 @@ def test_short_summary_compact_todo_when_overview_overflows(
             )
             body = row.short_summary or ""
 
-        # Operator-pinned: ONE message ≤ 4096 chars.
-        assert 0 < len(body) <= 4096, (
-            f"short summary body must fit in one Telegram DM; "
-            f"got {len(body)} chars"
+        # Verbose To-Do preserved — full descriptions land in
+        # the body (chunked across multiple DMs if needed).
+        assert rich_desc.strip()[:80] in body, (
+            "verbose description was unexpectedly compacted"
         )
-        # All 22 task titles present (compact mode keeps titles).
+        # All 22 task descriptions present.
         for i in range(22):
-            assert f"Задача {i+1:02d}" in body, (
-                f"missing task {i+1:02d} from compact To-Do"
+            assert f"Задача {i+1:02d}" in body or f"Тема{i+1:02d}" in body, (
+                f"missing task {i+1:02d} from verbose To-Do"
             )
-        # Verbose description body NOT in the compact rendering
-        # (that's the whole point — full text goes to Doc).
-        assert rich_desc.strip()[:80] not in body
-        # Operator-pinned: short summary lands in EXACTLY one
-        # Telegram DM (overview block, NOT split). Per-task DM
-        # cards arrive separately (those carry «👤» + «📅» on
-        # a fresh line right after the title); short summary
-        # text starts with the `<a href>` title block AND
-        # contains the «To-Do:» header.
-        short_summary_msgs = [
-            m for m in sender.sent
-            if m["chat_id"] == 777 and "To-Do:" in m["text"]
-        ]
-        assert len(short_summary_msgs) == 1, (
-            f"expected exactly one short-summary DM; got {len(short_summary_msgs)}"
+        # Each delivered chunk to admin fits Telegram's 4096-cap.
+        admin_msgs = [m for m in sender.sent if m["chat_id"] == 777]
+        for m in admin_msgs:
+            assert len(m["text"]) <= 4096, (
+                f"chunk exceeds Telegram limit: {len(m['text'])} chars"
+            )
+        # Verbose tasks span multiple chunks (operator-accepted
+        # split rather than compacting).
+        tasks_in_chunks = sum(
+            1 for m in admin_msgs
+            if "Тема" in m["text"] or "Задача" in m["text"]
         )
+        assert tasks_in_chunks >= 1, "no chunks carry the To-Do content"
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 

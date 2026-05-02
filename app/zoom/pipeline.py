@@ -413,52 +413,27 @@ class ZoomPipeline:
         # FR-CR-05-119 — drop any LLM-emitted To-Do section so we
         # can append the deterministic one. Also strip markdown.
         from app.fireflies.pipeline import (
-            _SHORT_SUMMARY_ONE_MESSAGE_LIMIT,
             _build_counterparties_section_for_short_summary,
             _build_todo_section,
             _strip_llm_todo_block,
         )
 
         text = _strip_llm_todo_block(text)
-        # FR-CR-05-119 — append To-Do from the actual extracted
-        # Task rows so the TG message matches what the operator
-        # has in the DB / Sheet / DM cards.
-        # FR-CR-05-128 — overview MUST land in ONE Telegram
-        # message (operator-pinned, repeatedly). Try verbose
-        # To-Do first; if total body > 4000 chars, rebuild in
-        # compact title-only mode. Full descriptions still ship
-        # via the Doc + per-task DM cards.
-        body_with_todo = text
+        # FR-CR-05-128 follow-up — verbose To-Do always; if
+        # overview overflows, splitter chunks into multiple
+        # Telegram DMs (operator-pinned).
         todo = _build_todo_section(
             session,
             source_kind=TaskSourceKind.zoom,
             source_conversation_id=row.zoom_id,
         )
         if todo:
-            body_with_todo = text.rstrip() + "\n\n" + todo
+            text = text.rstrip() + "\n\n" + todo
         cp_line = _build_counterparties_section_for_short_summary(
             session, source_kind="zoom", source_id=row.zoom_id,
         )
-        candidate = body_with_todo
         if cp_line:
-            candidate = candidate.rstrip() + "\n\n" + cp_line
-        if len(candidate) > _SHORT_SUMMARY_ONE_MESSAGE_LIMIT and todo:
-            todo_compact = _build_todo_section(
-                session,
-                source_kind=TaskSourceKind.zoom,
-                source_conversation_id=row.zoom_id,
-                compact=True,
-            )
-            log.info(
-                "zoom_short_summary_compact_todo",
-                zoom_id=row.zoom_id,
-                full_chars=len(candidate),
-                limit=_SHORT_SUMMARY_ONE_MESSAGE_LIMIT,
-            )
-            candidate = text.rstrip() + "\n\n" + todo_compact
-            if cp_line:
-                candidate = candidate.rstrip() + "\n\n" + cp_line
-        text = candidate
+            text = text.rstrip() + "\n\n" + cp_line
         # FR-CR-05-127 — title becomes an HTML hyperlink to the
         # Google Doc; the «📄 Подробный отчёт: <url>» trailer is
         # gone (replaced by the wrap on the first line). Sent

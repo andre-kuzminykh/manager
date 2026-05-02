@@ -1082,21 +1082,17 @@ class FirefliesPipeline:
         # Task rows. Description (verbatim what the LLM wrote on
         # the Task row) + owner_display_name in parens. If no
         # tasks were extracted we drop the section.
-        # FR-CR-05-128 — operator-pinned «один раз зафиксируй
-        # навсегда»: «Header + Участники + Суть + To-Do» MUST
-        # land in ONE Telegram message. We try the verbose
-        # To-Do first; if the resulting body would push past
-        # the 4096-char per-message cap (one Telegram DM), we
-        # rebuild the To-Do in compact mode (title-only). The
-        # full description still lives on the Doc + per-task
-        # DM cards, so no info is lost.
-        body_with_todo = body
+        # FR-CR-05-128 follow-up — operator pinned: «не надо всё
+        # вмещать в одно сообщение, если не вмещается, то след
+        # сообщение». Verbose To-Do always; the splitter chunks
+        # at paragraph boundaries (Header+Участники+Суть → chunk
+        # 1, To-Do → chunk 2 when it overflows).
         todo = _build_todo_section(
             session, source_kind=TaskSourceKind.fireflies,
             source_conversation_id=row.fireflies_id,
         )
         if todo:
-            body_with_todo = body.rstrip() + "\n\n" + todo
+            body = body.rstrip() + "\n\n" + todo
         # FR-CR-05-125 — single-line «🔗 Контрагенты: name1,
         # name2» appended after To-Do, before the doc-link
         # trailer. Only emitted when matches exist.
@@ -1105,26 +1101,8 @@ class FirefliesPipeline:
             source_kind="fireflies",
             source_id=row.fireflies_id,
         )
-        candidate = body_with_todo
         if cp_line:
-            candidate = candidate.rstrip() + "\n\n" + cp_line
-        # FR-CR-05-128 — overflow → compact To-Do.
-        if len(candidate) > _SHORT_SUMMARY_ONE_MESSAGE_LIMIT and todo:
-            todo_compact = _build_todo_section(
-                session, source_kind=TaskSourceKind.fireflies,
-                source_conversation_id=row.fireflies_id,
-                compact=True,
-            )
-            log.info(
-                "fireflies_short_summary_compact_todo",
-                fireflies_id=row.fireflies_id,
-                full_chars=len(candidate),
-                limit=_SHORT_SUMMARY_ONE_MESSAGE_LIMIT,
-            )
-            candidate = body.rstrip() + "\n\n" + todo_compact
-            if cp_line:
-                candidate = candidate.rstrip() + "\n\n" + cp_line
-        body = candidate
+            body = body.rstrip() + "\n\n" + cp_line
         # FR-CR-05-127 — operator-pinned: the «DD/MM - <Topic>»
         # header becomes an HTML hyperlink to the Google Doc.
         # Replaces the old «📄 Подробный отчёт: <url>» trailer

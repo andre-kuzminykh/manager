@@ -197,14 +197,29 @@ For each task, emit:
                 Russian, in infinitive («подготовить», «отправить»).
                 No filler («надо», «нужно»).
 - description:  ONE compact line in the operator-pinned format
-                (FR-CR-05-120):
+                (FR-CR-05-120 + FR-CR-05-128):
 
-                  «<тема> - <конкретное действие с деталями>»
+                  «<тема-или-фонд> - <глагол-действие с деталями>»
+
+                ═══════════════════════════════════════════════════
+                MANDATORY FORMAT (operator regression FR-CR-05-128):
+                «ты пропустил тему или фонд, а потом глагол что
+                сделать». The first segment BEFORE the « - » MUST
+                be the SUBJECT (counterparty / fund / company /
+                topic noun-phrase), NOT the verb. Then « - » then
+                the imperative verb-action with details.
+                ═══════════════════════════════════════════════════
 
                 The «тема» is the SHORT noun-phrase saying what
-                this task is about («Рассылка апдейтов по
-                Schaeffler», «Интро к катарскому шейху»,
-                «Draper Associates», «Варанты для инвесторов»).
+                this task is about — usually the COUNTERPARTY
+                NAME when an external entity is involved
+                («Schaeffler», «Felix Capital», «Draper Associates»,
+                «Tether», «QIA», «Insight Partners») or a topical
+                noun-phrase for internal work («Рассылка апдейтов
+                по Schaeffler», «Сегментация инвесторов»,
+                «Варанты для инвесторов», «Первый клоуз и Prime
+                Movers»). NEVER start with a verb.
+
                 The action after the dash is the imperative
                 instruction with the SPECIFIC details that
                 disambiguate it from any other similar task —
@@ -217,12 +232,27 @@ For each task, emit:
                   использовать ссылки, текст сократить, а договор
                   и материалы прикладывать»
                 ✓ «Draper Associates - найти историю общения»
+                ✓ «Felix Capital - проверить готовность рассмотреть
+                  больший чек с учётом вопросов по оценке»
                 ✓ «Интро к катарскому шейху - написать QIA,
                   попросить интро, Диме подготовить письмо,
                   Ирине отправить»
                 ✓ «Варанты для инвесторов - обсуждать только на
                   звонках с ограниченным кругом, определить кому
                   и при каком чеке»
+
+                ✗ «сегментировать инвесторов для follow-up» —
+                  starts with verb; should be «Сегментация
+                  инвесторов - разделить список на индивидуальные
+                  предложения, персональные апдейты, массовую
+                  рассылку»
+                ✗ «отправить апдейт Tether» — starts with verb;
+                  should be «Tether - отправить апдейт несмотря
+                  на отказ от 22 апреля, включая Schaeffler и Bosch»
+                ✗ «подготовить follow-up по Insight Partners» —
+                  starts with verb; should be «Insight Partners -
+                  подготовить follow-up или личное сообщение по
+                  старому отказу»
 
                 NEVER copy slack_user_id values from the
                 `known_employees` table into the description —

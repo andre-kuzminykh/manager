@@ -497,15 +497,436 @@ flowchart LR
 
 ---
 
-## 5. What's NOT in this doc
+## 5. Infrastructure (containers, networking, volumes)
 
-Operator-pinned scope: «инфру не трогаем».
+Two long-running app containers + one Postgres + 2 socat
+proxies. Everything sits on a single bridge network. Code lives
+in one repo (`~/manager`) but ships under two image tags
+(`manager-bot` + `slack-task-bot:latest`) — they're the SAME
+build, just running different entry-points.
 
-- **Docker compose topology** — see `docker-compose.yml`.
-- **Container networking / `slack-task-net`** — operator-managed.
-- **Postgres backup / disaster recovery** — out of scope.
+### Container topology
+
+```mermaid
+flowchart TB
+    classDef app fill:#7c2d12,color:#fff,stroke:#451a03;
+    classDef db fill:#365314,color:#fff,stroke:#1a2e05;
+    classDef proxy fill:#0c4a6e,color:#fff,stroke:#082f49;
+    classDef ext fill:#581c87,color:#fff,stroke:#3b0764;
+    classDef net fill:#1f2937,color:#fff,stroke:#111827;
+
+    subgraph NET["🟦 docker network: slack-task-net (bridge)"]
+        BOT["manager-bot-1<br/>image: manager-bot<br/>cmd: python -m app.main<br/>(Slack Bolt: socket-mode)"]:::app
+        TGL["slack-task-tg-listener<br/>image: slack-task-bot:latest<br/>cmd: python -m ops.telegram_listener<br/>(TG long-poll + Fireflies + Zoom +<br/>counterparties pull + view-poll)"]:::app
+        SBOT_LEGACY["slack-task-bot (legacy)<br/>image: slack-task-bot:latest<br/>predecessor of manager-bot;<br/>kept running, may be retired"]:::app
+        DB[("slack-task-db<br/>postgres:16-alpine<br/>DB: slack_tasks")]:::db
+        PG_PROXY["pg-proxy / pg-proxy-5433<br/>alpine/socat<br/>(external pg access from host)")]:::proxy
+    end
+
+    SLACK["Slack API<br/>(Bolt over WebSocket)"]:::ext
+    TELEGRAM["Telegram Bot API<br/>(getUpdates HTTP long-poll)"]:::ext
+    SUPABASE["Supabase Postgres<br/>humanoid_tg_chats view<br/>(read-only)"]:::ext
+    OPENAI["OpenAI API<br/>(Whisper + gpt-5.5-thinking)"]:::ext
+    ANTHROPIC["Anthropic API<br/>(Claude for intent + dedup)"]:::ext
+    FIREFLIES["Fireflies GraphQL +<br/>mp3 download URL"]:::ext
+    ZOOM["Zoom REST API +<br/>OAuth (account creds)<br/>+ recording download"]:::ext
+    GOOGLE["Google APIs<br/>(Sheets / Docs / Tasks)"]:::ext
+
+    BOT <-->|WebSocket| SLACK
+    BOT --> ANTHROPIC
+    BOT --> OPENAI
+
+    TGL <-->|long-poll| TELEGRAM
+    TGL -->|read-only| SUPABASE
+    TGL --> OPENAI
+    TGL --> ANTHROPIC
+    TGL --> FIREFLIES
+    TGL --> ZOOM
+    TGL --> GOOGLE
+
+    BOT -->|psycopg<br/>tcp:5432| DB
+    TGL -->|psycopg<br/>tcp:5432| DB
+    SBOT_LEGACY -->|psycopg<br/>tcp:5432| DB
+
+    PG_PROXY -.->|tcp passthrough| DB
+```
+
+### Networks
+
+| Network | Driver | Purpose | Members |
+|---|---|---|---|
+| `slack-task-net` | bridge | App + DB intra-container DNS (`slack-task-db` resolves) | `manager-bot-1`, `slack-task-tg-listener`, `slack-task-bot`, `slack-task-db`, `pg-proxy`, `pg-proxy-5433` |
+| `manager_default` | bridge | Auto-created by `~/manager/docker-compose.yml`; effectively unused — compose's own `db` service is no longer in play, real DB is on `slack-task-net`. | (empty) |
+
+Container-to-container DNS uses the slack-task-net aliases:
+- `slack-task-db` resolves to the Postgres container.
+- App containers DNS-discover the DB via the URL
+  `postgresql+psycopg://postgres:<pw>@slack-task-db:5432/slack_tasks`.
+
+External access to Postgres goes through `pg-proxy` (5432) and
+`pg-proxy-5433` (5433) socat passthroughs — convenient for
+operator psql sessions from the VM host without exec-ing into
+the container.
+
+### Volumes & bind mounts
+
+| Mount | Container path | Used by | Purpose |
+|---|---|---|---|
+| `~/manager/data` | `/app/data` | bot, tg-listener | Misc app-side persistence (not the DB) |
+| `~/manager/secrets` | `/app/secrets` | bot, tg-listener | `sa.json` (Google service account), other key files |
+| `~/manager/audio` | `/app/audio` | tg-listener | Downloaded Fireflies/Zoom mp3s before Whisper |
+| `~/manager/traces` | `/app/traces` | tg-listener | Per-recording JSONL trace files (FR-CR-05-128) |
+| Postgres named volume | `/var/lib/postgresql/data` | slack-task-db | DB data files (lifecycle managed outside this compose) |
+
+### Secrets
+
+Provided via env-vars (sourced from `~/manager/.env` + the
+saved `/tmp/tg-listener.env` for the listener container):
+
+| Env | Service | Notes |
+|---|---|---|
+| `DATABASE_URL` | both apps | `postgresql+psycopg://postgres:<pw>@slack-task-db:5432/slack_tasks` |
+| `TELEGRAM_SOURCE_DATABASE_URL` | tg-listener | Supabase read-only credentials for the `humanoid_tg_chats` view |
+| `TELEGRAM_BOT_TOKEN` | tg-listener | bot user token |
+| `TELEGRAM_ADMIN_USER_IDS` | tg-listener | comma-separated TG user_ids that get morning digests + enrollment widgets (FR-CR-05-133) |
+| `SLACK_BOT_TOKEN` / `SLACK_APP_TOKEN` | bot | xoxb / xapp socket-mode pair |
+| `OPENAI_API_KEY` | both | Whisper + gpt-5.5 + reasoning models |
+| `ANTHROPIC_API_KEY` | both | Claude (intent + dedup paths) |
+| `FIREFLIES_API_TOKEN` | tg-listener | GraphQL bearer |
+| `ZOOM_ACCOUNT_ID` / `_CLIENT_ID` / `_CLIENT_SECRET` / `_SECRET_TOKEN` | tg-listener | OAuth account creds |
+| `GOOGLE_SERVICE_ACCOUNT_JSON_PATH` | both | Path to mounted `sa.json` |
+| `*_SHEET_ID` / `*_TAB_NAME` | both | Spreadsheet binding for Team / Counterparties / Tasks / Status outreach |
+| `*_POLL_INTERVAL_SECONDS` | tg-listener | 30 (view) / 60 (zoom / fireflies / google_tasks) / 300 (counterparties) |
+
+Secrets currently sit in plain-text env files on the VM. No
+KMS / Vault integration yet.
+
+### Process model
+
+```mermaid
+flowchart LR
+    classDef cmd fill:#7c2d12,color:#fff,stroke:#451a03;
+    classDef loop fill:#0c4a6e,color:#fff,stroke:#082f49;
+    classDef job fill:#365314,color:#fff,stroke:#1a2e05;
+
+    BOT_PROC["python -m app.main<br/>(manager-bot-1)"]:::cmd
+    BOT_PROC --> SLACK_LOOP["Slack Bolt event loop<br/>(socket-mode WS)"]:::loop
+
+    TGL_PROC["python -m ops.telegram_listener<br/>(slack-task-tg-listener)"]:::cmd
+    TGL_PROC --> TICK["TelegramListener.tick()<br/>main loop, sleep_on_idle=1.0s"]:::loop
+    TICK --> TG_POLL["getUpdates long-poll<br/>(timeout 30s)"]:::job
+    TICK --> VIEW_POLL["view-poll → drafts<br/>every 30s"]:::job
+    TICK --> FF_POLL["fireflies-poll → process_one<br/>every 60s"]:::job
+    TICK --> ZM_POLL["zoom-poll → process_one<br/>every 60s"]:::job
+    TICK --> TM_PULL["team-sheet pull<br/>every 60s"]:::job
+    TICK --> CP_PULL["counterparties pull<br/>every 300s"]:::job
+    TICK --> GT_PULL["google-tasks pull<br/>every 60s"]:::job
+    TICK --> CB["callback_query dispatch<br/>(buttons + replies)"]:::job
+
+    MIGRATE["python -m alembic upgrade head<br/>(one-shot, manager-migrate-1)"]:::cmd
+```
+
+- **`bot` service** runs continuously under restart-policy
+  `unless-stopped`.
+- **`tg-listener` container** runs continuously under
+  restart-policy `unless-stopped` (started via `docker run`,
+  not the compose).
+- **`migrate` service** runs once via
+  `docker-compose run --rm migrate` (operator-triggered or on
+  redeploy).
+- **No background workers / no celery / no cron** — every
+  periodic action is a `_maybe_run_*` check inside the listener
+  tick loop.
+
+### Deploy flow
+
+```mermaid
+sequenceDiagram
+    actor OP as Operator
+    participant GIT as GitHub
+    participant DOCKER as Docker
+    participant DB as slack-task-db
+    participant BOT as manager-bot-1
+    participant TGL as slack-task-tg-listener
+
+    OP->>GIT: git push to feature branch
+    OP->>DOCKER: docker-compose up -d --build bot
+    DOCKER->>BOT: rebuild + restart
+    OP->>DOCKER: docker-compose run --rm migrate
+    DOCKER->>DB: alembic upgrade head
+    OP->>DOCKER: docker build -t slack-task-bot:latest .
+    OP->>DOCKER: docker rm -f slack-task-tg-listener
+    OP->>DOCKER: docker run -d --name slack-task-tg-listener<br/>--network slack-task-net --env-file ... slack-task-bot:latest
+    DOCKER->>TGL: restart with new code
+    TGL-->>DB: connect via slack-task-net
+    BOT-->>DB: connect via slack-task-net
+```
+
+The ad-hoc `docker run` for the listener is a known wart —
+should be folded into the compose as a second service in a
+follow-up so a single `docker-compose up -d --build` covers
+both apps.
+
+### Health, restart, observability
+
+- **Restart policy**: `unless-stopped` for both apps. Postgres
+  managed externally.
+- **No HTTP health endpoints** — health is implicit (logs
+  showing tick output every ~60s).
+- **Observability**:
+  - `docker logs <name>` for raw structlog output.
+  - `~/manager/traces/<source>-<recording-id>.jsonl` for the
+    full per-recording event trace (FR-CR-05-128). See
+    [`TRACES.md`](./TRACES.md).
+  - Postgres queries via `docker exec slack-task-db psql -U postgres -d slack_tasks`.
+
+### External-API budgets (current)
+
+| API | Pattern | Cost dial |
+|---|---|---|
+| OpenAI Whisper | per-meeting transcribe | mp3 size (capped at 25MB Whisper limit; chunked via ffmpeg) |
+| OpenAI gpt-5.5-thinking | 4 passes per meeting + extract + verify + canonicalize + consolidate + detailed + short | reasoning_effort (default `medium`) |
+| Anthropic Claude | per-message in Slack/TG passive ingest + per-task dedup | prompt-cached system message |
+| Fireflies | poll list + per-recording fetch | poll interval (60s) |
+| Zoom | poll list + per-recording fetch + OAuth refresh | poll interval (60s) |
+| Google Sheets | counterparties (300s) + team_members (60s) + tasks-pull (60s) | poll intervals |
+| Telegram | long-poll (timeout 30s) + sendMessage / editMessageText per card | message volume |
+
+---
+
+## 6. Features & user flows
+
+What real humans actually do with this system.
+
+### Personas
+
+| Persona | Surface | What they get |
+|---|---|---|
+| **Operator (admin)** — Andre, etc. | TG DM with bot + Slack workspace + Google Doc + Sheet | Morning + evening digests, meeting summaries, all task cards, enrollment widgets |
+| **Team member** | TG DM with bot + Slack DMs | Task cards for their assigned tasks; subscription updates for tasks they follow |
+| **External counterparty** | (none — never sees the bot) | n/a — they show up only as named entities in the directory |
+
+### Feature catalogue
+
+```mermaid
+flowchart LR
+    classDef inp fill:#0c4a6e,color:#fff,stroke:#082f49;
+    classDef ai fill:#581c87,color:#fff,stroke:#3b0764;
+    classDef out fill:#7c2d12,color:#fff,stroke:#451a03;
+
+    %% --- Inputs the user can perform ---
+    subgraph IN["What the user CAN DO"]
+        I1[/"Send a Slack message in any channel<br/>where the bot is invited"/]:::inp
+        I2[/"DM the bot in Telegram<br/>(text or voice)"/]:::inp
+        I3[/"@-mention the bot in Slack"/]:::inp
+        I4[/"Have a Fireflies-recorded meeting"/]:::inp
+        I5[/"Have a Zoom-recorded meeting"/]:::inp
+        I6[/"Tap inline buttons on bot cards"/]:::inp
+        I7[/"Reply to bot's question prompts"/]:::inp
+        I8[/"Edit Google Sheet (Team / Counterparties)"/]:::inp
+    end
+
+    %% --- AI-side processing ---
+    subgraph AI["AI processing"]
+        A1["Intent classifier<br/>(Anthropic, cached)"]:::ai
+        A2["Title / Owner / Date<br/>field resolvers"]:::ai
+        A3["Detailed summary<br/>+ task extraction<br/>+ verification + canonicalize<br/>+ consolidate (4 passes)"]:::ai
+        A4["Counterparty match<br/>(Pass 1 + Pass 2)"]:::ai
+        A5["Whisper transcription<br/>(with bias prompt)"]:::ai
+        A6["Voice → text<br/>(for replies)"]:::ai
+    end
+
+    %% --- Outputs the user receives ---
+    subgraph OUT["What the user GETS"]
+        O1[/"Draft confirmation card<br/>[Reject][Edit][Accept]"/]:::out
+        O2[/"Task card<br/>[Start][Edit][Delete][Subscribe]"/]:::out
+        O3[/"Per-task DM card after a meeting"/]:::out
+        O4[/"Short summary DM<br/>(title-as-link to Google Doc)"/]:::out
+        O5[/"Detailed Google Doc per meeting"/]:::out
+        O6[/"Morning digest +<br/>evening status DM"/]:::out
+        O7[/"«Track this entity?» widget<br/>(FR-CR-05-133)"/]:::out
+        O8[/"Sheet rows in Google Tasks +<br/>Tasks tab"/]:::out
+    end
+
+    I1 --> A1
+    I2 --> A6
+    A6 --> A1
+    I3 --> A1
+    A1 --> A2
+    A2 --> O1
+    O1 -->|Accept| O2
+
+    I4 --> A5
+    I5 --> A5
+    A5 --> A3
+    A5 --> A4
+    A3 --> O3
+    A3 --> O4
+    A3 --> O5
+    A4 --> O7
+
+    I6 -->|Start/Done/Edit/Delete| O2
+    I7 --> A6
+    A6 --> O7
+
+    I8 -->|next pull tick| A1
+    I8 --> A4
+
+    O2 --> O8
+    O3 --> O8
+```
+
+### Flow A — passive task creation in Slack/Telegram
+
+«User says something in chat → bot proposes a task → user
+confirms.»
+
+```mermaid
+sequenceDiagram
+    actor U as Author
+    participant CHAT as Slack channel /<br/>TG group chat
+    participant BOT as Bot listener
+    participant LLM as Intent LLM
+    participant DM as Operator's DM
+
+    U->>CHAT: «Алина, подготовь пилот-deck до пятницы»
+    CHAT->>BOT: message event
+    BOT->>LLM: DETECT → SYSTEM_PROMPT → fields
+    LLM-->>BOT: {title, owner=Алина, due=Friday, …}
+    BOT->>DM: Draft card<br/>[Reject][Edit][Accept]
+    U->>DM: Tap [Accept]
+    DM->>BOT: callback_query
+    BOT->>BOT: orchestrator.finalize(draft → Task)
+    BOT->>DM: replace draft card with Task card<br/>[Start][Edit][Delete][Subscribe]
+    BOT->>U: Owner gets Task card in their DM
+```
+
+### Flow B — meeting → tasks & summary
+
+«Meeting recorded → all the artefacts arrive while operator
+sleeps.»
+
+```mermaid
+sequenceDiagram
+    actor M as Meeting participants
+    participant RAW as Fireflies / Zoom
+    participant TGL as TG listener
+    participant LLM as LLM passes
+    participant DOCS as Google Docs / Sheets
+    participant DM as Admin DM
+
+    M->>RAW: meeting recorded
+    RAW-->>TGL: poll list_recent (every 60s)
+    TGL->>RAW: download mp3
+    TGL->>LLM: Whisper transcribe (with bias prompt)
+    TGL->>LLM: detailed_summary
+    TGL->>LLM: counterparty Pass 1 + Pass 2
+    TGL->>DM: «Track «<unresolved>»?» widget<br/>per unresolved mention (FR-CR-05-133)
+    TGL->>LLM: extract_tasks + verify_tasks
+    TGL->>LLM: canonicalize (Pass 3) + consolidate (Pass 4)
+    TGL->>LLM: short_summary
+    TGL->>DOCS: write Google Doc
+    TGL->>DM: short summary DM<br/>(title-as-link)
+    TGL->>DM: per-task DM card per assignee
+```
+
+### Flow C — enrollment widget (FR-CR-05-133)
+
+«Bot picked up an entity that isn't in the directory.»
+
+```mermaid
+sequenceDiagram
+    actor OP as Operator
+    participant BOT as TG bot
+    participant DB as counterparty_prompts
+    participant CP as counterparties hub
+
+    BOT->>OP: 🔍 «Track «Odeya»?»<br/>[Yes] [No]
+    DB->>DB: status = pending_yesno
+    alt operator clicks [Yes]
+        OP->>BOT: callback_query (enroll_yes)
+        BOT->>OP: «Send context (text or voice), or [Skip]»
+        DB->>DB: status = awaiting_context
+        alt operator sends text/voice
+            OP->>BOT: «Israeli partner intro via Ziya, follow up next week»
+            BOT->>BOT: Whisper if voice
+            BOT->>CP: INSERT Counterparty + telegram_enrollment satellite
+            BOT->>OP: ✅ «Added «Odeya» to the directory with context.»
+            DB->>DB: status = completed_added
+        else operator clicks [Skip]
+            OP->>BOT: callback_query (enroll_skip)
+            BOT->>CP: INSERT Counterparty (no satellite)
+            BOT->>OP: ✅ «Added «Odeya» to the directory (no context).»
+            DB->>DB: status = completed_skipped
+        end
+    else operator clicks [No]
+        OP->>BOT: callback_query (enroll_no)
+        BOT->>OP: ❌ «Won't track «Odeya».»
+        DB->>DB: status = declined
+    end
+```
+
+### Flow D — daily rhythm (operator's POV)
+
+```mermaid
+journey
+    title Operator's day with the bot
+    section Morning
+      Open TG, see overnight meeting summaries: 5: Operator
+      See morning digest with today's tasks: 5: Operator
+      Tap [Start] on first task: 4: Operator
+      Answer 3 «Track this entity?» widgets from last night's meeting: 3: Operator
+    section During work
+      Send «Алина подготовь deck» in Slack: 5: Operator
+      Tap [Accept] on the auto-draft: 5: Operator
+      Voice memo to TG bot for a quick task: 5: Operator
+      Tap [Mark done] on completed task with link as artifact: 5: Operator
+    section Meeting
+      Have Zoom call: 4: Operator
+      Bot processes recording end-to-end while you talk to next client: 5: Operator
+    section Evening
+      Get evening digest with what got done: 5: Operator
+      Edit Sheet with new counterparty if needed (next pull picks it up): 4: Operator
+```
+
+### Feature → code map
+
+| Feature | Spec FR | Entry-point |
+|---|---|---|
+| Slack mention task creation | FR-1..5 | `app/intent/classifier.py` |
+| Telegram passive ingest | FR-CR-04-30 | `app/telegram_ingest/service.py` |
+| Telegram voice → text | FR-CR-05-14 | `_maybe_transcribe_voice` |
+| Draft confirm/reject/edit | FR-CR-04-32 | `app/orchestrator/finalize.py` + handlers |
+| Task lifecycle (Start/Done/Edit/Delete) | FR-CR-04 | `app/telegram_bot/listener.py::_dispatch_action` |
+| Subscriptions | FR-CR-04 | `app/services/subscriptions.py` |
+| Morning digest | FR-CR-05-10 | `app/telegram_bot/morning_cards.py` |
+| Evening status | FR-CR-05-10 | `app/telegram_bot/evening_status.py` |
+| Fireflies pipeline | FR-CR-05-119+ | `app/fireflies/pipeline.py` |
+| Zoom pipeline | FR-CR-05-119+ | `app/zoom/pipeline.py` |
+| Counterparty 4-pass canonicalisation | FR-CR-05-129..131 | `app/services/counterparty_match.py` |
+| Counterparty enrollment widget | FR-CR-05-133 | `app/services/counterparty_enrollment.py` |
+| Google Doc export per meeting | FR-CR-05-119 | `app/sync/docs.py` |
+| Google Tasks bidirectional sync | FR-CR-05-11 | `app/sync/task_sync.py` + `tasks_pull.py` |
+| Sheets writeback (Tasks tab) | FR-CR-05-11 | `app/services/card_sync.py` |
+| Per-recording trace JSONL | FR-CR-05-128 | `app/services/trace_log.py` |
+
+---
+
+## 7. What's NOT in this doc
+
+Now that infra + features are covered, the residual gaps:
+
+- **Backup & disaster recovery** for `slack-task-db` —
+  operator-managed (snapshots / pg_dump cadence not codified).
+- **Secret rotation** — env files on the VM, manual rotation.
 - **Webhook vs long-poll for Telegram** — currently long-poll
   via `getUpdates`, see `app/telegram_bot/listener.py`.
+- **Multi-tenant story** — single workspace today; operator's
+  Slack + a single TG bot user. No org-tenant model.
+- **Rate-limiting / quotas** — relies on upstream API limits +
+  poll-interval throttling; no internal queueing.
+- **Cost reporting** — no per-call cost tracking yet (operator
+  could read OpenAI dashboard).
 
-For trace observability of any of the above flows, see
+For trace observability of any flow, see
 [`TRACES.md`](./TRACES.md).

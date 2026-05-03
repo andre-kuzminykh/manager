@@ -209,22 +209,36 @@ class ZoomClient:
     # --- list recordings --------------------------------------
 
     def list_recordings(
-        self, *, limit: int = 20, page_size: int = 30
+        self, *, limit: int = 20, page_size: int = 30,
+        from_date: str | None = None, to_date: str | None = None,
     ) -> list[ZoomRecordingMeta]:
         """Return up to `limit` most-recent cloud recordings.
 
-        Zoom's `/users/me/recordings` returns reverse-chronological
-        when `from`/`to` aren't set. The migrator uses this same
-        call to grab «last N meetings» (mirrors Fireflies).
+        FR-CR-05-135 — Zoom Server-to-Server OAuth tokens are
+        NOT bound to a user, so the user-scope `/users/me/recordings`
+        endpoint 400s («Invalid access token, does not contain
+        scopes»). We use the account-wide endpoint
+        `/accounts/me/recordings` instead, which requires the
+        `cloud_recording:read:list_account_recordings:admin`
+        scope on the Zoom Marketplace app.
+
+        `from_date` / `to_date` are ISO `YYYY-MM-DD`. When None,
+        Zoom defaults to the last month. The migrator uses this
+        same call to grab «last N meetings» (mirrors Fireflies).
         """
         if not self.enabled:
             return []
         token = self._ensure_access_token()
         if not token:
             return []
+        params = [f"page_size={int(page_size)}"]
+        if from_date:
+            params.append(f"from={from_date}")
+        if to_date:
+            params.append(f"to={to_date}")
         url = (
-            f"{self._api_base}/users/me/recordings"
-            f"?page_size={int(page_size)}"
+            f"{self._api_base}/accounts/me/recordings?"
+            + "&".join(params)
         )
         headers = {
             "Authorization": f"Bearer {token}",

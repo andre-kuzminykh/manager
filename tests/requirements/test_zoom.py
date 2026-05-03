@@ -751,15 +751,22 @@ def test_zoom_short_summary_dm_arrives_before_per_task_cards(
             lambda **kw: "Артем сказал что Алина подготовит письмо.",
         )
 
+        # FR-CR-05-134 — give tasks explicit owners that resolve
+        # to a real team_member; previously relied on the now-
+        # removed admin_fallback_null_owner. Zoom uses
+        # `as_known_employees(prefer_telegram=True)` so the
+        # primary id is the telegram_user_id stringified ("777"),
+        # not the slack_user_id. Test purpose (summary BEFORE
+        # cards ordering) is unchanged.
         llm = _FakeLLM(
             summary_text="Краткое описание.",
             tasks=[
                 {"title": "Подготовить письмо",
                  "description": "Алина - подготовит письмо инвесторам.",
-                 "owner": None, "priority": "medium"},
+                 "owner": "777", "priority": "medium"},
                 {"title": "Скоординировать тайминг",
                  "description": "Ирина - скоординировать тайминг.",
-                 "owner": None, "priority": "medium"},
+                 "owner": "777", "priority": "medium"},
             ],
         )
         sender = _FakeSender()
@@ -778,7 +785,8 @@ def test_zoom_short_summary_dm_arrives_before_per_task_cards(
             s.add(
                 TeamMember(
                     real_name="Admin", telegram_user_id=777,
-                    telegram_username="admin", active=True,
+                    telegram_username="admin",
+                    active=True,
                 )
             )
             s.flush()

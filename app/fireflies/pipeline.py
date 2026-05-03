@@ -1804,12 +1804,21 @@ class FirefliesPipeline:
                 # LLM hallucinated a uid — null it.
                 owner_user_id = None
                 owner_resolution = "hallucinated_uid_dropped"
-            if not owner_user_id and admin_uid:
-                owner_user_id = admin_uid
+            if not owner_user_id:
+                # FR-CR-05-134 — when LLM declines to assign
+                # (Rule 6 anti-admin-default kicked in correctly),
+                # DO NOT silently route to the admin user. The
+                # admin is rarely the right owner for a meeting-
+                # task — defaulting to them caused «прислать email
+                # для отправки deck» landing on Андрей (AI Lead)
+                # when it should sit on IR. Operator-pinned: «не
+                # дефолтить на админе, если LLM не выбрал — пусть
+                # будет null, я доназначу руками». Card surfaces
+                # as «без владельца» until manually assigned.
                 owner_resolution = (
-                    "admin_fallback_null_owner"
+                    "left_unassigned"
                     if llm_owner_raw is None
-                    else owner_resolution + "_then_admin_fallback"
+                    else owner_resolution + "_left_unassigned"
                 )
             log.info(
                 "fireflies_task_owner_resolved",

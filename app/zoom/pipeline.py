@@ -1006,8 +1006,10 @@ class ZoomPipeline:
             owner_uid = (t.get("owner") or "").strip() or None
             if owner_uid and owner_uid not in valid_ids:
                 owner_uid = None
-            if owner_uid is None and admin_uid:
-                owner_uid = admin_uid
+            # FR-CR-05-134 — leave owner null when LLM declined
+            # to assign (Rule 6 anti-admin-default). Don't force
+            # admin: see fireflies/pipeline.py:_step_extract_tasks
+            # for the same fix.
             try:
                 priority = TaskPriority(t.get("priority") or "medium")
             except ValueError:
@@ -1213,8 +1215,8 @@ class ZoomPipeline:
             owner_uid = (t.get("owner") or "").strip() or None
             if owner_uid and owner_uid not in valid_ids:
                 owner_uid = None
-            if not owner_uid and admin_uid:
-                owner_uid = admin_uid
+            # FR-CR-05-134 — same fix as the first extract loop:
+            # do NOT force admin when LLM left owner null.
             owner_display_name = None
             if owner_uid and known_employees:
                 for e in known_employees:

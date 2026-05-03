@@ -547,12 +547,17 @@ def test_pipeline_retries_failed_step_on_rerun(
     assert docs.calls == 2  # second call succeeded
 
 
-def test_pipeline_admin_fallback_for_unresolved_owner(
+def test_pipeline_leaves_owner_null_when_llm_declined_to_assign(
     patched_session_scope, SessionFactory, monkeypatch
 ):
-    """Task extraction fallback chain mirrors FR-CR-05-09: when
-    the LLM emits an `owner` that doesn't resolve in
-    known_employees (or null), the admin uid wins."""
+    """FR-CR-05-134 — operator-pinned: when the LLM returns
+    ``owner=null`` (Rule 6 anti-admin-default kicked in
+    correctly), the pipeline MUST NOT silently route the task
+    to the admin user. Operator regression: «прислать email для
+    отправки deck» landed on Андрей (AI Lead) because Python
+    overrode Rule 6 with a hard fallback to admin_uid. Now the
+    task surfaces as owner=null and the operator assigns it
+    manually from the card."""
     monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "888")
     from app.config import get_settings
 
@@ -566,7 +571,6 @@ def test_pipeline_admin_fallback_for_unresolved_owner(
         )
         settings = _settings_with_audio_dir()
         client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-3")])
-        # LLM returns null owner — should fall through to admin.
         llm = _FakeLLM(tasks=[{"title": "сделать", "owner": None}])
         pipeline = FirefliesPipeline(
             settings=settings,
@@ -593,7 +597,8 @@ def test_pipeline_admin_fallback_for_unresolved_owner(
                 .first()
             )
             assert task is not None
-            assert task.owner_user_id == "888"
+            assert task.owner_user_id is None
+            assert task.owner_display_name in (None, "")
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 

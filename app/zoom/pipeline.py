@@ -248,16 +248,71 @@ class ZoomPipeline:
             mimetype_for=_mt,
             max_workers=3,
         )
-        for i, t in enumerate(transcript_parts):
-            if not t:
-                row.last_error = (
-                    f"Whisper returned empty transcript on chunk "
-                    f"{i+1}/{len(audio_paths)}"
+        whisper_failed = any(t is None or not (t or "").strip()
+                             for t in transcript_parts)
+        transcript = "\n".join(t or "" for t in transcript_parts).strip()
+
+        # FR-CR-05-148 — Zoom VTT fallback when Whisper either
+        # returns empty OR hallucinates (loops on Russian
+        # subtitle-credit phrases). Operator regression on
+        # «Ирина - статус по задачам»: Whisper produced 2962
+        # chars of «Редактор субтитров А.Семкин» repeating;
+        # Zoom's own VTT had the actual speech.
+        from app.services.transcription import (
+            looks_like_whisper_hallucination,
+        )
+
+        is_hallucinated = looks_like_whisper_hallucination(transcript)
+        if whisper_failed or is_hallucinated:
+            log.info(
+                "zoom_whisper_fallback_to_vtt",
+                zoom_id=row.zoom_id,
+                whisper_failed=whisper_failed,
+                hallucinated=is_hallucinated,
+                whisper_chars=len(transcript),
+            )
+            from app.services.trace_log import trace_event as _zte_h
+            _zte_h(
+                source="zoom", recording_id=row.zoom_id,
+                event="zoom_whisper_fallback_to_vtt",
+                whisper_failed=whisper_failed,
+                hallucinated=is_hallucinated,
+                whisper_chars=len(transcript),
+                whisper_preview=transcript[:300],
+            )
+            vtt_url = self._find_vtt_download_url(row)
+            if vtt_url:
+                vtt_text = self._client.fetch_vtt_transcript(vtt_url)
+                if vtt_text and len(vtt_text) > 100:
+                    log.info(
+                        "zoom_vtt_transcript_used",
+                        zoom_id=row.zoom_id,
+                        vtt_chars=len(vtt_text),
+                    )
+                    _zte_h(
+                        source="zoom", recording_id=row.zoom_id,
+                        event="zoom_vtt_transcript_used",
+                        vtt_chars=len(vtt_text),
+                    )
+                    transcript = vtt_text
+                    is_hallucinated = False
+                    whisper_failed = False
+                else:
+                    log.warning(
+                        "zoom_vtt_transcript_empty",
+                        zoom_id=row.zoom_id, vtt_url=vtt_url[:120],
+                    )
+            else:
+                log.warning(
+                    "zoom_vtt_url_not_found",
+                    zoom_id=row.zoom_id,
                 )
-                return False
-        transcript = "\n".join(transcript_parts).strip()
+
+        if whisper_failed and not transcript:
+            row.last_error = "transcribe failed: Whisper empty + no VTT fallback"
+            return False
         if not transcript:
-            row.last_error = "Whisper returned empty transcript"
+            row.last_error = "transcribe returned empty"
             return False
         if len(audio_paths) > 1:
             for p in audio_paths:
@@ -270,6 +325,30 @@ class ZoomPipeline:
         row.transcribed = True
         row.last_error = None
         return True
+
+    def _find_vtt_download_url(self, row: ZoomRecording) -> str | None:
+        """FR-CR-05-148 — find the Zoom-side VTT transcript file
+        URL for this recording. We re-list and match on uuid
+        (cheap — one HTTP call) instead of re-querying the
+        single-recording endpoint."""
+        try:
+            metas = self._client.list_recordings(
+                limit=50, page_size=100,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        for m in metas:
+            if m.id != row.zoom_id:
+                continue
+            files = (m.raw or {}).get("recording_files") or []
+            for rf in files:
+                if not isinstance(rf, dict):
+                    continue
+                rt = (rf.get("recording_type") or "").lower()
+                ext = (rf.get("file_extension") or "").upper()
+                if rt == "audio_transcript" and ext == "VTT":
+                    return rf.get("download_url")
+        return None
 
     # --- step 3: detailed summary -----------------------------
 

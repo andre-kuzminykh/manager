@@ -547,3 +547,124 @@ def test_resolve_mentions_to_directory_default_no_batching_one_call():
     )
     assert calls == 1
     assert out == {"m1": 10, "m2": 10}
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-148 — Whisper hallucination detection + Zoom VTT fallback
+# --------------------------------------------------------------------------- #
+
+
+def test_looks_like_whisper_hallucination_flags_subtitle_credit_loop():
+    """FR-CR-05-148 — operator regression on «Ирина - статус
+    по задачам»: Whisper returned 2962 chars of «Редактор
+    субтитров А.Семкин Корректор А.Егорова» repeating instead
+    of actual speech. Detector must flag this so VTT fallback
+    fires."""
+    from app.services.transcription import (
+        looks_like_whisper_hallucination,
+    )
+
+    operator_actual_output = (
+        "Редактор субтитров А.Семкин Корректор А.Егорова "
+        "Редактор субтитров Н.Александрова Корректор А.Кулакова "
+    ) * 50  # ~2900 chars, mimics the production failure
+    assert looks_like_whisper_hallucination(operator_actual_output) is True
+
+
+def test_looks_like_whisper_hallucination_passes_real_transcript():
+    """A normal meeting transcript with diverse vocabulary
+    must NOT be flagged."""
+    from app.services.transcription import (
+        looks_like_whisper_hallucination,
+    )
+
+    real_transcript = (
+        "Артем сказал что нужно продолжить переговоры с Шефлером "
+        "и согласовать формулировки base contract value. Алина "
+        "уточнила формат investor update и обсудила email-рассылку "
+        "по Sanders Capital. Дмитрий Седов отметил риски варантов "
+        "и предложил обсуждать только на звонках. Ирина зафиксировала "
+        "follow-up по Insight Partners и Bauerdort. " * 10
+    )
+    assert looks_like_whisper_hallucination(real_transcript) is False
+
+
+def test_looks_like_whisper_hallucination_short_text_returns_false():
+    """Short transcripts (e.g. operator forgot to record) are
+    NOT hallucinations — they're empty meetings. Don't trigger
+    fallback for them."""
+    from app.services.transcription import (
+        looks_like_whisper_hallucination,
+    )
+
+    assert looks_like_whisper_hallucination("") is False
+    assert looks_like_whisper_hallucination("Spasibo.") is False
+    assert looks_like_whisper_hallucination("Корректор А.Егорова") is False
+
+
+def test_looks_like_whisper_hallucination_flags_low_unique_word_ratio():
+    """Even without subtitle markers, a transcript that
+    repeats the same 4-word phrase 200x is a Whisper loop."""
+    from app.services.transcription import (
+        looks_like_whisper_hallucination,
+    )
+
+    looped = "встреча прошла продуктивно ничего нового " * 200
+    assert looks_like_whisper_hallucination(looped) is True
+
+
+def test_parse_vtt_to_plain_text_strips_timing_and_cue_ids():
+    """FR-CR-05-148 — Zoom VTT format: WEBVTT header, optional
+    cue-id (numeric), timing line `00:00:00.000 --> ...`, then
+    cue text. Parser drops everything except cue text and
+    joins lines with `\\n`."""
+    from app.zoom.client import _parse_vtt_to_plain_text
+
+    vtt = (
+        "WEBVTT\n"
+        "\n"
+        "1\n"
+        "00:00:00.000 --> 00:00:05.000\n"
+        "Привет, начинаем встречу.\n"
+        "\n"
+        "2\n"
+        "00:00:05.500 --> 00:00:12.000\n"
+        "Артем: давайте обсудим Schaeffler.\n"
+        "\n"
+        "3\n"
+        "00:00:12.500 --> 00:00:18.000\n"
+        "Алина: подготовлю письмо до пятницы.\n"
+    )
+    out = _parse_vtt_to_plain_text(vtt)
+    assert "Привет, начинаем встречу." in out
+    assert "Артем: давайте обсудим Schaeffler." in out
+    assert "Алина: подготовлю письмо до пятницы." in out
+    assert "WEBVTT" not in out
+    assert "00:00:" not in out
+    # Cue ids (1, 2, 3) on their own lines stripped.
+    lines = out.split("\n")
+    assert "1" not in lines and "2" not in lines and "3" not in lines
+
+
+def test_parse_vtt_to_plain_text_handles_no_cue_ids():
+    """VTT without numeric cue-ids — Zoom often omits them."""
+    from app.zoom.client import _parse_vtt_to_plain_text
+
+    vtt = (
+        "WEBVTT\n"
+        "\n"
+        "00:00:00.000 --> 00:00:05.000\n"
+        "Hello world.\n"
+        "\n"
+        "00:00:05.500 --> 00:00:10.000\n"
+        "Second line.\n"
+    )
+    out = _parse_vtt_to_plain_text(vtt)
+    assert out == "Hello world.\nSecond line."
+
+
+def test_parse_vtt_to_plain_text_empty_input():
+    from app.zoom.client import _parse_vtt_to_plain_text
+
+    assert _parse_vtt_to_plain_text("") == ""
+    assert _parse_vtt_to_plain_text("WEBVTT\n\n") == ""

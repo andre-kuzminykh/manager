@@ -103,6 +103,62 @@ def transcribe_bytes(
     return text.strip() or None
 
 
+# FR-CR-05-148 — phrases Whisper LOOPS on when audio is silent /
+# quiet / has long pauses. Russian dubbed-content «titles» it
+# saw in training data. List grows as we hit new ones in prod.
+WHISPER_HALLUCINATION_MARKERS: tuple[str, ...] = (
+    "Редактор субтитров",
+    "Корректор",
+    "Субтитры от",
+    "Субтитры подготовлены",
+    "Субтитры сделал",
+    "Субтитры от",
+    "Спасибо за просмотр",
+    "Подписывайтесь",
+    "Subscribe to my channel",
+    "Subtitles by",
+    "Edited by",
+    "Translated by",
+)
+
+
+def looks_like_whisper_hallucination(
+    text: str,
+    *,
+    expected_min_chars: int = 500,
+) -> bool:
+    """FR-CR-05-148 — detect Whisper's silent-audio hallucination
+    where it loops repeating Russian-dubbed-content subtitle
+    credits («Редактор субтитров А.Семкин Корректор А.Егорова»
+    etc.) instead of the actual speech.
+
+    Two signals:
+      1. Multiple `WHISPER_HALLUCINATION_MARKERS` matches in the
+         first 1000 chars (≥3 hits).
+      2. Very low unique-word ratio over the whole text (<5%
+         when there are 100+ words). A 30-min recording that
+         loops the same 4-word phrase fits this.
+
+    Returns False on short / empty input — those are «empty
+    meeting» cases, not hallucinations.
+    """
+    if not text or len(text) < expected_min_chars:
+        return False
+    head = text[:1000]
+    marker_hits = sum(head.count(m) for m in WHISPER_HALLUCINATION_MARKERS)
+    if marker_hits >= 3:
+        return True
+    import re as _re
+
+    words = _re.findall(r"\w+", text.lower())
+    if len(words) < 100:
+        return False
+    unique = len(set(words))
+    if unique / len(words) < 0.05:
+        return True
+    return False
+
+
 def transcribe_chunks_parallel(
     paths: list[str],
     *,

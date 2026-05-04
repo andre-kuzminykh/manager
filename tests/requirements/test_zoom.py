@@ -473,6 +473,64 @@ def test_zoom_participants_kickoff_runs_in_parallel_with_detailed_summary(
         assert row.__dict__.get("_zm_team_participants") == ["Артем Соколов"]
 
 
+def test_zoom_client_fetch_vtt_transcript_returns_plain_text():
+    """FR-CR-05-148 — `fetch_vtt_transcript(url)` HTTP-GETs the
+    VTT file (with bearer token), parses cue text out, returns
+    plain string. Used as Whisper fallback when output looks
+    like the operator's «Редактор субтитров А.Семкин» loop."""
+    fake = _FakeRequestFunc(
+        responses=[
+            # OAuth
+            {"access_token": "tok-1", "expires_in": 3600},
+        ]
+    )
+    c = ZoomClient(
+        account_id="acc", client_id="cid", client_secret="csecret",
+        request_func=fake,
+    )
+
+    vtt_body = (
+        "WEBVTT\n"
+        "\n"
+        "1\n"
+        "00:00:00.000 --> 00:00:05.000\n"
+        "Артем: начинаем синк.\n"
+        "\n"
+        "2\n"
+        "00:00:05.500 --> 00:00:10.000\n"
+        "Ирина: статус по задачам в порядке.\n"
+    )
+
+    # Patch urllib.request.urlopen used inside fetch_vtt_transcript.
+    from io import BytesIO
+    from unittest.mock import patch
+
+    class _FakeResp:
+        def __init__(self, body: bytes):
+            self._buf = BytesIO(body)
+
+        def __enter__(self):
+            return self._buf
+
+        def __exit__(self, *a):
+            pass
+
+    def _fake_urlopen(req, timeout):
+        # Verify auth header was set.
+        assert req.headers.get("Authorization", "").startswith("Bearer ")
+        return _FakeResp(vtt_body.encode("utf-8"))
+
+    with patch(
+        "app.zoom.client.urllib.request.urlopen",
+        side_effect=_fake_urlopen,
+    ):
+        out = c.fetch_vtt_transcript("https://zoom.us/rec/download/X.vtt")
+    assert "Артем: начинаем синк." in out
+    assert "Ирина: статус по задачам в порядке." in out
+    assert "WEBVTT" not in out
+    assert "00:00:" not in out
+
+
 def test_zoom_client_token_cached_until_expiry():
     """Second list_recordings call within the TTL doesn't
     re-OAuth."""

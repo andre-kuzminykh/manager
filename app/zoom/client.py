@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -414,6 +415,81 @@ class ZoomClient:
         except Exception as e:  # noqa: BLE001
             log.warning("zoom_audio_download_failed", error=str(e))
             return None
+
+
+    def fetch_vtt_transcript(
+        self, vtt_download_url: str,
+    ) -> str | None:
+        """FR-CR-05-148 — download Zoom's VTT transcript file
+        and return its plain-text content (cue text only,
+        cue-ids and timing lines stripped).
+
+        Used as a fallback when Whisper hallucinates (returns
+        looped Russian subtitle credits like «Редактор
+        субтитров»). Zoom's own VTT is generally usable —
+        less proper-noun fidelity than Whisper-with-bias-prompt
+        but better than 100% garbage.
+
+        Returns the joined transcript text, or `None` on any
+        failure (auth / network / parse).
+        """
+        if not vtt_download_url:
+            return None
+        token = self._ensure_access_token()
+        if not token:
+            log.warning("zoom_vtt_no_token")
+            return None
+        req = urllib.request.Request(
+            vtt_download_url,
+            headers={"Authorization": f"Bearer {token}"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                vtt_bytes = resp.read()
+        except urllib.error.HTTPError as e:
+            log.warning(
+                "zoom_vtt_http_error", status=e.code,
+                url=vtt_download_url[:200],
+            )
+            return None
+        except Exception as e:  # noqa: BLE001
+            log.warning("zoom_vtt_download_failed", error=str(e))
+            return None
+        try:
+            text = vtt_bytes.decode("utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            return None
+        return _parse_vtt_to_plain_text(text)
+
+
+def _parse_vtt_to_plain_text(vtt_body: str) -> str:
+    """Strip WEBVTT header, cue-ids, and timing lines; return
+    concatenated cue text. Cues separated by single newlines."""
+    if not vtt_body:
+        return ""
+    lines = vtt_body.splitlines()
+    out: list[str] = []
+    timing_re = re.compile(
+        r"^\s*\d{1,2}:\d{2}(:\d{2})?\.\d{1,3}\s*-->\s*"
+        r"\d{1,2}:\d{2}(:\d{2})?\.\d{1,3}"
+    )
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        if line.upper().startswith("WEBVTT"):
+            continue
+        if timing_re.match(line):
+            continue
+        # Cue identifier — pure number on its own line. Skip.
+        if line.isdigit():
+            continue
+        # NOTE / STYLE / REGION blocks in WebVTT — skip the line.
+        if line.startswith(("NOTE", "STYLE", "REGION")):
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
 
 
 __all__ = ["ZoomClient", "ZoomRecordingMeta"]

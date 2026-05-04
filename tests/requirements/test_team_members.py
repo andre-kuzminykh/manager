@@ -905,6 +905,49 @@ def test_pick_meeting_owner_fallback_excludes_topic_forbidden_teammates():
     assert out == "U_SEDOV"
 
 
+def test_pick_meeting_owner_fallback_honours_ne_uchastvuet_phrasing():
+    """FR-CR-05-142b — operator's actual notes use «не
+    участвует в Fundrising sync» (not «не вести X-задачи»).
+    The fallback must still recognise this phrasing AND the
+    operator's typo «Fundrising» (vs «Fundraising»). Pinned
+    against the real production notes for Дима Дроздов."""
+    from app.services.team_members import (
+        infer_topic_keywords_from_text,
+        pick_meeting_owner_fallback,
+    )
+
+    drozdov_notes = (
+        "ВСЕ, ЧТО СВЯЗАНО С ФОНДАМИ\n"
+        "Коннекты со встреч\n"
+        "Поиск выходов на фонды\n"
+        "Аутрич (почта, линк) // не участвует в Fundrising sync"
+    )
+    sedov_notes = (
+        "Ведёт все fundraising / IR задачи: общение с инвесторами, "
+        "варанты, экземпляры контрактов, fund close"
+    )
+    employees = [
+        {"slack_user_id": "U_DROZDOV", "real_name": "Дима Дроздов",
+         "role": "Head of Network", "notes": drozdov_notes},
+        {"slack_user_id": "U_SEDOV", "real_name": "Дмитрий Седов",
+         "role": "Финансовый Советник Артема", "notes": sedov_notes},
+    ]
+
+    # Topic inferred from operator's actual meeting title (with
+    # the «Fundrising» typo).
+    keywords = infer_topic_keywords_from_text("01/05 - Fundrising sync")
+    assert "fundrais" in keywords or "fundrising" in keywords
+
+    out = pick_meeting_owner_fallback(
+        known_employees=employees,
+        participants_real_names=["Дима Дроздов", "Дмитрий Седов"],
+        topic_keywords=keywords,
+    )
+    # Дроздов EXCLUDED via «не участвует в Fundrising sync»
+    # override; cascade lands on Седов.
+    assert out == "U_SEDOV"
+
+
 def test_pick_meeting_owner_fallback_returns_none_with_no_participants():
     from app.services.team_members import pick_meeting_owner_fallback
 

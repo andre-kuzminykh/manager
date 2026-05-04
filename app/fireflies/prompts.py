@@ -484,16 +484,33 @@ OWNER SELECTION RULES (read carefully — operator-specific):
        non-forbidden participant). Never `null` (FR-CR-05-142).
 
    NOTES-FORBIDS-DOMAIN EXCLUSION (FR-CR-05-142b): when a
-   teammate's `notes` explicitly say «не вести X-задачи» /
-   «не вести X» (where X is fundraising, IR, research, …) AND
-   the task is in domain X — EXCLUDE that teammate as a
-   candidate even if their first name matches. Example: «Дима
-   Дроздов» notes say «не вести fundraising-задачи»; on a task
-   like «Sanders Capital — выяснить релевантный private фонд»
-   (fundraising) you must NOT pick Дроздов even if he was on
-   the call. Pick Седов (the other Дима, whose notes say
-   «Ведёт fundraising / IR») instead. If Седов wasn't on the
-   call, fall back to the principal per Rule 5d.
+   teammate's `notes` contain ANY exclusion clause for the
+   task's domain — «не вести X-задачи», «не вести X»,
+   «не участвует в X», «не назначать X», «doesn't attend X»,
+   «do not assign X» — EXCLUDE that teammate as a candidate
+   even if their first name matches AND even if a heading
+   line in the same notes describes them as adjacent to the
+   domain.
+
+   READ THE FULL NOTES BLOCK. Operator notes often have a
+   HEADING describing what a teammate generally does followed
+   later by an OVERRIDE clause forbidding a specific bucket.
+   The override wins. Worked example: «Дима Дроздов» notes:
+
+       ВСЕ, ЧТО СВЯЗАНО С ФОНДАМИ
+       Коннекты со встреч
+       Поиск выходов на фонды
+       Аутрич (почта, линк)
+       // не участвует в Fundrising sync
+
+   On task «Sanders Capital — выяснить релевантный private
+   фонд» from a Fundrising sync meeting, the heading «ВСЕ,
+   ЧТО СВЯЗАНО С ФОНДАМИ» looks tempting BUT the «не
+   участвует в Fundrising sync» override forbids him for
+   fundraising-sync-derived tasks. Pick «Дмитрий Седов» (the
+   other Дима, notes: «Ведёт все fundraising / IR задачи»)
+   instead. If Седов wasn't on the call either, fall back to
+   the principal per Rule 5d — never to Дроздов on this domain.
 
    Operator regressions this rule fixes:
      team has «Дима Дроздов» (Аналитик) and «Дмитрий Седов»

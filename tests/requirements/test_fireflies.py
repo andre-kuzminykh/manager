@@ -1607,19 +1607,27 @@ def test_task_extraction_prompt_pins_notes_forbids_domain_rule():
         # FR id present so a future rewrite can't drop it silently.
         assert "FR-CR-05-142b" in prompt
     # Worked example pinned in extractor Rule 8 (Дроздов excluded
-    # from fundraising even when present).
+    # from fundraising even when present). Uses operator's
+    # actual notes phrasing «не участвует в Fundrising sync».
     assert "FR-CR-05-142b" in TASK_EXTRACTION_SYSTEM
-    assert "не вести fundraising" in TASK_EXTRACTION_SYSTEM
     assert "Sanders Capital" in TASK_EXTRACTION_SYSTEM
+    assert "не участвует в Fundrising sync" in TASK_EXTRACTION_SYSTEM
+    assert "ВСЕ, ЧТО СВЯЗАНО С ФОНДАМИ" in TASK_EXTRACTION_SYSTEM
+    # The override-vs-heading framing pinned (operator notes
+    # have a heading line + later override clause).
+    assert "override" in TASK_EXTRACTION_SYSTEM.lower()
 
     # Participants extractor honours the same exclusion when
-    # `meeting_title` flags fundraising.
+    # `meeting_title` flags fundraising. Recognises operator's
+    # natural phrasing «не участвует в X».
     assert "FR-CR-05-142b" in PARTICIPANTS_EXTRACT_SYSTEM
     assert "не вести" in PARTICIPANTS_EXTRACT_SYSTEM
-    assert "Fundraising sync" in PARTICIPANTS_EXTRACT_SYSTEM
-    # Worked example B pinned (notes EXCLUDE on topic).
+    assert "не участвует" in PARTICIPANTS_EXTRACT_SYSTEM
+    assert "Fundrising sync" in PARTICIPANTS_EXTRACT_SYSTEM
+    # Worked example B pinned with operator's actual notes.
     assert "Дима Дроздов" in PARTICIPANTS_EXTRACT_SYSTEM
     assert "Дмитрий Седов" in PARTICIPANTS_EXTRACT_SYSTEM
+    assert "ВСЕ, ЧТО СВЯЗАНО С ФОНДАМИ" in PARTICIPANTS_EXTRACT_SYSTEM
 
 
 def test_task_extraction_prompt_forbids_admin_default_owner():

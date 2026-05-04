@@ -650,13 +650,23 @@ PRINCIPAL_NOTE_MARKERS: tuple[str, ...] = (
 )
 
 # Notes-clause prefix the operator uses to forbid a teammate
-# from a domain («не вести fundraising-задачи»). Pipeline + prompt
-# both honour this for FR-CR-05-142b.
+# from a domain («не вести fundraising-задачи», «не участвует в
+# Fundrising sync»). Pipeline + prompt both honour this for
+# FR-CR-05-142b. Match is case-insensitive substring; we look
+# for the prefix AND a topic keyword in the same notes block.
 NOTES_FORBIDS_PREFIX: tuple[str, ...] = (
     "не вести",
     "не назначать",
+    "не участвует",
+    "не участвую",
+    "не присутствует",
+    "не ходит",
     "do not assign",
     "do not own",
+    "doesn't attend",
+    "does not attend",
+    "not in fundrais",
+    "not in fundrais",
 )
 
 
@@ -777,9 +787,10 @@ def infer_topic_keywords_from_text(text: str) -> list[str]:
     t = text.lower()
     out: set[str] = set()
     fundraising_markers = (
-        "fundraising", "fundrais", "ir", "investor", "инвест",
-        "раунд", "round", "first close", "эксклюзив",
-        "term sheet", "термшит", "термшит",
+        "fundraising", "fundrais", "fundrising", "ir",
+        "investor", "инвест", "раунд", "round", "first close",
+        "эксклюзив", "term sheet", "термшит",
+        "fund close", "fund-close", "private fund",
     )
     research_markers = (
         "research", "data analysis", "dashboard", "аналитик",
@@ -787,8 +798,11 @@ def infer_topic_keywords_from_text(text: str) -> list[str]:
     )
     if any(m in t for m in fundraising_markers):
         out.add("fundraising")
+        out.add("fundrais")
+        out.add("fundrising")
         out.add("ir")
         out.add("investor")
+        out.add("инвест")
     if any(m in t for m in research_markers):
         out.add("research")
     return sorted(out)

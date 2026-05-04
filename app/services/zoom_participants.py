@@ -71,10 +71,20 @@ teammates with that first name (e.g. «Дима Дроздов» AND
     TOPIC): when the meeting's topic (from `meeting_title` /
     transcript content) is clearly X (e.g. «Fundraising sync» /
     investor calls) AND a candidate's `notes` explicitly say
-    «не вести X-задачи» / «не вести X» / «do not assign X» —
-    EXCLUDE that candidate even on a bare-first-name match.
+    «не вести X-задачи» / «не вести X» / «не участвует в X» /
+    «не назначать X» / «doesn't attend X» / «do not assign X»
+    — EXCLUDE that candidate even on a bare-first-name match.
     Operator-pinned: «димы дроздова не в участниках ни в
     задачах не должно быть в Fundrising».
+
+    READ THE FULL `notes` BLOCK — operator notes often have a
+    HEADING line («ВСЕ, ЧТО СВЯЗАНО С ФОНДАМИ») followed by a
+    LATER override clause («не участвует в Fundrising sync»).
+    The override clause WINS over the heading; the heading
+    describes what the teammate generally does, while the
+    «не участвует / не вести / doesn't attend» clause forbids
+    that teammate FROM THIS SPECIFIC MEETING TYPE. Skim every
+    line of `notes`, not just the first.
 
 Worked example A (notes don't disambiguate, bare first name):
   team_members: «Дима Дроздов» (notes: «Research, dashboards»)
@@ -85,16 +95,25 @@ Worked example A (notes don't disambiguate, bare first name):
                 Downstream task-routing uses notes per task.
 
 Worked example B (FR-CR-05-142b — notes EXCLUDE on topic):
-  team_members: «Дима Дроздов» (notes: «Research, dashboards;
-                не вести fundraising-задачи»)
-                AND «Дмитрий Седов» (notes: «Ведёт fundraising
-                / IR: общение с инвесторами, варанты»).
-  meeting_title: «Fundraising sync» — clear fundraising topic.
-  transcript:   «… Дима подготовит Sanders Capital follow-up …»
-                (bare first name, no surname).
-  output:       ONLY «Дмитрий Седов». «Дима Дроздов» EXCLUDED
-                because his notes forbid fundraising-задачи AND
-                the meeting is fundraising.
+  team_members:
+    «Дима Дроздов» — notes (multi-line, the LAST line is the
+      override): «ВСЕ, ЧТО СВЯЗАНО С ФОНДАМИ. Коннекты со
+      встреч. Поиск выходов на фонды. Аутрич (почта, линк).
+      // не участвует в Fundrising sync»
+    «Дмитрий Седов» — notes: «Ведёт все fundraising / IR
+      задачи: общение с инвесторами, варанты, fund close».
+  meeting_title: «01/05 - Fundrising sync» — clear fundraising
+    topic (note operator's typo «Fundrising» — match it
+    fuzzily; both spellings count).
+  transcript: «… Дима подготовит Sanders Capital follow-up …»
+    (bare first name, no surname).
+  output: ONLY «Дмитрий Седов». «Дима Дроздов» EXCLUDED —
+    his notes contain «не участвует в Fundrising sync», which
+    overrides the «ВСЕ, ЧТО СВЯЗАНО С ФОНДАМИ» heading at the
+    top of his notes. The override clause is the operator's
+    way of saying «yes he does fundraising-adjacent work
+    (research, network, outreach), but he is NOT on this
+    specific recurring call». Honor the override.
 ═══════════════════════════════════════════════════════════════
 
 OUTPUT RULES:

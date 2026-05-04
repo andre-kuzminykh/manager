@@ -5,7 +5,10 @@ from app.models.counterparty import (
     CounterpartyAttribute,
     CounterpartyMention,
 )
-from app.models.counterparty_prompt import CounterpartyPrompt
+from app.models.counterparty_prompt import (
+    CounterpartyPrompt,
+    CounterpartyPromptBatch,
+)
 from app.models.daily_plan import DailyPlanItem
 from app.models.employee import Employee
 from app.models.intent import ActionDraft, ActionDraftState, IntentInference
@@ -44,6 +47,7 @@ __all__ = [
     "CounterpartyAttribute",
     "CounterpartyMention",
     "CounterpartyPrompt",
+    "CounterpartyPromptBatch",
     "ActionDraftState",
     "DailyPlanItem",
     "Employee",

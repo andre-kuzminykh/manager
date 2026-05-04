@@ -33,6 +33,21 @@ ACTION_UNSUBSCRIBE = "unsubscribe"
 ACTION_ENROLL_YES = "enroll_yes"
 ACTION_ENROLL_NO = "enroll_no"
 ACTION_ENROLL_SKIP = "enroll_skip"
+# FR-CR-05-138 — batch multi-select enrollment widget. Two
+# stages of buttons:
+#   stage 1 — numpad toggles + finish
+#     ACTION_BATCH_TOGGLE — toggles index_in_batch on a prompt
+#     ACTION_BATCH_NEXT   — finalise selection, start processing
+#   stage 2 — per-entity name confirm + skip
+#     ACTION_BATCH_KEEP_NAME — keep mention surface form as-is
+#     ACTION_BATCH_SKIP_ENTITY — skip current entity, advance
+# entity_id encoding (single-int slot in callback_data):
+#   ACTION_BATCH_TOGGLE: prompt_id (the toggled CounterpartyPrompt)
+#   all others: batch_id
+ACTION_BATCH_TOGGLE = "btoggle"
+ACTION_BATCH_NEXT = "bnext"
+ACTION_BATCH_KEEP_NAME = "bkeep"
+ACTION_BATCH_SKIP_ENTITY = "bskip"
 
 
 def _btn(text: str, action: str, entity_id: int) -> dict[str, Any]:
@@ -144,6 +159,71 @@ def enrollment_skip_keyboard(*, prompt_id: int) -> dict[str, Any]:
     return {
         "inline_keyboard": [
             _row(_btn("Skip", ACTION_ENROLL_SKIP, prompt_id)),
+        ]
+    }
+
+
+def batch_select_keyboard(
+    *,
+    prompts: list[dict[str, Any]],
+    batch_id: int,
+    selected_count: int,
+) -> dict[str, Any]:
+    """FR-CR-05-138 stage 1 — numpad of N buttons (2-per-row)
+    + final [Next →]. `prompts` is a list of
+    `{id: int, index: int, selected: bool}` ordered by
+    `index_in_batch`. Selected indices show with a leading ✅.
+
+    Up to 10 entities = 5 buttons per row × 2 rows. Beyond 10
+    we just keep going 5 per row — operator's UX target was 10
+    so this is a graceful overflow rather than a paginator (a
+    paginator can be added in v2.1 once needed).
+    """
+    rows: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for p in prompts:
+        idx = p["index"]
+        label = f"✅{idx}" if p.get("selected") else str(idx)
+        current.append(_btn(label, ACTION_BATCH_TOGGLE, p["id"]))
+        if len(current) == 5:
+            rows.append(current)
+            current = []
+    if current:
+        rows.append(current)
+    next_label = (
+        f"Next →  ({selected_count} selected)"
+        if selected_count
+        else "Next →"
+    )
+    rows.append([_btn(next_label, ACTION_BATCH_NEXT, batch_id)])
+    return {"inline_keyboard": rows}
+
+
+def batch_confirm_name_keyboard(
+    *, batch_id: int, mention_text: str
+) -> dict[str, Any]:
+    """FR-CR-05-138 stage 2 — confirm or skip the surface form
+    as the canonical name. (User can also reply with text/voice
+    to suggest a corrected name; that flows through
+    PendingRegistry.) Trim mention to fit Telegram's button-
+    text 64-byte cap."""
+    keep_label = f"✅ Keep \"{(mention_text or '')[:30]}\""
+    return {
+        "inline_keyboard": [
+            _row(
+                _btn(keep_label, ACTION_BATCH_KEEP_NAME, batch_id),
+                _btn("⏭ Skip", ACTION_BATCH_SKIP_ENTITY, batch_id),
+            ),
+        ]
+    }
+
+
+def batch_context_keyboard(*, batch_id: int) -> dict[str, Any]:
+    """FR-CR-05-138 stage 3 — single Skip button. Text/voice
+    reply provides the context."""
+    return {
+        "inline_keyboard": [
+            _row(_btn("⏭ Skip", ACTION_BATCH_SKIP_ENTITY, batch_id)),
         ]
     }
 

@@ -1,32 +1,27 @@
-"""FR-CR-05-133 — Telegram-side enrollment widget for counter-
-party mentions that didn't resolve to the directory.
+"""FR-CR-05-133 + FR-CR-05-138 — Telegram-side enrollment
+widget for counterparty mentions that didn't resolve to the
+directory.
 
-After Pass 2 (`resolve_mentions_to_directory`) finishes for a
-meeting, the pipeline lists every mention with
-`directory_id is None` (Whisper heard a name the operator never
-added to Sheets). For each unresolved mention × each admin
-recipient, the bot posts a two-stage widget:
+FR-CR-05-138 supersedes the per-entity yes/no flow with a
+single multi-select message:
 
-  Stage 1: «Track «<name>»? [Yes] [No]»
-  Stage 2 (after Yes): «Send text or voice context, or [Skip].»
+  Stage 1 — multi-select grid (one `CounterpartyPromptBatch`
+            per (recording, user)):
+    «Found N unrecognised entities — tap numbers to select»
+    [1][2][3][4][5]
+    [6][7][8][9][10]
+    [Next →]
 
-`CounterpartyPrompt` rows persist that flow durably so:
-  - the operator can answer hours later (after the morning DM
-    summary lands at start of workday) without state loss across
-    listener restarts (the in-memory `PendingRegistry` is for
-    short-lived flows only — FR-CR-04-29 docstring);
-  - `(source_kind, source_id, mention_normalised, user_id)` is
-    UNIQUE so re-running a meeting pipeline doesn't double-post.
+  Stage 2 — for each selected, ask for canonical-name
+            confirmation (text/voice or [Keep] / [Skip]).
 
-Status transitions:
+  Stage 3 — for each kept name, ask for context
+            (text/voice or [Skip]).
 
-    pending_yesno ─[Yes]──→ awaiting_context ─[text/voice]→ completed_added
-                  ─[No]───→ declined          ─[Skip]──────→ completed_skipped
-
-Both terminal-completed paths optionally write a `Counterparty`
-hub (and a `CounterpartyAttribute` satellite carrying the
-operator's notes when a context reply arrived) — captured via
-`created_counterparty_id` for audit.
+The legacy per-prompt yes/no statuses
+(`pending_yesno`, `awaiting_context`) stay for back-compat
+with existing rows; new flow uses `pending_selection`,
+`pending_confirm_name`, `pending_context`.
 """
 from __future__ import annotations
 
@@ -35,6 +30,7 @@ from typing import Any  # noqa: F401  (kept for future JSON satellite)
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -50,16 +46,29 @@ from app.models.base import Base, TimestampMixin
 # Status string constants — keep close to the model so callers
 # can `from app.models.counterparty_prompt import STATUS_*`
 # without circular imports.
+# FR-CR-05-133 (legacy per-entity yes/no flow):
 STATUS_PENDING_YESNO = "pending_yesno"
 STATUS_AWAITING_CONTEXT = "awaiting_context"
 STATUS_COMPLETED_ADDED = "completed_added"
 STATUS_COMPLETED_SKIPPED = "completed_skipped"
 STATUS_DECLINED = "declined"
+# FR-CR-05-138 (batch multi-select flow):
+STATUS_PENDING_SELECTION = "pending_selection"
+STATUS_PENDING_CONFIRM_NAME = "pending_confirm_name"
+STATUS_PENDING_CONTEXT = "pending_context"
+STATUS_BATCH_PROCESSING = "processing"
+STATUS_BATCH_COMPLETED = "completed"
+
+# Per-batch step pointer (selected entities iterate one at a
+# time through these two sub-stages).
+STEP_CONFIRM_NAME = "confirm_name"
+STEP_CONTEXT = "context"
 
 
 class CounterpartyPrompt(Base, TimestampMixin):
-    """One enrollment widget for one unresolved counterparty
-    mention, delivered to one Telegram user."""
+    """One enrollment row per unresolved counterparty mention,
+    tied to a recipient. May be part of a batch (FR-CR-05-138)
+    or standalone (legacy FR-CR-05-133)."""
 
     __tablename__ = "counterparty_prompts"
     __table_args__ = (
@@ -114,14 +123,94 @@ class CounterpartyPrompt(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
+    # FR-CR-05-138 — batch multi-select flow.
+    batch_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("counterparty_prompt_batches.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    index_in_batch: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    selected: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    canonical_name_corrected: Mapped[str | None] = mapped_column(
+        String(512), nullable=True
+    )
+
     counterparty = relationship("Counterparty")
+    batch = relationship(
+        "CounterpartyPromptBatch", back_populates="prompts"
+    )
+
+
+class CounterpartyPromptBatch(Base, TimestampMixin):
+    """FR-CR-05-138 — one batch per (recording, user). Carries
+    the multi-select message id + processing pointer."""
+
+    __tablename__ = "counterparty_prompt_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_kind", "source_id", "user_id",
+            name="uq_counterparty_prompt_batches_per_user",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    multiselect_message_id: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True
+    )
+
+    entity_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=STATUS_PENDING_SELECTION
+    )
+    # 1-based index into the SELECTED subset of prompts.
+    current_index: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    # Which sub-step we're on for current_index:
+    # `confirm_name` or `context`. Null when not processing.
+    current_step: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    prompts = relationship(
+        "CounterpartyPrompt", back_populates="batch",
+        order_by="CounterpartyPrompt.index_in_batch",
+    )
 
 
 __all__ = [
     "CounterpartyPrompt",
+    "CounterpartyPromptBatch",
     "STATUS_PENDING_YESNO",
     "STATUS_AWAITING_CONTEXT",
     "STATUS_COMPLETED_ADDED",
     "STATUS_COMPLETED_SKIPPED",
     "STATUS_DECLINED",
+    "STATUS_PENDING_SELECTION",
+    "STATUS_PENDING_CONFIRM_NAME",
+    "STATUS_PENDING_CONTEXT",
+    "STATUS_BATCH_PROCESSING",
+    "STATUS_BATCH_COMPLETED",
+    "STEP_CONFIRM_NAME",
+    "STEP_CONTEXT",
 ]

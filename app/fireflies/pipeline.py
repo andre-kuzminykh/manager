@@ -1329,19 +1329,22 @@ class FirefliesPipeline:
         if not recipient_ids:
             return 0
 
-        from app.services.counterparty_enrollment import (
-            post_enrollment_prompts,
+        # FR-CR-05-138 — switched from per-entity yes/no
+        # widgets to a single batch multi-select widget.
+        from app.services.counterparty_enrollment_batch import (
+            post_enrollment_batch,
         )
 
-        result = post_enrollment_prompts(
+        result = post_enrollment_batch(
             session,
             sender=self._sender,
             source_kind="fireflies",
             source_id=row.fireflies_id,
+            meeting_title=row.title or "",
             unresolved_mentions=unresolved,
             recipient_user_ids=recipient_ids,
         )
-        return result.posted
+        return result.batches_created
 
     def _step_canonicalize_task_names(
         self, session: Session, row: MeetingRecording

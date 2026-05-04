@@ -50,6 +50,10 @@ from app.telegram_bot.cards import (
     replace_widgets_with_task_card,
 )
 from app.telegram_bot.keyboards import (
+    ACTION_BATCH_KEEP_NAME,
+    ACTION_BATCH_NEXT,
+    ACTION_BATCH_SKIP_ENTITY,
+    ACTION_BATCH_TOGGLE,
     ACTION_CANCEL,
     ACTION_CONFIRM,
     ACTION_DELETE,
@@ -1046,6 +1050,21 @@ class TelegramListener:
                         report.errors += 1
                     continue
 
+                # FR-CR-05-138 — text/voice reply for the active
+                # batch enrollment widget. Detect by user having
+                # exactly one batch in `processing` state; route
+                # the (possibly transcribed) text to the batch's
+                # current step.
+                try:
+                    if self._maybe_route_to_active_batch(session, msg):
+                        report.pending_replies_handled += 1
+                        continue
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "telegram_batch_reply_failed",
+                        chat_id=msg.chat_id, error=str(e),
+                    )
+
                 try:
                     # FR-CR-05-45 — welcome widget on /start (and /help).
                     # Operators arrive at the bot's DM cold and need a
@@ -1232,12 +1251,14 @@ class TelegramListener:
         if outcome is None:
             return
 
-        # FR-CR-05-133 — enrollment widgets edit themselves in
-        # place inside the dispatcher path; nothing further to
-        # render. Yes additionally registers a PendingQuestion
-        # so the next text/voice reply lands back here.
+        # FR-CR-05-133 — legacy per-entity enrollment widgets.
+        # FR-CR-05-138 — batch multi-select widgets edit
+        # themselves in place inside the dispatcher; nothing
+        # further to render here.
         if action in (
             ACTION_ENROLL_YES, ACTION_ENROLL_NO, ACTION_ENROLL_SKIP,
+            ACTION_BATCH_TOGGLE, ACTION_BATCH_NEXT,
+            ACTION_BATCH_KEEP_NAME, ACTION_BATCH_SKIP_ENTITY,
         ):
             return
 
@@ -1343,7 +1364,90 @@ class TelegramListener:
             return self._handle_enroll_skip(
                 session, prompt_id=entity_id, actor=actor
             )
+        # FR-CR-05-138 — batch multi-select.
+        if action == ACTION_BATCH_TOGGLE:
+            return self._handle_batch_toggle(
+                session, prompt_id=entity_id, actor=actor
+            )
+        if action == ACTION_BATCH_NEXT:
+            return self._handle_batch_next(
+                session, batch_id=entity_id, actor=actor
+            )
+        if action == ACTION_BATCH_KEEP_NAME:
+            return self._handle_batch_keep_name(
+                session, batch_id=entity_id, actor=actor
+            )
+        if action == ACTION_BATCH_SKIP_ENTITY:
+            return self._handle_batch_skip_current(
+                session, batch_id=entity_id, actor=actor
+            )
         log.info("telegram_unknown_action", action=action)
+        return None
+
+    # ---- batch enrollment handlers (FR-CR-05-138) -----------
+
+    def _handle_batch_toggle(
+        self, session, *, prompt_id, actor,
+    ):
+        from app.services.counterparty_enrollment_batch import (
+            handle_toggle,
+        )
+        try:
+            actor_uid = int(actor)
+        except (TypeError, ValueError):
+            return None
+        handle_toggle(
+            session, sender=self._sender,
+            prompt_id=prompt_id, actor_user_id=actor_uid,
+        )
+        return None
+
+    def _handle_batch_next(
+        self, session, *, batch_id, actor,
+    ):
+        from app.services.counterparty_enrollment_batch import (
+            handle_next,
+        )
+        try:
+            actor_uid = int(actor)
+        except (TypeError, ValueError):
+            return None
+        handle_next(
+            session, sender=self._sender,
+            batch_id=batch_id, actor_user_id=actor_uid,
+        )
+        return None
+
+    def _handle_batch_keep_name(
+        self, session, *, batch_id, actor,
+    ):
+        from app.services.counterparty_enrollment_batch import (
+            handle_keep_current_name,
+        )
+        try:
+            actor_uid = int(actor)
+        except (TypeError, ValueError):
+            return None
+        handle_keep_current_name(
+            session, sender=self._sender,
+            batch_id=batch_id, actor_user_id=actor_uid,
+        )
+        return None
+
+    def _handle_batch_skip_current(
+        self, session, *, batch_id, actor,
+    ):
+        from app.services.counterparty_enrollment_batch import (
+            handle_skip_current,
+        )
+        try:
+            actor_uid = int(actor)
+        except (TypeError, ValueError):
+            return None
+        handle_skip_current(
+            session, sender=self._sender,
+            batch_id=batch_id, actor_user_id=actor_uid,
+        )
         return None
 
     # ---- enrollment widget handlers (FR-CR-05-133) -----------
@@ -1619,6 +1723,47 @@ class TelegramListener:
                 duration=attachment.get("duration"),
             )
         return (transcript or "").strip()
+
+    def _maybe_route_to_active_batch(
+        self, session: Session, msg: TelegramSourceMessage
+    ) -> bool:
+        """FR-CR-05-138 — when the user has exactly one
+        currently-processing enrollment batch, treat their next
+        text or voice reply as input for the current step
+        (confirm-name OR context). Returns True if the message
+        was consumed, False otherwise.
+
+        The caller of this method continues processing the
+        message normally when False is returned.
+        """
+        if not msg.user_id or not msg.chat_id:
+            return False
+        from app.services.counterparty_enrollment_batch import (
+            find_active_batch_for_user,
+            receive_text_for_current,
+        )
+
+        batch = find_active_batch_for_user(
+            session, chat_id=msg.chat_id, user_id=msg.user_id,
+        )
+        if batch is None:
+            return False
+
+        # Resolve text — if voice, transcribe via Whisper.
+        text = (msg.text or "").strip()
+        if not text:
+            transcribed = self._maybe_transcribe_voice(msg)
+            if transcribed:
+                text = transcribed
+        if not text:
+            return False
+
+        receive_text_for_current(
+            session, sender=self._sender,
+            batch_id=batch.id, text=text,
+            actor_user_id=int(msg.user_id),
+        )
+        return True
 
     def _handle_pending_reply(
         self,

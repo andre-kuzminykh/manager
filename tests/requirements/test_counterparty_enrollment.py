@@ -565,7 +565,18 @@ def test_fireflies_pipeline_posts_enrollment_widgets_for_unresolved_mentions(
     # Drive only the two steps under test.
     pipeline._step_match_counterparties(session, rec)
     posted = pipeline._step_enroll_unresolved(session, rec)
-    assert posted == 2
+    # FR-CR-05-138 — pipeline now returns batches_created
+    # (one batch per recipient), not per-entity prompts. Two
+    # unresolved × one admin → 1 batch with 2 prompts inside.
+    assert posted == 1
+    from app.models import CounterpartyPromptBatch
+    [batch] = (
+        session.query(CounterpartyPromptBatch)
+        .filter(CounterpartyPromptBatch.source_kind == "fireflies")
+        .filter(CounterpartyPromptBatch.source_id == "ff-enroll-1")
+        .all()
+    )
+    assert batch.entity_count == 2
     rows = (
         session.query(CounterpartyPrompt)
         .filter(CounterpartyPrompt.source_kind == "fireflies")

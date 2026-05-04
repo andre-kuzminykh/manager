@@ -434,7 +434,20 @@ OWNER SELECTION RULES (read carefully — operator-specific):
      - If exactly ONE matching teammate is in
        `meeting_participants` → pick that one.
      - If multiple matching teammates are in
-       `meeting_participants` → use role + notes context.
+       `meeting_participants` → READ THEIR `notes` AND `role`
+       columns and pick whichever's notes most directly match
+       the task domain. NOTES IS THE GROUND TRUTH for this
+       choice — the operator writes them precisely to
+       disambiguate same-first-name teammates by responsibility.
+       Worked example: team has «Дима Дроздов» (notes:
+       «Research, data analysis, dashboards, reporting; не вести
+       fundraising-задачи») AND «Дмитрий Седов» (notes: «Ведёт
+       fundraising / IR: общение с инвесторами, варанты, fund
+       close, эксклюзивы, инвесторские письма»). Both on the
+       call. Transcript «Дима, отправь Tether email-апдейт» →
+       Tether is an investor → notes-match is Седов → pick him.
+       Transcript «Дима, выгрузи статистику open rates» → data
+       analysis → notes-match is Дроздов → pick him.
      - If NONE of the matching teammates is in
        `meeting_participants` and the transcript ONLY mentions
        them in third person (discussed, not delegated) → DO NOT

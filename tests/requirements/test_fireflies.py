@@ -1518,6 +1518,12 @@ def test_task_extraction_prompt_pins_disambiguate_first_names_via_participants()
         "DO NOT pick an absent teammate just because their"
         in TASK_EXTRACTION_SYSTEM
     )
+    # When BOTH Димs are on the call, notes is the disambig
+    # ground-truth — operator-pinned in both rule body + worked
+    # example.
+    assert "NOTES IS THE GROUND TRUTH" in TASK_EXTRACTION_SYSTEM
+    assert "fundraising" in TASK_EXTRACTION_SYSTEM
+    assert "Tether email-апдейт" in TASK_EXTRACTION_SYSTEM
 
 
 def test_task_extraction_prompt_forbids_admin_default_owner():

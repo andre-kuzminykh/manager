@@ -1758,8 +1758,42 @@ class FirefliesPipeline:
         # FR-CR-05-139 — render participants as a prominent block
         # so the LLM can disambiguate identical first names («Дима
         # Дроздов» vs «Дмитрий Седов») via Rule 8.
+        # FR-CR-05-145 — Python-side defense: drop teammates whose
+        # notes forbid this meeting's topic («не участвует в
+        # Fundrising sync» / «не вести fundraising-задачи»).
+        from app.services.team_members import (
+            filter_participants_by_notes_forbid,
+            infer_topic_keywords_from_text,
+        )
+
+        _ff_topic_kw = infer_topic_keywords_from_text(
+            " ".join([
+                row.title or "",
+                (row.detailed_summary or "")[:3000],
+                (row.transcript_text or "")[:1500],
+            ])
+        )
+        _ff_filtered_participants, _ff_dropped = filter_participants_by_notes_forbid(
+            list(row.participants or []),
+            known_employees=[
+                {
+                    "real_name": (e.get("real_name") or "").strip(),
+                    "notes": e.get("notes") or "",
+                }
+                for e in known_employees
+            ],
+            topic_keywords=_ff_topic_kw,
+        )
+        if _ff_dropped:
+            log.info(
+                "fireflies_participants_post_filter_applied",
+                fireflies_id=row.fireflies_id,
+                topic_keywords=_ff_topic_kw,
+                dropped=_ff_dropped,
+                kept=_ff_filtered_participants,
+            )
         participants_lines = (
-            "\n".join(f"  - {p}" for p in (row.participants or []) if p)
+            "\n".join(f"  - {p}" for p in _ff_filtered_participants if p)
             or "  (нет данных)"
         )
         meta = (

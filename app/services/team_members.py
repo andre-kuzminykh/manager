@@ -692,6 +692,48 @@ def _employee_forbids_topic(notes: str, topic_keywords: list[str]) -> bool:
     return False
 
 
+def employee_forbids_topic(notes: str, topic_keywords: list[str]) -> bool:
+    """Public alias of `_employee_forbids_topic`. Kept stable
+    for FR-CR-05-145 — pipeline-level participants post-filter
+    needs to import this and the leading-underscore name is
+    fragile in import lists."""
+    return _employee_forbids_topic(notes, topic_keywords)
+
+
+def filter_participants_by_notes_forbid(
+    participants_real_names: list[str],
+    *,
+    known_employees: list[dict[str, str]],
+    topic_keywords: list[str],
+) -> tuple[list[str], list[str]]:
+    """FR-CR-05-145 — Python-side defense for the notes-forbids
+    rule. Even when the LLM `extract_zoom_participants_via_llm`
+    ignores the «не участвует в X» clause, drop forbidden
+    teammates from the resulting participants list.
+
+    Returns `(kept, dropped)`. `topic_keywords` is the output
+    of `infer_topic_keywords_from_text` against meeting title +
+    transcript / detailed summary excerpts. Empty
+    `topic_keywords` → no filtering (returns input as-is).
+    """
+    if not topic_keywords or not participants_real_names:
+        return list(participants_real_names), []
+    notes_by_name: dict[str, str] = {}
+    for e in known_employees:
+        rn = (e.get("real_name") or "").strip()
+        if rn:
+            notes_by_name[rn] = e.get("notes") or ""
+    kept: list[str] = []
+    dropped: list[str] = []
+    for p in participants_real_names:
+        notes = notes_by_name.get((p or "").strip(), "")
+        if _employee_forbids_topic(notes, topic_keywords):
+            dropped.append(p)
+        else:
+            kept.append(p)
+    return kept, dropped
+
+
 def _is_admin_uid(uid: str | None) -> bool:
     """True if `uid` is in TELEGRAM_ADMIN_USER_IDS."""
     if not uid:

@@ -929,6 +929,52 @@ class ZoomPipeline:
                 zoom_id=row.zoom_id, error=str(e),
             )
             participants = []
+        # FR-CR-05-145 — Python-side defense for «не участвует
+        # в X» / «не вести X-задачи» notes. Even when the LLM
+        # ignores the rule (it did this on the Fundrising sync
+        # rerun), drop forbidden teammates here. Topic source =
+        # meeting title + detailed_summary excerpt + transcript
+        # excerpt — covers cases where Zoom's auto-title is
+        # «Artem Sokolov's Zoom Meeting» without the «Fundrising»
+        # keyword.
+        if participants:
+            from app.services.team_members import (
+                filter_participants_by_notes_forbid,
+                infer_topic_keywords_from_text,
+            )
+
+            topic_text = " ".join([
+                row.title or "",
+                (row.detailed_summary or "")[:3000],
+                (row.transcript_text or "")[:1500],
+            ])
+            topic_kw = infer_topic_keywords_from_text(topic_text)
+            kept, dropped = filter_participants_by_notes_forbid(
+                participants,
+                known_employees=[
+                    {
+                        "real_name": (e.get("real_name") or "").strip(),
+                        "notes": e.get("notes") or "",
+                    }
+                    for e in known_employees
+                ],
+                topic_keywords=topic_kw,
+            )
+            if dropped:
+                log.info(
+                    "zoom_participants_post_filter_applied",
+                    zoom_id=row.zoom_id,
+                    topic_keywords=topic_kw,
+                    dropped=dropped, kept=kept,
+                )
+                from app.services.trace_log import trace_event as _zte_pf
+                _zte_pf(
+                    source="zoom", recording_id=row.zoom_id,
+                    event="zoom_participants_post_filter_applied",
+                    topic_keywords=topic_kw,
+                    dropped=dropped, kept=kept,
+                )
+                participants = kept
         row.__dict__["_zm_team_participants"] = participants
         return participants
 

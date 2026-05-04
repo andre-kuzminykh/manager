@@ -993,3 +993,92 @@ def test_infer_topic_keywords_from_text_recognises_fundraising_signals():
     # No fundraising signal → empty.
     assert infer_topic_keywords_from_text("Standup") == []
     assert infer_topic_keywords_from_text("") == []
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-145 — Python-side defense for «не участвует в X» / «не вести X»
+# --------------------------------------------------------------------------- #
+
+
+def test_filter_participants_drops_drozdov_on_fundraising_topic():
+    """FR-CR-05-145 — operator regression «опять дима дроздов
+    во фандрайзинге участвует - он не должен». Even when the
+    LLM puts Дроздов into the participants list, the Python
+    post-filter must drop him because his notes contain
+    «не участвует в Fundrising sync» and the topic_keywords
+    include «fundraising»."""
+    from app.services.team_members import (
+        filter_participants_by_notes_forbid,
+        infer_topic_keywords_from_text,
+    )
+
+    drozdov_notes = (
+        "ВСЕ, ЧТО СВЯЗАНО С ФОНДАМИ\n"
+        "Коннекты со встреч\n"
+        "Поиск выходов на фонды\n"
+        "Аутрич (почта, линк) // не участвует в Fundrising sync"
+    )
+    employees = [
+        {"real_name": "Дима Дроздов", "notes": drozdov_notes},
+        {"real_name": "Дмитрий Седов",
+         "notes": "Ведёт fundraising / IR"},
+        {"real_name": "Артем Соколов",
+         "notes": "founder, principal"},
+    ]
+    # Even when Zoom auto-title is "Artem Sokolov's Zoom Meeting"
+    # (no fundraising keyword), the transcript content surfaces
+    # the topic.
+    topic_text = (
+        "Artem Sokolov's Zoom Meeting\n"
+        "Прошлись по fundraising pipeline, Schaeffler investor "
+        "update, Sanders Capital, варанты, term sheet."
+    )
+    keywords = infer_topic_keywords_from_text(topic_text)
+    assert "fundraising" in keywords  # sanity check
+
+    kept, dropped = filter_participants_by_notes_forbid(
+        ["Дима Дроздов", "Дмитрий Седов", "Артем Соколов"],
+        known_employees=employees,
+        topic_keywords=keywords,
+    )
+    assert kept == ["Дмитрий Седов", "Артем Соколов"]
+    assert dropped == ["Дима Дроздов"]
+
+
+def test_filter_participants_no_op_when_no_topic_keywords():
+    """Empty topic_keywords (e.g. internal sync without
+    fundraising signal) → no filtering."""
+    from app.services.team_members import (
+        filter_participants_by_notes_forbid,
+    )
+
+    employees = [
+        {"real_name": "Дима Дроздов",
+         "notes": "не участвует в Fundrising sync"},
+    ]
+    kept, dropped = filter_participants_by_notes_forbid(
+        ["Дима Дроздов"],
+        known_employees=employees,
+        topic_keywords=[],
+    )
+    assert kept == ["Дима Дроздов"]
+    assert dropped == []
+
+
+def test_filter_participants_unknown_name_passes_through():
+    """A real_name not in known_employees has no notes to check,
+    so we don't drop it (defensive — let the regular pipeline
+    handle unknown names)."""
+    from app.services.team_members import (
+        filter_participants_by_notes_forbid,
+    )
+
+    employees = [{"real_name": "Дима Дроздов",
+                  "notes": "не вести fundraising"}]
+    kept, dropped = filter_participants_by_notes_forbid(
+        ["Stranger", "Дима Дроздов"],
+        known_employees=employees,
+        topic_keywords=["fundraising"],
+    )
+    assert kept == ["Stranger"]
+    assert dropped == ["Дима Дроздов"]

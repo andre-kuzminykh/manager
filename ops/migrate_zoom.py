@@ -79,6 +79,17 @@ def _parse_args() -> argparse.Namespace:
             "the target host's recordings are sparse."
         ),
     )
+    p.add_argument(
+        "--days-back",
+        type=int,
+        default=30,
+        help=(
+            "FR-CR-05-143 — when `--zoom-id` is given, search "
+            "this many days back. Zoom API defaults to LAST 24 "
+            "HOURS when from/to are unspecified, so historical "
+            "UUIDs need a wider window. Default 30 days."
+        ),
+    )
     return p.parse_args()
 
 
@@ -140,8 +151,17 @@ def main() -> int:
     if args.zoom_id:
         # Need to find ONE specific recording by UUID — required-
         # email filter is bypassed (operator picked the uuid).
+        # Zoom API defaults to last 24 hours when from/to are
+        # absent, so for an arbitrary historical UUID we widen
+        # the window to `--days-back` (default 30).
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        now = _dt.now(_tz.utc).date()
+        from_date = (now - _td(days=args.days_back)).isoformat()
+        to_date = now.isoformat()
         all_metas = client.list_recordings(
             limit=args.page_size, page_size=args.page_size,
+            from_date=from_date, to_date=to_date,
         )
         metas = [m for m in all_metas if m.id == args.zoom_id]
         if not metas:
@@ -149,10 +169,11 @@ def main() -> int:
                 "zoom_migration_zoom_id_not_found",
                 zoom_id=args.zoom_id,
                 page_size=args.page_size,
+                from_date=from_date, to_date=to_date,
                 page_total=len(all_metas),
                 hint=(
-                    "uuid not on first page — bump --page-size "
-                    "(max 300) or check the uuid"
+                    "uuid not in window — bump --days-back / "
+                    "--page-size (max 300) or check the uuid"
                 ),
             )
             return 2

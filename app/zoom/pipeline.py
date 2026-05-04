@@ -181,6 +181,7 @@ class ZoomPipeline:
             return False
         from app.services.transcription import (
             build_whisper_bias_prompt, transcribe_bytes,
+            transcribe_chunks_parallel,
         )
 
         # FR-CR-05-127 — bias Whisper toward the operator's
@@ -228,33 +229,32 @@ class ZoomPipeline:
                 size=size,
                 chunks=len(audio_paths),
             )
-        transcript_parts: list[str] = []
-        for i, p in enumerate(audio_paths):
-            try:
-                with open(p, "rb") as f:
-                    audio_bytes = f.read()
-            except OSError as e:
-                row.last_error = f"audio chunk read failed [{i}]: {e}"
-                return False
-            mimetype = (
-                "audio/mp4" if p.lower().endswith(".m4a") else
-                ("video/mp4" if p.lower().endswith(".mp4") else "audio/mpeg")
+        # FR-CR-05-146a — parallel Whisper across all chunks
+        # (was sequential — operator-pinned «Whisper-чанки
+        # параллельно»). Order preserved by `pool.map`, so the
+        # joined transcript is still chronological.
+        def _mt(path: str) -> str:
+            return (
+                "audio/mp4" if path.lower().endswith(".m4a") else
+                ("video/mp4" if path.lower().endswith(".mp4")
+                 else "audio/mpeg")
             )
-            chunk_text = transcribe_bytes(
-                audio_bytes=audio_bytes,
-                mimetype=mimetype,
-                filename=os.path.basename(p),
-                openai_api_key=api_key,
-                model=self._settings.fireflies_whisper_model,
-                prompt=whisper_prompt,
-            )
-            if not chunk_text:
+
+        transcript_parts = transcribe_chunks_parallel(
+            audio_paths,
+            openai_api_key=api_key,
+            model=self._settings.fireflies_whisper_model,
+            prompt=whisper_prompt,
+            mimetype_for=_mt,
+            max_workers=3,
+        )
+        for i, t in enumerate(transcript_parts):
+            if not t:
                 row.last_error = (
                     f"Whisper returned empty transcript on chunk "
                     f"{i+1}/{len(audio_paths)}"
                 )
                 return False
-            transcript_parts.append(chunk_text)
         transcript = "\n".join(transcript_parts).strip()
         if not transcript:
             row.last_error = "Whisper returned empty transcript"
@@ -273,12 +273,22 @@ class ZoomPipeline:
 
     # --- step 3: detailed summary -----------------------------
 
-    def _step_detailed_summary(self, row: ZoomRecording) -> bool:
+    def _step_detailed_summary(
+        self, row: ZoomRecording, *, session: Session | None = None,
+    ) -> bool:
         if row.detailed_summarised and row.detailed_summary:
             return True
         if not row.transcript_text:
             row.last_error = "no transcript for detailed summary"
             return False
+        # FR-CR-05-146c — kick off participants extraction in
+        # parallel with the detailed_summary LLM call. Both read
+        # only `transcript_text` and don't depend on each other.
+        # `_ensure_team_participants` (called later from
+        # `_step_extract_tasks`) joins the future and applies
+        # the post-filter.
+        if session is not None:
+            self._kickoff_team_participants_async(row, session)
         meta_lines = [
             f"Заголовок: {row.title or '(без названия)'}",
             f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}",
@@ -598,6 +608,8 @@ class ZoomPipeline:
                 reasoning_effort=(
                     self._settings.fireflies_tasks_reasoning_effort or None
                 ),
+                batch_size=self._settings.counterparty_resolve_batch_size,
+                max_workers=self._settings.counterparty_resolve_max_workers,
                 trace_source="zoom",
                 trace_recording_id=row.zoom_id,
             )
@@ -875,35 +887,21 @@ class ZoomPipeline:
             )
         return len(kept_ids)
 
-    def _ensure_team_participants(
+    def _run_participants_llm(
         self,
         row: ZoomRecording,
         known_employees: list[dict[str, Any]],
     ) -> list[str]:
-        """FR-CR-05-139 — extract once, cache on row.__dict__.
-
-        `extract_zoom_participants_via_llm` is an LLM call; it
-        runs in TWO downstream steps (extract_tasks + short
-        summary) so we cache the result rather than calling it
-        twice per recording.
-
-        Returns a list of canonical real_names from
-        team_members.real_name (validated, no Whisper
-        hallucinations). Empty list when no team_members are
-        configured / LLM call fails / transcript missing.
-        """
-        cached = row.__dict__.get("_zm_team_participants")
-        if cached is not None:
-            return list(cached)
+        """FR-CR-05-146c — pure LLM call (no DB, no caching),
+        suitable for running in a background thread."""
         if not row.transcript_text or not known_employees:
-            row.__dict__["_zm_team_participants"] = []
             return []
         try:
             from app.services.zoom_participants import (
                 extract_zoom_participants_via_llm,
             )
 
-            participants = extract_zoom_participants_via_llm(
+            return extract_zoom_participants_via_llm(
                 row.transcript_text,
                 [
                     {
@@ -928,7 +926,90 @@ class ZoomPipeline:
                 "zoom_participants_unexpected_error",
                 zoom_id=row.zoom_id, error=str(e),
             )
-            participants = []
+            return []
+
+    def _kickoff_team_participants_async(
+        self,
+        row: ZoomRecording,
+        session: Session,
+    ) -> None:
+        """FR-CR-05-146c — start participants LLM in background
+        thread so it overlaps with `_step_detailed_summary`'s
+        own LLM call. Both read only `transcript_text`. Saves
+        ~2 minutes per meeting (operator-pinned).
+
+        We pre-fetch `known_employees` here on the calling
+        thread (DB session is single-threaded). The thread call
+        only does HTTP to OpenAI.
+        """
+        if row.__dict__.get("_zm_team_participants") is not None:
+            return
+        if row.__dict__.get("_zm_participants_future") is not None:
+            return
+        if not row.transcript_text:
+            return
+        from app.services.team_members import as_known_employees
+        from concurrent.futures import ThreadPoolExecutor
+
+        try:
+            tm_rows = as_known_employees(session)
+        except Exception:  # noqa: BLE001
+            tm_rows = []
+        if not tm_rows:
+            row.__dict__["_zm_team_participants"] = []
+            return
+        # Snapshot the row attrs the thread needs so we don't
+        # touch the SQLA-bound row from outside the main thread.
+        row.__dict__["_zm_known_employees_snapshot"] = tm_rows
+        executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="zm-participants",
+        )
+        future = executor.submit(self._run_participants_llm, row, tm_rows)
+        # Schedule executor shutdown when the future is done so
+        # we don't leak threads. `cancel_futures=False` because
+        # we always want this one to complete.
+        future.add_done_callback(lambda _f: executor.shutdown(wait=False))
+        row.__dict__["_zm_participants_future"] = future
+        log.info(
+            "zoom_participants_kickoff_async",
+            zoom_id=row.zoom_id, team_members_count=len(tm_rows),
+        )
+
+    def _ensure_team_participants(
+        self,
+        row: ZoomRecording,
+        known_employees: list[dict[str, Any]],
+    ) -> list[str]:
+        """FR-CR-05-139 — extract once, cache on row.__dict__.
+
+        FR-CR-05-146c — when the kickoff helper has already
+        started a future (parallel with detailed_summary), wait
+        for it instead of starting a fresh LLM call.
+
+        Returns a list of canonical real_names from
+        team_members.real_name (validated, no Whisper
+        hallucinations). Empty list when no team_members are
+        configured / LLM call fails / transcript missing.
+        """
+        cached = row.__dict__.get("_zm_team_participants")
+        if cached is not None:
+            return list(cached)
+        if not row.transcript_text or not known_employees:
+            row.__dict__["_zm_team_participants"] = []
+            return []
+        future = row.__dict__.get("_zm_participants_future")
+        if future is not None:
+            try:
+                participants = future.result(timeout=600) or []
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_participants_future_failed",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+                participants = []
+            row.__dict__["_zm_participants_future"] = None
+        else:
+            participants = self._run_participants_llm(row, known_employees)
         # FR-CR-05-145 — Python-side defense for «не участвует
         # в X» / «не вести X-задачи» notes. Even when the LLM
         # ignores the rule (it did this on the Fundrising sync
@@ -1452,43 +1533,68 @@ class ZoomPipeline:
         Task ROW to admin/owner. Runs AFTER `_step_send_short_
         summary` so the operator gets the meeting overview first
         (Суть + To-Do in one message) and then per-task cards
-        cascade in. Returns number of cards posted."""
+        cascade in. Returns number of cards posted.
+
+        FR-CR-05-146d — parallel posting via thread-pool, max 10
+        concurrent (Telegram allows 30 msg/sec across chats). Each
+        thread opens its own session via `session_scope()` so we
+        don't share SQLA state across threads. Operator-pinned:
+        «параллельные TG-вызовы … но аккуратно по 10 максимум»."""
         if (
             self._sender is None
             or not getattr(self._sender, "enabled", False)
         ):
             return 0
+        from concurrent.futures import ThreadPoolExecutor
+
+        from app.db import session_scope
         from app.models import Task as _Task
         from app.telegram_bot.cards import post_initial_card
 
         admin_uid = _admin_fallback_owner_id()
-        tasks = (
-            session.query(_Task)
-            .filter(_Task.source_kind == TaskSourceKind.zoom)
-            .filter(_Task.source_conversation_id == row.zoom_id)
-            .filter(_Task.deleted_at.is_(None))
-            .order_by(_Task.id.asc())
-            .all()
-        )
-        posted = 0
-        for task in tasks:
-            try:
-                post_initial_card(
-                    sender=self._sender,
-                    session=session,
-                    task=task,
-                    chat_id=0,  # ignored — DM-only delivery
-                    reply_to_message_id=None,
-                    author_user_id=admin_uid,
-                )
-                posted += 1
-            except Exception as e:  # noqa: BLE001
-                log.info(
-                    "zoom_task_card_post_failed",
-                    task_id=task.id,
-                    error=str(e),
-                )
-        return posted
+        task_ids = [
+            t.id for t in (
+                session.query(_Task.id)
+                .filter(_Task.source_kind == TaskSourceKind.zoom)
+                .filter(_Task.source_conversation_id == row.zoom_id)
+                .filter(_Task.deleted_at.is_(None))
+                .order_by(_Task.id.asc())
+                .all()
+            )
+        ]
+        if not task_ids:
+            return 0
+
+        sender = self._sender
+
+        def _send_one(task_id: int) -> bool:
+            with session_scope() as s:
+                t = s.query(_Task).filter(_Task.id == task_id).first()
+                if t is None:
+                    return False
+                try:
+                    post_initial_card(
+                        sender=sender,
+                        session=s,
+                        task=t,
+                        chat_id=0,
+                        reply_to_message_id=None,
+                        author_user_id=admin_uid,
+                    )
+                    return True
+                except Exception as e:  # noqa: BLE001
+                    log.info(
+                        "zoom_task_card_post_failed",
+                        task_id=task_id, error=str(e),
+                    )
+                    return False
+
+        workers = max(1, min(10, len(task_ids)))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="zm-cards",
+        ) as pool:
+            results = list(pool.map(_send_one, task_ids))
+        return sum(1 for r in results if r)
 
     # --- main entry-point -------------------------------------
 
@@ -1521,7 +1627,10 @@ class ZoomPipeline:
         for label, fn in (
             ("download", lambda r: self._step_download_audio(r)),
             ("transcribe", lambda r: self._step_transcribe(r, session=session)),
-            ("detailed_summary", lambda r: self._step_detailed_summary(r)),
+            (
+                "detailed_summary",
+                lambda r: self._step_detailed_summary(r, session=session),
+            ),
         ):
             with _trace_step("zoom", label, **ctx):
                 ok = fn(row)

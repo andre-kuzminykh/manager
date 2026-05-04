@@ -403,6 +403,76 @@ def test_zoom_client_fetch_participant_emails_handles_failure():
     assert metas == []  # participants empty → drop.
 
 
+def test_zoom_participants_kickoff_runs_in_parallel_with_detailed_summary(
+    patched_session_scope, SessionFactory, monkeypatch,
+):
+    """FR-CR-05-146c — operator-pinned. detailed_summary's LLM
+    call and participants extraction's LLM call both read only
+    `transcript_text`, so we kick off participants in a thread
+    when the detailed-summary step starts. By the time
+    `_step_extract_tasks` calls `_ensure_team_participants`,
+    the future is (typically) done — no second LLM call."""
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    from app.models import TeamMember, ZoomRecording
+    from app.zoom.client import ZoomRecordingMeta
+    from app.zoom.pipeline import ZoomPipeline
+
+    # Stub LLM. detailed_summary returns text. The participants
+    # call returns a JSON list.
+    class _StubLLM:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        def complete_text(self, *, system_prompt, user_prompt, **kw):
+            import json as _json
+            if "participants" in (system_prompt or "").lower() or (
+                "team_members" in (user_prompt or "")
+                and "real_name" in (user_prompt or "")
+            ):
+                self.calls.append("participants")
+                return _json.dumps({"participants": ["Артем Соколов"]})
+            self.calls.append("detailed")
+            return "Подробное саммари."
+
+    settings = _settings_with_audio_dir()
+    pipeline = ZoomPipeline(
+        settings=settings, client=_StubZoomClient([]),
+        llm_backend=_StubLLM(),
+    )
+
+    with SessionFactory() as s:
+        s.add(TeamMember(
+            real_name="Артем Соколов", telegram_user_id=111,
+            role="CEO", notes="founder", active=True,
+        ))
+        row = ZoomRecording(
+            zoom_id="kickoff-test",
+            title="Standup",
+            meeting_date=datetime(2026, 5, 4, 8, 0, tzinfo=timezone.utc),
+            transcript_text="Артем сказал, что встречу нужно перенести.",
+            audio_downloaded=True, transcribed=True,
+        )
+        s.add(row)
+        s.flush()
+        # Run detailed_summary — this triggers the kickoff.
+        ok = pipeline._step_detailed_summary(row, session=s)
+        assert ok is True
+        # Future should now be set on the row.
+        assert row.__dict__.get("_zm_participants_future") is not None
+        # Now ensure_team_participants joins the future and
+        # caches result. No new LLM call made.
+        from app.services.team_members import as_known_employees
+        emp = as_known_employees(s)
+        out = pipeline._ensure_team_participants(row, emp)
+        assert out == ["Артем Соколов"]
+        # Verify the participants future was reused (after
+        # join, future field is cleared).
+        assert row.__dict__.get("_zm_participants_future") is None
+        assert row.__dict__.get("_zm_team_participants") == ["Артем Соколов"]
+
+
 def test_zoom_client_token_cached_until_expiry():
     """Second list_recordings call within the TTL doesn't
     re-OAuth."""

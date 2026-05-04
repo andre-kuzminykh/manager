@@ -883,6 +883,7 @@ class FirefliesPipeline:
             return False
         from app.services.transcription import (
             build_whisper_bias_prompt, transcribe_bytes,
+            transcribe_chunks_parallel,
         )
 
         # FR-CR-05-127 — bias Whisper toward the operator's
@@ -938,29 +939,24 @@ class FirefliesPipeline:
                 size=size,
                 chunks=len(audio_paths),
             )
-        transcript_parts: list[str] = []
-        for i, p in enumerate(audio_paths):
-            try:
-                with open(p, "rb") as f:
-                    audio_bytes = f.read()
-            except OSError as e:
-                row.last_error = f"audio chunk read failed [{i}]: {e}"
-                return False
-            chunk_text = transcribe_bytes(
-                audio_bytes=audio_bytes,
-                mimetype="audio/mpeg",
-                filename=os.path.basename(p),
-                openai_api_key=api_key,
-                model=self._settings.fireflies_whisper_model,
-                prompt=whisper_prompt,
-            )
-            if not chunk_text:
+        # FR-CR-05-146a — parallel Whisper across all chunks
+        # (was sequential — operator-pinned «Whisper-чанки
+        # параллельно»). Order preserved by `pool.map`, so the
+        # joined transcript is still chronological.
+        transcript_parts = transcribe_chunks_parallel(
+            audio_paths,
+            openai_api_key=api_key,
+            model=self._settings.fireflies_whisper_model,
+            prompt=whisper_prompt,
+            max_workers=3,
+        )
+        for i, t in enumerate(transcript_parts):
+            if not t:
                 row.last_error = (
                     f"Whisper returned empty transcript on chunk {i+1}/"
                     f"{len(audio_paths)}"
                 )
                 return False
-            transcript_parts.append(chunk_text)
         transcript = "\n".join(transcript_parts).strip()
         if not transcript:
             row.last_error = "Whisper returned empty transcript"
@@ -1223,6 +1219,8 @@ class FirefliesPipeline:
                 reasoning_effort=(
                     self._settings.fireflies_tasks_reasoning_effort or None
                 ),
+                batch_size=self._settings.counterparty_resolve_batch_size,
+                max_workers=self._settings.counterparty_resolve_max_workers,
                 trace_source="fireflies",
                 trace_recording_id=row.fireflies_id,
             )
@@ -2234,42 +2232,66 @@ class FirefliesPipeline:
         """FR-CR-05-120 follow-up — post DM card per extracted
         Task ROW. Runs AFTER `_step_send_short_summary` so the
         operator gets the overview first, then per-task cards.
-        Returns count of cards successfully posted."""
+        Returns count of cards successfully posted.
+
+        FR-CR-05-146d — parallel posting via thread-pool, max 10
+        concurrent (Telegram allows 30 msg/sec across chats).
+        Each thread opens its own session via `session_scope()`.
+        """
         if (
             self._sender is None
             or not getattr(self._sender, "enabled", False)
         ):
             return 0
+        from concurrent.futures import ThreadPoolExecutor
+
+        from app.db import session_scope
         from app.telegram_bot.cards import post_initial_card
 
         admin_uid = _admin_fallback_owner_id()
-        tasks = (
-            session.query(Task)
-            .filter(Task.source_kind == TaskSourceKind.fireflies)
-            .filter(Task.source_conversation_id == row.fireflies_id)
-            .filter(Task.deleted_at.is_(None))
-            .order_by(Task.id.asc())
-            .all()
-        )
-        posted = 0
-        for task in tasks:
-            try:
-                post_initial_card(
-                    sender=self._sender,
-                    session=session,
-                    task=task,
-                    chat_id=0,
-                    reply_to_message_id=None,
-                    author_user_id=admin_uid,
-                )
-                posted += 1
-            except Exception as e:  # noqa: BLE001
-                log.info(
-                    "fireflies_task_card_post_failed",
-                    task_id=task.id,
-                    error=str(e),
-                )
-        return posted
+        task_ids = [
+            t.id for t in (
+                session.query(Task.id)
+                .filter(Task.source_kind == TaskSourceKind.fireflies)
+                .filter(Task.source_conversation_id == row.fireflies_id)
+                .filter(Task.deleted_at.is_(None))
+                .order_by(Task.id.asc())
+                .all()
+            )
+        ]
+        if not task_ids:
+            return 0
+
+        sender = self._sender
+
+        def _send_one(task_id: int) -> bool:
+            with session_scope() as s:
+                t = s.query(Task).filter(Task.id == task_id).first()
+                if t is None:
+                    return False
+                try:
+                    post_initial_card(
+                        sender=sender,
+                        session=s,
+                        task=t,
+                        chat_id=0,
+                        reply_to_message_id=None,
+                        author_user_id=admin_uid,
+                    )
+                    return True
+                except Exception as e:  # noqa: BLE001
+                    log.info(
+                        "fireflies_task_card_post_failed",
+                        task_id=task_id, error=str(e),
+                    )
+                    return False
+
+        workers = max(1, min(10, len(task_ids)))
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="ff-cards",
+        ) as pool:
+            results = list(pool.map(_send_one, task_ids))
+        return sum(1 for r in results if r)
 
     # --- main entry ------------------------------------------
 

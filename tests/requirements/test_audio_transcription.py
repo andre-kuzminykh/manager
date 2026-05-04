@@ -347,3 +347,203 @@ def test_mention_with_voice_only_transcribes(
     # The task was auto-created via the mention path.
     with SessionFactory() as s:
         assert s.query(Task).count() == 1
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-146a — parallel Whisper chunks
+# --------------------------------------------------------------------------- #
+
+
+def test_transcribe_chunks_parallel_runs_concurrently_and_preserves_order(
+    tmp_path,
+):
+    """FR-CR-05-146a — operator-pinned «Whisper-чанки параллельно».
+    Each chunk goes to `transcribe_bytes` in a thread; all run
+    concurrently. Order of results matches input order so the
+    joined transcript stays chronological."""
+    import threading
+    import time
+    from unittest.mock import patch
+
+    from app.services.transcription import transcribe_chunks_parallel
+
+    # Three chunk files.
+    paths: list[str] = []
+    for i in range(3):
+        p = tmp_path / f"chunk{i}.m4a"
+        p.write_bytes(b"FAKE-AUDIO-" + str(i).encode())
+        paths.append(str(p))
+
+    in_flight = 0
+    max_in_flight = 0
+    in_flight_lock = threading.Lock()
+
+    def fake_transcribe(*, audio_bytes, filename, **_):
+        nonlocal in_flight, max_in_flight
+        with in_flight_lock:
+            in_flight += 1
+            max_in_flight = max(max_in_flight, in_flight)
+        time.sleep(0.05)  # let other threads pile in
+        with in_flight_lock:
+            in_flight -= 1
+        # Return text uniquely identifying the chunk by its bytes.
+        suffix = audio_bytes.decode().split("-")[-1]
+        return f"transcript_for_chunk_{suffix}"
+
+    with patch(
+        "app.services.transcription.transcribe_bytes",
+        side_effect=fake_transcribe,
+    ):
+        out = transcribe_chunks_parallel(
+            paths,
+            openai_api_key="sk-test",
+            model="whisper-1",
+            max_workers=3,
+        )
+
+    # All 3 chunks transcribed.
+    assert len(out) == 3
+    # Ordering preserved (chunk_0 first, chunk_2 last).
+    assert out == [
+        "transcript_for_chunk_0",
+        "transcript_for_chunk_1",
+        "transcript_for_chunk_2",
+    ]
+    # Concurrency observed — at least 2 in-flight at the peak.
+    assert max_in_flight >= 2, (
+        f"expected concurrent execution, max_in_flight={max_in_flight}"
+    )
+
+
+def test_transcribe_chunks_parallel_returns_none_on_no_api_key():
+    from app.services.transcription import transcribe_chunks_parallel
+
+    out = transcribe_chunks_parallel(
+        ["/x/a.m4a"], openai_api_key="", model="whisper-1",
+    )
+    assert out == [None]
+
+
+def test_transcribe_chunks_parallel_propagates_per_chunk_failure(tmp_path):
+    """One chunk failing returns None for THAT slot; others
+    still complete in order."""
+    from unittest.mock import patch
+
+    from app.services.transcription import transcribe_chunks_parallel
+
+    paths: list[str] = []
+    for i in range(3):
+        p = tmp_path / f"chunk{i}.m4a"
+        p.write_bytes(b"FAKE-" + str(i).encode())
+        paths.append(str(p))
+
+    def fake_transcribe(*, audio_bytes, **_):
+        suffix = audio_bytes.decode().split("-")[-1]
+        if suffix == "1":  # middle chunk fails
+            return None
+        return f"ok_{suffix}"
+
+    with patch(
+        "app.services.transcription.transcribe_bytes",
+        side_effect=fake_transcribe,
+    ):
+        out = transcribe_chunks_parallel(
+            paths, openai_api_key="sk-test", max_workers=3,
+        )
+    assert out == ["ok_0", None, "ok_2"]
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-146b — parallel counterparty resolve via batched LLM calls
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_mentions_to_directory_runs_batches_in_parallel():
+    """FR-CR-05-146b — operator-pinned «match_counterparties —
+    параллельно». 30 mentions, batch_size=10 → 3 LLM calls in
+    parallel; results merged with ORIGINAL mention order
+    preserved. Concurrent execution observed via lock-counter."""
+    import threading
+    import time
+
+    from app.models import Counterparty
+    from app.services.counterparty_match import (
+        resolve_mentions_to_directory,
+    )
+
+    directory = [
+        Counterparty(id=10 + i, name=f"Org{i}", name_normalised=f"org{i}")
+        for i in range(5)
+    ]
+    mentions = [f"mention_{i:02d}" for i in range(30)]
+
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    class _StubLLM:
+        def complete_text(self, *, system_prompt, user_prompt, **kw):
+            nonlocal in_flight, max_in_flight
+            with lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.05)
+            with lock:
+                in_flight -= 1
+            # Map every input mention to directory id 10
+            # (just enough so the function returns a non-empty
+            # mapping for each).
+            import json as _json
+            import re
+
+            ms = re.findall(r"\d+\.\s+(mention_\d+)", user_prompt)
+            return _json.dumps({
+                "matches": [
+                    {"mention": m, "directory_id": 10} for m in ms
+                ]
+            })
+
+    out = resolve_mentions_to_directory(
+        mentions, directory,
+        llm_backend=_StubLLM(),
+        model="gpt-test",
+        batch_size=10,
+        max_workers=3,
+    )
+    # All 30 mentions resolved to id 10.
+    assert len(out) == 30
+    assert all(v == 10 for v in out.values())
+    # 3 concurrent calls observed.
+    assert max_in_flight >= 2
+
+
+def test_resolve_mentions_to_directory_default_no_batching_one_call():
+    """`batch_size=0` (default) → single LLM call, legacy
+    behaviour. No threading."""
+    from app.models import Counterparty
+    from app.services.counterparty_match import (
+        resolve_mentions_to_directory,
+    )
+
+    directory = [
+        Counterparty(id=10, name="Org", name_normalised="org"),
+    ]
+
+    calls = 0
+
+    class _StubLLM:
+        def complete_text(self, **kw):
+            nonlocal calls
+            calls += 1
+            import json as _json
+            return _json.dumps({"matches": [
+                {"mention": "m1", "directory_id": 10},
+                {"mention": "m2", "directory_id": 10},
+            ]})
+
+    out = resolve_mentions_to_directory(
+        ["m1", "m2"], directory,
+        llm_backend=_StubLLM(), model="gpt-test",
+    )
+    assert calls == 1
+    assert out == {"m1": 10, "m2": 10}

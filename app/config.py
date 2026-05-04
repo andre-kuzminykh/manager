@@ -300,6 +300,20 @@ class Settings(BaseSettings):
     zoom_audio_max_bytes: int = Field(
         default=200 * 1024 * 1024, alias="ZOOM_AUDIO_MAX_BYTES"
     )
+    # FR-CR-05-146b — batch size for the counterparty-resolve
+    # LLM pass. When > 0 AND mentions list exceeds it, split
+    # mentions into batches and run them in parallel via thread-
+    # pool. Each batch sees the FULL directory so per-batch
+    # disambiguation against the universe is unchanged.
+    # Default 20 → ~3-4 parallel calls instead of one giant
+    # one (8x faster on a 70-mention meeting). 0 disables.
+    counterparty_resolve_batch_size: int = Field(
+        default=20, alias="COUNTERPARTY_RESOLVE_BATCH_SIZE"
+    )
+    counterparty_resolve_max_workers: int = Field(
+        default=5, alias="COUNTERPARTY_RESOLVE_MAX_WORKERS"
+    )
+
     # FR-CR-05-143 — operator-pinned «мне надо проверять что там
     # есть 1@thehumanoid.ai и только если да, то обрабатывать».
     # `/accounts/me/recordings` returns ALL recordings under the

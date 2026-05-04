@@ -686,34 +686,35 @@ def extract_counterparty_mentions(
     return out
 
 
-def resolve_mentions_to_directory(
+def _resolve_batch(
     mentions: list[str],
     directory: list[Counterparty],
     *,
     llm_backend: Any,
     model: str,
-    reasoning_effort: str | None = None,
-    trace_source: str | None = None,
-    trace_recording_id: str | None = None,
-) -> dict[str, int | None]:
-    """FR-CR-05-129 Pass 2 — for each Pass-1 mention, ask the
-    LLM which directory id it resolves to (or null when no
-    match). Returns a mention → directory_id mapping, deduped.
-    Uses the FULL directory in the prompt (no fuzzy shortlist
-    — Pass 1 already filtered the universe down to actual
-    mentions).
+    reasoning_effort: str | None,
+    trace_source: str | None,
+    trace_recording_id: str | None,
+    batch_index: int = 0,
+    batch_total: int = 1,
+) -> tuple[dict[str, int | None], dict[str, Any]]:
+    """FR-CR-05-146b — single-batch resolve: one LLM call for
+    the given `mentions` against the FULL `directory`. Returns
+    `(mapping, raw_result)` where mapping is mention→directory_id
+    (or None when no match / LLM refused / parse failed).
+
+    Pulled out of `resolve_mentions_to_directory` so the parent
+    can call it once OR many times in parallel (one per batch).
     """
     from app.services.trace_log import trace_event
 
     if not mentions:
-        return {}
-    if not directory:
-        return {m: None for m in mentions}
+        return {}, {}
+    import json as _json
+
     mentions_block = "\n".join(
         f"  {i+1}. {m}" for i, m in enumerate(mentions)
     )
-    import json as _json
-
     user_prompt = (
         "Return JSON: `{\"matches\": [{\"mention\": ..., "
         "\"directory_id\": <int|null>}, ...]}`.\n\n"
@@ -725,6 +726,7 @@ def resolve_mentions_to_directory(
         mentions_count=len(mentions),
         directory_size=len(directory),
         prompt_chars=len(user_prompt),
+        batch_index=batch_index, batch_total=batch_total,
     )
     log.info("counterparty_resolve_call_started", **_start)
     if trace_source:
@@ -744,30 +746,41 @@ def resolve_mentions_to_directory(
             response_format={"type": "json_object"},
         ) or ""
     except Exception as e:  # noqa: BLE001
-        log.warning("counterparty_resolve_llm_failed",
-                    model=model, error=str(e))
+        log.warning(
+            "counterparty_resolve_llm_failed",
+            model=model, error=str(e),
+            batch_index=batch_index, batch_total=batch_total,
+        )
         if trace_source:
-            trace_event(source=trace_source, recording_id=trace_recording_id,
-                        event="counterparty_resolve_llm_failed",
-                        model=model, error=str(e))
-        return {m: None for m in mentions}
+            trace_event(
+                source=trace_source, recording_id=trace_recording_id,
+                event="counterparty_resolve_llm_failed",
+                model=model, error=str(e),
+                batch_index=batch_index, batch_total=batch_total,
+            )
+        return {m: None for m in mentions}, {}
     try:
         result = _json.loads(text) if text else {}
     except _json.JSONDecodeError:
-        log.warning("counterparty_resolve_json_parse_failed",
-                    text_preview=text[:200])
+        log.warning(
+            "counterparty_resolve_json_parse_failed",
+            text_preview=text[:200],
+            batch_index=batch_index, batch_total=batch_total,
+        )
         if trace_source:
-            trace_event(source=trace_source, recording_id=trace_recording_id,
-                        event="counterparty_resolve_json_parse_failed",
-                        text_preview=text[:500])
-        return {m: None for m in mentions}
+            trace_event(
+                source=trace_source, recording_id=trace_recording_id,
+                event="counterparty_resolve_json_parse_failed",
+                text_preview=text[:500],
+                batch_index=batch_index, batch_total=batch_total,
+            )
+        return {m: None for m in mentions}, {}
     if not isinstance(result, dict):
-        return {m: None for m in mentions}
+        return {m: None for m in mentions}, {}
     matches = result.get("matches") or []
     if not isinstance(matches, list):
         matches = []
     valid_ids = {cp.id for cp in directory}
-    by_id = {cp.id: cp for cp in directory}
     out: dict[str, int | None] = {}
     for entry in matches:
         if not isinstance(entry, dict):
@@ -783,6 +796,105 @@ def resolve_mentions_to_directory(
     for m in mentions:
         if m not in out:
             out[m] = None
+    return out, result
+
+
+def resolve_mentions_to_directory(
+    mentions: list[str],
+    directory: list[Counterparty],
+    *,
+    llm_backend: Any,
+    model: str,
+    reasoning_effort: str | None = None,
+    batch_size: int = 0,
+    max_workers: int = 5,
+    trace_source: str | None = None,
+    trace_recording_id: str | None = None,
+) -> dict[str, int | None]:
+    """FR-CR-05-129 Pass 2 — for each Pass-1 mention, ask the
+    LLM which directory id it resolves to (or null when no
+    match). Returns a mention → directory_id mapping, deduped.
+    Uses the FULL directory in the prompt (no fuzzy shortlist
+    — Pass 1 already filtered the universe down to actual
+    mentions).
+
+    FR-CR-05-146b — when `batch_size > 0` AND the mentions list
+    exceeds it, split into batches of size `batch_size` and run
+    them via a `ThreadPoolExecutor` (max `max_workers` concurrent
+    LLM calls). Each batch sees the FULL directory so per-batch
+    disambiguation against the universe is unchanged. Operator-
+    pinned: «match_counterparties — параллельно чтобы каждый
+    контрпати отдельно искался». Default `batch_size=0`
+    preserves the legacy single-call behaviour.
+    """
+    from app.services.trace_log import trace_event
+
+    if not mentions:
+        return {}
+    if not directory:
+        return {m: None for m in mentions}
+
+    do_batch = batch_size > 0 and len(mentions) > batch_size
+    out: dict[str, int | None] = {}
+    raw_results: list[dict[str, Any]] = []
+
+    if not do_batch:
+        single_out, single_raw = _resolve_batch(
+            mentions, directory,
+            llm_backend=llm_backend, model=model,
+            reasoning_effort=reasoning_effort,
+            trace_source=trace_source,
+            trace_recording_id=trace_recording_id,
+            batch_index=1, batch_total=1,
+        )
+        out.update(single_out)
+        if single_raw:
+            raw_results.append(single_raw)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        batches = [
+            mentions[i : i + batch_size]
+            for i in range(0, len(mentions), batch_size)
+        ]
+        total = len(batches)
+        log.info(
+            "counterparty_resolve_batched",
+            total_mentions=len(mentions),
+            batch_count=total,
+            batch_size=batch_size,
+            max_workers=max_workers,
+        )
+        if trace_source:
+            trace_event(
+                source=trace_source, recording_id=trace_recording_id,
+                event="counterparty_resolve_batched",
+                total_mentions=len(mentions),
+                batch_count=total,
+                batch_size=batch_size,
+                max_workers=max_workers,
+            )
+
+        def _run(idx_batch: tuple[int, list[str]]):
+            idx, b = idx_batch
+            return _resolve_batch(
+                b, directory,
+                llm_backend=llm_backend, model=model,
+                reasoning_effort=reasoning_effort,
+                trace_source=trace_source,
+                trace_recording_id=trace_recording_id,
+                batch_index=idx + 1, batch_total=total,
+            )
+
+        workers = max(1, min(max_workers, total))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            partials = list(pool.map(_run, list(enumerate(batches))))
+        for partial_out, partial_raw in partials:
+            out.update(partial_out)
+            if partial_raw:
+                raw_results.append(partial_raw)
+
+    by_id = {cp.id: cp for cp in directory}
     resolved_mapping = [
         {
             "mention": m,
@@ -805,7 +917,7 @@ def resolve_mentions_to_directory(
             resolved_count=sum(1 for v in out.values() if v is not None),
             unresolved_count=sum(1 for v in out.values() if v is None),
             mapping=resolved_mapping,
-            raw_response_full=result,
+            raw_responses=raw_results,
         )
     return out
 

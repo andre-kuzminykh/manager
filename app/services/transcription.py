@@ -103,6 +103,72 @@ def transcribe_bytes(
     return text.strip() or None
 
 
+def transcribe_chunks_parallel(
+    paths: list[str],
+    *,
+    openai_api_key: str,
+    model: str = "whisper-1",
+    prompt: str | None = None,
+    mimetype_for: callable | None = None,
+    max_workers: int = 3,
+) -> list[str | None]:
+    """FR-CR-05-146a — transcribe a list of audio-chunk paths
+    in PARALLEL via a thread-pool, preserving order. Returns a
+    list of length `len(paths)` with the transcript text per
+    chunk (or `None` when that chunk failed). Each thread calls
+    `transcribe_bytes` independently.
+
+    `mimetype_for(path)` (optional callable) returns the mimetype
+    for a given chunk path; defaults to `audio/mpeg`. Used by
+    the Zoom path that sometimes hands us .m4a / .mp4 chunks
+    (different mimetypes per file).
+
+    `max_workers` is the concurrency cap — default 3 keeps us
+    well under OpenAI's 50 req/min Whisper limit even with the
+    surrounding LLM calls; bump it via the kwarg if needed.
+
+    Operator-pinned: «Whisper-чанки параллельно (сейчас 3
+    подряд) → -2.5 мин. asyncio.gather поверх transcribe_bytes
+    для каждого chunk».
+    """
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+
+    if not paths:
+        return []
+    if not openai_api_key:
+        return [None] * len(paths)
+    if mimetype_for is None:
+        mimetype_for = lambda p: "audio/mpeg"  # noqa: E731
+
+    def _transcribe_one(path: str) -> str | None:
+        try:
+            with open(path, "rb") as f:
+                audio_bytes = f.read()
+        except OSError as e:
+            log.warning(
+                "whisper_chunk_read_failed",
+                path=path, error=str(e),
+            )
+            return None
+        return transcribe_bytes(
+            audio_bytes=audio_bytes,
+            mimetype=mimetype_for(path),
+            filename=os.path.basename(path),
+            openai_api_key=openai_api_key,
+            model=model,
+            prompt=prompt,
+        )
+
+    workers = max(1, min(max_workers, len(paths)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        # `pool.map` preserves input order — we get results in
+        # the same sequence as `paths`, so the joined transcript
+        # comes out chronologically.
+        results = list(pool.map(_transcribe_one, paths))
+    return results
+
+
 def transcribe_audio_files(
     files: Iterable[dict[str, Any]],
     *,

@@ -60,8 +60,14 @@ def main() -> int:
     flow = InstalledAppFlow.from_client_config(
         client_config, GOOGLE_SCOPES_CALENDAR,
     )
+    # FR-CR-05-144 — bind to a fixed port (8080) on 0.0.0.0 so a
+    # headless server can be paired with `ssh -L 8080:localhost:
+    # 8080 …` from the operator's laptop. Port 0 (random) breaks
+    # SSH port-forward setups.
     credentials = flow.run_local_server(
-        port=0, prompt="consent", access_type="offline",
+        host="0.0.0.0", port=8080,
+        open_browser=False,
+        prompt="consent", access_type="offline",
     )
 
     if not credentials.refresh_token:

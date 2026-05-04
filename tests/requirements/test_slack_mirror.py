@@ -217,3 +217,109 @@ def test_post_meeting_summary_chunks_long_body_sequentially():
     for c in calls:
         assert len(c["text"]) <= 35_000
         assert c["channel"] == "D0AUXKND35Y"
+
+
+# --- FR-CR-05-147 _compact_for_slack -------------------------
+
+
+def test_compact_for_slack_collapses_blank_lines_between_numbered_tasks():
+    """FR-CR-05-147 — operator regression «опять в слаке
+    отдельные сообщения». Telegram body uses `\\n\\n` between
+    every `1)`, `2)`, ... task (good for mobile spacing).
+    Slack renders each `\\n\\n`-separated block as a separate
+    bubble for long messages — looks like 60 floating cards.
+    Compactor fuses consecutive numbered items into ONE
+    paragraph."""
+    from app.services.slack_mirror import _compact_for_slack
+
+    body = (
+        "30/04 - X meeting\n\n"
+        "Участники: A, B\n\n"
+        "Суть: short summary line\n\n"
+        "To-Do:\n\n"
+        "1) task one (Owner A)\n\n"
+        "2) task two (Owner B)\n\n"
+        "3) task three (Owner C)\n\n"
+        "Подробный отчёт"
+    )
+    out = _compact_for_slack(body)
+    # Header / Участники / Суть / To-Do header keep their
+    # paragraph spacing.
+    assert "30/04 - X meeting\n\nУчастники: A, B" in out
+    assert "Участники: A, B\n\nСуть:" in out
+    assert "Суть: short summary line\n\nTo-Do:" in out
+    # First numbered item KEEPS the gap after «To-Do:».
+    assert "To-Do:\n\n1) task one" in out
+    # Numbered items 1) → 2) → 3) are fused with single newlines.
+    assert "1) task one (Owner A)\n2) task two (Owner B)" in out
+    assert "2) task two (Owner B)\n3) task three (Owner C)" in out
+    # Trailing «Подробный отчёт» keeps its blank line.
+    assert "(Owner C)\n\nПодробный отчёт" in out
+
+
+def test_compact_for_slack_handles_two_digit_numbered_items():
+    """`12) ...` and `100) ...` are still recognised as numbered
+    list items (regex anchors on `\\d+\\)`)."""
+    from app.services.slack_mirror import _compact_for_slack
+
+    body = "To-Do:\n\n9) nine\n\n10) ten\n\n11) eleven"
+    out = _compact_for_slack(body)
+    assert out == "To-Do:\n\n9) nine\n10) ten\n11) eleven"
+
+
+def test_compact_for_slack_collapses_excess_blank_runs():
+    """3+ consecutive blank lines anywhere → max 2."""
+    from app.services.slack_mirror import _compact_for_slack
+
+    body = "Header\n\n\n\nBody\n\n\nFooter"
+    out = _compact_for_slack(body)
+    assert out == "Header\n\nBody\n\nFooter"
+
+
+def test_compact_for_slack_no_op_when_no_numbered_list():
+    """Body without numbered tasks passes through unchanged
+    (apart from blank-run collapse)."""
+    from app.services.slack_mirror import _compact_for_slack
+
+    body = "Just a summary\n\nAnother paragraph"
+    assert _compact_for_slack(body) == body
+
+
+def test_compact_for_slack_empty_input_returns_empty():
+    from app.services.slack_mirror import _compact_for_slack
+
+    assert _compact_for_slack("") == ""
+
+
+def test_post_meeting_summary_compacts_numbered_list_in_slack_call():
+    """End-to-end: `post_meeting_summary_to_slack` runs the
+    body through `_compact_for_slack` BEFORE chunk-splitting,
+    so the actual Slack `chat.postMessage` text param has the
+    numbered list compacted."""
+    captured: list[_FakeWebClient] = []
+
+    def _factory(token):
+        c = _FakeWebClient(token)
+        captured.append(c)
+        return c
+
+    with patch("slack_sdk.WebClient", side_effect=_factory):
+        body = (
+            "30/04 - sync\n\n"
+            "Участники: A\n\n"
+            "Суть: …\n\n"
+            "To-Do:\n\n"
+            "1) one (Owner)\n\n"
+            "2) two (Owner)\n\n"
+            "3) three (Owner)"
+        )
+        post_meeting_summary_to_slack(
+            slack_token="xoxb-test", channel_id="D0AUXKND35Y",
+            body=body,
+        )
+    [call] = captured[0].calls
+    sent = call["text"]
+    # Tasks fused — no blank line between consecutive items.
+    assert "1) one (Owner)\n2) two (Owner)\n3) three (Owner)" in sent
+    # Header → To-Do gap preserved.
+    assert "Суть: …\n\nTo-Do:" in sent

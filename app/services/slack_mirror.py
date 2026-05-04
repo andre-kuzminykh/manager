@@ -61,6 +61,60 @@ def _to_slack_mrkdwn(html_body: str) -> str:
     return text
 
 
+# FR-CR-05-147 — recognise numbered task list lines: `1) ...`,
+# `12) ...` etc. Used by `_compact_for_slack` to fuse blank-
+# line-separated tasks into a single visual paragraph.
+_NUMBERED_LINE_RE = re.compile(r"\n\n(?=\d+\)\s)")
+
+
+def _compact_for_slack(text: str) -> str:
+    """FR-CR-05-147 — operator-pinned «опять в слаке отдельные
+    сообщения - сделай под слак отдельную функцию которая
+    соединяет все в одно».
+
+    The Telegram body uses `\\n\\n` (double-newline) between
+    every numbered task so each one gets a visual gap on
+    mobile. Slack renders each `\\n\\n`-separated paragraph as
+    a SEPARATE message bubble for long messages, so a 60-task
+    To-Do reads as 60 floating cards instead of one tidy list.
+
+    This compactor:
+      1. Collapses `\\n\\n` → `\\n` BETWEEN consecutive numbered
+         items (`1)` … `2)` …) so the To-Do list reads as a
+         single paragraph in Slack.
+      2. Leaves the `\\n\\n` BEFORE the first numbered item
+         (after «To-Do:») alone — keeps separation between the
+         heading and the list.
+      3. Leaves all OTHER `\\n\\n` (between Header / Участники /
+         Суть / To-Do) intact — those should stay paragraph-
+         separated.
+      4. Collapses 3+ consecutive newlines anywhere → exactly 2.
+
+    Pure text in / out, no markdown injection.
+    """
+    if not text:
+        return ""
+    # Collapse any 3+ blank-line runs to exactly 2.
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Iteratively collapse `\n\n` between consecutive numbered
+    # items. We don't anchor to the FIRST `1)` so the heading-
+    # to-list gap is preserved (To-Do:\n\n1) ... → unchanged on
+    # first item; subsequent 2), 3), ... get fused).
+    prev: str = ""
+    while text != prev:
+        prev = text
+        # Match `\n\n` that's preceded by an item line (`...)` or
+        # text ending without `:`) and followed by another `N)`.
+        # Lookbehind: not a colon (so «To-Do:\n\n1)» stays).
+        text = re.sub(
+            r"(?<=[^:])\n\n(?=\d+\)\s)",
+            "\n",
+            text,
+            count=1,
+        )
+    return text
+
+
 def _split_for_slack(
     text: str, *, limit: int = SLACK_TEXT_CHUNK_CHARS
 ) -> list[str]:
@@ -173,6 +227,9 @@ def post_meeting_summary_to_slack(
         return []
 
     text = _to_slack_mrkdwn(body)
+    # FR-CR-05-147 — compact numbered-list spacing so the To-Do
+    # block doesn't render as 60 separate bubbles in Slack.
+    text = _compact_for_slack(text)
     chunks = _split_for_slack(text, limit=SLACK_TEXT_CHUNK_CHARS)
     if not chunks:
         return []
@@ -238,6 +295,7 @@ def post_meeting_summary_to_slack(
 __all__ = [
     "post_meeting_summary_to_slack",
     "_to_slack_mrkdwn",
+    "_compact_for_slack",
     "_split_for_slack",
     "SLACK_TEXT_CHUNK_CHARS",
 ]

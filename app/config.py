@@ -15,6 +15,31 @@ class Settings(BaseSettings):
     slack_bot_token: str = Field(default="", alias="SLACK_BOT_TOKEN")
     slack_app_token: str = Field(default="", alias="SLACK_APP_TOKEN")
     slack_signing_secret: str = Field(default="", alias="SLACK_SIGNING_SECRET")
+    # FR-CR-05-137 — when set, the meeting pipeline mirrors the
+    # short-summary DM to this Slack channel (e.g. Artem AI's
+    # bot-DM `D0AUXKND35Y`). Empty disables the mirror.
+    slack_meeting_channel_id: str = Field(
+        default="", alias="SLACK_MEETING_CHANNEL_ID"
+    )
+
+    # FR-CR-05-136 — Calendar-match for meeting titles. The
+    # Apps Script Web App is the proxy that does the Calendar
+    # read with operator-level OAuth (no service account /
+    # billing required). Python pipeline GETs events in a
+    # ±N-minute window, runs an LLM-pass to pick the best match,
+    # rewrites the meeting title to «DD/MM - <calendar title>».
+    calendar_match_enabled: bool = Field(
+        default=False, alias="CALENDAR_MATCH_ENABLED"
+    )
+    calendar_match_window_minutes: int = Field(
+        default=30, alias="CALENDAR_MATCH_WINDOW_MINUTES"
+    )
+    calendar_apps_script_url: str = Field(
+        default="", alias="CALENDAR_APPS_SCRIPT_URL"
+    )
+    calendar_apps_script_shared_token: str = Field(
+        default="", alias="CALENDAR_APPS_SCRIPT_SHARED_TOKEN"
+    )
 
     # DB
     database_url: str = Field(

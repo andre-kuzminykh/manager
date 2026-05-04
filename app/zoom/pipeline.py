@@ -524,6 +524,37 @@ class ZoomPipeline:
             if uid_chunks == len(chunks):
                 sent += 1
         row.short_summary_sent = sent > 0
+        # FR-CR-05-137 — mirror the same body into Slack (Artem
+        # AI's bot DM by default). Failures here MUST NOT block
+        # the rest of the pipeline. Configured via
+        # SLACK_MEETING_CHANNEL_ID + SLACK_BOT_TOKEN env.
+        try:
+            from app.services.slack_mirror import (
+                post_meeting_summary_to_slack,
+            )
+            channel = self._settings.slack_meeting_channel_id
+            token = self._settings.slack_bot_token
+            if channel and token and (row.short_summary or "").strip():
+                resp = post_meeting_summary_to_slack(
+                    slack_token=token, channel_id=channel,
+                    body=row.short_summary or "",
+                )
+                from app.services.trace_log import trace_event as _te
+                _te(source="zoom", recording_id=row.zoom_id,
+                    event="zoom_slack_mirror_posted",
+                    channel_id=channel,
+                    posted=bool(resp and resp.get("ok")),
+                    body_chars=len(row.short_summary or ""))
+                log.info(
+                    "zoom_slack_mirror_posted",
+                    zoom_id=row.zoom_id, channel_id=channel,
+                    posted=bool(resp and resp.get("ok")),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "zoom_slack_mirror_unexpected_error",
+                zoom_id=row.zoom_id, error=str(e),
+            )
         return sent
 
     def _step_match_counterparties(

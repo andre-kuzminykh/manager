@@ -1070,6 +1070,71 @@ class FirefliesPipeline:
 
     # --- step 4: Google Doc export ----------------------------
 
+    def _step_match_calendar_title(
+        self, session: Session, row: MeetingRecording
+    ) -> int:
+        """FR-CR-05-136 — replace Fireflies' auto-generated
+        title with the matching Google Calendar event title
+        («30/04 - US Innovative Technology / TWG Global»).
+
+        Fetches Calendar events ±N min around `row.meeting_date`
+        via the Apps Script proxy, asks an LLM to pick the best
+        match against the detailed summary, then writes the
+        canonical title back to `row.title`. Returns 1 on
+        update, 0 on no-match / disabled / failure.
+        """
+        if not self._settings.calendar_match_enabled:
+            return 0
+        if not row.meeting_date or not row.detailed_summary:
+            return 0
+        if not self._settings.calendar_apps_script_url:
+            return 0
+        from app.services.calendar_match import match_and_format_title
+
+        try:
+            new_title = match_and_format_title(
+                meeting_dt=row.meeting_date,
+                agenda=row.detailed_summary or "",
+                apps_script_url=self._settings.calendar_apps_script_url,
+                shared_token=self._settings.calendar_apps_script_shared_token,
+                window_minutes=self._settings.calendar_match_window_minutes,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                trace_source="fireflies",
+                trace_recording_id=row.fireflies_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "fireflies_calendar_match_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+            return 0
+        if not new_title:
+            log.info(
+                "fireflies_calendar_match_no_match",
+                fireflies_id=row.fireflies_id,
+                original_title=row.title,
+            )
+            return 0
+        if new_title == row.title:
+            return 0
+        old_title = row.title
+        row.title = new_title
+        session.flush()
+        log.info(
+            "fireflies_calendar_match_title_updated",
+            fireflies_id=row.fireflies_id,
+            old_title=old_title, new_title=new_title,
+        )
+        from app.services.trace_log import trace_event as _te
+        _te(source="fireflies", recording_id=row.fireflies_id,
+            event="calendar_match_title_updated",
+            old_title=old_title, new_title=new_title)
+        return 1
+
     def _step_match_counterparties(
         self, session: Session, row: MeetingRecording
     ) -> int:
@@ -2188,6 +2253,17 @@ class FirefliesPipeline:
                 report.errors.append(row.last_error or "detailed_summary_failed")
                 return report
         report.detailed_chars = len(row.detailed_summary or "")
+        # FR-CR-05-136 — replace the Fireflies-supplied title
+        # with the matching Google Calendar event title (via
+        # Apps Script proxy). Failures NEVER cascade.
+        try:
+            with _trace_step("fireflies", "match_calendar_title", **ctx):
+                self._step_match_calendar_title(session, row)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_calendar_match_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
         # FR-CR-05-125 — match counterparty mentions against the
         # canonical directory before doc/summary generation so
         # both surfaces can render the «🔗 Контрагенты» block.

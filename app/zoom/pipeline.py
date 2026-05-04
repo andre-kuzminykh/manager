@@ -385,44 +385,22 @@ class ZoomPipeline:
         if not row.detailed_summary:
             row.last_error = "no detailed summary for short summary"
             return False
-        # FR-CR-05-130 — operator-pinned: «надо «участники» для
-        # встреч по зуму вычленять из списка Team». LLM reads
-        # the transcript + team_members and emits the team-side
-        # real-name participants. Falls back to row.participants
-        # (Zoom API metadata) if the LLM call fails or no team
+        # FR-CR-05-130 / FR-CR-05-139 — same helper as
+        # _step_extract_tasks; stash on row to avoid double LLM
+        # call. LLM reads the transcript + team_members and
+        # emits the team-side real-name participants. Falls
+        # back to row.participants (Zoom API metadata) if the
+        # LLM call fails or no team
         # members are configured.
-        team_participants: list[str] = []
+        # FR-CR-05-139 — pull team-validated participants via the
+        # cached helper; reused by extract_tasks above so the
+        # extraction LLM call only fires once per recording.
+        from app.services.team_members import as_known_employees
         try:
-            from app.services.team_members import as_known_employees
-            from app.services.zoom_participants import (
-                extract_zoom_participants_via_llm,
-            )
             tm_rows = as_known_employees(session, prefer_telegram=True)
-            if tm_rows and row.transcript_text:
-                team_participants = extract_zoom_participants_via_llm(
-                    row.transcript_text,
-                    [
-                        {
-                            "real_name": (e.get("real_name") or "").strip(),
-                            "role": e.get("role") or "",
-                            "notes": e.get("notes") or "",
-                        }
-                        for e in tm_rows
-                    ],
-                    llm_backend=self._llm,
-                    model=self._settings.fireflies_tasks_model,
-                    reasoning_effort=(
-                        self._settings.fireflies_tasks_reasoning_effort
-                        or None
-                    ),
-                    trace_source="zoom",
-                    trace_recording_id=row.zoom_id,
-                )
-        except Exception as e:  # noqa: BLE001
-            log.info(
-                "zoom_participants_unexpected_error",
-                zoom_id=row.zoom_id, error=str(e),
-            )
+        except Exception:  # noqa: BLE001
+            tm_rows = []
+        team_participants = self._ensure_team_participants(row, tm_rows)
         effective_participants = team_participants or list(row.participants or [])
         participants_block = "\n".join(
             f"  - {p}" for p in effective_participants if p
@@ -890,6 +868,62 @@ class ZoomPipeline:
             )
         return len(kept_ids)
 
+    def _ensure_team_participants(
+        self,
+        row: ZoomRecording,
+        known_employees: list[dict[str, Any]],
+    ) -> list[str]:
+        """FR-CR-05-139 — extract once, cache on row.__dict__.
+
+        `extract_zoom_participants_via_llm` is an LLM call; it
+        runs in TWO downstream steps (extract_tasks + short
+        summary) so we cache the result rather than calling it
+        twice per recording.
+
+        Returns a list of canonical real_names from
+        team_members.real_name (validated, no Whisper
+        hallucinations). Empty list when no team_members are
+        configured / LLM call fails / transcript missing.
+        """
+        cached = row.__dict__.get("_zm_team_participants")
+        if cached is not None:
+            return list(cached)
+        if not row.transcript_text or not known_employees:
+            row.__dict__["_zm_team_participants"] = []
+            return []
+        try:
+            from app.services.zoom_participants import (
+                extract_zoom_participants_via_llm,
+            )
+
+            participants = extract_zoom_participants_via_llm(
+                row.transcript_text,
+                [
+                    {
+                        "real_name": (e.get("real_name") or "").strip(),
+                        "role": e.get("role") or "",
+                        "notes": e.get("notes") or "",
+                    }
+                    for e in known_employees
+                ],
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort
+                    or None
+                ),
+                trace_source="zoom",
+                trace_recording_id=row.zoom_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_participants_unexpected_error",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            participants = []
+        row.__dict__["_zm_team_participants"] = participants
+        return participants
+
     # --- step 6: extract tasks --------------------------------
 
     def _step_extract_tasks(
@@ -936,9 +970,25 @@ class ZoomPipeline:
 
         admin_uid = _admin_fallback_owner_id()
         emp_table = _render_known_employees_table(known_employees)
+
+        # FR-CR-05-139 — extract real-name participants from
+        # transcript (validated against team_members) so the LLM
+        # can disambiguate identical first names (Rule 8).
+        # Cached on row.__dict__ for short_summary reuse.
+        team_participants = self._ensure_team_participants(
+            row, known_employees,
+        )
+        participants_block = (
+            "\n".join(f"  - {p}" for p in team_participants if p)
+            or "  (нет данных)"
+        )
+
         prompt_user = (
             f"Заголовок: {row.title or '(без названия)'}\n"
             f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}\n"
+            "\nmeeting_participants (REAL NAMES of who was on this call,\n"
+            "use to disambiguate identical first names — Rule 8):\n"
+            f"{participants_block}\n"
             "\nИзвестные сотрудники:\n"
             f"{emp_table}\n\nПодробный отчёт:\n{row.detailed_summary}"
         )

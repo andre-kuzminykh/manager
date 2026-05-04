@@ -1494,6 +1494,32 @@ def test_task_extraction_prompt_pins_role_notes_and_assistant_routing():
     assert "speaker" in blob.lower() or "SPEAKER" in blob
 
 
+def test_task_extraction_prompt_pins_disambiguate_first_names_via_participants():
+    """FR-CR-05-139 — operator regression: «Дима Дроздов» vs
+    «Дмитрий Седов» both match a transcript «Дима, …». The
+    LLM was assigning fundraising tasks to Седов even when only
+    Дроздов was on the call — because Седов's role looked like a
+    better fit. Rule 8 inverts that: «participants beat role-
+    match» — assign to who was actually present."""
+    from app.fireflies.prompts import (
+        TASK_EXTRACTION_SYSTEM, TASK_VERIFICATION_SYSTEM,
+    )
+
+    for prompt in (TASK_EXTRACTION_SYSTEM, TASK_VERIFICATION_SYSTEM):
+        assert "PARTICIPANTS BEAT" in prompt
+        assert "meeting_participants" in prompt
+        assert "FR-CR-05-139" in prompt
+    # Worked example pinning the operator's specific regression.
+    assert "Дима Дроздов" in TASK_EXTRACTION_SYSTEM
+    assert "Дмитрий Седов" in TASK_EXTRACTION_SYSTEM
+    # The rule must NOT say «pick by role even if absent» — the
+    # operator regression came from precisely that behaviour.
+    assert (
+        "DO NOT pick an absent teammate just because their"
+        in TASK_EXTRACTION_SYSTEM
+    )
+
+
 def test_task_extraction_prompt_forbids_admin_default_owner():
     """FR-CR-05-117 rule 6 — «прислать строку с таймингами» and
     «уточнить сроки поездки» landed on Андрей Кузьминых (admin /

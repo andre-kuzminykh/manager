@@ -407,6 +407,51 @@ OWNER SELECTION RULES (read carefully — operator-specific):
      transcript: «Дима, нужно провести тест письма…»
        → owner = <Дима's uid> (NEVER Viktor or anyone else).
 
+8. PARTICIPANTS BEAT ROLE/NOTES MATCH (FR-CR-05-139). The
+   `meeting_participants` block in the user prompt lists the
+   REAL NAMES of teammates who were ACTUALLY on this call.
+   When multiple `known_employees` could plausibly own a task,
+   ALWAYS prefer the one(s) IN `meeting_participants` over an
+   absent teammate, EVEN IF the absent teammate's role / notes
+   look like a better topical fit.
+
+   Decision tree for ANY task you're routing:
+     a) Did the transcript explicitly delegate the task to a
+        named person? («Седов сделает X», «Дима отправит …»)
+        → pick them by Rule 7 (named-assignee wins). Use first-
+        name disambiguation below if the name maps to multiple
+        teammates.
+     b) Otherwise, who's on the call and whose role/notes match
+        the task topic? Pick them.
+     c) DO NOT pick an absent teammate just because their
+        role/notes is a closer match — the operator wants tasks
+        routed to people who can actually pick them up
+        immediately. Leave owner null rather than assigning to
+        someone who wasn't there.
+
+   First-name disambiguation (when the transcript uses a bare
+   first name that matches multiple teammates):
+     - If exactly ONE matching teammate is in
+       `meeting_participants` → pick that one.
+     - If multiple matching teammates are in
+       `meeting_participants` → use role + notes context.
+     - If NONE of the matching teammates is in
+       `meeting_participants` and the transcript ONLY mentions
+       them in third person (discussed, not delegated) → DO NOT
+       assign; leave owner null OR pick a present teammate
+       whose role fits.
+
+   Operator regressions this rule fixes:
+     team has «Дима Дроздов» (Аналитик) and «Дмитрий Седов»
+     (Финансовый Советник Артема). Meeting participants =
+     [Дима Дроздов, Артем, Ира, Алина, Лена]. Transcript
+     mentions «Седов» a few times in third person but he wasn't
+     on the call. Tasks like «Prime Movers — подтвердить
+     участие» and «Первый close — определить минимальную сумму»
+     have a role-match for Седов but he WASN'T THERE. Route
+     them to Дроздов (present, also a Дима) or to a present
+     IR teammate, not to Седов.
+
 Worked owner-selection example:
     employees:
       U1 — name «Артём», role «CEO», notes «только
@@ -552,6 +597,14 @@ OWNER SELECTION RULES (same as the first pass):
    («Дима» = «Дмитрий», «Ира» = «Ирина», «Артём» = «Артём
    Соколов»). NEVER substitute a different teammate. NEVER
    fall back to admin when a name was named.
+8. PARTICIPANTS BEAT ROLE-MATCH (FR-CR-05-139). The
+   `meeting_participants` block lists who was on the call.
+   Don't assign tasks to teammates who weren't there just
+   because their role / notes look like a better topical fit;
+   leave owner null OR route to a present teammate. Same
+   first-name disambiguation as the extractor — when the
+   transcript says «Дима» and only one Дима was on the call,
+   pick that one regardless of role match for the absent one.
 """
 
 

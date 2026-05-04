@@ -1744,9 +1744,18 @@ class FirefliesPipeline:
         except Exception as e:  # noqa: BLE001
             log.info("fireflies_team_registry_unavailable", error=str(e))
             known_employees = []
+        # FR-CR-05-139 — render participants as a prominent block
+        # so the LLM can disambiguate identical first names («Дима
+        # Дроздов» vs «Дмитрий Седов») via Rule 8.
+        participants_lines = (
+            "\n".join(f"  - {p}" for p in (row.participants or []) if p)
+            or "  (нет данных)"
+        )
         meta = (
             f"meeting_title: {row.title or ''}\n"
-            f"participants: {', '.join(row.participants or [])}\n"
+            f"\nmeeting_participants (REAL NAMES of who was on this call,\n"
+            f"use to disambiguate identical first names — Rule 8):\n"
+            f"{participants_lines}\n"
         )
         user_prompt = (
             "known_employees (pick a slack_user_id from this table):\n"

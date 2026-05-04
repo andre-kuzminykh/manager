@@ -513,20 +513,27 @@ class ZoomPipeline:
             channel = self._settings.slack_meeting_channel_id
             token = self._settings.slack_bot_token
             if channel and token and (row.short_summary or "").strip():
-                resp = post_meeting_summary_to_slack(
+                # FR-CR-05-141 — multi-chunk delivery; returns
+                # list of responses, one per ≤35K-char chunk.
+                resps = post_meeting_summary_to_slack(
                     slack_token=token, channel_id=channel,
                     body=row.short_summary or "",
+                )
+                posted = sum(
+                    1 for r in (resps or [])
+                    if isinstance(r, dict) and r.get("ok")
                 )
                 from app.services.trace_log import trace_event as _te
                 _te(source="zoom", recording_id=row.zoom_id,
                     event="zoom_slack_mirror_posted",
                     channel_id=channel,
-                    posted=bool(resp and resp.get("ok")),
+                    chunks_posted=posted,
                     body_chars=len(row.short_summary or ""))
                 log.info(
                     "zoom_slack_mirror_posted",
                     zoom_id=row.zoom_id, channel_id=channel,
-                    posted=bool(resp and resp.get("ok")),
+                    chunks_posted=posted,
+                    body_chars=len(row.short_summary or ""),
                 )
         except Exception as e:  # noqa: BLE001
             log.warning(

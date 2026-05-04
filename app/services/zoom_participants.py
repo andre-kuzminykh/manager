@@ -47,6 +47,37 @@ constantly:
   «Ира» / «Ирина» / «Ирочка»     → match Irina teammate
 ═══════════════════════════════════════════════════════════════
 
+═══════════════════════════════════════════════════════════════
+AMBIGUOUS FIRST-NAME RULE (FR-CR-05-140) — operator-pinned:
+«не забудь ставить в ответственных только тех кто был на
+встрече» combined with «у тебя в участниках Дроздов, а нужен
+Седов» (we picked the wrong Дима).
+
+When the transcript uses a BARE first name («Дима», «Лена»,
+«Саша») WITHOUT a surname AND `team_members` has TWO OR MORE
+teammates with that first name (e.g. «Дима Дроздов» AND
+«Дмитрий Седов»):
+
+  - DO NOT guess one. Include ALL of them in the participants
+    list. The downstream task-routing layer reads the per-task
+    topic + each teammate's `notes` column to pick the right
+    person per task, with much more context than this single
+    pass has.
+  - The ONLY exception: when the transcript explicitly uses a
+    surname («Дима Дроздов сказал …», «Седов посмотрит …») or
+    other unambiguous identifier — then include only the named
+    one.
+
+Worked example:
+  team_members: «Дима Дроздов» (Head of Network) + «Дмитрий
+                Седов» (Финансовый Советник Артема).
+  transcript:   «… Дима, отправь Tether email-апдейт …» (no
+                surname mentioned anywhere in the call).
+  output:       BOTH names in `participants`. Downstream
+                task-routing layer uses notes to assign each
+                Дима-task to the right one.
+═══════════════════════════════════════════════════════════════
+
 OUTPUT RULES:
 
 1. Return the team_member's `real_name` EXACTLY as in the
@@ -57,6 +88,8 @@ OUTPUT RULES:
    real participation evidence, return `{"participants": []}`.
 5. NEVER add names that aren't in the team_members table
    (those are external counterparties, not participants).
+6. Apply the AMBIGUOUS FIRST-NAME RULE above when the
+   transcript leaves a first name unresolvable.
 
 Respond as a JSON object: `{"participants": ["<real_name>", ...]}`.
 """

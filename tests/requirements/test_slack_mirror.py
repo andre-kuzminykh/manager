@@ -72,21 +72,21 @@ def test_post_meeting_summary_no_op_when_token_missing():
     res = post_meeting_summary_to_slack(
         slack_token="", channel_id="C0XYZ", body="hi",
     )
-    assert res is None
+    assert res == []
 
 
 def test_post_meeting_summary_no_op_when_channel_missing():
     res = post_meeting_summary_to_slack(
         slack_token="xoxb-test", channel_id="", body="hi",
     )
-    assert res is None
+    assert res == []
 
 
 def test_post_meeting_summary_no_op_when_body_blank():
     res = post_meeting_summary_to_slack(
         slack_token="xoxb-test", channel_id="C0XYZ", body="   ",
     )
-    assert res is None
+    assert res == []
 
 
 def test_post_meeting_summary_calls_chat_postMessage_with_converted_body():
@@ -105,8 +105,10 @@ def test_post_meeting_summary_calls_chat_postMessage_with_converted_body():
             body=body,
         )
 
-    assert res is not None
-    assert res.get("ok") is True
+    # FR-CR-05-141 — list-of-responses, not single dict.
+    assert isinstance(res, list)
+    assert len(res) == 1
+    assert res[0].get("ok") is True
     assert len(captured) == 1
     [call] = captured[0].calls
     assert call["channel"] == "D0AUXKND35Y"
@@ -117,7 +119,7 @@ def test_post_meeting_summary_calls_chat_postMessage_with_converted_body():
     assert call["unfurl_media"] is False
 
 
-def test_post_meeting_summary_returns_none_on_slack_api_error():
+def test_post_meeting_summary_returns_empty_list_on_slack_api_error():
     """Slack rate-limit / 5xx etc. — caller treats as non-fatal,
     pipeline keeps going."""
     from slack_sdk.errors import SlackApiError
@@ -140,10 +142,10 @@ def test_post_meeting_summary_returns_none_on_slack_api_error():
             channel_id="C0XYZ",
             body="hi",
         )
-    assert res is None
+    assert res == []
 
 
-def test_post_meeting_summary_returns_none_on_unexpected_exception():
+def test_post_meeting_summary_returns_empty_list_on_unexpected_exception():
     class _BoomClient:
         def __init__(self, token):
             raise RuntimeError("transport down")
@@ -154,4 +156,64 @@ def test_post_meeting_summary_returns_none_on_unexpected_exception():
             channel_id="C0XYZ",
             body="hi",
         )
-    assert res is None
+    assert res == []
+
+
+# --- FR-CR-05-141 chunked delivery ---------------------------
+
+def test_split_for_slack_short_body_one_chunk():
+    from app.services.slack_mirror import _split_for_slack
+    out = _split_for_slack("short body", limit=100)
+    assert out == ["short body"]
+
+
+def test_split_for_slack_paragraph_boundary():
+    from app.services.slack_mirror import _split_for_slack
+    body = "para1 long" * 10 + "\n\n" + "para2 long" * 10
+    chunks = _split_for_slack(body, limit=120)
+    assert len(chunks) == 2
+    assert "para1" in chunks[0]
+    assert "para2" in chunks[1]
+
+
+def test_split_for_slack_handles_long_single_paragraph():
+    from app.services.slack_mirror import _split_for_slack
+    body = "line\n" * 200  # 1000 chars, no double-newlines
+    chunks = _split_for_slack(body, limit=300)
+    assert all(len(c) <= 300 for c in chunks)
+    assert sum(len(c) for c in chunks) >= 950  # most content preserved
+
+
+def test_post_meeting_summary_chunks_long_body_sequentially():
+    """FR-CR-05-141 — body > 35 000 chars splits into multiple
+    chat.postMessage calls in order."""
+    captured: list[_FakeWebClient] = []
+
+    def _factory(token):
+        c = _FakeWebClient(token)
+        captured.append(c)
+        return c
+
+    long_body = (
+        "Title\n\n"
+        + "\n\n".join(f"Paragraph {i}: " + ("x" * 1000) for i in range(50))
+    )
+    assert len(long_body) > 35_000
+
+    with patch("slack_sdk.WebClient", side_effect=_factory):
+        res = post_meeting_summary_to_slack(
+            slack_token="xoxb-test",
+            channel_id="D0AUXKND35Y",
+            body=long_body,
+        )
+
+    assert isinstance(res, list)
+    assert len(res) >= 2  # multiple chunks
+    assert all(r.get("ok") for r in res)
+    assert len(captured) == 1  # one client, multiple calls
+    calls = captured[0].calls
+    assert len(calls) == len(res)
+    # Chunks delivered in order, each ≤ 35 000 chars.
+    for c in calls:
+        assert len(c["text"]) <= 35_000
+        assert c["channel"] == "D0AUXKND35Y"

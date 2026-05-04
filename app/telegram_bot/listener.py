@@ -766,8 +766,17 @@ class TelegramListener:
         if self._zoom_started_at is None:
             self._zoom_started_at = datetime.now(timezone.utc)
         try:
+            # FR-CR-05-143 — pass `required_email` so the
+            # listener picks up only meetings where Artem is
+            # the host OR a participant.
+            settings = getattr(self._zoom_pipeline, "_settings", None)
+            req = (
+                (getattr(settings, "zoom_required_email", "") or "").strip()
+                or None
+            )
             metas = self._zoom_pipeline._client.list_recordings(  # noqa: SLF001
-                limit=self._zoom_poll_batch
+                limit=self._zoom_poll_batch,
+                required_email=req,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("listener_zoom_poll_list_failed", error=str(e))

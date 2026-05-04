@@ -37,7 +37,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--limit", type=int, default=5)
     p.add_argument(
         "--newest", action="store_true",
-        help="Required flag — pulls the `--limit` most-recent recordings.",
+        help=(
+            "Pulls the `--limit` most-recent recordings. Required "
+            "unless `--zoom-id` is given (which targets a single "
+            "recording by its UUID)."
+        ),
     )
     p.add_argument(
         "--rerun",
@@ -52,6 +56,27 @@ def _parse_args() -> argparse.Namespace:
             "summaries. Existing Tasks extracted from those "
             "recordings are NOT deleted (operator's responsibility "
             "via wipe_tasks if needed)."
+        ),
+    )
+    p.add_argument(
+        "--zoom-id",
+        default=None,
+        help=(
+            "FR-CR-05-143 — process exactly ONE recording by its "
+            "Zoom UUID. Useful for targeted reruns on a known "
+            "meeting (`HdyK6m9iQtKabZFpT6bN1Q==`) without touching "
+            "neighbouring recordings. Pages the recording listing "
+            "until the UUID is found. Implies a single-row run."
+        ),
+    )
+    p.add_argument(
+        "--page-size",
+        type=int,
+        default=30,
+        help=(
+            "FR-CR-05-143 — Zoom API page size for the listing "
+            "request. Bump up to 300 when host filter is on and "
+            "the target host's recordings are sparse."
         ),
     )
     return p.parse_args()
@@ -72,8 +97,11 @@ def main() -> int:
                    "ZOOM_CLIENT_SECRET not all set",
         )
         return 2
-    if not args.newest:
-        log.error("zoom_migration_requires_newest_flag")
+    if not args.newest and not args.zoom_id:
+        log.error(
+            "zoom_migration_requires_newest_or_zoom_id",
+            hint="pass either `--newest` or `--zoom-id <uuid>`",
+        )
         return 2
 
     client = ZoomClient(
@@ -104,10 +132,41 @@ def main() -> int:
         sender=sender,
     )
 
-    metas = client.list_recordings(limit=args.limit)
+    # FR-CR-05-143 — when `--zoom-id` is given we keep paging
+    # until the target uuid surfaces (or we run out of pages).
+    # When `--newest`, we just take the first --limit recordings,
+    # filtered by ZOOM_REQUIRED_EMAIL (host OR participant) if set.
+    required_email = (settings.zoom_required_email or "").strip() or None
+    if args.zoom_id:
+        # Need to find ONE specific recording by UUID — required-
+        # email filter is bypassed (operator picked the uuid).
+        all_metas = client.list_recordings(
+            limit=args.page_size, page_size=args.page_size,
+        )
+        metas = [m for m in all_metas if m.id == args.zoom_id]
+        if not metas:
+            log.error(
+                "zoom_migration_zoom_id_not_found",
+                zoom_id=args.zoom_id,
+                page_size=args.page_size,
+                page_total=len(all_metas),
+                hint=(
+                    "uuid not on first page — bump --page-size "
+                    "(max 300) or check the uuid"
+                ),
+            )
+            return 2
+    else:
+        metas = client.list_recordings(
+            limit=args.limit,
+            page_size=args.page_size,
+            required_email=required_email,
+        )
     log.info(
         "zoom_migration_starting",
         limit=args.limit,
+        zoom_id=args.zoom_id,
+        required_email=required_email,
         seen=len(metas),
         rerun=args.rerun,
     )

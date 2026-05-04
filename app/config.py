@@ -282,6 +282,18 @@ class Settings(BaseSettings):
     zoom_audio_max_bytes: int = Field(
         default=200 * 1024 * 1024, alias="ZOOM_AUDIO_MAX_BYTES"
     )
+    # FR-CR-05-143 — operator-pinned «мне надо проверять что там
+    # есть 1@thehumanoid.ai и только если да, то обрабатывать».
+    # `/accounts/me/recordings` returns ALL recordings under the
+    # Humanoid.AI Zoom account (incl. ones hosted by other
+    # teammates). When ZOOM_REQUIRED_EMAIL is set, a recording is
+    # kept iff `host_email` matches OR the email appears in the
+    # `/past_meetings/{uuid}/participants` list (i.e. the email
+    # is the host OR a confirmed attendee). Empty disables the
+    # filter (legacy behaviour — accept all).
+    zoom_required_email: str = Field(
+        default="", alias="ZOOM_REQUIRED_EMAIL"
+    )
     # FR-CR-05-118 — listener-side periodic poll for Zoom Cloud
     # Recordings, mirrors `FIREFLIES_REALTIME_ENABLED`. Idempotent:
     # ZoomPipeline.process_one short-circuits already-processed

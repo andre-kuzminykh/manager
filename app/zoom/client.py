@@ -33,7 +33,8 @@ class ZoomRecordingMeta:
     `id` is Zoom's UUID (the dedup key); `meeting_id` is the
     numeric room id. `audio_url` is the `download_url` of the
     smallest audio-only file we can find (M4A first, MP4 as
-    fallback)."""
+    fallback). `host_email` is the recording's host (operator
+    uses this to filter to only Artem-hosted meetings — FR-CR-05-143)."""
 
     id: str
     meeting_id: str | None
@@ -43,6 +44,7 @@ class ZoomRecordingMeta:
     participants: list[str]
     audio_url: str | None
     share_url: str | None
+    host_email: str | None = None
     raw: dict = field(default_factory=dict)
 
 
@@ -211,6 +213,7 @@ class ZoomClient:
     def list_recordings(
         self, *, limit: int = 20, page_size: int = 30,
         from_date: str | None = None, to_date: str | None = None,
+        required_email: str | None = None,
     ) -> list[ZoomRecordingMeta]:
         """Return up to `limit` most-recent cloud recordings.
 
@@ -246,13 +249,34 @@ class ZoomClient:
         }
         payload = self._request_func(url, headers, None, "GET")
         meetings = (payload or {}).get("meetings") or []
+        # FR-CR-05-143 — operator-pinned: keep only recordings
+        # where `required_email` is the host OR appears in the
+        # `/past_meetings/{uuid}/participants` list. `/accounts/me/
+        # recordings` returns the whole workspace; operator wants
+        # Artem-only.
+        required = (required_email or "").strip().lower()
         out: list[ZoomRecordingMeta] = []
+        skipped_no_match = 0
+        skipped_participants_check = 0
         for m in meetings:
             if not isinstance(m, dict):
                 continue
             uuid = m.get("uuid")
             if not uuid:
                 continue
+            row_host = (m.get("host_email") or "").strip().lower()
+            if required:
+                host_matches = (row_host == required)
+                if not host_matches:
+                    # Host doesn't match — fall back to checking
+                    # the participants list (extra API call).
+                    p_emails = self._fetch_meeting_participant_emails(
+                        str(uuid), token=token,
+                    )
+                    if required not in p_emails:
+                        skipped_no_match += 1
+                        continue
+                    skipped_participants_check += 1
             audio_url = _pick_audio_url(m.get("recording_files") or [])
             out.append(
                 ZoomRecordingMeta(
@@ -273,12 +297,66 @@ class ZoomClient:
                     ),
                     audio_url=audio_url,
                     share_url=m.get("share_url") or None,
+                    host_email=(m.get("host_email") or None),
                     raw=m,
                 )
             )
             if len(out) >= limit:
                 break
+        if required:
+            log.info(
+                "zoom_recordings_listed",
+                required_email=required, kept=len(out),
+                skipped_no_match=skipped_no_match,
+                kept_via_participants=skipped_participants_check,
+                page_total=len(meetings),
+            )
         return out
+
+    def _fetch_meeting_participant_emails(
+        self, uuid: str, *, token: str | None = None,
+    ) -> set[str]:
+        """FR-CR-05-143 — fetch participant emails for a single
+        recording via `/past_meetings/{uuid}/participants`. Used
+        by the host-or-participant filter when `host_email`
+        doesn't match (so we still don't skip recordings where
+        Artem joined someone else's call).
+
+        Returns lowercase emails. Empty set on any failure
+        (auth, 404, network) — never raises. Zoom UUIDs that
+        contain `/` or start with `/` need to be DOUBLE
+        URL-encoded; we always single-encode the `==`/normal
+        chars and double-encode when the uuid starts with `/`
+        or contains `//`.
+        """
+        if not uuid:
+            return set()
+        token = token or self._ensure_access_token()
+        if not token:
+            return set()
+        # Per Zoom docs: double-encode UUIDs that start with `/`
+        # or contain `//`. Single-encode otherwise.
+        encoded = urllib.parse.quote(uuid, safe="")
+        if uuid.startswith("/") or "//" in uuid:
+            encoded = urllib.parse.quote(encoded, safe="")
+        url = (
+            f"{self._api_base}/past_meetings/{encoded}/participants"
+            "?page_size=300"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        payload = self._request_func(url, headers, None, "GET")
+        rows = (payload or {}).get("participants") or []
+        emails: set[str] = set()
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            e = (r.get("user_email") or r.get("email") or "").strip().lower()
+            if e:
+                emails.add(e)
+        return emails
 
     # --- audio download ---------------------------------------
 

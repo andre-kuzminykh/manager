@@ -207,6 +207,202 @@ def test_zoom_client_oauth_basic_auth_and_list_recordings():
     assert rec_call[1]["Authorization"] == "Bearer tok-1"
 
 
+def test_zoom_client_list_recordings_populates_host_email():
+    """FR-CR-05-143 — `host_email` from the Zoom API payload is
+    surfaced on `ZoomRecordingMeta` so the migrator can filter
+    to Artem-only recordings."""
+    fake = _FakeRequestFunc(
+        responses=[
+            {"access_token": "tok-1", "expires_in": 3600},
+            {
+                "meetings": [
+                    {
+                        "uuid": "abc-1",
+                        "id": 1,
+                        "topic": "Artem's call",
+                        "host_email": "1@thehumanoid.ai",
+                        "start_time": "2026-05-01T08:04:00Z",
+                        "duration": 70,
+                        "recording_files": [
+                            {"file_type": "M4A",
+                             "download_url": "https://x/a.m4a"},
+                        ],
+                    },
+                    {
+                        "uuid": "abc-2",
+                        "id": 2,
+                        "topic": "Viktor sync",
+                        "host_email": "irina.shipilova@skl.vc",
+                        "start_time": "2026-05-04T08:09:00Z",
+                        "duration": 60,
+                        "recording_files": [],
+                    },
+                ]
+            },
+        ]
+    )
+    c = ZoomClient(
+        account_id="acc", client_id="cid", client_secret="csecret",
+        request_func=fake,
+    )
+    metas = c.list_recordings(limit=10)
+    assert len(metas) == 2
+    by_uuid = {m.id: m for m in metas}
+    assert by_uuid["abc-1"].host_email == "1@thehumanoid.ai"
+    assert by_uuid["abc-2"].host_email == "irina.shipilova@skl.vc"
+
+
+def test_zoom_client_list_recordings_keeps_host_match_no_participants_call():
+    """FR-CR-05-143 — when `host_email == required_email`,
+    the recording is kept WITHOUT an extra
+    `/past_meetings/{uuid}/participants` call (cost saver)."""
+    fake = _FakeRequestFunc(
+        responses=[
+            {"access_token": "tok-1", "expires_in": 3600},
+            {
+                "meetings": [
+                    {"uuid": "host-match", "id": 1,
+                     "topic": "Artem call",
+                     "host_email": "1@thehumanoid.ai",
+                     "recording_files": []},
+                ],
+            },
+        ]
+    )
+    c = ZoomClient(
+        account_id="acc", client_id="cid", client_secret="csecret",
+        request_func=fake,
+    )
+    metas = c.list_recordings(
+        limit=10, required_email="1@thehumanoid.ai",
+    )
+    assert [m.id for m in metas] == ["host-match"]
+    # No extra `/past_meetings/.../participants` call was made.
+    participant_calls = [
+        c for c in fake.calls if "/past_meetings/" in c[0]
+    ]
+    assert participant_calls == []
+
+
+def test_zoom_client_list_recordings_falls_back_to_participants_check():
+    """FR-CR-05-143 — operator-pinned «мне надо проверять что
+    там есть 1@thehumanoid.ai». When `host_email` is someone
+    else, fetch `/past_meetings/{uuid}/participants` and keep
+    the recording iff the required email appears there. So
+    Artem's joined-someone-else's calls aren't dropped."""
+    fake = _FakeRequestFunc(
+        responses=[
+            {"access_token": "tok-1", "expires_in": 3600},
+            # listing
+            {
+                "meetings": [
+                    # (a) host doesn't match, Artem IS in the
+                    #     participant list → keep.
+                    {"uuid": "viktor-call", "id": 1,
+                     "topic": "Viktor <> Artem",
+                     "host_email": "irina.shipilova@skl.vc",
+                     "recording_files": []},
+                    # (b) host doesn't match, Artem NOT in the
+                    #     participant list → drop.
+                    {"uuid": "elena-call", "id": 2,
+                     "topic": "Elena solo",
+                     "host_email": "elena.radionova@sokolov.ch",
+                     "recording_files": []},
+                    # (c) host matches → keep, no participants call.
+                    {"uuid": "artem-call", "id": 3,
+                     "topic": "Artem hosted",
+                     "host_email": "1@thehumanoid.ai",
+                     "recording_files": []},
+                ],
+            },
+            # /past_meetings/viktor-call/participants
+            {"participants": [
+                {"user_email": "irina.shipilova@skl.vc"},
+                {"user_email": "1@thehumanoid.ai"},  # Artem
+            ]},
+            # /past_meetings/elena-call/participants
+            {"participants": [
+                {"user_email": "elena.radionova@sokolov.ch"},
+                {"user_email": "stranger@example.com"},
+            ]},
+        ]
+    )
+    c = ZoomClient(
+        account_id="acc", client_id="cid", client_secret="csecret",
+        request_func=fake,
+    )
+    metas = c.list_recordings(
+        limit=10, required_email="1@thehumanoid.ai",
+    )
+    kept = sorted(m.id for m in metas)
+    # viktor-call kept (Artem participant), artem-call kept
+    # (host); elena-call dropped (Artem absent).
+    assert kept == ["artem-call", "viktor-call"]
+    # Exactly TWO participants calls were made (one per host
+    # mismatch). The host-match (artem-call) skipped the call.
+    participant_calls = [
+        c for c in fake.calls if "/past_meetings/" in c[0]
+    ]
+    assert len(participant_calls) == 2
+
+
+def test_zoom_client_list_recordings_empty_required_email_disables_filter():
+    """Passing `required_email=None` (default) preserves legacy
+    behaviour — accept every recording, no participants call."""
+    fake = _FakeRequestFunc(
+        responses=[
+            {"access_token": "tok-1", "expires_in": 3600},
+            {
+                "meetings": [
+                    {"uuid": "a", "id": 1, "topic": "X",
+                     "host_email": "x@y.z", "recording_files": []},
+                    {"uuid": "b", "id": 2, "topic": "Y",
+                     "host_email": "p@q.r", "recording_files": []},
+                ]
+            },
+        ]
+    )
+    c = ZoomClient(
+        account_id="acc", client_id="cid", client_secret="csecret",
+        request_func=fake,
+    )
+    assert len(c.list_recordings(limit=10)) == 2
+    # No `/past_meetings/...` calls.
+    assert all("/past_meetings/" not in c[0] for c in fake.calls)
+
+
+def test_zoom_client_fetch_participant_emails_handles_failure():
+    """FR-CR-05-143 — `_fetch_meeting_participant_emails`
+    returns `set()` (empty) on any failure (auth, network,
+    404). Listing skips the recording in that case (effectively
+    a deny-by-default when the participants check itself fails).
+    """
+    fake = _FakeRequestFunc(
+        responses=[
+            {"access_token": "tok-1", "expires_in": 3600},
+            # listing
+            {
+                "meetings": [
+                    {"uuid": "weird-uuid==", "id": 1, "topic": "x",
+                     "host_email": "stranger@example.com",
+                     "recording_files": []},
+                ],
+            },
+            # /past_meetings/... — empty payload (e.g. 404
+            # turned into {}).
+            {},
+        ]
+    )
+    c = ZoomClient(
+        account_id="acc", client_id="cid", client_secret="csecret",
+        request_func=fake,
+    )
+    metas = c.list_recordings(
+        limit=10, required_email="1@thehumanoid.ai",
+    )
+    assert metas == []  # participants empty → drop.
+
+
 def test_zoom_client_token_cached_until_expiry():
     """Second list_recordings call within the TTL doesn't
     re-OAuth."""
@@ -416,9 +612,11 @@ class _StubZoomClient:
     def __init__(self, metas):
         self._metas = metas
         self.calls = 0
+        self.last_kwargs: dict = {}
 
-    def list_recordings(self, *, limit):
+    def list_recordings(self, *, limit, **kw):
         self.calls += 1
+        self.last_kwargs = dict(kw)
         return list(self._metas)
 
 

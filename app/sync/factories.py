@@ -23,8 +23,10 @@ from app.logging_setup import get_logger
 from app.sync.google_auth import (
     GOOGLE_SCOPES_SHEETS,
     GOOGLE_SCOPES_TASKS,
+    GOOGLE_USER_KEY_CALENDAR,
     GoogleCredentialStore,
     TokenCipher,
+    build_google_calendar_credentials,
     build_google_credentials,
     load_service_account_credentials,
 )
@@ -230,5 +232,53 @@ def build_google_tasks_pull_factory(
             credentials=creds,
             tasklist_id=settings.google_tasks_default_tasklist_id,
         )
+
+    return factory
+
+
+def build_calendar_credentials_factory(
+    settings: Settings,
+) -> Callable[[], object | None] | None:
+    """FR-CR-05-144 — return a callable that loads + refreshes
+    the Calendar OAuth credentials from the DB (separate user
+    key from the Sheets/Docs/Tasks one). Returns None when the
+    Calendar OAuth client isn't configured.
+
+    The factory is passed into `match_and_format_title` —
+    `googleapiclient.discovery.build('calendar', ...)` calls
+    `creds.refresh()` automatically when the access token has
+    expired, so a single load per pipeline run is enough.
+    """
+    if not (
+        settings.google_calendar_client_id
+        and settings.google_calendar_client_secret
+    ):
+        return None
+
+    def factory():
+        try:
+            cipher = TokenCipher()
+        except RuntimeError as e:
+            log.info(
+                "calendar_oauth_disabled_no_encryption_key",
+                reason=str(e),
+            )
+            return None
+        store = GoogleCredentialStore(cipher)
+        with session_scope() as session:
+            record = store.load(
+                session, user_key=GOOGLE_USER_KEY_CALENDAR,
+            )
+            if record is None:
+                log.info(
+                    "calendar_oauth_no_stored_credentials",
+                    user_key=GOOGLE_USER_KEY_CALENDAR,
+                    hint=(
+                        "run `python -m ops.bootstrap_calendar_oauth` "
+                        "to do the one-time consent flow"
+                    ),
+                )
+                return None
+            return build_google_calendar_credentials(record, store)
 
     return factory

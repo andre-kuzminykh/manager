@@ -1087,7 +1087,16 @@ class FirefliesPipeline:
             return 0
         if not row.meeting_date or not row.detailed_summary:
             return 0
-        if not self._settings.calendar_apps_script_url:
+        # FR-CR-05-144 — prefer direct Google Calendar API when
+        # `GOOGLE_CALENDAR_CLIENT_ID` is configured (operator's
+        # new path); fall back to Apps Script proxy of FR-CR-05-136
+        # when only that's set.
+        api_factory = None
+        if self._settings.google_calendar_client_id:
+            from app.sync.factories import build_calendar_credentials_factory
+
+            api_factory = build_calendar_credentials_factory(self._settings)
+        if api_factory is None and not self._settings.calendar_apps_script_url:
             return 0
         from app.services.calendar_match import match_and_format_title
 
@@ -1095,14 +1104,16 @@ class FirefliesPipeline:
             new_title = match_and_format_title(
                 meeting_dt=row.meeting_date,
                 agenda=row.detailed_summary or "",
-                apps_script_url=self._settings.calendar_apps_script_url,
-                shared_token=self._settings.calendar_apps_script_shared_token,
                 window_minutes=self._settings.calendar_match_window_minutes,
                 llm_backend=self._llm,
                 model=self._settings.fireflies_tasks_model,
                 reasoning_effort=(
                     self._settings.fireflies_tasks_reasoning_effort or None
                 ),
+                api_credentials_factory=api_factory,
+                api_calendar_id=self._settings.google_calendar_id,
+                apps_script_url=self._settings.calendar_apps_script_url,
+                shared_token=self._settings.calendar_apps_script_shared_token,
                 trace_source="fireflies",
                 trace_recording_id=row.fireflies_id,
             )

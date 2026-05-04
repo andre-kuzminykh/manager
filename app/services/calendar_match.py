@@ -68,6 +68,88 @@ Rules:
 """
 
 
+def fetch_calendar_events_via_api(
+    meeting_dt: datetime,
+    *,
+    window_minutes: int,
+    credentials_factory: Any,
+    calendar_id: str = "primary",
+) -> list[dict[str, Any]]:
+    """FR-CR-05-144 — fetch Calendar events via direct Google
+    Calendar API (replaces the Apps Script proxy of FR-CR-05-136).
+
+    `credentials_factory` is a callable returning a refreshed
+    `google.oauth2.credentials.Credentials` (we delegate the
+    refresh to the OAuth store, same as Sheets/Docs/Tasks).
+    Returns events in the same shape as
+    `fetch_calendar_events_around` (`{title, start, end,
+    attendees, description}`) so downstream LLM-pass + format
+    code is unchanged.
+
+    Failures NEVER raise — empty list on auth fail, network
+    fail, or any HttpError. Operator-pinned.
+    """
+    if meeting_dt is None or credentials_factory is None:
+        return []
+    if meeting_dt.tzinfo is None:
+        meeting_dt = meeting_dt.replace(tzinfo=timezone.utc)
+    delta = timedelta(minutes=int(window_minutes))
+    time_min = (meeting_dt - delta).isoformat()
+    time_max = (meeting_dt + delta).isoformat()
+    try:
+        creds = credentials_factory()
+    except Exception as e:  # noqa: BLE001
+        log.warning("calendar_match_api_credentials_failed", error=str(e))
+        return []
+    if creds is None:
+        log.info("calendar_match_api_no_credentials")
+        return []
+    try:
+        from googleapiclient.discovery import build
+        from googleapiclient.errors import HttpError
+    except ImportError:
+        log.warning("calendar_match_api_googleapiclient_missing")
+        return []
+    try:
+        service = build(
+            "calendar", "v3", credentials=creds,
+            cache_discovery=False,
+        )
+        resp = service.events().list(
+            calendarId=calendar_id or "primary",
+            timeMin=time_min, timeMax=time_max,
+            singleEvents=True, orderBy="startTime",
+            maxResults=50,
+        ).execute()
+    except HttpError as e:  # noqa: BLE001
+        log.warning(
+            "calendar_match_api_http_error",
+            status=getattr(e, "status_code", None),
+            calendar_id=calendar_id,
+        )
+        return []
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "calendar_match_api_unexpected_error",
+            calendar_id=calendar_id, error=str(e),
+        )
+        return []
+    out: list[dict[str, Any]] = []
+    for ev in (resp.get("items") or []):
+        if not isinstance(ev, dict):
+            continue
+        out.append({
+            "title": ev.get("summary") or "",
+            "start": (ev.get("start") or {}).get("dateTime")
+                     or (ev.get("start") or {}).get("date") or "",
+            "end": (ev.get("end") or {}).get("dateTime")
+                    or (ev.get("end") or {}).get("date") or "",
+            "attendees": ev.get("attendees") or [],
+            "description": ev.get("description") or "",
+        })
+    return out
+
+
 def fetch_calendar_events_around(
     meeting_dt: datetime,
     *,
@@ -208,24 +290,43 @@ def match_and_format_title(
     *,
     meeting_dt: datetime,
     agenda: str,
-    apps_script_url: str,
-    shared_token: str,
     window_minutes: int,
     llm_backend: Any,
     model: str,
     reasoning_effort: str | None = None,
+    apps_script_url: str | None = None,
+    shared_token: str | None = None,
+    api_credentials_factory: Any | None = None,
+    api_calendar_id: str = "primary",
     trace_source: str | None = None,
     trace_recording_id: str | None = None,
 ) -> str | None:
     """End-to-end: fetch + match + format. Returns the new
     canonical title, or ``None`` when no match (caller keeps
-    the original title)."""
-    events = fetch_calendar_events_around(
-        meeting_dt,
-        window_minutes=window_minutes,
-        apps_script_url=apps_script_url,
-        shared_token=shared_token,
-    )
+    the original title).
+
+    Two backend paths (FR-CR-05-144 superseded FR-CR-05-136):
+      - When `api_credentials_factory` is given, fetch via
+        direct Google Calendar API.
+      - Else when `apps_script_url` is given, fall back to the
+        Apps Script proxy.
+      - Else: no-op (returns None).
+    """
+    events: list[dict[str, Any]] = []
+    if api_credentials_factory is not None:
+        events = fetch_calendar_events_via_api(
+            meeting_dt,
+            window_minutes=window_minutes,
+            credentials_factory=api_credentials_factory,
+            calendar_id=api_calendar_id,
+        )
+    elif apps_script_url:
+        events = fetch_calendar_events_around(
+            meeting_dt,
+            window_minutes=window_minutes,
+            apps_script_url=apps_script_url,
+            shared_token=shared_token or "",
+        )
     if trace_source:
         trace_event(
             source=trace_source, recording_id=trace_recording_id,
@@ -258,6 +359,7 @@ def match_and_format_title(
 __all__ = [
     "CALENDAR_MATCH_SYSTEM",
     "fetch_calendar_events_around",
+    "fetch_calendar_events_via_api",
     "match_calendar_event_to_meeting_via_llm",
     "format_canonical_title",
     "match_and_format_title",

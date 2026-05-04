@@ -13,6 +13,17 @@ from app.models import OAuthCredential
 
 GOOGLE_SCOPES_SHEETS = ["https://www.googleapis.com/auth/spreadsheets"]
 GOOGLE_SCOPES_TASKS = ["https://www.googleapis.com/auth/tasks"]
+# FR-CR-05-144 — read-only Calendar access for the meeting-
+# title matcher (Fireflies + Zoom). Operator pinned a separate
+# OAuth client for Calendar so Sheets/Docs consent isn't
+# affected by re-consent on Calendar scope changes.
+GOOGLE_SCOPES_CALENDAR = ["https://www.googleapis.com/auth/calendar.readonly"]
+
+# DB `user_key` keys for the OAuth credential store. Each
+# OAuth client (Sheets+Docs+Tasks vs Calendar) gets its own
+# row so refresh tokens stay isolated.
+GOOGLE_USER_KEY_SERVICE = "_service_account"
+GOOGLE_USER_KEY_CALENDAR = "_calendar"
 
 
 class TokenCipher:
@@ -112,6 +123,28 @@ def build_google_credentials(
         expiry=_strip_tz(record.token_expires_at),
     )
     return creds
+
+
+def build_google_calendar_credentials(
+    record: OAuthCredential,
+    store: GoogleCredentialStore,
+) -> Credentials:
+    """FR-CR-05-144 — same as `build_google_credentials` but
+    uses the Calendar-specific OAuth client (`GOOGLE_CALENDAR_*`
+    settings). Operator-pinned: Calendar runs on its own OAuth
+    app so Sheets/Docs consent isn't disrupted when the
+    Calendar scope is added or revoked."""
+    settings = get_settings()
+    scopes = (record.scopes or "").split() or None
+    return Credentials(
+        token=store.decrypt_access_token(record),
+        refresh_token=store.decrypt_refresh_token(record),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.google_calendar_client_id,
+        client_secret=settings.google_calendar_client_secret,
+        scopes=scopes,
+        expiry=_strip_tz(record.token_expires_at),
+    )
 
 
 def _strip_tz(dt: datetime | None) -> datetime | None:

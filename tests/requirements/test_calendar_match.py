@@ -16,7 +16,10 @@ Plus end-to-end: the Fireflies pipeline rewrites
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import sys
+import types
 from datetime import datetime, timezone
 from io import BytesIO
 from unittest.mock import patch
@@ -29,6 +32,40 @@ from app.services.calendar_match import (
     match_and_format_title,
     match_calendar_event_to_meeting_via_llm,
 )
+
+
+@contextlib.contextmanager
+def _patched_googleapiclient(service_factory):
+    """FR-CR-05-144 — install a stub `googleapiclient` package
+    in `sys.modules` so the lazy `from googleapiclient.discovery
+    import build` inside `fetch_calendar_events_via_api` resolves
+    to our stub. Restores prior modules on exit so order-
+    dependent test pollution doesn't leak."""
+    saved = {
+        k: sys.modules.get(k)
+        for k in (
+            "googleapiclient",
+            "googleapiclient.discovery",
+            "googleapiclient.errors",
+        )
+    }
+    stub_disc = types.SimpleNamespace(
+        build=lambda *a, **kw: service_factory(),
+    )
+    stub_errors = types.SimpleNamespace(HttpError=Exception)
+    sys.modules["googleapiclient"] = types.SimpleNamespace(
+        discovery=stub_disc, errors=stub_errors,
+    )
+    sys.modules["googleapiclient.discovery"] = stub_disc
+    sys.modules["googleapiclient.errors"] = stub_errors
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
 
 
 # --- _format_canonical_title ----------------------------------
@@ -307,4 +344,176 @@ def test_match_and_format_title_returns_none_when_llm_declines():
             llm_backend=_StubLLM(picked_index=None),
             model="gpt-5.5",
         )
+    assert out is None
+
+
+# --- FR-CR-05-144: direct Google Calendar API path ------------
+
+
+def test_fetch_calendar_events_via_api_returns_normalised_dicts():
+    """FR-CR-05-144 — direct Calendar API path returns events
+    in the same shape as the Apps Script proxy
+    (`{title, start, end, attendees, description}`) so the
+    LLM-pass + format code is unchanged."""
+    from app.services.calendar_match import fetch_calendar_events_via_api
+
+    captured: dict = {}
+
+    class _StubExecutable:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def execute(self):
+            return self._payload
+
+    class _StubEvents:
+        def list(self, **kw):
+            captured["list_kwargs"] = kw
+            return _StubExecutable({
+                "items": [
+                    {
+                        "summary": "Fundraising sync",
+                        "start": {"dateTime": "2026-05-01T08:04:00Z"},
+                        "end": {"dateTime": "2026-05-01T09:14:00Z"},
+                        "attendees": [{"email": "a@b.c"}],
+                        "description": "agenda…",
+                    },
+                    # All-day event uses `date` not `dateTime`.
+                    {
+                        "summary": "All-day",
+                        "start": {"date": "2026-05-01"},
+                        "end": {"date": "2026-05-02"},
+                    },
+                ]
+            })
+
+    class _StubService:
+        def events(self):
+            return _StubEvents()
+
+    creds_returned: list = []
+
+    def factory():
+        creds_returned.append("called")
+        return object()  # any non-None object
+
+    with _patched_googleapiclient(_StubService):
+        out = fetch_calendar_events_via_api(
+            datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc),
+            window_minutes=30,
+            credentials_factory=factory,
+            calendar_id="primary",
+        )
+
+    assert len(out) == 2
+    assert out[0]["title"] == "Fundraising sync"
+    assert out[0]["start"] == "2026-05-01T08:04:00Z"
+    assert out[0]["end"] == "2026-05-01T09:14:00Z"
+    assert out[0]["attendees"] == [{"email": "a@b.c"}]
+    assert out[0]["description"] == "agenda…"
+    # All-day event picks `date` field.
+    assert out[1]["start"] == "2026-05-01"
+    assert out[1]["end"] == "2026-05-02"
+    # Calendar API was called with the right time window.
+    list_kw = captured["list_kwargs"]
+    assert list_kw["calendarId"] == "primary"
+    assert list_kw["singleEvents"] is True
+    assert list_kw["orderBy"] == "startTime"
+    assert list_kw["timeMin"] == "2026-05-01T07:30:00+00:00"
+    assert list_kw["timeMax"] == "2026-05-01T08:30:00+00:00"
+    assert creds_returned == ["called"]
+
+
+def test_fetch_calendar_events_via_api_no_credentials_returns_empty():
+    """When the factory returns None (no stored OAuth record),
+    the call returns empty without ever hitting the API."""
+    from app.services.calendar_match import fetch_calendar_events_via_api
+
+    out = fetch_calendar_events_via_api(
+        datetime(2026, 5, 1, tzinfo=timezone.utc),
+        window_minutes=30,
+        credentials_factory=lambda: None,
+    )
+    assert out == []
+
+
+def test_fetch_calendar_events_via_api_credentials_factory_raises():
+    """Factory raising → empty list, never propagates."""
+    from app.services.calendar_match import fetch_calendar_events_via_api
+
+    def boom():
+        raise RuntimeError("oauth token corrupt")
+
+    out = fetch_calendar_events_via_api(
+        datetime(2026, 5, 1, tzinfo=timezone.utc),
+        window_minutes=30,
+        credentials_factory=boom,
+    )
+    assert out == []
+
+
+def test_match_and_format_title_prefers_api_path_when_factory_given():
+    """FR-CR-05-144 — when both `api_credentials_factory` and
+    `apps_script_url` are passed, the API path WINS — Apps
+    Script proxy is the legacy fallback."""
+    from app.services.calendar_match import match_and_format_title
+
+    api_calls: list = []
+
+    def factory():
+        api_calls.append("called")
+        return object()
+
+    class _StubExecutable:
+        def execute(self):
+            return {"items": [
+                {"summary": "01/05 sync",
+                 "start": {"dateTime": "2026-05-01T08:00:00Z"}},
+            ]}
+
+    class _StubEvents:
+        def list(self, **kw):
+            return _StubExecutable()
+
+    class _StubService:
+        def events(self):
+            return _StubEvents()
+
+    # Apps Script `urlopen` MUST NOT be called — set up a
+    # poison-trap that fails the test if it runs.
+    def _poison(*a, **kw):
+        raise AssertionError(
+            "Apps Script urlopen called when API factory was given"
+        )
+
+    with _patched_googleapiclient(_StubService), patch(
+        "app.services.calendar_match.urllib.request.urlopen",
+        side_effect=_poison,
+    ):
+        out = match_and_format_title(
+            meeting_dt=datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc),
+            agenda="01/05 fundraising sync agenda",
+            window_minutes=30,
+            llm_backend=_StubLLM(picked_index=1),
+            model="gpt-5.5",
+            api_credentials_factory=factory,
+            api_calendar_id="primary",
+            # Apps Script also configured but should be ignored.
+            apps_script_url="https://script.google.com/exec",
+            shared_token="x",
+        )
+    assert out == "01/05 - 01/05 sync"
+    assert api_calls == ["called"]
+
+
+def test_match_and_format_title_no_op_when_neither_backend_configured():
+    from app.services.calendar_match import match_and_format_title
+
+    out = match_and_format_title(
+        meeting_dt=datetime(2026, 5, 1, tzinfo=timezone.utc),
+        agenda="x",
+        window_minutes=30,
+        llm_backend=_StubLLM(picked_index=1),
+        model="gpt-5.5",
+    )
     assert out is None

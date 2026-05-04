@@ -81,6 +81,24 @@ class Settings(BaseSettings):
         default="http://localhost:8080/oauth/google/callback",
         alias="GOOGLE_REDIRECT_URI",
     )
+    # FR-CR-05-144 — separate OAuth client for read-only Google
+    # Calendar access. Operator-pinned: Calendar runs on its own
+    # OAuth app so adding/removing the Calendar scope doesn't
+    # disrupt the existing Sheets/Docs/Tasks consent. Refresh
+    # token stored under DB user_key=`_calendar` (vs
+    # `_service_account` for Sheets/Docs/Tasks).
+    google_calendar_client_id: str = Field(
+        default="", alias="GOOGLE_CALENDAR_CLIENT_ID"
+    )
+    google_calendar_client_secret: str = Field(
+        default="", alias="GOOGLE_CALENDAR_CLIENT_SECRET"
+    )
+    # `primary` = the operator's own primary calendar. Override
+    # to a specific calendar id (e.g. `team@thehumanoid.ai`) to
+    # match against a shared team calendar instead.
+    google_calendar_id: str = Field(
+        default="primary", alias="GOOGLE_CALENDAR_ID"
+    )
     google_sheets_spreadsheet_id: str = Field(default="", alias="GOOGLE_SHEETS_SPREADSHEET_ID")
     # Tab name inside the spreadsheet. Defaults to "Main" so existing
     # `Tasks` spreadsheets with a "Main" tab work out of the box.

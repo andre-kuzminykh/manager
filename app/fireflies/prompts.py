@@ -364,22 +364,48 @@ OWNER SELECTION RULES (read carefully — operator-specific):
    handles what. If the operator left a row's notes blank,
    that row has no claim to any task domain; reject it.
 
-5. When NOBODY's role / notes match AND no name was uttered,
-   leave owner null. Downstream falls back to the admin uid;
-   the operator can reassign via the card's Edit button.
+5. ALWAYS PICK AN OWNER (FR-CR-05-142). Empty `owner` is a
+   bug — operator-pinned: «есть задачи без ответственных /
+   такого быть не может! всегда ответственный должен быть».
+   You MUST emit a non-null `owner` (slack_user_id from
+   `known_employees`) for EVERY task. If you find yourself
+   about to emit `null`, walk this cascade until you land:
 
-6. NEVER pick the operator (admin) row as the owner just
-   because no other match is obvious. Leaving owner null is
-   STRICTLY BETTER than defaulting to the admin / AI Lead —
-   the operator gets a card with «owner not set» and routes it
-   manually, which is far less noise than them silently being
-   assigned tasks they shouldn't own. The admin row in
-   `known_employees` is for context only; do not pick it
-   unless the transcript explicitly addresses them by name
-   («Андрей, сделай X», «Andre, you'll handle Y»). Routine
-   ops / scheduling / follow-up work goes to whoever owns
-   that domain per role / notes (rule 1) or to their assistant
-   (rule 2), NOT to the admin.
+     a) Rule 7 (named-assignee in transcript) wins.
+     b) SELF-NAMED IN TASK BODY — when the task's own title /
+        description starts with «Список <Имя>» / «Задачи <Имя>» /
+        «<Name>'s <noun>» / «дела <Имя>» / «список <Имя>», that's
+        a self-assignment. The named teammate IS the owner.
+        Apply the same first-name disambiguation as Rule 8.
+        Examples:
+          «Список Иры — прислать свой список задач»
+              → owner = Ирина's uid.
+          «Задачи Димы — прочесать email и отписаться Ирине»
+              → owner = whichever Дима matches per Rule 8 notes.
+     c) Rule 8 (PARTICIPANTS BEAT ROLE-MATCH) — pick the
+        present teammate whose role/notes best fit the task.
+     d) STILL nothing? Pick the meeting PRINCIPAL — the
+        present teammate whose notes mark them «principal» /
+        «CEO» / «руководитель» / «founder». Routine ops /
+        scheduling for the principal still routes to their
+        assistant per Rule 2.
+     e) If even (d) fails (no principal among participants),
+        pick the FIRST participant in `meeting_participants`
+        whose `notes` do NOT explicitly forbid the task domain
+        («не вести fundraising-задачи» — skip them for
+        fundraising tasks).
+
+   NEVER emit `null`. NEVER short-circuit the cascade.
+
+6. NEVER PICK THE ADMIN / AI LEAD ROW as fallback (FR-CR-05-134
+   regression). The admin row in `known_employees` is the
+   operator themselves; defaulting to them caused «прислать
+   email для отправки deck» to land on Андрей (AI Lead) when
+   it should have gone to IR. Pick the admin ONLY when the
+   transcript explicitly addresses them by name («Андрей,
+   сделай X», «Andre, you'll handle Y»). For everything else,
+   route via Rule 5's cascade (a → b → c → d → e), which
+   ALWAYS lands on a non-admin teammate.
 
 7. NAMED ASSIGNEE OVERRIDES EVERYTHING (FR-CR-05-119). When the
    transcript explicitly names a person who SHOULD do the task
@@ -396,10 +422,12 @@ OWNER SELECTION RULES (read carefully — operator-specific):
 
    - If the named person is in `known_employees` → use their uid
      (this rule wins over rules 1-6).
-   - If the named person is NOT in `known_employees` → leave
-     owner null (operator will fix, downstream falls back to
-     admin uid). Do NOT invent a uid and do NOT pick a different
-     teammate as a substitute.
+   - If the named person is NOT in `known_employees` → fall
+     through to Rule 5's cascade (NEVER null per FR-CR-05-142;
+     NEVER admin per Rule 6). Do NOT invent a uid and do NOT
+     pick a different teammate as a literal substitute for the
+     unknown name; instead, pick the most relevant PRESENT
+     teammate via cascade.
 
    Operator regressions this rule fixes:
      transcript: «Алине поручено добавить блок reminder…»
@@ -451,8 +479,21 @@ OWNER SELECTION RULES (read carefully — operator-specific):
      - If NONE of the matching teammates is in
        `meeting_participants` and the transcript ONLY mentions
        them in third person (discussed, not delegated) → DO NOT
-       assign; leave owner null OR pick a present teammate
-       whose role fits.
+       assign to the absent ones; pick a PRESENT teammate per
+       Rule 5's cascade (domain-match → principal → first
+       non-forbidden participant). Never `null` (FR-CR-05-142).
+
+   NOTES-FORBIDS-DOMAIN EXCLUSION (FR-CR-05-142b): when a
+   teammate's `notes` explicitly say «не вести X-задачи» /
+   «не вести X» (where X is fundraising, IR, research, …) AND
+   the task is in domain X — EXCLUDE that teammate as a
+   candidate even if their first name matches. Example: «Дима
+   Дроздов» notes say «не вести fundraising-задачи»; on a task
+   like «Sanders Capital — выяснить релевантный private фонд»
+   (fundraising) you must NOT pick Дроздов even if he was on
+   the call. Pick Седов (the other Дима, whose notes say
+   «Ведёт fundraising / IR») instead. If Седов wasn't on the
+   call, fall back to the principal per Rule 5d.
 
    Operator regressions this rule fixes:
      team has «Дима Дроздов» (Аналитик) and «Дмитрий Седов»
@@ -604,8 +645,14 @@ OWNER SELECTION RULES (same as the first pass):
    strategic, route to X.
 3. SPEAKER ≠ ASSIGNEE — speaker is delegating, not doing.
 4. NEVER pick the «AI Lead» row for non-AI work.
-5. When nobody matches and no name was uttered → null.
-6. NEVER pick the admin row as default. Null > admin / AI Lead.
+5. ALWAYS PICK AN OWNER (FR-CR-05-142). Empty `owner` is a
+   bug. Cascade when LLM-uncertain: (a) Rule 7 named-assignee →
+   (b) self-named in task body «Список <Имя>» / «Задачи <Имя>»
+   → (c) Rule 8 present teammate domain match → (d) meeting
+   PRINCIPAL among participants → (e) first non-forbidden
+   participant. NEVER null.
+6. NEVER pick the admin / AI Lead row as fallback (FR-CR-05-134).
+   Pick admin ONLY when transcript explicitly addresses them.
 7. NAMED ASSIGNEE OVERRIDES EVERYTHING — match short forms
    («Дима» = «Дмитрий», «Ира» = «Ирина», «Артём» = «Артём
    Соколов»). NEVER substitute a different teammate. NEVER
@@ -614,10 +661,13 @@ OWNER SELECTION RULES (same as the first pass):
    `meeting_participants` block lists who was on the call.
    Don't assign tasks to teammates who weren't there just
    because their role / notes look like a better topical fit;
-   leave owner null OR route to a present teammate. Same
+   route to a PRESENT teammate per Rule 5's cascade. Same
    first-name disambiguation as the extractor — when the
    transcript says «Дима» and only one Дима was on the call,
    pick that one regardless of role match for the absent one.
+   NOTES-FORBIDS-DOMAIN EXCLUSION (FR-CR-05-142b): when notes
+   explicitly say «не вести X-задачи», DO NOT pick that
+   teammate for X-domain tasks even when present.
 """
 
 

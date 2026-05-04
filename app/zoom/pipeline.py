@@ -919,6 +919,7 @@ class ZoomPipeline:
                     self._settings.fireflies_tasks_reasoning_effort
                     or None
                 ),
+                meeting_title=row.title,
                 trace_source="zoom",
                 trace_recording_id=row.zoom_id,
             )
@@ -1094,13 +1095,36 @@ class ZoomPipeline:
                 title = normalize_task_title(title)
             except ValueError:
                 continue
-            owner_uid = (t.get("owner") or "").strip() or None
+            llm_owner_raw = (t.get("owner") or "").strip() or None
+            owner_uid = llm_owner_raw
             if owner_uid and owner_uid not in valid_ids:
                 owner_uid = None
-            # FR-CR-05-134 — leave owner null when LLM declined
-            # to assign (Rule 6 anti-admin-default). Don't force
-            # admin: see fireflies/pipeline.py:_step_extract_tasks
-            # for the same fix.
+            # FR-CR-05-142a — never emit owner=null. Cascade
+            # fallback: pick PRINCIPAL among present participants
+            # whose notes don't forbid the topic; never the admin
+            # row (FR-CR-05-134 still holds).
+            owner_resolution = "llm" if owner_uid else "fallback_pending"
+            if not owner_uid:
+                from app.services.team_members import (
+                    infer_topic_keywords_from_text,
+                    pick_meeting_owner_fallback,
+                )
+
+                topic_text = " ".join(
+                    [
+                        row.title or "",
+                        title or "",
+                        (t.get("description") or "")[:300],
+                    ]
+                )
+                owner_uid = pick_meeting_owner_fallback(
+                    known_employees=known_employees,
+                    participants_real_names=team_participants or [],
+                    topic_keywords=infer_topic_keywords_from_text(topic_text),
+                )
+                owner_resolution = (
+                    "fallback_principal" if owner_uid else "fallback_no_participants"
+                )
             try:
                 priority = TaskPriority(t.get("priority") or "medium")
             except ValueError:
@@ -1115,6 +1139,17 @@ class ZoomPipeline:
                             or owner_uid
                         )
                         break
+            log.info(
+                "zoom_task_owner_resolved",
+                zoom_id=row.zoom_id, title=title[:80],
+                llm_owner=llm_owner_raw, final_owner=owner_uid,
+                resolution=owner_resolution,
+            )
+            from app.services.trace_log import trace_event as _zte_o
+            _zte_o(source="zoom", recording_id=row.zoom_id,
+                   event="task_owner_resolved", title=title[:80],
+                   llm_owner=llm_owner_raw, final_owner=owner_uid,
+                   resolution=owner_resolution)
             try:
                 task = Task(
                     title=title[:10_000],

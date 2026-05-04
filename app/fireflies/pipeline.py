@@ -1882,21 +1882,41 @@ class FirefliesPipeline:
                 owner_user_id = None
                 owner_resolution = "hallucinated_uid_dropped"
             if not owner_user_id:
-                # FR-CR-05-134 — when LLM declines to assign
-                # (Rule 6 anti-admin-default kicked in correctly),
-                # DO NOT silently route to the admin user. The
-                # admin is rarely the right owner for a meeting-
-                # task — defaulting to them caused «прислать email
-                # для отправки deck» landing on Андрей (AI Lead)
-                # when it should sit on IR. Operator-pinned: «не
-                # дефолтить на админе, если LLM не выбрал — пусть
-                # будет null, я доназначу руками». Card surfaces
-                # as «без владельца» until manually assigned.
-                owner_resolution = (
-                    "left_unassigned"
-                    if llm_owner_raw is None
-                    else owner_resolution + "_left_unassigned"
+                # FR-CR-05-142a — never emit owner=null. Cascade
+                # to principal participant; never to admin/AI Lead
+                # (FR-CR-05-134). Operator-pinned: «есть задачи
+                # без ответственных / такого быть не может!
+                # всегда ответственный должен быть».
+                from app.services.team_members import (
+                    infer_topic_keywords_from_text,
+                    pick_meeting_owner_fallback,
                 )
+
+                topic_text = " ".join(
+                    [
+                        row.title or "",
+                        title or "",
+                        (description or "")[:300],
+                    ]
+                )
+                fb = pick_meeting_owner_fallback(
+                    known_employees=known_employees,
+                    participants_real_names=list(row.participants or []),
+                    topic_keywords=infer_topic_keywords_from_text(topic_text),
+                )
+                if fb:
+                    owner_user_id = fb
+                    owner_resolution = (
+                        "fallback_principal"
+                        if llm_owner_raw is None
+                        else owner_resolution + "_fallback_principal"
+                    )
+                else:
+                    owner_resolution = (
+                        "fallback_no_participants"
+                        if llm_owner_raw is None
+                        else owner_resolution + "_fallback_no_participants"
+                    )
             log.info(
                 "fireflies_task_owner_resolved",
                 fireflies_id=row.fireflies_id,

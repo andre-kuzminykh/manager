@@ -1004,6 +1004,55 @@ def test_extract_zoom_participants_via_llm():
     assert "Эксперт" not in out
 
 
+def test_extract_zoom_participants_passes_meeting_title_to_llm_for_topic_filter():
+    """FR-CR-05-142b — operator-pinned: «димы дроздова не в
+    участниках ни в задачах не должно быть в Fundrising».
+    The participants extractor must forward `meeting_title`
+    into the LLM user prompt so the prompt can apply the
+    NOTES-FORBIDS-MEETING-TOPIC rule (exclude teammates whose
+    notes say «не вести fundraising-задачи» from fundraising
+    meetings even on a bare-first-name match)."""
+    from app.services.zoom_participants import (
+        extract_zoom_participants_via_llm,
+    )
+
+    captured: dict[str, str] = {}
+
+    class _CapturingLLM:
+        def complete_text(self, *, system_prompt, user_prompt, **kw):
+            captured["user_prompt"] = user_prompt
+            import json as _json
+            return _json.dumps({"participants": ["Дмитрий Седов"]})
+
+    team = [
+        {
+            "real_name": "Дима Дроздов", "role": "Аналитик",
+            "notes": "Research, dashboards; не вести fundraising-задачи",
+        },
+        {
+            "real_name": "Дмитрий Седов", "role": "Финансовый Советник",
+            "notes": "Ведёт fundraising / IR: общение с инвесторами",
+        },
+    ]
+
+    out = extract_zoom_participants_via_llm(
+        "Дима, отправь Sanders Capital follow-up",
+        team,
+        llm_backend=_CapturingLLM(),
+        model="gpt-5.5",
+        meeting_title="01/05 - Fundraising sync",
+    )
+    # meeting_title is passed into the user prompt so the LLM
+    # can reason about NOTES-FORBIDS-DOMAIN.
+    assert "01/05 - Fundraising sync" in captured["user_prompt"]
+    assert "meeting_title" in captured["user_prompt"]
+    # The notes are present for the LLM to filter against.
+    assert "не вести fundraising" in captured["user_prompt"]
+    # When the LLM correctly excludes Дроздов, output is just
+    # Седов.
+    assert out == ["Дмитрий Седов"]
+
+
 def test_extract_zoom_participants_drops_unknown_names():
     """LLM might hallucinate names — filter against canonical
     team_members.real_name set."""

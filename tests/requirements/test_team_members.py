@@ -829,3 +829,124 @@ def test_upsert_from_sheet_rows_does_not_deactivate_when_pull_empty(session):
     actives = list_active(session)
     assert len(actives) == 1
     assert actives[0].real_name == "Andre"
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-142a / 142b — `pick_meeting_owner_fallback` cascade.
+# --------------------------------------------------------------------------- #
+
+
+def test_pick_meeting_owner_fallback_picks_principal_among_participants():
+    """Cascade pass 1: principal (notes/role mention CEO/founder/
+    principal) wins."""
+    from app.services.team_members import pick_meeting_owner_fallback
+
+    employees = [
+        {"slack_user_id": "U1", "real_name": "Артем",
+         "role": "CEO", "notes": "founder, principal"},
+        {"slack_user_id": "U2", "real_name": "Алина",
+         "role": "IR", "notes": "investor relations"},
+        {"slack_user_id": "U3", "real_name": "Andre",
+         "role": "AI Lead", "notes": "admin"},
+    ]
+    out = pick_meeting_owner_fallback(
+        known_employees=employees,
+        participants_real_names=["Артем", "Алина"],
+    )
+    assert out == "U1"
+
+
+def test_pick_meeting_owner_fallback_skips_admin_uid_via_env(monkeypatch):
+    """FR-CR-05-134 compatibility — never pick the admin row
+    even when admin's notes / role would otherwise win."""
+    from app.config import get_settings
+    from app.services.team_members import pick_meeting_owner_fallback
+
+    monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "U_ADMIN")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+    try:
+        employees = [
+            # Admin marked as principal — must STILL be skipped.
+            {"slack_user_id": "U_ADMIN", "real_name": "Andre Admin",
+             "role": "Founder / CEO", "notes": "principal admin"},
+            {"slack_user_id": "U2", "real_name": "Алина",
+             "role": "IR", "notes": ""},
+        ]
+        out = pick_meeting_owner_fallback(
+            known_employees=employees,
+            participants_real_names=["Andre Admin", "Алина"],
+        )
+        assert out == "U2"  # Алина, NOT Andre Admin.
+    finally:
+        get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+def test_pick_meeting_owner_fallback_excludes_topic_forbidden_teammates():
+    """FR-CR-05-142b — when a teammate's notes say «не вести
+    fundraising-задачи» AND the task topic is fundraising,
+    skip them in favour of an unrestricted teammate."""
+    from app.services.team_members import pick_meeting_owner_fallback
+
+    employees = [
+        # Дроздов would otherwise win as a present principal.
+        {"slack_user_id": "U_DROZDOV", "real_name": "Дима Дроздов",
+         "role": "Аналитик",
+         "notes": "Research; не вести fundraising-задачи"},
+        # Седов is fundraising — should win for fundraising tasks.
+        {"slack_user_id": "U_SEDOV", "real_name": "Дмитрий Седов",
+         "role": "Финансовый Советник",
+         "notes": "Ведёт fundraising / IR"},
+    ]
+    out = pick_meeting_owner_fallback(
+        known_employees=employees,
+        participants_real_names=["Дима Дроздов", "Дмитрий Седов"],
+        topic_keywords=["fundraising", "ir"],
+    )
+    assert out == "U_SEDOV"
+
+
+def test_pick_meeting_owner_fallback_returns_none_with_no_participants():
+    from app.services.team_members import pick_meeting_owner_fallback
+
+    employees = [
+        {"slack_user_id": "U1", "real_name": "Артем",
+         "role": "CEO", "notes": "principal"},
+    ]
+    assert pick_meeting_owner_fallback(
+        known_employees=employees, participants_real_names=[],
+    ) is None
+
+
+def test_pick_meeting_owner_fallback_last_resort_first_participant():
+    """Pass 3 — when nobody is principal AND every present
+    teammate is forbidden, fall back to first participant.
+    Better than null per operator's «всегда ответственный
+    должен быть»."""
+    from app.services.team_members import pick_meeting_owner_fallback
+
+    employees = [
+        {"slack_user_id": "U_A", "real_name": "А.",
+         "role": "Analyst", "notes": "не вести fundraising-задачи"},
+        {"slack_user_id": "U_B", "real_name": "Б.",
+         "role": "Analyst", "notes": "не вести fundraising"},
+    ]
+    out = pick_meeting_owner_fallback(
+        known_employees=employees,
+        participants_real_names=["А.", "Б."],
+        topic_keywords=["fundraising"],
+    )
+    assert out == "U_A"  # last-resort first present.
+
+
+def test_infer_topic_keywords_from_text_recognises_fundraising_signals():
+    from app.services.team_members import infer_topic_keywords_from_text
+
+    assert "fundraising" in infer_topic_keywords_from_text(
+        "01/05 - Fundraising sync"
+    )
+    assert "fundraising" in infer_topic_keywords_from_text(
+        "Раунд Humanoid — first close"
+    )
+    # No fundraising signal → empty.
+    assert infer_topic_keywords_from_text("Standup") == []
+    assert infer_topic_keywords_from_text("") == []

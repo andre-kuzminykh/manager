@@ -67,15 +67,34 @@ teammates with that first name (e.g. «Дима Дроздов» AND
     surname («Дима Дроздов сказал …», «Седов посмотрит …») or
     other unambiguous identifier — then include only the named
     one.
+  - Second exception (FR-CR-05-142b — NOTES-FORBIDS-MEETING-
+    TOPIC): when the meeting's topic (from `meeting_title` /
+    transcript content) is clearly X (e.g. «Fundraising sync» /
+    investor calls) AND a candidate's `notes` explicitly say
+    «не вести X-задачи» / «не вести X» / «do not assign X» —
+    EXCLUDE that candidate even on a bare-first-name match.
+    Operator-pinned: «димы дроздова не в участниках ни в
+    задачах не должно быть в Fundrising».
 
-Worked example:
-  team_members: «Дима Дроздов» (Head of Network) + «Дмитрий
-                Седов» (Финансовый Советник Артема).
-  transcript:   «… Дима, отправь Tether email-апдейт …» (no
-                surname mentioned anywhere in the call).
-  output:       BOTH names in `participants`. Downstream
-                task-routing layer uses notes to assign each
-                Дима-task to the right one.
+Worked example A (notes don't disambiguate, bare first name):
+  team_members: «Дима Дроздов» (notes: «Research, dashboards»)
+                AND «Дмитрий Седов» (notes: «Финансовый Советник»).
+  meeting_title: «Standup» — no topic signal.
+  transcript:   «… Дима, отправь Tether email-апдейт …»
+  output:       BOTH «Дима Дроздов» AND «Дмитрий Седов».
+                Downstream task-routing uses notes per task.
+
+Worked example B (FR-CR-05-142b — notes EXCLUDE on topic):
+  team_members: «Дима Дроздов» (notes: «Research, dashboards;
+                не вести fundraising-задачи»)
+                AND «Дмитрий Седов» (notes: «Ведёт fundraising
+                / IR: общение с инвесторами, варанты»).
+  meeting_title: «Fundraising sync» — clear fundraising topic.
+  transcript:   «… Дима подготовит Sanders Capital follow-up …»
+                (bare first name, no surname).
+  output:       ONLY «Дмитрий Седов». «Дима Дроздов» EXCLUDED
+                because his notes forbid fundraising-задачи AND
+                the meeting is fundraising.
 ═══════════════════════════════════════════════════════════════
 
 OUTPUT RULES:
@@ -102,6 +121,7 @@ def extract_zoom_participants_via_llm(
     llm_backend: Any,
     model: str,
     reasoning_effort: str | None = None,
+    meeting_title: str | None = None,
     trace_source: str | None = None,
     trace_recording_id: str | None = None,
 ) -> list[str]:
@@ -133,8 +153,13 @@ def extract_zoom_participants_via_llm(
         notes = (tm.get("notes") or "")[:80]
         table_lines.append(f"  {rn:<29} | {role:<18} | {notes}")
     table_block = "\n".join(table_lines)
+    title_block = (
+        f"meeting_title: {meeting_title.strip()}\n\n"
+        if meeting_title and meeting_title.strip() else ""
+    )
     user_prompt = (
-        "team_members:\n" + table_block
+        title_block
+        + "team_members:\n" + table_block
         + "\n\nТранскрипт встречи:\n" + transcript
     )
     _start = dict(

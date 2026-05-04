@@ -547,17 +547,16 @@ def test_pipeline_retries_failed_step_on_rerun(
     assert docs.calls == 2  # second call succeeded
 
 
-def test_pipeline_leaves_owner_null_when_llm_declined_to_assign(
+def test_pipeline_assigns_principal_when_llm_returns_null_owner(
     patched_session_scope, SessionFactory, monkeypatch
 ):
-    """FR-CR-05-134 — operator-pinned: when the LLM returns
-    ``owner=null`` (Rule 6 anti-admin-default kicked in
-    correctly), the pipeline MUST NOT silently route the task
-    to the admin user. Operator regression: «прислать email для
-    отправки deck» landed on Андрей (AI Lead) because Python
-    overrode Rule 6 with a hard fallback to admin_uid. Now the
-    task surfaces as owner=null and the operator assigns it
-    manually from the card."""
+    """FR-CR-05-142a — operator-pinned: «есть задачи без
+    ответственных / такого быть не может! всегда ответственный
+    должен быть, это сломалось - спека и тесты». When the LLM
+    emits owner=null, the pipeline MUST cascade-fallback to the
+    PRINCIPAL among present participants (NEVER admin / AI Lead
+    per FR-CR-05-134). Resulting task always has a non-null
+    owner_user_id."""
     monkeypatch.setenv("TELEGRAM_ADMIN_USER_IDS", "888")
     from app.config import get_settings
 
@@ -570,8 +569,15 @@ def test_pipeline_leaves_owner_null_when_llm_declined_to_assign(
             "app.services.transcription.transcribe_bytes", fake_transcribe
         )
         settings = _settings_with_audio_dir()
-        client = _FakeFirefliesClient(transcripts=[_fake_transcript("trans-3")])
-        llm = _FakeLLM(tasks=[{"title": "сделать", "owner": None}])
+        # Meeting participants include the principal (Артем) and
+        # an ordinary teammate. Admin is also seeded but should
+        # NEVER win the cascade.
+        transcript = _fake_transcript("trans-3", title="Fundraising sync")
+        transcript.participants = ["Артем Соколов", "Алина Колпакова"]
+        client = _FakeFirefliesClient(transcripts=[transcript])
+        llm = _FakeLLM(tasks=[
+            {"title": "follow up with Tether", "owner": None},
+        ])
         pipeline = FirefliesPipeline(
             settings=settings,
             client=client,
@@ -580,12 +586,25 @@ def test_pipeline_leaves_owner_null_when_llm_declined_to_assign(
             sender=None,
         )
         with SessionFactory() as s:
-            s.add(
-                TeamMember(
-                    real_name="Admin", telegram_user_id=888,
-                    active=True,
-                )
-            )
+            # Admin row — present in known_employees but MUST be
+            # filtered out of the fallback (FR-CR-05-134).
+            s.add(TeamMember(
+                real_name="Andre Admin", telegram_user_id=888,
+                role="AI Lead", notes="admin", active=True,
+            ))
+            # Principal: notes mark Артем as CEO. Cascade should
+            # land on him.
+            s.add(TeamMember(
+                real_name="Артем Соколов", telegram_user_id=111,
+                role="CEO", notes="founder, CEO, principal",
+                active=True,
+            ))
+            # Ordinary participant — only used if no principal.
+            s.add(TeamMember(
+                real_name="Алина Колпакова", telegram_user_id=222,
+                role="IR", notes="investor relations",
+                active=True,
+            ))
             s.flush()
             t = client.list_transcripts(limit=1)[0]
             pipeline.process_one(s, t)
@@ -597,8 +616,13 @@ def test_pipeline_leaves_owner_null_when_llm_declined_to_assign(
                 .first()
             )
             assert task is not None
-            assert task.owner_user_id is None
-            assert task.owner_display_name in (None, "")
+            # FR-CR-05-142a — never null.
+            assert task.owner_user_id is not None
+            # Cascade lands on Артем (principal among participants).
+            assert task.owner_user_id == "111"
+            # NEVER admin / AI Lead.
+            assert task.owner_user_id != "888"
+            assert task.owner_display_name == "Артем Соколов"
     finally:
         get_settings.cache_clear()  # type: ignore[attr-defined]
 
@@ -1038,9 +1062,15 @@ def test_owner_assignment_full_team_context_consistent_across_all_paths():
         )
     )
 
-    # 4. Rule 6 (anti-admin-default / null > admin) pinned for
-    # Fireflies/Zoom path.
-    assert "STRICTLY BETTER" in TASK_EXTRACTION_SYSTEM
+    # 4. Rule 6 (anti-admin-default) pinned for Fireflies/Zoom
+    # path. Updated for FR-CR-05-142a — was «STRICTLY BETTER
+    # than picking admin» (null > admin), now «NEVER PICK THE
+    # ADMIN / AI LEAD ROW» combined with the always-pick
+    # cascade (Rule 5).
+    assert (
+        "NEVER PICK THE ADMIN" in TASK_EXTRACTION_SYSTEM
+        or "NEVER pick the admin" in TASK_EXTRACTION_SYSTEM
+    )
 
 
 def test_as_known_employees_returns_role_and_notes(session):
@@ -1526,20 +1556,88 @@ def test_task_extraction_prompt_pins_disambiguate_first_names_via_participants()
     assert "Tether email-апдейт" in TASK_EXTRACTION_SYSTEM
 
 
+def test_task_extraction_prompt_pins_never_null_owner_cascade():
+    """FR-CR-05-142a — operator regression: «есть задачи без
+    ответственных / такого быть не может! всегда ответственный
+    должен быть, это сломалось - спека и тесты». Rule 5
+    contract is now «ALWAYS PICK AN OWNER» — null is a bug.
+    The cascade must include: named-assignee → self-named in
+    task body («Список <Имя>» / «Задачи <Имя>») → present
+    teammate domain match → meeting principal → first non-
+    forbidden participant. Admin / AI Lead is NEVER a
+    fallback (FR-CR-05-134 still holds via Rule 6)."""
+    from app.fireflies.prompts import (
+        TASK_EXTRACTION_SYSTEM, TASK_VERIFICATION_SYSTEM,
+    )
+
+    for prompt in (TASK_EXTRACTION_SYSTEM, TASK_VERIFICATION_SYSTEM):
+        # FR id pinned in both surfaces.
+        assert "FR-CR-05-142" in prompt
+        # «ALWAYS PICK AN OWNER» literal pinned.
+        assert "ALWAYS PICK AN OWNER" in prompt
+        # «NEVER null» framing.
+        assert "NEVER" in prompt and "null" in prompt.lower()
+
+    # Cascade steps pinned ONLY in the extractor (verifier
+    # references the same rules concisely).
+    assert "Список" in TASK_EXTRACTION_SYSTEM and "Задачи" in TASK_EXTRACTION_SYSTEM
+    # Self-name examples worked through.
+    assert "Список Иры" in TASK_EXTRACTION_SYSTEM
+    assert "Задачи Димы" in TASK_EXTRACTION_SYSTEM
+    # Principal fallback explicitly named.
+    assert "PRINCIPAL" in TASK_EXTRACTION_SYSTEM or "principal" in TASK_EXTRACTION_SYSTEM.lower()
+
+
+def test_task_extraction_prompt_pins_notes_forbids_domain_rule():
+    """FR-CR-05-142b — operator-pinned: «димы дроздова не в
+    участниках ни в задачах не должно быть в Fundrising».
+    When notes explicitly say «не вести X-задачи», that
+    teammate must NOT be picked for X-domain tasks even when
+    present. Pinned both in the extractor's Rule 8 and in the
+    participants extractor prompt."""
+    from app.fireflies.prompts import (
+        TASK_EXTRACTION_SYSTEM, TASK_VERIFICATION_SYSTEM,
+    )
+    from app.services.zoom_participants import (
+        PARTICIPANTS_EXTRACT_SYSTEM,
+    )
+
+    for prompt in (TASK_EXTRACTION_SYSTEM, TASK_VERIFICATION_SYSTEM):
+        assert "не вести" in prompt or "NOTES-FORBIDS" in prompt
+        # FR id present so a future rewrite can't drop it silently.
+        assert "FR-CR-05-142b" in prompt
+    # Worked example pinned in extractor Rule 8 (Дроздов excluded
+    # from fundraising even when present).
+    assert "FR-CR-05-142b" in TASK_EXTRACTION_SYSTEM
+    assert "не вести fundraising" in TASK_EXTRACTION_SYSTEM
+    assert "Sanders Capital" in TASK_EXTRACTION_SYSTEM
+
+    # Participants extractor honours the same exclusion when
+    # `meeting_title` flags fundraising.
+    assert "FR-CR-05-142b" in PARTICIPANTS_EXTRACT_SYSTEM
+    assert "не вести" in PARTICIPANTS_EXTRACT_SYSTEM
+    assert "Fundraising sync" in PARTICIPANTS_EXTRACT_SYSTEM
+    # Worked example B pinned (notes EXCLUDE on topic).
+    assert "Дима Дроздов" in PARTICIPANTS_EXTRACT_SYSTEM
+    assert "Дмитрий Седов" in PARTICIPANTS_EXTRACT_SYSTEM
+
+
 def test_task_extraction_prompt_forbids_admin_default_owner():
     """FR-CR-05-117 rule 6 — «прислать строку с таймингами» and
     «уточнить сроки поездки» landed on Андрей Кузьминых (admin /
     AI Lead) because the LLM defaulted to admin when no obvious
-    match existed. Rule 6 forbids that: null is STRICTLY BETTER
-    than picking the admin / AI Lead. This test pins the
-    operator-mandated language so a future prompt rewrite can't
-    accidentally drop it."""
+    match existed. Rule 6 forbids that: never pick the
+    admin / AI Lead row as a fallback (FR-CR-05-134).
+    Updated for FR-CR-05-142a: cascade now lands on a present
+    teammate or principal — never null AND never admin."""
     from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
 
     blob = TASK_EXTRACTION_SYSTEM
-    # «Null is strictly better» language pinned.
     lower = blob.lower()
-    assert "null is strictly better" in lower or "strictly better than" in lower
+    # FR-CR-05-134 anti-admin-default still pinned.
+    assert "FR-CR-05-134" in blob
+    # Rule 6's «NEVER PICK THE ADMIN / AI LEAD ROW» framing.
+    assert "never pick the admin" in lower or "never pick the operator" in lower
     # «admin» row called out as context-only.
     assert "admin" in lower
     # The rule explicitly mentions the AI Lead anti-default.

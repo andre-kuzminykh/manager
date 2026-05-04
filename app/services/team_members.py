@@ -629,3 +629,197 @@ def upsert_from_sheet_rows(
 
 def _parse_bool(s: str) -> bool:
     return (s or "").strip().lower() in {"true", "1", "yes", "y", "да", "+"}
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-142 — never-null owner: pipeline-side fallback picker.
+# --------------------------------------------------------------------------- #
+
+# Notes/role keywords that mark a teammate as the «principal»
+# (CEO / founder / decision-maker) — pipeline falls back to the
+# principal among present participants when the LLM emits
+# owner=null. Match is case-insensitive substring.
+PRINCIPAL_NOTE_MARKERS: tuple[str, ...] = (
+    "principal",
+    "ceo",
+    "founder",
+    "руководитель",
+    "руководит",
+    "основатель",
+    "генеральный",
+)
+
+# Notes-clause prefix the operator uses to forbid a teammate
+# from a domain («не вести fundraising-задачи»). Pipeline + prompt
+# both honour this for FR-CR-05-142b.
+NOTES_FORBIDS_PREFIX: tuple[str, ...] = (
+    "не вести",
+    "не назначать",
+    "do not assign",
+    "do not own",
+)
+
+
+def _employee_forbids_topic(notes: str, topic_keywords: list[str]) -> bool:
+    """Return True iff `notes` contains a «не вести X»-style
+    clause where X overlaps with any keyword in `topic_keywords`.
+    Used by `pick_meeting_owner_fallback` to skip teammates whose
+    own notes forbid the meeting/task domain.
+    """
+    if not notes or not topic_keywords:
+        return False
+    n = notes.lower()
+    for prefix in NOTES_FORBIDS_PREFIX:
+        if prefix not in n:
+            continue
+        # Look for keyword in the same notes (a teammate with
+        # ANY «не вести fundraising» line is forbidden from
+        # fundraising tasks; we don't try to parse the clause
+        # boundaries — operator's notes are short).
+        for kw in topic_keywords:
+            if kw and kw.lower() in n:
+                return True
+    return False
+
+
+def _is_admin_uid(uid: str | None) -> bool:
+    """True if `uid` is in TELEGRAM_ADMIN_USER_IDS."""
+    if not uid:
+        return False
+    try:
+        from app.telegram_bot.handlers import admin_user_ids
+
+        return uid in admin_user_ids()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def pick_meeting_owner_fallback(
+    *,
+    known_employees: list[dict[str, str]],
+    participants_real_names: list[str],
+    topic_keywords: list[str] | None = None,
+) -> str | None:
+    """FR-CR-05-142 — pipeline-side never-null owner fallback.
+
+    Cascade (matches the prompt's Rule 5d / 5e):
+
+      1. PRINCIPAL among `participants_real_names` whose notes /
+         role mark them as principal/CEO/founder AND whose notes
+         do NOT forbid the topic.
+      2. First participant (in `participants_real_names` order)
+         whose notes do NOT forbid the topic.
+      3. First participant unconditionally (last resort).
+      4. None — only when `participants_real_names` is empty.
+
+    NEVER picks the admin/AI Lead row (FR-CR-05-134) — admin uids
+    are filtered out of all candidate sets.
+
+    `topic_keywords` (optional): lowercase strings like
+    `["fundraising","ir","investor"]`. When a candidate's notes
+    contain a `не вести X` / `do not assign` clause matching any
+    keyword, that candidate is skipped (FR-CR-05-142b).
+    """
+    if not known_employees or not participants_real_names:
+        return None
+    topic_keywords = topic_keywords or []
+    by_name: dict[str, dict[str, str]] = {}
+    for e in known_employees:
+        rn = (e.get("real_name") or "").strip()
+        if rn:
+            by_name[rn] = e
+    present: list[dict[str, str]] = []
+    for n in participants_real_names:
+        if not n:
+            continue
+        e = by_name.get(n.strip())
+        if not e:
+            continue
+        if _is_admin_uid(e.get("slack_user_id")):
+            continue
+        present.append(e)
+    if not present:
+        return None
+    # Pass 1: principal not forbidden.
+    for e in present:
+        notes = (e.get("notes") or "").lower()
+        role = (e.get("role") or "").lower()
+        is_principal = any(
+            mk in notes or mk in role for mk in PRINCIPAL_NOTE_MARKERS
+        )
+        if is_principal and not _employee_forbids_topic(
+            e.get("notes") or "", topic_keywords
+        ):
+            return e.get("slack_user_id")
+    # Pass 2: any present teammate not forbidden.
+    for e in present:
+        if not _employee_forbids_topic(
+            e.get("notes") or "", topic_keywords
+        ):
+            return e.get("slack_user_id")
+    # Pass 3: last resort — first present (even if forbidden,
+    # better than null per operator's «всегда ответственный»).
+    return present[0].get("slack_user_id")
+
+
+def infer_topic_keywords_from_text(text: str) -> list[str]:
+    """Best-effort topic keyword extraction from a meeting title /
+    description / task title. Returns lowercase keywords used by
+    `pick_meeting_owner_fallback` for FR-CR-05-142b
+    notes-forbids-domain checks.
+
+    Conservative — operator-driven topic taxonomy. If a meeting
+    falls outside these buckets, returns []; the cascade then
+    skips the «forbids-topic» filter entirely.
+    """
+    if not text:
+        return []
+    t = text.lower()
+    out: set[str] = set()
+    fundraising_markers = (
+        "fundraising", "fundrais", "ir", "investor", "инвест",
+        "раунд", "round", "first close", "эксклюзив",
+        "term sheet", "термшит", "термшит",
+    )
+    research_markers = (
+        "research", "data analysis", "dashboard", "аналитик",
+        "репортинг", "reporting",
+    )
+    if any(m in t for m in fundraising_markers):
+        out.add("fundraising")
+        out.add("ir")
+        out.add("investor")
+    if any(m in t for m in research_markers):
+        out.add("research")
+    return sorted(out)
+
+
+def names_with_first_name(
+    known_employees: list[dict[str, str]], first_name: str
+) -> list[str]:
+    """Return real_names whose first token matches `first_name`
+    (case-insensitive, supports «Дима»/«Дмитрий» short-form via
+    common-prefix). Used by self-name-in-task disambiguation
+    (FR-CR-05-142a, Rule 5b).
+    """
+    if not first_name or not known_employees:
+        return []
+    target = first_name.strip().lower()
+    if not target:
+        return []
+    out: list[str] = []
+    for e in known_employees:
+        rn = (e.get("real_name") or "").strip()
+        if not rn:
+            continue
+        head = rn.split()[0].lower()
+        if head == target:
+            out.append(rn)
+            continue
+        # Short-form common-prefix («Дима» ↔ «Дмитрий»; require
+        # ≥3 chars overlap to keep this conservative).
+        if len(target) >= 3 and len(head) >= 3 and (
+            head.startswith(target) or target.startswith(head)
+        ):
+            out.append(rn)
+    return out

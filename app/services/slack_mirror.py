@@ -57,9 +57,31 @@ def _to_slack_mrkdwn(html_body: str) -> str:
     """
     if not html_body:
         return ""
+
+    def _link_sub(m: "re.Match[str]") -> str:
+        # FR-CR-05-156 follow-up — Slack mrkdwn link is
+        # `<URL|LABEL>`; literal `<`, `>`, `|` inside LABEL break
+        # the parser and the link renders as raw text. Decode the
+        # HTML-escaped label first, then strip/replace the three
+        # forbidden chars so e.g. «Genia Xasis <> Humanoid» reads
+        # as «Genia Xasis ‹› Humanoid» (visually similar, link-safe).
+        url = m.group("url")
+        label = (
+            m.group("label")
+            .replace("&amp;", "&")
+            .replace("&lt;", "‹")
+            .replace("&gt;", "›")
+            .replace("&quot;", '"')
+            .replace("&#39;", "'")
+            .replace("<", "‹")
+            .replace(">", "›")
+            .replace("|", "/")
+        )
+        return f"<{url}|{label}>"
+
     text = re.sub(
         r'<a\s+href=["\'](?P<url>[^"\']+)["\']>(?P<label>[^<]+)</a>',
-        lambda m: f"<{m.group('url')}|{m.group('label')}>",
+        _link_sub,
         html_body,
     )
     text = (

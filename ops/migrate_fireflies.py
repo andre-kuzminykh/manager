@@ -68,6 +68,17 @@ def _parse_args() -> argparse.Namespace:
             "via wipe_tasks if needed)."
         ),
     )
+    p.add_argument(
+        "--transcript-id",
+        default=None,
+        help=(
+            "FR-CR-05-153 — process exactly ONE Fireflies "
+            "transcript by id (e.g. `01KQFEVKGBBNR0ZQMKBJTE4EP3`). "
+            "Pulls `--limit` recent transcripts and filters to "
+            "the matching one. Bump `--limit` if the target is "
+            "older than the default 5-recording window."
+        ),
+    )
     return p.parse_args()
 
 
@@ -119,11 +130,30 @@ def main() -> int:
     )
 
     transcripts = client.list_transcripts(limit=args.limit)
+    # FR-CR-05-153 — `--transcript-id` narrows to one specific
+    # recording. If not in the first `--limit` window, operator
+    # bumps `--limit`.
+    if args.transcript_id:
+        target_id = args.transcript_id.strip()
+        all_count = len(transcripts)
+        transcripts = [t for t in transcripts if t.id == target_id]
+        if not transcripts:
+            log.error(
+                "fireflies_transcript_id_not_found",
+                transcript_id=target_id,
+                page_total=all_count,
+                hint=(
+                    "id not in the first --limit window. "
+                    "Bump --limit (e.g. 50) and retry."
+                ),
+            )
+            return 2
     log.info(
         "fireflies_migration_starting",
         seen=len(transcripts),
         limit=args.limit,
         rerun=args.rerun,
+        transcript_id=args.transcript_id,
     )
 
     # FR-CR-05-117 — `--rerun` resets the step flags + step

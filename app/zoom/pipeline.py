@@ -550,11 +550,14 @@ class ZoomPipeline:
         # gone (replaced by the wrap on the first line). Sent
         # with parse_mode=HTML.
         # FR-CR-05-156 — first line MUST be the raw meeting title
-        # (operator: «такие же названия тайтлов как в самих встречах»).
+        # (operator: «такие же названия тайтлов как в самих встречах»),
+        # prefixed with the `DD/MM` of the meeting date.
         from app.fireflies.pipeline import (
             _force_meeting_title_first_line,
         )
-        text = _force_meeting_title_first_line(text, row.title or "")
+        text = _force_meeting_title_first_line(
+            text, row.title or "", row.meeting_date,
+        )
         if row.google_doc_url:
             from app.fireflies.pipeline import (
                 _wrap_short_summary_with_doc_link,

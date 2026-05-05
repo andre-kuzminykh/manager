@@ -106,6 +106,9 @@ def transcribe_bytes(
 # FR-CR-05-148 — phrases Whisper LOOPS on when audio is silent /
 # quiet / has long pauses. Russian dubbed-content «titles» it
 # saw in training data. List grows as we hit new ones in prod.
+# FR-CR-05-153 — added URL/social patterns from operator's
+# Fundraising daily 05/05 regression: «Университет youtube
+# Университет https://vk.com.ua» loop.
 WHISPER_HALLUCINATION_MARKERS: tuple[str, ...] = (
     "Редактор субтитров",
     "Корректор",
@@ -119,6 +122,13 @@ WHISPER_HALLUCINATION_MARKERS: tuple[str, ...] = (
     "Subtitles by",
     "Edited by",
     "Translated by",
+    # FR-CR-05-153 web-URL / social-domain leakage:
+    "youtube",
+    "https://vk.",
+    "vk.com",
+    "instagram.com",
+    "facebook.com",
+    ".com.ua",
 )
 
 
@@ -132,12 +142,18 @@ def looks_like_whisper_hallucination(
     credits («Редактор субтитров А.Семкин Корректор А.Егорова»
     etc.) instead of the actual speech.
 
-    Two signals:
+    Three signals:
       1. Multiple `WHISPER_HALLUCINATION_MARKERS` matches in the
          first 1000 chars (≥3 hits).
-      2. Very low unique-word ratio over the whole text (<5%
+      2. Very low unique-word ratio over the whole text (<8%
          when there are 100+ words). A 30-min recording that
-         loops the same 4-word phrase fits this.
+         loops the same 4-word phrase fits this. (FR-CR-05-153
+         lowered threshold from 5% to 8% — operator's «youtube
+         vk.com.ua» loop had ~10 unique words ≈ 10%.)
+      3. FR-CR-05-153 — bigram-loop signal: any 2-word phrase
+         repeats ≥20 times. Catches cases where unique-ratio
+         is OK due to a varied head but the body is pure loop
+         («Университет youtube Университет youtube …»).
 
     Returns False on short / empty input — those are «empty
     meeting» cases, not hallucinations.
@@ -154,8 +170,20 @@ def looks_like_whisper_hallucination(
     if len(words) < 100:
         return False
     unique = len(set(words))
-    if unique / len(words) < 0.05:
+    if unique / len(words) < 0.08:
         return True
+    # FR-CR-05-153 — bigram loop. If any 2-word phrase repeats
+    # ≥20 times, it's a loop hallucination. Defense for the
+    # «Университет youtube Университет youtube …» pattern where
+    # the first chars are varied but the bulk is repetitive.
+    if len(words) >= 50:
+        from collections import Counter as _Counter
+
+        bigrams = list(zip(words, words[1:]))
+        if bigrams:
+            _phrase, _count = _Counter(bigrams).most_common(1)[0]
+            if _count >= 20:
+                return True
     return False
 
 

@@ -668,3 +668,65 @@ def test_parse_vtt_to_plain_text_empty_input():
 
     assert _parse_vtt_to_plain_text("") == ""
     assert _parse_vtt_to_plain_text("WEBVTT\n\n") == ""
+
+
+def test_looks_like_whisper_hallucination_flags_youtube_vk_loop():
+    """FR-CR-05-153 — operator regression on Fundraising daily
+    05/05: Whisper produced 1795 chars of «Девушкиной науке
+    Университет candy samurai Университет voice ... Университет
+    youtube Университет https://vk.com.ua» on a 26-min recording
+    of normal speech. Different from the May 4 «Редактор
+    субтитров» loop (different vocabulary), so the original
+    detector missed it. Three new signals catch it:
+
+      - URL/social markers («youtube», «vk.com», «https://vk.»)
+      - Lower unique-word ratio threshold (5% → 8%)
+      - Bigram-loop detector (a 2-word phrase repeating ≥20×)
+    """
+    from app.services.transcription import (
+        looks_like_whisper_hallucination,
+    )
+
+    operator_actual_output = (
+        "Девушкиной науке Университет candy samurai Университет "
+        "voice, промышленная сфера Университет hablva, "
+        "социальный обзор Университет сogle Университет "
+        "https://vk.com.ua Университет https://vk.com.ua "
+        + ("Университет youtube " * 100)
+    )
+    assert looks_like_whisper_hallucination(operator_actual_output) is True
+
+
+def test_looks_like_whisper_hallucination_flags_pure_bigram_loop():
+    """Pure bigram loop with 0 markers — caught by the new
+    bigram-counter signal alone."""
+    from app.services.transcription import (
+        looks_like_whisper_hallucination,
+    )
+
+    text = "слово фраза " * 100
+    assert looks_like_whisper_hallucination(text) is True
+
+
+def test_looks_like_whisper_hallucination_real_transcript_with_some_repetition():
+    """Real meeting transcripts have natural repetition (filler
+    words, common phrases). Must NOT be flagged as
+    hallucination. Pinning a realistic Russian-meeting
+    transcript with diverse vocabulary."""
+    from app.services.transcription import (
+        looks_like_whisper_hallucination,
+    )
+
+    # ~600 char realistic snippet from a fundraising meeting.
+    real = (
+        "Артем сказал что нужно подготовить рассылку по Schaeffler. "
+        "Алина уточнила тему письма и формат. Дмитрий Седов добавил "
+        "что варанты обсуждаем только на звонках. Ирина зафиксировала "
+        "follow-up по Insight Partners. По Sanders Capital решили "
+        "включить в общий апдейт. Bauerdort пригласить на кофе "
+        "и демо робота. Прайм Муверс пересчитать вклад при "
+        "разных размерах раунда. К сожалению Tencent в private side "
+        "пока не активно. Фонд QIA попросить интро через "
+        "существующих контактов." * 3
+    )
+    assert looks_like_whisper_hallucination(real) is False

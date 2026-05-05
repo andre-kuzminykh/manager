@@ -549,6 +549,12 @@ class ZoomPipeline:
         # Google Doc; the «📄 Подробный отчёт: <url>» trailer is
         # gone (replaced by the wrap on the first line). Sent
         # with parse_mode=HTML.
+        # FR-CR-05-156 — first line MUST be the raw meeting title
+        # (operator: «такие же названия тайтлов как в самих встречах»).
+        from app.fireflies.pipeline import (
+            _force_meeting_title_first_line,
+        )
+        text = _force_meeting_title_first_line(text, row.title or "")
         if row.google_doc_url:
             from app.fireflies.pipeline import (
                 _wrap_short_summary_with_doc_link,

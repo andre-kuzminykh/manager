@@ -514,6 +514,18 @@ def _strip_llm_todo_block(text: str) -> str:
     return _TODO_SECTION_HEADERS_RE.sub("", text).rstrip()
 
 
+def _force_meeting_title_first_line(body: str, title: str) -> str:
+    """FR-CR-05-156 — operator-pinned: «первая строка summary должна
+    быть точным названием встречи (не LLM-переписанным)». Substitute
+    the raw `row.title` for whatever the LLM emitted on line 1.
+    Empty title or empty body → returned as-is."""
+    if not (body or "").strip() or not (title or "").strip():
+        return body
+    parts = body.split("\n", 1)
+    rest = parts[1] if len(parts) > 1 else ""
+    return f"{title.strip()}\n{rest}"
+
+
 def _wrap_short_summary_with_doc_link(body: str, doc_url: str) -> str:
     """FR-CR-05-127 — replace the «📄 Подробный отчёт: <url>»
     trailer with an HTML hyperlink wrapping the FIRST line of
@@ -1692,6 +1704,9 @@ class FirefliesPipeline:
         # line so the doc-link is on the title itself and the
         # body looks cleaner. Sent with parse_mode=HTML
         # (sender's default).
+        # FR-CR-05-156 — first line MUST be the raw meeting title
+        # (operator: «такие же названия тайтлов как в самих встречах»).
+        body = _force_meeting_title_first_line(body, row.title or "")
         if row.google_doc_url:
             body = _wrap_short_summary_with_doc_link(
                 body.rstrip(), row.google_doc_url,

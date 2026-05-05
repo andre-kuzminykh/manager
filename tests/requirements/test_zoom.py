@@ -1223,29 +1223,94 @@ def test_zoom_listener_poll_swallows_pipeline_errors(
     assert pipe.processed == ["zm-ok-1", "zm-ok-2"]
 
 
-def test_zoom_listener_poll_skips_recordings_before_startup(
+def test_zoom_listener_poll_processes_all_unfinished_recordings(
     patched_session_scope, SessionFactory
 ):
-    """`_zoom_started_at` cutoff drops recordings finished before
-    listener startup so a fresh deploy doesn't backfill stale
-    meetings — symmetric with FR-CR-05-51."""
+    """FR-CR-05-151 — operator regression: orphans (recordings
+    where pipeline started but rolled back mid-step) NEVER
+    auto-retried because old `_zoom_started_at` cutoff dropped
+    them as `skipped_old`. New logic: process EVERY listing
+    item that doesn't yet have `tasks_extracted=true AND
+    last_error=null` in DB.
+
+    Operator-pinned: «как быть уверенеым что ты подтягивашеь
+    свежие звонки и делаешь транскрипты», «надо ее подхватить
+    как обработается»."""
     from datetime import datetime as _dt, timezone as _tz
 
+    from app.models import ZoomRecording
+
     listener = _zoom_listener_for_poll()
-    old = _zoom_poll_meta("zm-old")
-    old.meeting_date = _dt(2000, 1, 1, tzinfo=_tz.utc)
+    # Three metas: old-and-done (skip), orphan-with-error
+    # (retry), fresh-new (process).
+    done = _zoom_poll_meta("zm-done")
+    done.meeting_date = _dt(2000, 1, 1, tzinfo=_tz.utc)
+    orphan = _zoom_poll_meta("zm-orphan")
+    orphan.meeting_date = _dt(2010, 1, 1, tzinfo=_tz.utc)
     fresh = _zoom_poll_meta("zm-fresh")
-    pipe = _StubZoomPipeline(metas=[old, fresh])
+    fresh.meeting_date = _dt(2030, 1, 1, tzinfo=_tz.utc)
+    pipe = _StubZoomPipeline(metas=[done, orphan, fresh])
     listener.wire_zoom(
         pipeline=pipe, enabled=True,
         poll_interval_seconds=60, poll_batch_size=10,
     )
-    # Set the cutoff in the past so the fresh meeting (date =
-    # «now» at construction time) is treated as new.
-    listener._zoom_started_at = _dt(2020, 1, 1, tzinfo=_tz.utc)
-    fresh.meeting_date = _dt(2030, 1, 1, tzinfo=_tz.utc)
+    # Seed DB:
+    #   - zm-done has tasks_extracted=true, no error → SKIP
+    #   - zm-orphan has tasks_extracted=false + last_error → RETRY
+    #   - zm-fresh: no DB row at all → PROCESS as new
+    with SessionFactory() as s:
+        s.add(ZoomRecording(
+            zoom_id="zm-done",
+            audio_downloaded=True, transcribed=True,
+            detailed_summarised=True, doc_exported=True,
+            tasks_extracted=True, last_error=None,
+        ))
+        s.add(ZoomRecording(
+            zoom_id="zm-orphan",
+            audio_downloaded=True, transcribed=False,
+            tasks_extracted=False,
+            last_error="zoom file not ready",
+        ))
+        s.flush()
+        s.commit()
     listener._maybe_poll_zoom()
-    assert pipe.processed == ["zm-fresh"]
+    # Both orphan and fresh processed; done skipped despite
+    # being the OLDEST meeting_date.
+    assert sorted(pipe.processed) == ["zm-fresh", "zm-orphan"]
+
+
+def test_zoom_listener_poll_retries_row_with_no_error_but_not_finished(
+    patched_session_scope, SessionFactory
+):
+    """A row that has audio_downloaded=true but
+    tasks_extracted=false (e.g. transcribe step failed silently)
+    AND last_error=NULL must STILL be retried — only fully
+    completed rows (`tasks_extracted=true AND last_error=null`)
+    are skipped."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from app.models import ZoomRecording
+
+    listener = _zoom_listener_for_poll()
+    half = _zoom_poll_meta("zm-half")
+    half.meeting_date = _dt(2010, 1, 1, tzinfo=_tz.utc)
+    pipe = _StubZoomPipeline(metas=[half])
+    listener.wire_zoom(
+        pipeline=pipe, enabled=True,
+        poll_interval_seconds=60, poll_batch_size=10,
+    )
+    with SessionFactory() as s:
+        s.add(ZoomRecording(
+            zoom_id="zm-half",
+            audio_downloaded=True, transcribed=True,
+            detailed_summarised=False,  # ← halted
+            tasks_extracted=False,
+            last_error=None,
+        ))
+        s.flush()
+        s.commit()
+    listener._maybe_poll_zoom()
+    assert pipe.processed == ["zm-half"]
 
 
 def test_settings_zoom_polling_defaults():

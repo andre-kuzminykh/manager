@@ -784,24 +784,52 @@ class TelegramListener:
         if not metas:
             return
         processed = 0
-        skipped = 0
-        skipped_old = 0
+        skipped_already_done = 0
+        retried_orphan = 0
         errors = 0
         tasks_total = 0
-        cutoff = self._zoom_started_at
+        # FR-CR-05-151 — drop the `_zoom_started_at` cutoff. It
+        # caused orphans (recordings where pipeline started but
+        # session rolled back mid-step) to NEVER retry, because
+        # meeting_date < listener-startup-time → skipped_old.
+        # Operator-pinned: «как быть уверенеым что ты подтягивашеь
+        # свежие звонки и делаешь транскрипты», «надо ее
+        # подхватить как обработается».
+        #
+        # New logic: skip ONLY rows that are FULLY done. Anything
+        # else — new, partial, errored — gets processed. Per-step
+        # `process_one` is idempotent (each step short-circuits
+        # when its flag is already set), so re-running on a
+        # half-done row picks up where it left off.
+        from app.models import ZoomRecording
+
+        existing_by_uuid: dict[str, "ZoomRecording"] = {}
+        if metas:
+            uuids = [m.id for m in metas]
+            with session_scope() as _s:
+                rows = (
+                    _s.query(ZoomRecording)
+                    .filter(ZoomRecording.zoom_id.in_(uuids))
+                    .all()
+                )
+                for r in rows:
+                    existing_by_uuid[r.zoom_id] = r
         for m in metas:
-            mt = getattr(m, "meeting_date", None)
-            if mt is not None:
-                if mt.tzinfo is None:
-                    mt = mt.replace(tzinfo=timezone.utc)
-                if cutoff is not None and mt < cutoff:
-                    skipped_old += 1
-                    continue
+            existing = existing_by_uuid.get(m.id)
+            if (
+                existing is not None
+                and existing.tasks_extracted
+                and not existing.last_error
+            ):
+                skipped_already_done += 1
+                continue
+            if existing is not None:
+                retried_orphan += 1
             try:
                 with session_scope() as session:
                     report = self._zoom_pipeline.process_one(session, m)
                 if report.skipped_reason:
-                    skipped += 1
+                    skipped_already_done += 1
                 else:
                     processed += 1
                     tasks_total += report.tasks_created
@@ -817,8 +845,8 @@ class TelegramListener:
                 "listener_zoom_poll_done",
                 seen=len(metas),
                 processed=processed,
-                skipped=skipped,
-                skipped_old=skipped_old,
+                skipped_already_done=skipped_already_done,
+                retried_orphan=retried_orphan,
                 tasks_created=tasks_total,
                 errors=errors,
             )

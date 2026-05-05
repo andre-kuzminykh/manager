@@ -28,8 +28,17 @@ The script:
 """
 from __future__ import annotations
 
+import os
 import sys
 from datetime import timezone
+
+# FR-CR-05-144 — `oauthlib` refuses http://localhost callbacks
+# by default. The loopback redirect is safe per RFC 8252 (the
+# only consumer is the operator's own browser); set the
+# documented insecure-transport flag BEFORE importing
+# `google_auth_oauthlib` so its `Flow.fetch_token` accepts our
+# `http://localhost:8080/...?code=...` redirect URL.
+os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
 from google_auth_oauthlib.flow import Flow
 

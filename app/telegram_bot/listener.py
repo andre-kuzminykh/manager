@@ -706,27 +706,29 @@ class TelegramListener:
         # `process_one` is idempotent per-step.
         from app.models import MeetingRecording
 
-        existing_by_id: dict[str, "MeetingRecording"] = {}
+        # FR-CR-05-151 — read into plain tuples inside session
+        # scope (DetachedInstanceError-safe).
+        existing_status: dict[str, tuple[bool, str | None]] = {}
         if transcripts:
             ids = [t.id for t in transcripts]
             with session_scope() as _s:
                 rows = (
-                    _s.query(MeetingRecording)
+                    _s.query(
+                        MeetingRecording.fireflies_id,
+                        MeetingRecording.tasks_extracted,
+                        MeetingRecording.last_error,
+                    )
                     .filter(MeetingRecording.fireflies_id.in_(ids))
                     .all()
                 )
-                for r in rows:
-                    existing_by_id[r.fireflies_id] = r
+                for fid, t_done, err in rows:
+                    existing_status[fid] = (bool(t_done), err)
         for t in transcripts:
-            existing = existing_by_id.get(t.id)
-            if (
-                existing is not None
-                and existing.tasks_extracted
-                and not existing.last_error
-            ):
+            status = existing_status.get(t.id)
+            if status is not None and status[0] and not status[1]:
                 skipped_already_done += 1
                 continue
-            if existing is not None:
+            if status is not None:
                 retried_orphan += 1
             try:
                 with session_scope() as session:
@@ -821,27 +823,33 @@ class TelegramListener:
         # half-done row picks up where it left off.
         from app.models import ZoomRecording
 
-        existing_by_uuid: dict[str, "ZoomRecording"] = {}
+        # FR-CR-05-151 — read into a plain dict INSIDE the
+        # session scope. SQLAlchemy ORM rows become detached
+        # when the session closes; accessing attributes on them
+        # after that raises DetachedInstanceError. Plain tuples
+        # (tasks_extracted, last_error) are safe to use later.
+        existing_status: dict[str, tuple[bool, str | None]] = {}
         if metas:
             uuids = [m.id for m in metas]
             with session_scope() as _s:
                 rows = (
-                    _s.query(ZoomRecording)
+                    _s.query(
+                        ZoomRecording.zoom_id,
+                        ZoomRecording.tasks_extracted,
+                        ZoomRecording.last_error,
+                    )
                     .filter(ZoomRecording.zoom_id.in_(uuids))
                     .all()
                 )
-                for r in rows:
-                    existing_by_uuid[r.zoom_id] = r
+                for zid, t_done, err in rows:
+                    existing_status[zid] = (bool(t_done), err)
         for m in metas:
-            existing = existing_by_uuid.get(m.id)
-            if (
-                existing is not None
-                and existing.tasks_extracted
-                and not existing.last_error
-            ):
+            status = existing_status.get(m.id)
+            if status is not None and status[0] and not status[1]:
+                # tasks_extracted=True AND last_error IS NULL
                 skipped_already_done += 1
                 continue
-            if existing is not None:
+            if status is not None:
                 retried_orphan += 1
             try:
                 with session_scope() as session:

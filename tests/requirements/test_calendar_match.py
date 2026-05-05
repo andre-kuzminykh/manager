@@ -517,3 +517,153 @@ def test_match_and_format_title_no_op_when_neither_backend_configured():
         model="gpt-5.5",
     )
     assert out is None
+
+
+# --- FR-CR-05-152 multi-calendar (comma-separated calendar_id) ---
+
+
+def test_fetch_events_via_api_merges_multiple_calendars():
+    """FR-CR-05-152 — operator-pinned «надо все кроме личного».
+    `calendar_id` accepts comma-separated list. Each calendar
+    is queried independently; events are merged in the order
+    of query; duplicates (same `id` across calendars) are kept
+    only once."""
+    from app.services.calendar_match import fetch_calendar_events_via_api
+
+    captured_calendar_ids: list[str] = []
+
+    class _StubExecutable:
+        def __init__(self, items):
+            self._items = items
+
+        def execute(self):
+            return {"items": self._items}
+
+    class _StubEvents:
+        def list(self, **kw):
+            cid = kw["calendarId"]
+            captured_calendar_ids.append(cid)
+            # Different events per calendar; one duplicate by `id`.
+            if cid == "primary":
+                return _StubExecutable([
+                    {"id": "a", "summary": "Fundraising daily",
+                     "start": {"dateTime": "2026-05-05T10:30:00Z"}},
+                ])
+            if cid.startswith("c_15b48"):
+                return _StubExecutable([
+                    {"id": "b", "summary": "Sculptor intro",
+                     "start": {"dateTime": "2026-05-05T11:00:00Z"}},
+                    # duplicate of `a` — should be deduped
+                    {"id": "a", "summary": "Fundraising daily",
+                     "start": {"dateTime": "2026-05-05T10:30:00Z"}},
+                ])
+            if cid.startswith("c_e02f"):
+                return _StubExecutable([
+                    {"id": "c", "summary": "Aramco PoC",
+                     "start": {"date": "2026-05-03"}},
+                ])
+            return _StubExecutable([])
+
+    class _StubService:
+        def events(self):
+            return _StubEvents()
+
+    with _patched_googleapiclient(_StubService):
+        events = fetch_calendar_events_via_api(
+            datetime(2026, 5, 5, 10, 30, tzinfo=timezone.utc),
+            window_minutes=60,
+            credentials_factory=lambda: object(),
+            calendar_id=(
+                "primary,"
+                "c_15b484dbb98135465be706542626a2a323679089464f3c962e5f3a335854a877@group.calendar.google.com,"
+                "c_e02f2d20fc1cc703b8c2a53e3d5b37f6ece70fcda7f4946896e8bb7b689c02b5@group.calendar.google.com"
+            ),
+        )
+    titles = [e["title"] for e in events]
+    assert titles == ["Fundraising daily", "Sculptor intro", "Aramco PoC"]
+    # All 3 calendars queried in order.
+    assert len(captured_calendar_ids) == 3
+    assert captured_calendar_ids[0] == "primary"
+    # Events carry source `_calendar_id` for trace / debugging.
+    assert events[0]["_calendar_id"] == "primary"
+    assert events[1]["_calendar_id"].startswith("c_15b48")
+    assert events[2]["_calendar_id"].startswith("c_e02f")
+
+
+def test_fetch_events_via_api_skips_blank_calendar_ids():
+    """`primary,,c_xxx` (extra commas / blanks) → just two real
+    queries, blanks ignored."""
+    from app.services.calendar_match import fetch_calendar_events_via_api
+
+    captured: list[str] = []
+
+    class _StubExecutable:
+        def execute(self):
+            return {"items": []}
+
+    class _StubEvents:
+        def list(self, **kw):
+            captured.append(kw["calendarId"])
+            return _StubExecutable()
+
+    class _StubService:
+        def events(self):
+            return _StubEvents()
+
+    with _patched_googleapiclient(_StubService):
+        fetch_calendar_events_via_api(
+            datetime(2026, 5, 5, tzinfo=timezone.utc),
+            window_minutes=30,
+            credentials_factory=lambda: object(),
+            calendar_id="primary,,  ,c_xxx",
+        )
+    assert captured == ["primary", "c_xxx"]
+
+
+def test_fetch_events_via_api_one_calendar_failing_doesnt_block_others():
+    """If one calendar's HTTP query fails (e.g. permission
+    revoked on shared calendar), the function continues with
+    the others — partial results > complete failure."""
+    from app.services.calendar_match import fetch_calendar_events_via_api
+
+    class _StubExecutable:
+        def __init__(self, items=None, raise_on_execute=False):
+            self._items = items or []
+            self._raise = raise_on_execute
+
+        def execute(self):
+            if self._raise:
+                # Simulate googleapiclient HttpError from the
+                # patched stub (we used `Exception` as the
+                # placeholder in `_patched_googleapiclient`).
+                raise Exception("403 forbidden")
+            return {"items": self._items}
+
+    class _StubEvents:
+        def list(self, **kw):
+            cid = kw["calendarId"]
+            if cid == "primary":
+                return _StubExecutable([
+                    {"id": "p1", "summary": "OK from primary",
+                     "start": {"dateTime": "2026-05-05T10:00:00Z"}},
+                ])
+            if cid == "broken":
+                return _StubExecutable(raise_on_execute=True)
+            return _StubExecutable([
+                {"id": "g1", "summary": "OK from group",
+                 "start": {"dateTime": "2026-05-05T11:00:00Z"}},
+            ])
+
+    class _StubService:
+        def events(self):
+            return _StubEvents()
+
+    with _patched_googleapiclient(_StubService):
+        events = fetch_calendar_events_via_api(
+            datetime(2026, 5, 5, tzinfo=timezone.utc),
+            window_minutes=60,
+            credentials_factory=lambda: object(),
+            calendar_id="primary,broken,c_g",
+        )
+    titles = [e["title"] for e in events]
+    assert titles == ["OK from primary", "OK from group"]

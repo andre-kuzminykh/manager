@@ -88,6 +88,16 @@ def fetch_calendar_events_via_api(
 
     Failures NEVER raise — empty list on auth fail, network
     fail, or any HttpError. Operator-pinned.
+
+    FR-CR-05-152 — `calendar_id` accepts a COMMA-SEPARATED list
+    of calendar ids. Each is queried independently; results are
+    merged and deduplicated by event id. Operator regression:
+    «Fundraising daily» lives on `c_15b48…@group.calendar…`,
+    «Sculptor» on primary, «Чайная церемония» on personal — a
+    single calendar is too narrow. Operator-pinned: «надо все
+    кроме личного» (multi-calendar with the personal one
+    excluded). Pass calendar id list as
+    `GOOGLE_CALENDAR_ID=primary,c_xxxx@group...,c_yyyy@group...`.
     """
     if meeting_dt is None or credentials_factory is None:
         return []
@@ -110,43 +120,65 @@ def fetch_calendar_events_via_api(
     except ImportError:
         log.warning("calendar_match_api_googleapiclient_missing")
         return []
+    # Parse comma-separated list, drop blanks.
+    cal_ids = [
+        c.strip() for c in (calendar_id or "primary").split(",") if c.strip()
+    ] or ["primary"]
     try:
         service = build(
             "calendar", "v3", credentials=creds,
             cache_discovery=False,
         )
-        resp = service.events().list(
-            calendarId=calendar_id or "primary",
-            timeMin=time_min, timeMax=time_max,
-            singleEvents=True, orderBy="startTime",
-            maxResults=50,
-        ).execute()
-    except HttpError as e:  # noqa: BLE001
-        log.warning(
-            "calendar_match_api_http_error",
-            status=getattr(e, "status_code", None),
-            calendar_id=calendar_id,
-        )
-        return []
     except Exception as e:  # noqa: BLE001
         log.warning(
             "calendar_match_api_unexpected_error",
-            calendar_id=calendar_id, error=str(e),
+            calendar_ids=cal_ids, error=str(e),
         )
         return []
     out: list[dict[str, Any]] = []
-    for ev in (resp.get("items") or []):
-        if not isinstance(ev, dict):
+    seen_event_ids: set[str] = set()
+    for cid in cal_ids:
+        try:
+            resp = service.events().list(
+                calendarId=cid,
+                timeMin=time_min, timeMax=time_max,
+                singleEvents=True, orderBy="startTime",
+                maxResults=50,
+            ).execute()
+        except HttpError as e:  # noqa: BLE001
+            log.warning(
+                "calendar_match_api_http_error",
+                status=getattr(e, "status_code", None),
+                calendar_id=cid,
+            )
             continue
-        out.append({
-            "title": ev.get("summary") or "",
-            "start": (ev.get("start") or {}).get("dateTime")
-                     or (ev.get("start") or {}).get("date") or "",
-            "end": (ev.get("end") or {}).get("dateTime")
-                    or (ev.get("end") or {}).get("date") or "",
-            "attendees": ev.get("attendees") or [],
-            "description": ev.get("description") or "",
-        })
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "calendar_match_api_unexpected_error",
+                calendar_id=cid, error=str(e),
+            )
+            continue
+        for ev in (resp.get("items") or []):
+            if not isinstance(ev, dict):
+                continue
+            ev_id = ev.get("id") or ""
+            # Same event can appear in multiple calendars (when
+            # both host + attendee calendars are queried). Keep
+            # only the first occurrence by stable id.
+            if ev_id and ev_id in seen_event_ids:
+                continue
+            if ev_id:
+                seen_event_ids.add(ev_id)
+            out.append({
+                "title": ev.get("summary") or "",
+                "start": (ev.get("start") or {}).get("dateTime")
+                         or (ev.get("start") or {}).get("date") or "",
+                "end": (ev.get("end") or {}).get("dateTime")
+                        or (ev.get("end") or {}).get("date") or "",
+                "attendees": ev.get("attendees") or [],
+                "description": ev.get("description") or "",
+                "_calendar_id": cid,  # for trace / debugging
+            })
     return out
 
 

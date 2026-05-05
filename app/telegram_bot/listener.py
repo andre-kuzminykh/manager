@@ -723,6 +723,11 @@ class TelegramListener:
                 )
                 for fid, t_done, err in rows:
                     existing_status[fid] = (bool(t_done), err)
+        log.info(
+            "listener_fireflies_poll_loop_start",
+            transcripts=len(transcripts),
+            known_rows=len(existing_status),
+        )
         for t in transcripts:
             status = existing_status.get(t.id)
             if status is not None and status[0] and not status[1]:
@@ -730,6 +735,12 @@ class TelegramListener:
                 continue
             if status is not None:
                 retried_orphan += 1
+            log.info(
+                "listener_fireflies_poll_recording_start",
+                fireflies_id=t.id,
+                title=getattr(t, "title", None),
+                is_orphan=status is not None,
+            )
             try:
                 with session_scope() as session:
                     report = self._fireflies_pipeline.process_one(session, t)
@@ -843,6 +854,11 @@ class TelegramListener:
                 )
                 for zid, t_done, err in rows:
                     existing_status[zid] = (bool(t_done), err)
+        log.info(
+            "listener_zoom_poll_loop_start",
+            metas=len(metas),
+            known_rows=len(existing_status),
+        )
         for m in metas:
             status = existing_status.get(m.id)
             if status is not None and status[0] and not status[1]:
@@ -851,6 +867,12 @@ class TelegramListener:
                 continue
             if status is not None:
                 retried_orphan += 1
+            log.info(
+                "listener_zoom_poll_recording_start",
+                zoom_id=m.id,
+                topic=getattr(m, "topic", None),
+                is_orphan=status is not None,
+            )
             try:
                 with session_scope() as session:
                     report = self._zoom_pipeline.process_one(session, m)

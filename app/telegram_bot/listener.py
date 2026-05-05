@@ -694,27 +694,45 @@ class TelegramListener:
         if not transcripts:
             return
         processed = 0
-        skipped = 0
-        skipped_old = 0
+        skipped_already_done = 0
+        retried_orphan = 0
         errors = 0
         tasks_total = 0
-        cutoff = self._fireflies_started_at
+        # FR-CR-05-151 (Fireflies side) — same orphan-retry
+        # contract as Zoom: drop the `_fireflies_started_at`
+        # cutoff. Skip ONLY rows that are FULLY done
+        # (`tasks_extracted=true AND last_error IS NULL`);
+        # process everything else (new / partial / errored).
+        # `process_one` is idempotent per-step.
+        from app.models import MeetingRecording
+
+        existing_by_id: dict[str, "MeetingRecording"] = {}
+        if transcripts:
+            ids = [t.id for t in transcripts]
+            with session_scope() as _s:
+                rows = (
+                    _s.query(MeetingRecording)
+                    .filter(MeetingRecording.fireflies_id.in_(ids))
+                    .all()
+                )
+                for r in rows:
+                    existing_by_id[r.fireflies_id] = r
         for t in transcripts:
-            # FR-CR-05-51 — drop recordings finished before
-            # listener startup. tz-aware compare; treat naive as
-            # UTC.
-            mt = getattr(t, "meeting_date", None)
-            if mt is not None:
-                if mt.tzinfo is None:
-                    mt = mt.replace(tzinfo=timezone.utc)
-                if cutoff is not None and mt < cutoff:
-                    skipped_old += 1
-                    continue
+            existing = existing_by_id.get(t.id)
+            if (
+                existing is not None
+                and existing.tasks_extracted
+                and not existing.last_error
+            ):
+                skipped_already_done += 1
+                continue
+            if existing is not None:
+                retried_orphan += 1
             try:
                 with session_scope() as session:
                     report = self._fireflies_pipeline.process_one(session, t)
                 if report.skipped_reason:
-                    skipped += 1
+                    skipped_already_done += 1
                 else:
                     processed += 1
                     tasks_total += report.tasks_created
@@ -734,8 +752,8 @@ class TelegramListener:
                 "listener_fireflies_poll_done",
                 seen=len(transcripts),
                 processed=processed,
-                skipped=skipped,
-                skipped_old=skipped_old,
+                skipped_already_done=skipped_already_done,
+                retried_orphan=retried_orphan,
                 tasks_created=tasks_total,
                 errors=errors,
             )

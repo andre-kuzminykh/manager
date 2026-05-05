@@ -301,4 +301,72 @@ class FirefliesClient:
         return len(content)
 
 
+    def update_transcript_title(
+        self, transcript_id: str, title: str,
+    ) -> bool:
+        """FR-CR-05-154 — push a new title back to Fireflies via
+        their `updateMeetingTitle` GraphQL mutation. Used after
+        `_step_match_calendar_title` rewrites our DB title to
+        the canonical «DD/MM - <calendar event>» — operator-
+        pinned «зум не надо переименовывать, только firefiles»
+        / «встреча все равно называется: '30/04 - James Morgon'»
+        (in Fireflies UI).
+
+        Returns True on success, False on any failure (network,
+        HTTP error, mutation-level error). Failures NEVER raise
+        — caller wraps in try/except so the rest of the pipeline
+        keeps going."""
+        if not self.enabled or not transcript_id or not title:
+            return False
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        query = (
+            "mutation UpdateMeetingTitle($title: String!, "
+            "$transcript_id: String!) { "
+            "updateMeetingTitle(input: { title: $title, "
+            "transcript_id: $transcript_id }) "
+            "{ title success message } }"
+        )
+        body = {
+            "query": query,
+            "variables": {"title": title, "transcript_id": transcript_id},
+        }
+        try:
+            payload = self._request_func(self._endpoint, headers, body)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "fireflies_update_title_request_failed",
+                transcript_id=transcript_id, error=str(e),
+            )
+            return False
+        if not isinstance(payload, dict):
+            return False
+        # GraphQL errors come at the top-level `errors` key.
+        if payload.get("errors"):
+            log.warning(
+                "fireflies_update_title_graphql_errors",
+                transcript_id=transcript_id,
+                errors=payload.get("errors"),
+            )
+            return False
+        data = (payload or {}).get("data") or {}
+        result = data.get("updateMeetingTitle") or {}
+        if not result.get("success"):
+            log.warning(
+                "fireflies_update_title_returned_unsuccessful",
+                transcript_id=transcript_id,
+                message=result.get("message"),
+            )
+            return False
+        log.info(
+            "fireflies_title_updated_remote",
+            transcript_id=transcript_id,
+            new_title=title,
+            message=result.get("message"),
+        )
+        return True
+
+
 __all__ = ["FirefliesClient", "FirefliesTranscript"]

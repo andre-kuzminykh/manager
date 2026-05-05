@@ -93,6 +93,104 @@ def test_client_handles_empty_response():
     assert c.list_transcripts(limit=5) == []
 
 
+# --- FR-CR-05-154 update_transcript_title --------------------
+
+
+def test_update_transcript_title_sends_correct_mutation_and_returns_true():
+    """FR-CR-05-154 — operator regression «встреча все равно
+    называется '30/04 - James Morgon'» in Fireflies UI. After
+    `_step_match_calendar_title` rewrites our DB title, we
+    push the new title back to Fireflies via the
+    `updateMeetingTitle` GraphQL mutation. Verifies request
+    shape + parses success path."""
+    captured: dict = {}
+
+    def fake_request(url, headers, body):
+        captured["url"] = url
+        captured["headers"] = dict(headers)
+        captured["body"] = body
+        return {
+            "data": {
+                "updateMeetingTitle": {
+                    "title": "30/04 - James Morgon <> Artem | Zoom call",
+                    "success": True,
+                    "message": "Title updated",
+                }
+            }
+        }
+
+    c = FirefliesClient(token="abc", request_func=fake_request)
+    ok = c.update_transcript_title(
+        "01KQFEVKGBBNR0ZQMKBJTE4EP3",
+        "30/04 - James Morgon <> Artem | Zoom call",
+    )
+    assert ok is True
+    assert captured["headers"]["Authorization"] == "Bearer abc"
+    body = captured["body"]
+    assert "updateMeetingTitle" in body["query"]
+    assert body["variables"]["title"] == (
+        "30/04 - James Morgon <> Artem | Zoom call"
+    )
+    assert body["variables"]["transcript_id"] == "01KQFEVKGBBNR0ZQMKBJTE4EP3"
+
+
+def test_update_transcript_title_returns_false_on_graphql_errors():
+    """GraphQL `errors` array → log warning + return False, no
+    raise."""
+    def fake_request(url, headers, body):
+        return {
+            "errors": [{"message": "Permission denied"}],
+            "data": None,
+        }
+
+    c = FirefliesClient(token="abc", request_func=fake_request)
+    ok = c.update_transcript_title("trans-1", "New title")
+    assert ok is False
+
+
+def test_update_transcript_title_returns_false_on_unsuccess():
+    """Mutation returned `success=false` → False."""
+    def fake_request(url, headers, body):
+        return {
+            "data": {
+                "updateMeetingTitle": {
+                    "success": False,
+                    "message": "rate limited",
+                }
+            }
+        }
+
+    c = FirefliesClient(token="abc", request_func=fake_request)
+    assert c.update_transcript_title("trans-1", "x") is False
+
+
+def test_update_transcript_title_returns_false_on_request_exception():
+    """Network error → False, no raise."""
+    def fake_request(url, headers, body):
+        raise RuntimeError("connection refused")
+
+    c = FirefliesClient(token="abc", request_func=fake_request)
+    assert c.update_transcript_title("trans-1", "x") is False
+
+
+def test_update_transcript_title_no_op_on_disabled_or_missing_args():
+    """Empty token / id / title → False, no API call."""
+    calls = 0
+
+    def fake_request(url, headers, body):
+        nonlocal calls
+        calls += 1
+        return {}
+
+    c = FirefliesClient(token="", request_func=fake_request)
+    assert c.update_transcript_title("x", "y") is False  # disabled
+
+    c2 = FirefliesClient(token="abc", request_func=fake_request)
+    assert c2.update_transcript_title("", "y") is False  # no id
+    assert c2.update_transcript_title("x", "") is False  # no title
+    assert calls == 0  # no HTTP attempted
+
+
 # --------------------------------------------------------------------------- #
 # Pipeline — fakes
 # --------------------------------------------------------------------------- #

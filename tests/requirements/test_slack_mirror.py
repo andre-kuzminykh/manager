@@ -185,8 +185,12 @@ def test_split_for_slack_handles_long_single_paragraph():
 
 
 def test_post_meeting_summary_chunks_long_body_sequentially():
-    """FR-CR-05-141 — body > 35 000 chars splits into multiple
-    chat.postMessage calls in order."""
+    """FR-CR-05-141 + FR-CR-05-149 — body > SLACK_TEXT_CHUNK_CHARS
+    (3 500) splits into multiple chat.postMessage calls in order
+    so we control the split boundaries instead of letting Slack
+    auto-split mid-word."""
+    from app.services.slack_mirror import SLACK_TEXT_CHUNK_CHARS
+
     captured: list[_FakeWebClient] = []
 
     def _factory(token):
@@ -194,11 +198,12 @@ def test_post_meeting_summary_chunks_long_body_sequentially():
         captured.append(c)
         return c
 
+    # Body of ~10 K chars (typical Fundraising sync size).
     long_body = (
         "Title\n\n"
-        + "\n\n".join(f"Paragraph {i}: " + ("x" * 1000) for i in range(50))
+        + "\n\n".join(f"Paragraph {i}: " + ("x" * 200) for i in range(50))
     )
-    assert len(long_body) > 35_000
+    assert len(long_body) > SLACK_TEXT_CHUNK_CHARS
 
     with patch("slack_sdk.WebClient", side_effect=_factory):
         res = post_meeting_summary_to_slack(
@@ -208,15 +213,34 @@ def test_post_meeting_summary_chunks_long_body_sequentially():
         )
 
     assert isinstance(res, list)
-    assert len(res) >= 2  # multiple chunks
+    assert len(res) >= 3  # multiple chunks (10K / 3.5K ≈ 3)
     assert all(r.get("ok") for r in res)
     assert len(captured) == 1  # one client, multiple calls
     calls = captured[0].calls
     assert len(calls) == len(res)
-    # Chunks delivered in order, each ≤ 35 000 chars.
+    # Chunks delivered in order, each ≤ SLACK_TEXT_CHUNK_CHARS.
     for c in calls:
-        assert len(c["text"]) <= 35_000
+        assert len(c["text"]) <= SLACK_TEXT_CHUNK_CHARS
         assert c["channel"] == "D0AUXKND35Y"
+
+
+def test_slack_chunk_limit_is_under_slack_auto_split_threshold():
+    """FR-CR-05-149 — the chunk limit MUST be < ~4000 so that
+    Slack server-side doesn't re-split our chunks mid-word.
+    Operator regression: 10 730-char body with chunks_posted=1
+    landed as 3 Slack messages with adjacent ts (3995/3974/2759
+    chars), the second starting mid-task on «23) Update…».
+
+    Pinning the upper bound here so a future tweak that bumps
+    the limit (back to 35 000 or whatever) breaks this test
+    loudly with a clear hint."""
+    from app.services.slack_mirror import SLACK_TEXT_CHUNK_CHARS
+
+    assert SLACK_TEXT_CHUNK_CHARS <= 3_900, (
+        f"SLACK_TEXT_CHUNK_CHARS={SLACK_TEXT_CHUNK_CHARS} >= 4000 "
+        "→ Slack will server-split mid-word; FR-CR-05-149 says "
+        "keep it under 4000."
+    )
 
 
 # --- FR-CR-05-147 _compact_for_slack -------------------------

@@ -29,11 +29,22 @@ from app.logging_setup import get_logger
 log = get_logger(__name__)
 
 
-# FR-CR-05-141 — Slack chat.postMessage `text` param has a soft
-# cap that's higher than this, but we keep a 35 000-char split
-# bound (operator-pinned) to leave headroom for mrkdwn renderer
-# + safe under any per-block / per-attachment limits.
-SLACK_TEXT_CHUNK_CHARS = 35_000
+# FR-CR-05-141 + FR-CR-05-149 — Slack `chat.postMessage` API
+# accepts text up to 40 000 chars BUT Slack server-side AUTO-
+# SPLITS messages above ~4 000 chars into multiple visible
+# posts (each gets its own ts), splitting MID-WORD or MID-LINE
+# wherever it likes. Operator regression: «он нарзал. также
+# как в тг» — Fundraising sync's 10 730-char body landed as 3
+# Slack messages with adjacent ts (3995 + 3974 + 2759 chars),
+# the second starting mid-task on «23) Update follow-up».
+#
+# Fix: keep our chunks UNDER 4000 chars so we control the
+# split boundaries (paragraph → line → hard-cut). Each chunk
+# becomes one explicit `chat.postMessage` call → one ts → no
+# Slack server-side mid-word fragmentation. The 35 000 ceiling
+# is preserved as a defense-in-depth max but the real bound
+# is 3500, just under Slack's auto-split threshold.
+SLACK_TEXT_CHUNK_CHARS = 3_500
 
 
 def _to_slack_mrkdwn(html_body: str) -> str:

@@ -256,22 +256,36 @@ def post_meeting_summary_to_slack(
 
     responses: list[dict[str, Any]] = []
     total = len(chunks)
+    parent_ts: str | None = None  # FR-CR-05-150 — thread root
     for i, chunk in enumerate(chunks, start=1):
         try:
-            resp = client.chat_postMessage(
+            # FR-CR-05-150 — first chunk → channel-level post,
+            # parent of the thread. Chunks 2..N → thread replies
+            # under the parent's ts. Operator-pinned: «остальным
+            # были как в треде этого сообщения».
+            kwargs: dict[str, Any] = dict(
                 channel=channel_id,
                 text=chunk,
                 unfurl_links=False,
                 unfurl_media=False,
             )
+            if parent_ts:
+                kwargs["thread_ts"] = parent_ts
+            resp = client.chat_postMessage(**kwargs)
             data = resp.data if hasattr(resp, "data") else dict(resp)
             responses.append(data)
+            # Capture the parent ts from the first successful post.
+            if parent_ts is None and isinstance(data, dict):
+                got_ts = data.get("ts")
+                if isinstance(got_ts, str) and got_ts:
+                    parent_ts = got_ts
             log.info(
                 "slack_mirror_chunk_posted",
                 channel_id=channel_id,
                 chunk_index=i, chunk_total=total,
                 chunk_chars=len(chunk),
                 ts=data.get("ts") if isinstance(data, dict) else None,
+                thread_ts=parent_ts if i > 1 else None,
             )
         except SlackApiError as e:  # noqa: BLE001
             status = (

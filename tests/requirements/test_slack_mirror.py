@@ -243,6 +243,94 @@ def test_slack_chunk_limit_is_under_slack_auto_split_threshold():
     )
 
 
+# --- FR-CR-05-150 thread replies ------------------------------
+
+
+class _ThreadCapturingFakeWebClient:
+    """Like _FakeWebClient but assigns unique ts per call so we
+    can verify thread_ts threading. ts is `1700000000.<i>`."""
+
+    def __init__(self, token):
+        self.token = token
+        self.calls: list[dict] = []
+        self._ts_counter = 0
+
+    def chat_postMessage(self, **kwargs):  # noqa: N802
+        self.calls.append(kwargs)
+        self._ts_counter += 1
+        ts = f"1700000000.{self._ts_counter:06d}"
+        return SimpleNamespace(data={"ok": True, "ts": ts})
+
+
+def test_post_meeting_summary_threads_remaining_chunks_under_first():
+    """FR-CR-05-150 — operator-pinned «как сделать в слаке так,
+    чтобы он слал сообщение, а остальным были как в треде
+    этого сообщения». First chunk goes to the channel as
+    parent; chunks 2..N go as `thread_ts=<parent_ts>`. In the
+    Slack DM channel only the parent is visible, the rest
+    sit in the thread."""
+    captured: list[_ThreadCapturingFakeWebClient] = []
+
+    def _factory(token):
+        c = _ThreadCapturingFakeWebClient(token)
+        captured.append(c)
+        return c
+
+    # Body large enough to split into ≥3 chunks.
+    long_body = (
+        "Title\n\n"
+        + "\n\n".join(f"Paragraph {i}: " + ("x" * 200) for i in range(50))
+    )
+
+    with patch("slack_sdk.WebClient", side_effect=_factory):
+        res = post_meeting_summary_to_slack(
+            slack_token="xoxb-test",
+            channel_id="D0AUXKND35Y",
+            body=long_body,
+        )
+
+    assert len(res) >= 3, f"expected ≥3 chunks, got {len(res)}"
+    calls = captured[0].calls
+    assert len(calls) == len(res)
+
+    # Chunk 1 → no thread_ts (parent).
+    assert "thread_ts" not in calls[0]
+    parent_ts = res[0]["ts"]
+
+    # Chunks 2..N → thread_ts = parent_ts.
+    for i, call in enumerate(calls[1:], start=2):
+        assert call.get("thread_ts") == parent_ts, (
+            f"chunk #{i} should have thread_ts={parent_ts}, "
+            f"got {call.get('thread_ts')}"
+        )
+
+    # All posted to the same channel.
+    for call in calls:
+        assert call["channel"] == "D0AUXKND35Y"
+
+
+def test_post_meeting_summary_single_chunk_no_thread():
+    """When the body fits in a single chunk, NO thread_ts is
+    passed (no thread to start)."""
+    captured: list[_ThreadCapturingFakeWebClient] = []
+
+    def _factory(token):
+        c = _ThreadCapturingFakeWebClient(token)
+        captured.append(c)
+        return c
+
+    with patch("slack_sdk.WebClient", side_effect=_factory):
+        res = post_meeting_summary_to_slack(
+            slack_token="xoxb-test",
+            channel_id="D0AUXKND35Y",
+            body="Short body that fits in one chunk.",
+        )
+
+    assert len(res) == 1
+    [call] = captured[0].calls
+    assert "thread_ts" not in call
+
+
 # --- FR-CR-05-147 _compact_for_slack -------------------------
 
 

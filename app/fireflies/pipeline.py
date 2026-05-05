@@ -1126,6 +1126,34 @@ class FirefliesPipeline:
                 original_title=row.title,
             )
             return 0
+        # FR-CR-05-154 — push title to Fireflies' UI even if our
+        # DB already has the canonical form. Operator regression:
+        # a `--rerun` after a previous successful match has DB
+        # title == new_title, so the early-return below WOULD
+        # skip the push and Fireflies' UI stays out of sync.
+        # The mutation is idempotent — doing it on every match
+        # keeps Fireflies in lockstep with our DB.
+        try:
+            pushed = self._client.update_transcript_title(
+                row.fireflies_id, new_title,
+            )
+            log.info(
+                "fireflies_title_pushed_to_remote",
+                fireflies_id=row.fireflies_id,
+                title=new_title, success=pushed,
+            )
+            from app.services.trace_log import trace_event as _te_p
+            _te_p(
+                source="fireflies", recording_id=row.fireflies_id,
+                event="title_pushed_to_remote",
+                title=new_title, success=pushed,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_title_push_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+
         if new_title == row.title:
             return 0
         old_title = row.title
@@ -1140,31 +1168,6 @@ class FirefliesPipeline:
         _te(source="fireflies", recording_id=row.fireflies_id,
             event="calendar_match_title_updated",
             old_title=old_title, new_title=new_title)
-        # FR-CR-05-154 — also push the new title back to
-        # Fireflies' UI via their `updateMeetingTitle` GraphQL
-        # mutation. Operator regression: «встреча все равно
-        # называется: '30/04 - James Morgon'» (in Fireflies UI).
-        # Failures NEVER cascade — DB title is already updated;
-        # this is best-effort for the Fireflies surface.
-        try:
-            pushed = self._client.update_transcript_title(
-                row.fireflies_id, new_title,
-            )
-            log.info(
-                "fireflies_title_pushed_to_remote",
-                fireflies_id=row.fireflies_id,
-                title=new_title, success=pushed,
-            )
-            _te(
-                source="fireflies", recording_id=row.fireflies_id,
-                event="title_pushed_to_remote",
-                title=new_title, success=pushed,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.info(
-                "fireflies_title_push_unexpected_error",
-                fireflies_id=row.fireflies_id, error=str(e),
-            )
         return 1
 
     def _step_match_counterparties(

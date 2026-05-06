@@ -369,6 +369,23 @@ class ZoomPipeline:
         if not row.transcript_text:
             row.last_error = "no transcript for detailed summary"
             return False
+        # FR-CR-05-157 — short / garbage transcripts: stop before
+        # we burn LLM tokens and post «содержательная часть
+        # отсутствует» to Slack/TG. Set `tasks_extracted=true,
+        # last_error=NULL` so listener orphan-retry skips this row.
+        from app.services.transcription import is_transcript_unsummarizable
+
+        unsumm, reason = is_transcript_unsummarizable(row.transcript_text)
+        if unsumm:
+            row.tasks_extracted = True
+            row.last_error = None
+            log.info(
+                "zoom_pipeline_skipped_thin_transcript",
+                zoom_id=row.zoom_id, title=row.title,
+                transcript_chars=len(row.transcript_text or ""),
+                reason=reason,
+            )
+            return False
         # FR-CR-05-146c — kick off participants extraction in
         # parallel with the detailed_summary LLM call. Both read
         # only `transcript_text` and don't depend on each other.

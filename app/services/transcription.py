@@ -132,6 +132,46 @@ WHISPER_HALLUCINATION_MARKERS: tuple[str, ...] = (
 )
 
 
+def is_transcript_unsummarizable(text: str) -> tuple[bool, str | None]:
+    """FR-CR-05-157 — operator-pinned: «нужны только новые загружать
+    и там где транскрипт нормальный». Identify recordings whose
+    transcript is too thin / too garbage to summarize, so the
+    pipeline can short-circuit BEFORE the detailed_summary LLM
+    call, doc export, Slack post, TG cards.
+
+    Returns (True, human-readable-reason) when one of:
+      - empty / whitespace-only
+      - <800 chars  (≈< 2-3 min of speech)
+      - dominated by Whisper subtitle hallucination (≥2 marker hits
+        in head 2KB) AND no real content
+    Else (False, None).
+
+    Threshold deliberately lower than `looks_like_whisper_hallucination`
+    because we want to catch SHORT garbage (which the looser
+    detector skips with «empty meeting» exemption).
+    """
+    if not text or not text.strip():
+        return True, "transcript empty"
+    n = len(text.strip())
+    if n < 800:
+        return True, f"transcript too short ({n} chars)"
+    head = text[:2000].lower()
+    sub_markers_lc = (
+        "редактор субтитров",
+        "корректор",
+        "субтитры от",
+        "субтитры подготовлены",
+        "субтитры сделал",
+        "subtitles by",
+        "edited by",
+        "translated by",
+    )
+    sub_hits = sum(head.count(m) for m in sub_markers_lc)
+    if sub_hits >= 2:
+        return True, f"transcript dominated by subtitle credits ({sub_hits} hits)"
+    return False, None
+
+
 def looks_like_whisper_hallucination(
     text: str,
     *,

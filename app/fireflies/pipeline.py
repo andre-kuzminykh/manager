@@ -1013,6 +1013,23 @@ class FirefliesPipeline:
         if not row.transcript_text:
             row.last_error = "no transcript for detailed summary"
             return False
+        # FR-CR-05-157 — same thin-transcript guard as Zoom: stop
+        # before we burn LLM tokens and post «содержательная часть
+        # отсутствует» to Slack/TG. Mark done so listener doesn't
+        # retry.
+        from app.services.transcription import is_transcript_unsummarizable
+
+        unsumm, reason = is_transcript_unsummarizable(row.transcript_text)
+        if unsumm:
+            row.tasks_extracted = True
+            row.last_error = None
+            log.info(
+                "fireflies_pipeline_skipped_thin_transcript",
+                fireflies_id=row.fireflies_id, title=row.title,
+                transcript_chars=len(row.transcript_text or ""),
+                reason=reason,
+            )
+            return False
         # FR-CR-05-117 — replace Fireflies' auto-stamp title
         # («Apr 30, 03:32 PM») with one derived from the
         # transcript before we feed everything into the LLM.

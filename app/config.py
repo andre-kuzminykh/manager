@@ -249,7 +249,7 @@ class Settings(BaseSettings):
         default="high", alias="FIREFLIES_TASKS_REASONING_EFFORT"
     )
     fireflies_whisper_model: str = Field(
-        default="gpt-4o-transcribe", alias="FIREFLIES_WHISPER_MODEL"
+        default="gpt-4o-transcribe-diarize", alias="FIREFLIES_WHISPER_MODEL"
     )
     # Listener-side periodic poll (mirrors VIEW_REALTIME_ENABLED
     # for TG view).

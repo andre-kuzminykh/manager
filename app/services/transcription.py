@@ -132,6 +132,58 @@ WHISPER_HALLUCINATION_MARKERS: tuple[str, ...] = (
 )
 
 
+def is_summary_no_content(text: str) -> tuple[bool, str | None]:
+    """FR-CR-05-157 follow-up — operator-pinned: «если там мало
+    текста то не выводим вообще». Detect when the LLM's short
+    summary basically says «I couldn't extract anything from
+    this transcript» — those posts are noise in Slack/TG and
+    should be suppressed.
+
+    Returns (True, matched_phrase) on hit, else (False, None).
+
+    Triggers when ANY of these phrases appears in the body
+    (case-insensitive, NFKD-folded). The phrases are taken
+    from real LLM output that operator complained about:
+
+      - «содержательная часть … (не зафиксирован|отсутствует)»
+      - «содержательный транскрипт отсутствует»
+      - «восстановить … (невозможно|не удалось)»
+      - «доступны только служебные пометки»
+      - «единственный надёжный вывод: для саммари нужна
+         корректная расшифровка»
+      - «по доступным данным можно подтвердить только факт»
+    """
+    if not text:
+        return False, None
+    haystack = text.lower()
+    patterns = (
+        "содержательная часть",
+        "содержательный транскрипт отсутствует",
+        "восстановить … невозможно",
+        "восстановить … не удалось",
+        "доступны только служебные пометки",
+        "единственный надёжный вывод",
+        "для саммари нужна корректная расшифровка",
+        "можно подтвердить только факт",
+        "конкретика этих обновлений не раскрыта",
+        "решений, договорённостей",
+    )
+    for p in patterns:
+        # Allow `…` as wildcard between two halves.
+        if "…" in p:
+            left, right = p.split("…", 1)
+            li = haystack.find(left.strip())
+            if li == -1:
+                continue
+            ri = haystack.find(right.strip(), li + len(left.strip()))
+            if ri != -1 and ri - li - len(left.strip()) < 80:
+                return True, p
+            continue
+        if p in haystack:
+            return True, p
+    return False, None
+
+
 def is_transcript_unsummarizable(text: str) -> tuple[bool, str | None]:
     """FR-CR-05-157 — operator-pinned: «нужны только новые загружать
     и там где транскрипт нормальный». Identify recordings whose

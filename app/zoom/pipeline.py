@@ -542,6 +542,24 @@ class ZoomPipeline:
         if not text:
             row.last_error = "short summary returned empty"
             return False
+        # FR-CR-05-157 follow-up — LLM said «содержательная часть
+        # отсутствует» (transcript was too thin to summarize, but
+        # passed the upstream char/marker guards). Don't post this
+        # to Slack/TG — it's noise. Mark done so listener won't
+        # retry.
+        from app.services.transcription import is_summary_no_content
+
+        no_content, hit_phrase = is_summary_no_content(text)
+        if no_content:
+            row.tasks_extracted = True
+            row.last_error = None
+            log.info(
+                "zoom_pipeline_skipped_no_content_summary",
+                zoom_id=row.zoom_id, title=row.title,
+                hit_phrase=hit_phrase,
+                summary_chars=len(text),
+            )
+            return False
         # FR-CR-05-119 — drop any LLM-emitted To-Do section so we
         # can append the deterministic one. Also strip markdown.
         from app.fireflies.pipeline import (

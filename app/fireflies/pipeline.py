@@ -1707,6 +1707,19 @@ class FirefliesPipeline:
         if not text:
             row.last_error = "short summary LLM returned empty"
             return False
+        # FR-CR-05-157 follow-up — same no-content guard as Zoom.
+        from app.services.transcription import is_summary_no_content
+
+        no_content, hit_phrase = is_summary_no_content(text)
+        if no_content:
+            row.tasks_extracted = True
+            row.last_error = None
+            log.info(
+                "fireflies_pipeline_skipped_no_content_summary",
+                fireflies_id=row.fireflies_id, title=row.title,
+                hit_phrase=hit_phrase, summary_chars=len(text),
+            )
+            return False
         body = _truncate(text, limit=3800)
         # FR-CR-05-119 — strip any «To-Do» / «Следующие шаги»
         # block the LLM still emits despite the prompt forbidding

@@ -73,6 +73,8 @@ def _to_slack_mrkdwn(html_body: str) -> str:
             .replace("&gt;", "›")
             .replace("&quot;", '"')
             .replace("&#39;", "'")
+            .replace("&#x27;", "'")
+            .replace("&apos;", "'")
             .replace("<", "‹")
             .replace(">", "›")
             .replace("|", "/")
@@ -90,6 +92,8 @@ def _to_slack_mrkdwn(html_body: str) -> str:
         .replace("&gt;", ">")
         .replace("&quot;", '"')
         .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
     )
     return text
 

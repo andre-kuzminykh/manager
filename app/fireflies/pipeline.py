@@ -1859,6 +1859,36 @@ class FirefliesPipeline:
                 sent += 1
         if sent:
             row.short_summary_sent = True
+        # FR-CR-05-158 — operator-pinned: «в слаке я не вижу
+        # firefiles». Fireflies pipeline never mirrored to Slack
+        # (Zoom did via FR-CR-05-137). Add the same call here.
+        # Failures MUST NOT break the pipeline — wrapped in try/except.
+        try:
+            from app.services.slack_mirror import (
+                post_meeting_summary_to_slack,
+            )
+            channel = self._settings.slack_meeting_channel_id
+            token = self._settings.slack_bot_token
+            if channel and token and (row.short_summary or "").strip():
+                resps = post_meeting_summary_to_slack(
+                    slack_token=token, channel_id=channel,
+                    body=row.short_summary or "",
+                )
+                posted = sum(
+                    1 for r in (resps or [])
+                    if isinstance(r, dict) and r.get("ok")
+                )
+                log.info(
+                    "fireflies_slack_mirror_posted",
+                    fireflies_id=row.fireflies_id, channel_id=channel,
+                    chunks_posted=posted,
+                    body_chars=len(row.short_summary or ""),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "fireflies_slack_mirror_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
         return sent
 
     # --- step 7: task extraction -----------------------------

@@ -1030,6 +1030,57 @@ class FirefliesPipeline:
                 reason=reason,
             )
             return False
+        # FR-CR-05-158 — operator-pinned: «как в зуме сделаем
+        # участников». Fireflies API gives unreliable participants
+        # list (often just one host email like `1@thehumanoid.ai`).
+        # Run the same LLM extractor Zoom uses to recover canonical
+        # team-member real_names from the transcript itself.
+        try:
+            from app.db import session_scope
+            from app.services.team_members import as_known_employees
+            from app.services.zoom_participants import (
+                extract_zoom_participants_via_llm,
+            )
+
+            with session_scope() as _ps_sess:
+                tm_rows = as_known_employees(_ps_sess, prefer_telegram=True)
+            if tm_rows:
+                llm_parts = extract_zoom_participants_via_llm(
+                    transcript=row.transcript_text or "",
+                    team_members=tm_rows,
+                    llm_backend=self._llm,
+                    model=self._settings.fireflies_summary_model,
+                    reasoning_effort=(
+                        self._settings.fireflies_tasks_reasoning_effort or None
+                    ),
+                    meeting_title=row.title,
+                    trace_source="fireflies",
+                    trace_recording_id=row.fireflies_id,
+                )
+                if llm_parts:
+                    # Merge LLM-extracted real_names with the email-
+                    # only participants the API returned (e.g.
+                    # external attendees who aren't team members).
+                    api_external = [
+                        p for p in (row.participants or [])
+                        if isinstance(p, str) and "@" in p
+                        and not any(
+                            tm.get("real_name") and tm.get("real_name") in p
+                            for tm in tm_rows
+                        )
+                    ]
+                    row.participants = llm_parts + api_external
+                    log.info(
+                        "fireflies_participants_resolved_via_llm",
+                        fireflies_id=row.fireflies_id,
+                        team_real_names=llm_parts,
+                        external_kept=len(api_external),
+                    )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_participants_resolve_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
         # FR-CR-05-117 — replace Fireflies' auto-stamp title
         # («Apr 30, 03:32 PM») with one derived from the
         # transcript before we feed everything into the LLM.

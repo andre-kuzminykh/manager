@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     slack_meeting_channel_id: str = Field(
         default="", alias="SLACK_MEETING_CHANNEL_ID"
     )
+    # FR-CR-05-160 — n8n webhook for meeting summaries. Same body
+    # that lands in Slack (short_summary + metadata) is POST'ed
+    # JSON to this URL right after slack_mirror succeeds. Empty
+    # URL → webhook disabled (no-op).
+    meeting_webhook_url: str = Field(
+        default="", alias="MEETING_WEBHOOK_URL"
+    )
 
     # FR-CR-05-136 — Calendar-match for meeting titles. The
     # Apps Script Web App is the proxy that does the Calendar

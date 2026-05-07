@@ -682,6 +682,30 @@ class ZoomPipeline:
                 "zoom_slack_mirror_unexpected_error",
                 zoom_id=row.zoom_id, error=str(e),
             )
+        # FR-CR-05-160 — mirror to external webhook (n8n).
+        try:
+            from app.services.meeting_webhook import post_meeting_to_webhook
+
+            url = self._settings.meeting_webhook_url
+            if url and (row.short_summary or "").strip():
+                post_meeting_to_webhook(
+                    webhook_url=url,
+                    source="zoom",
+                    source_id=row.zoom_id,
+                    title=row.title,
+                    meeting_date=row.meeting_date,
+                    duration_seconds=row.duration_seconds,
+                    short_summary=row.short_summary,
+                    detailed_summary=row.detailed_summary,
+                    google_doc_url=row.google_doc_url,
+                    participants=list(row.participants or []),
+                    tasks_count=row.tasks_extracted_count,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "zoom_meeting_webhook_unexpected_error",
+                zoom_id=row.zoom_id, error=str(e),
+            )
         return sent
 
     def _step_match_counterparties(

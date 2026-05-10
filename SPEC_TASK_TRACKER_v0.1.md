@@ -1020,6 +1020,120 @@ flowchart TD
     Listener -.-> GTasksAPI
 ```
 
+### Client-to-Service Flow (TG message → task → card)
+
+```mermaid
+sequenceDiagram
+    participant U as User (TG chat)
+    participant SV as Supabase view
+    participant L as Listener
+    participant IS as IngestService
+    participant CL as Classifier (LLM)
+    participant DG as DraftsGraph (LLM)
+    participant DB as Postgres
+    participant TG as TG Bot API
+    participant Owner as Owner (TG DM)
+
+    U->>SV: post message
+    SV->>L: poll batch (every 30s)
+    L->>IS: prepare_drafts(message)
+    IS->>CL: classify intent
+    CL-->>IS: {intent: "task", conf: 0.92}
+    IS->>DG: run drafts loop
+    DG->>DG: title_node + desc + owner + date + priority + dedup
+    DG-->>IS: ActionDraft
+    IS->>DB: INSERT tasks row
+    IS->>TG: sendMessage(owner_uid, card)
+    TG-->>Owner: card
+    IS->>TG: sendMessage(admin_uid, card)
+```
+
+### Service-to-AI-Service Flow (drafts loop)
+
+```mermaid
+sequenceDiagram
+    participant DG as DraftsGraph
+    participant LLM as OpenAI Chat
+    participant DB as Postgres
+    participant TM as team_members table
+
+    DG->>LLM: title_node prompt
+    LLM-->>DG: title
+    DG->>LLM: description_node prompt
+    LLM-->>DG: description
+    DG->>TM: SELECT real_name, telegram_user_id, role, notes
+    TM-->>DG: team list
+    DG->>LLM: owner_node prompt (text + team)
+    LLM-->>DG: {owner_uid, llm_picked_name, reasoning}
+    DG->>DG: post-LLM check: owner_uid in team?
+    alt Found
+        DG->>DG: final_uid = owner_uid
+    else Not found
+        DG->>DG: final_uid = admin (fallback)
+    end
+    DG->>LLM: date_node prompt
+    LLM-->>DG: {iso_date, reasoning}
+    DG->>LLM: priority_node prompt
+    LLM-->>DG: priority
+    DG->>DB: SELECT existing tasks (last 30 days)
+    DG->>LLM: dedup_node prompt
+    LLM-->>DG: {is_duplicate, duplicate_of}
+```
+
+### Card Lifecycle Flow
+
+```mermaid
+sequenceDiagram
+    participant U as Owner
+    participant TG as TG Bot
+    participant H as CallbackHandler
+    participant DB as Postgres
+    participant TGAdmin as Admin (TG)
+
+    U->>TG: tap "✅ Принять"
+    TG->>H: callback_query
+    H->>DB: UPDATE task SET status='in_progress'
+    H->>DB: INSERT task_status_changes
+    H->>TG: editMessageText (owner card)
+    TG->>U: refreshed card
+    H->>TG: editMessageText (admin card)
+    TG->>TGAdmin: refreshed card
+```
+
+### Data Flow Diagram
+
+```mermaid
+flowchart LR
+    User[CEO/Owner]
+    TGAPI[TG Bot API]
+    DB[(Postgres)]
+    LLM[OpenAI GPT]
+    SupabaseView[(Supabase view)]
+    SlackAPI[Slack API Q2]
+    GmailAPI[Gmail API Q2]
+    GTasksAPI[Google Tasks API Q3]
+
+    User --> TGAPI
+    TGAPI --> Listener
+    Listener --> SupabaseView
+    Listener -.-> SlackAPI
+    Listener -.-> GmailAPI
+    Listener --> LLM
+    Listener --> DB
+    Listener --> TGAPI
+
+    DB --> Digest[Digest Service Q2]
+    Digest --> TGAPI
+
+    DB --> Reminder[Reminder Service Q2]
+    Reminder --> TGAPI
+
+    DB --> GTSync[GTasks Sync Q3]
+    GTSync --> GTasksAPI
+    GTasksAPI --> GTSync
+    GTSync --> DB
+```
+
 ## 12.10 Architecture Decision Records (ADR)
 
 ### ADR-TT-001: Single LLM-graph для drafts loop
@@ -1162,9 +1276,87 @@ flowchart TD
 
 ---
 
-# 14. Appendices
+# 14. Assumptions, Out of Scope, Traceability
 
-## 14.1 Glossary
+## 14.0a Assumptions (Допущения)
+
+| ID | Assumption | Где используется | Риск если неверно | Как проверить |
+|---|---|---|---|---|
+| A-TT-1 | Supabase view возвращает свежие сообщения <30s после post | NSM target | Если 1+ мин — NSM не достижим | Замер на 100 сообщений |
+| A-TT-2 | LLM intent_classifier accuracy ≥90% (task vs chitchat) | M-Q5 | Иначе spam карточек | Manual sample 100 messages |
+| A-TT-3 | team_members справочник содержит ≤100 человек | LLM owner_node token budget | При 1000+ выйдем из window | Audit table size |
+| A-TT-4 | Owner team_members имеет telegram_user_id | TG card delivery | Иначе fallback на admin | DB query coverage |
+| A-TT-5 | Owners подписаны на бот (`/start`) | Card delivery rate | Иначе `chat not found` 100% | Onboarding checklist |
+| A-TT-6 | TG long-poll выдерживает поток до 100 msg/min | Throughput | При >100 — Bot API throttle | Stress test |
+| A-TT-7 | Дедлайны редко даются с точностью до часа («к пятнице» а не «в 14:30») | date_node simplification | Если 50%+ нужно time → переписать prompt | Sample analysis |
+| A-TT-8 | Recurring задачи будут ≤20 active rules | Cron-loop scaling | При 100+ нужен индекс на next_run_at | Audit при v1 |
+| A-TT-9 | Google Tasks 2-way sync (Q3) — quota 50k requests/day достаточна | GTasks throughput | При >50k → throttle | Estimate from current task volume |
+| A-TT-10 | TIMEZONE един для всех owner'ов (Europe/London) | Digest timing | Distributed team будет получать в неудобное время | Survey owners |
+
+## 14.0b Out of Scope (Что не входит в продукт)
+
+**Task Tracker НЕ делает:**
+- ❌ Транскрибация / summary встреч — это Note Taker (см. SPEC_NOTE_TAKER_v0.1.md)
+- ❌ Project management features (Gantt, dependencies, sprints, milestones) — слишком far из CEO scope
+- ❌ Time tracking / billable hours — out of vision
+- ❌ Performance reviews / 1-on-1 notes — separate tool
+- ❌ Internal messaging между users (это просто слой над уже-существующими каналами TG/Slack)
+- ❌ Web admin UI до Q4 — все управление через TG bot и DB direct
+- ❌ Native iOS/Android apps — только TG (mobile-friendly)
+- ❌ Voice commands в TG (Q3 roadmap)
+- ❌ Calendar integration для задач (нет «заблокировать слот в календаре под задачу») — Q4
+- ❌ File attachments к задачам — out of MVP
+- ❌ Comments на задачах (внутренний chat) — out of MVP
+- ❌ Multi-tenant (один tenant = один CEO+team) — будет если нужно
+
+## 14.0c Traceability Matrix
+
+### Task Tracker Traceability
+
+| Feature | User Story | User Flow | Use Case | BDD Scenario | FR | NFR | Component | Test |
+|---|---|---|---|---|---|---|---|---|
+| F-TT-01 (TG ingest live) | US-TT-1 | 8.1: TG → Supabase → Listener | UC-TT-01 | "Простая задача с явным owner" | FR-TT-1.1, 1.2 | NFR-TT-P.1, R.1 | TelegramIngestService | T-TT-001 |
+| F-TT-02 (Intent classifier) | US-TT-1 | 8.1: classifier | UC-TT-01 | "Сообщение классифицировано как chitchat" | FR-TT-2.1, 2.2 | NFR-TT-O.1 | IntentClassifier | T-TT-002 |
+| F-TT-03 (Drafts loop) | US-TT-1 | 8.1: drafts | UC-TT-01 | "Drafts loop создаёт ActionDraft" | FR-TT-3.1..3.5 | NFR-TT-C.1 | DraftsGraph | T-TT-004..007 |
+| F-TT-04 (Owner LLM-router) | US-TT-1 | 8.1: owner_node | UC-TT-01 | "Owner не найден — fallback admin" | FR-TT-3.3 | NFR-TT-O.1 | OwnerNode + team_members | T-TT-005 |
+| F-TT-05 (Deadline parser) | US-TT-1 | 8.1: date_node | UC-TT-01 | (implicit) | FR-TT-3.4 | NFR-TT-O.1 | DateNode | T-TT-006 |
+| F-TT-06 (Priority inference) | US-TT-1 | 8.1: priority_node | UC-TT-01 | (implicit) | FR-TT-3.5 | NFR-TT-O.1 | PriorityNode | T-TT-007 |
+| F-TT-07 (Dedup) | US-TT-1 | 8.1: dedup_node | UC-TT-01 | "Дубликат" | FR-TT-4.1, 4.2, 4.3 | NFR-TT-D.1 | DedupNode | T-TT-008 |
+| F-TT-08 (Card lifecycle) | US-TT-2 | 8.2: button presses | UC-TT-02 | "Принять", "Делегировать", "Закрыть" | FR-TT-7.1..7.4 | NFR-TT-U.1, U.2 | CallbackHandler + TaskCardBuilder | T-TT-014, 015, 016 |
+| F-TT-09 (NT tasks pickup) | US-TT-4 | 8.x: NT INSERT → TT picks up | UC-TT-05 | (no full Gherkin yet, depends NT) | FR-TT-1.6 | NFR-TT-P.1 | (через DB shared) | T-TT-040 |
+| F-TT-10 (Multi-recipient delivery) | US-TT-1, 2 | 8.1: TG cards out | UC-TT-01, 02 | "TG card отправляется Алине + admin" | FR-TT-6.1, 6.2, 6.3, 6.4 | NFR-TT-U.1 | TaskCardBuilder.post_initial_card | T-TT-011, 013 |
+| F-TT-11 (Slack ingest) TODO | US-TT-5 | 8.x (TODO): Slack → ingest | UC-TT-03 | (TODO) | FR-TT-1.3, 1.4 | NFR-TT-S.2 | SlackIngestService (TODO) | T-TT-020, 021 |
+| F-TT-12 (Email ingest) TODO | (no full US) | (TODO) | UC-TT-04 | (TODO) | FR-TT-1.5 | NFR-TT-* | EmailIngestService (TODO) | T-TT-030 |
+| F-TT-13 (Recurring tasks) TODO | US-TT-6 | (TODO) | UC-TT-09 | (TODO) | FR-TT-10.1..10.3 | NFR-TT-* | RecurringScheduler (TODO) | T-TT-060 |
+| F-TT-14 (Morning digest) TODO | US-TT-3 | (TODO) | UC-TT-06 | (TODO) | FR-TT-8.1, 8.3, 8.4 | NFR-TT-U.* | DigestService (TODO) | T-TT-070 |
+| F-TT-15 (Evening digest) TODO | (mirror US-TT-3) | (TODO) | UC-TT-07 | (TODO) | FR-TT-8.2 | NFR-TT-U.* | DigestService (TODO) | T-TT-071 |
+| F-TT-16 (Deadline reminders) TODO | (no full US) | (TODO) | UC-TT-08 | (TODO) | FR-TT-9.1..9.3 | NFR-TT-* | DeadlineReminderService (TODO) | T-TT-080 |
+| F-TT-17 (Status notifications) TODO | (no full US) | (TODO) | (no UC yet) | (TODO) | (no FR yet) | NFR-TT-* | StatusNotificationService (TODO) | T-TT-090 |
+| F-TT-18 (Manual /task) TODO | (no full US) | (TODO) | UC-TT-11 | (TODO) | FR-TT-1.7 | NFR-TT-* | TG bot command handler (TODO) | T-TT-050 |
+| F-TT-19 (GTasks 2-way sync) TODO | US-TT-7 | (TODO) | UC-TT-10 | (TODO) | FR-TT-11.1..11.4 | NFR-TT-I.1 | GoogleTasksSync (TODO) | T-TT-100 |
+| F-TT-20 (Subscriptions) TODO | (no full US) | (TODO) | UC-TT-12 | (TODO) | FR-TT-12.1, 12.2 | NFR-TT-* | task_subscriptions table + handler (TODO) | T-TT-120 |
+
+### Architecture Traceability
+
+| Requirement ID | Use Case | User Flow | Client Component | Service | AI Service | Entity | Test |
+|---|---|---|---|---|---|---|---|
+| FR-TT-1.1 | UC-TT-01 | 8.1 step "Listener poll Supabase" | (none) | TelegramIngestService.prepare_drafts | (none direct) | processed_telegram_messages | T-TT-001 |
+| FR-TT-2.1 | UC-TT-01 | 8.1 step "intent classifier" | (none) | (none direct) | IntentClassifier | (transient) | T-TT-002 |
+| FR-TT-3.3 | UC-TT-01 | 8.1 step "owner_node" | (none) | (none direct) | OwnerNode | team_members | T-TT-005 |
+| FR-TT-3.4 | UC-TT-01 | 8.1 step "date_node" | (none) | (none direct) | DateNode | tasks.due_date | T-TT-006 |
+| FR-TT-4.1 | UC-TT-01 | 8.1 step "dedup_node" | (none) | (none direct) | DedupNode | tasks (existing) | T-TT-008 |
+| FR-TT-5.1 | UC-TT-01 | 8.1 step "INSERT tasks" | (none) | TelegramIngestService | (none) | tasks | T-TT-009 |
+| FR-TT-6.1 | UC-TT-02 | 8.2 step "card delivery" | TG card | TaskCardBuilder.post_initial_card | (none) | tasks (card_channel/card_ts) | T-TT-011 |
+| FR-TT-7.1 | UC-TT-02 | 8.2 step "button press" | TG inline keyboard | CallbackHandler | (none) | tasks.status | T-TT-014 |
+| FR-TT-7.3 | UC-TT-02 | 8.2 step "audit row" | (none) | CallbackHandler | (none) | task_status_changes | T-TT-015 |
+| FR-TT-1.6 | UC-TT-05 | 8.x NT pickup | (none, indirect via TG card) | (через shared DB) | (none) | tasks (source_kind=zoom/fireflies) | T-TT-040 |
+| FR-TT-8.1 | UC-TT-06 | (TODO) Q2 | TG morning digest message | DigestService | (none) | tasks query | T-TT-070 (TODO) |
+| FR-TT-10.1 | UC-TT-09 | (TODO) Q2 | (none) | RecurringScheduler | (none) | recurring_task_rules | T-TT-060 (TODO) |
+| FR-TT-11.1 | UC-TT-10 | (TODO) Q3 | (none) | GoogleTasksSync.push | (none) | tasks.google_task_id | T-TT-100 (TODO) |
+
+# 15. Appendices
+
+## 15.1 Glossary
 
 - **Task Tracker** — agent для task lifecycle (create → assign → distribute → close)
 - **Drafts loop** — серия LLM-вызовов (title/desc/owner/date/priority/dedup)
@@ -1173,7 +1365,7 @@ flowchart TD
 - **Recurring rule** — шаблон periodically генерирующий задачи (daily/weekly/monthly/cron)
 - **Subscription** — пользователь подписан на чужую задачу для notifications
 
-## 14.2 References
+## 15.2 References
 
 - `docs/specs/task_tracker/` — detailed sub-specs
 - `SPEC_NOTE_TAKER_v0.1.md` — Note Taker spec (sister agent)

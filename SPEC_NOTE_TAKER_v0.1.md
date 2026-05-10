@@ -977,6 +977,107 @@ flowchart TD
     GDoc --> User
 ```
 
+### Client-to-Service Flow
+
+```mermaid
+sequenceDiagram
+    participant Z as Zoom Cloud
+    participant L as Listener
+    participant P as Pipeline
+    participant DB as Postgres
+    participant LLM as OpenAI
+    participant GD as Google Drive
+    participant SL as Slack API
+    participant TG as TG Bot
+
+    Z->>L: GET /accounts/me/recordings (every 60s)
+    L->>L: detect new zoom_id ∉ DB
+    L->>P: process_one(meta)
+    P->>DB: INSERT row, mark audio_downloaded=false
+    P->>Z: GET audio_url, download
+    P->>DB: row.audio_downloaded=true, row.audio_path=...
+    P->>LLM: Whisper transcribe (chunked)
+    LLM-->>P: transcript_text
+    P->>P: quality_gate is_transcript_unsummarizable?
+    alt Pass
+        P->>LLM: detailed_summary
+        P->>LLM: short_summary
+        P->>LLM: extract participants
+        P->>LLM: extract counterparties
+        P->>LLM: extract tasks
+        P->>GD: create Doc
+        P->>SL: chat.postMessage
+        P->>TG: sendMessage admin
+        P->>n8n: POST webhook
+        P->>DB: tasks_extracted=true, last_error=NULL
+    else Fail (e.g. <800 chars)
+        P->>DB: tasks_extracted=true, last_error=NULL, no publish
+    end
+```
+
+### Service-to-AI-Service Flow
+
+```mermaid
+sequenceDiagram
+    participant P as Pipeline
+    participant T as TranscriptionService
+    participant W as Whisper API
+    participant CS as Counterparty Service
+    participant LLM as OpenAI Chat
+
+    P->>T: transcribe(audio_path)
+    T->>W: POST /audio/transcriptions (gpt-4o-transcribe-diarize)
+    W-->>T: text
+    T->>T: looks_like_whisper_hallucination?
+    alt Hallucinated
+        T->>P: fallback to VTT/Fireflies-provided
+    else OK
+        T-->>P: transcript_text
+    end
+
+    P->>CS: extract_then_resolve(transcript)
+    CS->>LLM: Mentions extract (single call)
+    LLM-->>CS: mentions list
+    CS->>LLM: 5 parallel batches × 20 mentions resolve
+    LLM-->>CS: matched + unresolved
+    CS-->>P: result
+```
+
+### Data Flow Diagram
+
+```mermaid
+flowchart LR
+    User[CEO]
+    Zoom[Zoom Cloud]
+    FF[Fireflies API]
+    Whisper[OpenAI Whisper]
+    LLM[OpenAI GPT]
+    GDrive[Google Drive]
+    GCal[Google Calendar]
+    SlackAPI[Slack API]
+    TGAPI[TG Bot API]
+    n8n[n8n webhook]
+    DB[(Postgres)]
+
+    Zoom -->|S2S poll| Pipeline
+    FF -->|GraphQL poll| Pipeline
+    Pipeline --> Whisper
+    Whisper --> Pipeline
+    Pipeline --> LLM
+    LLM --> Pipeline
+    Pipeline --> GDrive
+    Pipeline -->|Fireflies only| GCal
+    Pipeline --> SlackAPI
+    Pipeline --> TGAPI
+    Pipeline --> n8n
+    Pipeline --> DB
+
+    SlackAPI --> User
+    TGAPI --> User
+```
+
+### Entity-Relationship (см. секцию 12.6 для полного ER)
+
 ## 12.10 Architecture Decision Records (ADR)
 
 ### ADR-NT-001: Postgres rows как очередь вместо Redis/Kafka
@@ -1081,9 +1182,87 @@ flowchart TD
 
 ---
 
-# 14. Appendices
+# 14. Assumptions, Out of Scope, Traceability
 
-## 14.1 Glossary
+## 14.0a Assumptions (Допущения)
+
+| ID | Assumption | Где используется | Риск если неверно | Как проверить |
+|---|---|---|---|---|
+| A-NT-1 | OpenAI API доступен с tier-5 rate limits (500 RPM) | Pipeline throughput | При quotа throttling pipeline лагает | Mониторинг 429 за неделю |
+| A-NT-2 | Zoom Cloud Recording finalize-time = 5-15 мин | NSM target | Если 30+ мин — NSM не достижим | Замер на 50 встречах |
+| A-NT-3 | Fireflies API возвращает transcript внутри ≤30 мин | Latency | Аналогично | Замер |
+| A-NT-4 | team_members справочник содержит ≤100 человек | LLM token budget | При 1000+ promp выйдет из window | Audit table size |
+| A-NT-5 | Объём аудио per встреча ≤ 200 MB | Whisper chunking | При 500+ MB chunking слишком долгий | Audit Zoom recordings |
+| A-NT-6 | Google Service Account имеет Editor доступ к Shared Drive | Doc creation | Без Shared Drive — `storageQuotaExceeded` | Verified в production |
+| A-NT-7 | Webhook consumer (n8n) обрабатывает 1 POST/min без backpressure | Throughput | При 50/min n8n будет лагать | Stress test n8n |
+| A-NT-8 | Slack mrkdwn parser обрабатывает `‹›` нормально | UX | Если рендерится странно — нужны другие unicode | Visual check 5 random posts |
+
+## 14.0b Out of Scope (Что не входит в продукт)
+
+**Note Taker НЕ делает:**
+- ❌ Назначение task-owner'ов / parsing deadlines / priority — это Task Tracker (см. SPEC_TASK_TRACKER_v0.1.md)
+- ❌ Status updates / digests / reminders — Task Tracker
+- ❌ Project management (Gantt, sprints, dependencies) — out of vision
+- ❌ Real-time meeting analytics во время встречи (latency недостижим без push events) — будущее
+- ❌ Live transcription stream — только post-meeting batch
+- ❌ Транскрибация на других языках кроме en/ru без явного override (auto-detect — Q4 roadmap)
+- ❌ Video analysis (slides, whiteboard) — Q4 roadmap
+- ❌ Sentiment / emotion detection — out of MVP
+- ❌ Управление recording'ами (start/stop/scheduling) — операторы делают сами в Zoom/Fireflies
+- ❌ Web/mobile UI для просмотра встреч (используем Google Doc + Slack/TG/webhook)
+
+## 14.0c Traceability Matrix
+
+Цель: показать, что **ни одна** Feature → User Story → User Flow → Use Case → BDD Scenario → FR/NFR → Component → Test не потерялись.
+
+### Note Taker Traceability
+
+| Feature | User Story | User Flow Step | Use Case | BDD Scenario | FR | NFR | Component | Test |
+|---|---|---|---|---|---|---|---|---|
+| F-NT-01 (Zoom auto-ingest) | US-NT-1 | 8.1: Zoom Cloud → Listener poll | UC-NT-01 | "New Zoom recording detected" | FR-NT-1.1, 1.2 | NFR-NT-P.1, R.1 | ZoomPipeline._step_download_audio | T-NT-001 |
+| F-NT-02 (Fireflies auto-ingest) | US-NT-2 | 8.1: FF API → Listener poll | UC-NT-02 | "New Fireflies transcript" | FR-NT-1.3, 1.4 | NFR-NT-P.1, R.1 | FirefliesPipeline | T-NT-003 |
+| F-NT-03 (Whisper transcription) | US-NT-1, 2 | 8.2: Pipeline → Whisper API | UC-NT-01 | "Audio downloaded then transcribed" | FR-NT-2.1, 2.2, 2.3, 2.4, 2.5 | NFR-NT-P.2, C.2 | TranscriptionService | T-NT-002, T-NT-004 |
+| F-NT-04 (Quality gates 5 levels) | US-NT-6 | 8.1: Pipeline → quality_gate | UC-NT-03 | All scenarios L1-L5 | FR-NT-3.1..3.5 | NFR-NT-U.1, R.3 | TranscriptionService.is_transcript_unsummarizable, is_summary_no_content | T-NT-015, 016, 017 |
+| F-NT-05 (Participants resolver) | US-NT-8 | 8.2: Pipeline → LLM participants | UC-NT-01, 02 | "Participants extracted via LLM" | FR-NT-4.1, 4.2, 4.3 | NFR-NT-Q.M-Q3 | extract_zoom_participants_via_llm | T-NT-020 |
+| F-NT-06 (Detailed summary → GDoc) | US-NT-4 | 8.2: Pipeline → Drive create | UC-NT-05 | "Google Doc creation" | FR-NT-5.1, 9.4 | NFR-NT-I.3 | _step_doc_export | T-NT-012 |
+| F-NT-07 (Short → Slack/TG) | US-NT-3 | 8.1: Pipeline → Slack/TG | UC-NT-05 | "Slack post single chunk", "multi-chunk" | FR-NT-5.2, 5.3, 5.4, 9.1, 9.2, 9.3, 9.7 | NFR-NT-U.1, U.2 | _send_short_summary, _to_slack_mrkdwn | T-NT-007, 010, 011, 014 |
+| F-NT-08 (Calendar match) | US-NT-7 | 8.2: Pipeline → Calendar API | UC-NT-04 | "Single calendar event matches" | FR-NT-6.1, 6.2, 6.3, 6.4, 6.5 | NFR-NT-I.* | _step_match_calendar_title | T-NT-018, 019 |
+| F-NT-09 (Counterparty match) | US-NT-9 | 8.2: Pipeline → LLM counterparty | UC-NT-01, 02 | "Counterparties resolved" | FR-NT-7.1, 7.2, 7.3, 7.4 | NFR-NT-C.1 | counterparty_match.extract_then_resolve | T-NT-021, 024 |
+| F-NT-10 (Task extraction) | (handoff to TT) | 8.2: Pipeline → tasks INSERT | UC-NT-01, 02 | "Task extracted, stored in DB" | FR-NT-8.1..8.5 | NFR-NT-D.1 | _step_extract_tasks, _step_verify_tasks | T-NT-008, 009 |
+| F-NT-11 (Webhook → n8n) | US-NT-5 | 8.2: Pipeline → POST webhook | UC-NT-05 | "Webhook POST n8n" | FR-NT-9.5 | NFR-NT-I.1 | post_meeting_to_webhook | T-NT-013 |
+| F-NT-12 (DB read-only) | US-NT-13 | 8.x: external SQL | UC-NT-09 | "BI consumer reads view" | FR-NT-9.6 | NFR-NT-S.1 | meeting_summaries_published view | T-NT-023 |
+| F-NT-13 (Idempotent recovery) | US-NT-12 | 8.x: container reset → restart | UC-NT-08 | (no full Gherkin yet) | FR-NT-10.1, 10.2, 10.3, 10.4 | NFR-NT-R.2 | listener orphan-retry logic | T-NT-022 |
+| F-NT-14 (GMeet ingest) TODO | (no full US) | (TODO) | UC-NT-10 | (TODO) | FR-NT-1.7 | NFR-NT-P.1 | GMeetPoller (TODO) | T-NT-042 (TODO) |
+| F-NT-15 (Manual upload) TODO | US-NT-10 | (TODO) | UC-NT-06 | (TODO) | FR-NT-1.5 | NFR-NT-P.1 | ManualUploadHandler (TODO) | T-NT-040 (TODO) |
+| F-NT-16 (Title push to Fireflies UI) | US-NT-7 | 8.2: post calendar match | UC-NT-04 | "Push to Fireflies UI" | FR-NT-6.4 | NFR-NT-I.* | _client.update_transcript_title | T-NT-019 |
+| F-NT-17 (Backups) TODO | (no full US, ops) | (TODO) | (no UC) | (no Gherkin) | (no FR yet, will be FR-NT-11.x) | NFR-NT-R.* | pg_dump cron (TODO) | T-NT-070 (TODO) |
+| F-NT-18 (Healthcheck) TODO | (no full US, ops) | (TODO) | (no UC) | (no Gherkin) | (no FR yet) | NFR-NT-R.*, O.* | HTTP /health endpoint (TODO) | T-NT-071 (TODO) |
+| F-NT-19 (Voice dictation) TODO | US-NT-11 | (TODO) | UC-NT-07 | (TODO) | FR-NT-1.6 | NFR-NT-P.1 | TG voice handler (TODO) | T-NT-041 (TODO) |
+
+### Architecture Traceability
+
+| Requirement ID | Use Case | User Flow | Client Component | Service | AI Service | Entity | Test |
+|---|---|---|---|---|---|---|---|
+| FR-NT-1.1 | UC-NT-01 | 8.1 step "Listener poll Zoom" | (none, server-side) | ZoomClient.list_recordings | (none) | zoom_recordings | T-NT-001 |
+| FR-NT-2.1 | UC-NT-01 | 8.1 step "Pipeline → Whisper" | (none) | TranscriptionService | Whisper API call | zoom_recordings.transcript_text | T-NT-002 |
+| FR-NT-3.3 | UC-NT-03 | 8.1 step "quality gate" | (none) | TranscriptionService.is_transcript_unsummarizable | (none, deterministic) | zoom_recordings.tasks_extracted | T-NT-016 |
+| FR-NT-4.1 | UC-NT-01, 02 | 8.2 step "LLM participants" | (none) | (none direct) | ParticipantExtractor | zoom_recordings.participants | T-NT-020 |
+| FR-NT-5.1 | UC-NT-01, 02 | 8.2 step "LLM detailed_summary" | (none) | (none direct) | DetailedSummary | zoom_recordings.detailed_summary | T-NT-006 |
+| FR-NT-5.3 | UC-NT-05 | 8.1 step "Slack push" | Slack DM card | SlackMirror | (none) | (transient text) | T-NT-019 |
+| FR-NT-6.1 | UC-NT-04 | 8.2 step "Calendar match" | (none) | CalendarMatch.find_match | CalendarPicker | meeting_recordings.title | T-NT-018 |
+| FR-NT-7.1 | UC-NT-01, 02 | 8.2 step "Counterparty extract" | (none) | CounterpartyMatch | CounterpartyExtractor + Resolver | counterparties + counterparty_mentions | T-NT-021 |
+| FR-NT-8.1 | UC-NT-01, 02 | 8.2 step "Tasks extract" | TG cards (через TT) | (handoff to TT) | TaskExtractor | tasks (source_kind=zoom/fireflies) | T-NT-008 |
+| FR-NT-9.1 | UC-NT-05 | 8.1 step "Slack push" | Slack DM | SlackMirror | (none) | (transient) | T-NT-010 |
+| FR-NT-9.4 | UC-NT-05 | 8.2 step "Drive create" | Google Doc | _step_doc_export | (none) | zoom_recordings.google_doc_url | T-NT-012 |
+| FR-NT-9.5 | UC-NT-05 | 8.2 step "POST webhook" | (none, n8n side) | MeetingWebhook | (none) | (transient) | T-NT-013 |
+| FR-NT-9.6 | UC-NT-09 | 8.x BI external | psql | DB view | (none) | meeting_summaries_published view | T-NT-023 |
+| FR-NT-10.1 | UC-NT-08 | 8.x recover | (none) | listener orphan-retry | (none) | step-flags | T-NT-022 |
+
+Если требование без полного покрытия — отметка **GAP** в колонке "Test" и open question в 12.12.
+
+# 15. Appendices
+
+## 15.1 Glossary
 
 - **Note Taker** — agent для meeting recordings
 - **Pipeline-step** — atomic action в pipeline (download, transcribe, summary, distribute)
@@ -1092,7 +1271,7 @@ flowchart TD
 - **Idempotent step** — повторный run на той же row не дублирует и не платит за API
 - **Source-agnostic** — pipeline работает одинаково для Zoom/Fireflies/GMeet/manual
 
-## 14.2 References
+## 15.2 References
 
 - `docs/specs/note_taker/` — detailed sub-specs
 - `SPEC.md` — original implementation reference

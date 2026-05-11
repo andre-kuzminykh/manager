@@ -2129,10 +2129,15 @@ class TelegramListener:
         )
         # FR-CR-05-161 — initialize watchdog state + spawn daemon
         import threading as _thr
+        from app.config import get_settings as _get_settings
         self._last_tick_at = time.monotonic()
-        watchdog_silence_seconds = int(
-            getattr(self._settings, "watchdog_max_silence_seconds", 600)
-        )
+        try:
+            _settings = _get_settings()
+            watchdog_silence_seconds = int(
+                getattr(_settings, "watchdog_max_silence_seconds", 600)
+            )
+        except Exception:  # noqa: BLE001
+            watchdog_silence_seconds = 600
         _thr.Thread(
             target=self._watchdog_thread,
             args=(watchdog_silence_seconds,),

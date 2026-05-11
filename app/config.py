@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     zoom_post_task_cards_timeout_seconds: int = Field(
         default=120, alias="ZOOM_POST_TASK_CARDS_TIMEOUT_SECONDS"
     )
+    # FR-CR-05-162 — Slack Socket-Mode ingest. По умолчанию OFF —
+    # включается через env когда оператор готов и Slack App scopes
+    # перенастроены (channels:history, groups:history, etc).
+    slack_ingest_enabled: bool = Field(
+        default=False, alias="SLACK_INGEST_ENABLED"
+    )
 
     # FR-CR-05-136 — Calendar-match for meeting titles. The
     # Apps Script Web App is the proxy that does the Calendar

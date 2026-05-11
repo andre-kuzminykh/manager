@@ -437,6 +437,24 @@ def _build_todo_section(
     )
     if not tasks:
         return ""
+    # FR-CR-05-163 — direction badge + deadline render.
+    # Badge prefix только для важных направлений (beta/budget/design/
+    # investors/deliverables). «other» — без badge'a.
+    from app.services.task_direction import (
+        DIRECTIONS_IMPORTANT,
+        DIRECTION_BADGES,
+    )
+
+    def _format_deadline(task) -> str:  # noqa: ANN001
+        """DD.MM.YYYY HH:MM. Default = today 18:00 if both empty
+        (operator-pinned: «если сегодня то так и пишем
+        22.04.2028 18:00 — это дефолт»)."""
+        from datetime import date, time as _time
+
+        d = task.due_date if getattr(task, "due_date", None) else date.today()
+        t = task.due_time if getattr(task, "due_time", None) else _time(18, 0)
+        return f"{d.strftime('%d.%m.%Y')} {t.strftime('%H:%M')}"
+
     items: list[str] = []
     for i, t in enumerate(tasks, 1):
         owner = (t.owner_display_name or "").strip()
@@ -447,10 +465,25 @@ def _build_todo_section(
             if len(raw) > 350:
                 cut = raw.rfind(" ", 0, 350)
                 raw = (raw[: cut if cut > 200 else 350]).rstrip(",;:- ") + "…"
+        # Direction badge if task.extra.direction ∈ important
+        direction = None
+        try:
+            extra = t.extra or {}
+            if isinstance(extra, dict):
+                direction = extra.get("direction")
+        except Exception:  # noqa: BLE001
+            direction = None
+        badge = ""
+        if direction in DIRECTIONS_IMPORTANT:
+            badge = (DIRECTION_BADGES.get(direction) or "") + " "
+        # Compose: "1) [BADGE] Title — Owner • DD.MM.YYYY HH:MM"
+        suffix_parts: list[str] = []
         if owner:
-            items.append(f"{i}) {raw} ({owner})")
-        else:
-            items.append(f"{i}) {raw}")
+            suffix_parts.append(owner)
+        deadline_str = _format_deadline(t)
+        suffix_parts.append(deadline_str)
+        suffix = " • ".join(suffix_parts)
+        items.append(f"{i}) {badge}{raw} — {suffix}")
     # FR-CR-05-128 follow-up — operator regression: splitter was
     # cutting mid-task because the entire To-Do block was a
     # single paragraph («\n» between items). Use «\n\n» between
@@ -2426,6 +2459,50 @@ class FirefliesPipeline:
             row.tasks_extracted_count = (row.tasks_extracted_count or 0) + added
         return added
 
+    def _step_classify_directions(
+        self, session: Session, row: MeetingRecording,
+    ) -> None:
+        """FR-CR-05-163 — classify each task by strategic direction
+        (beta / budget / design / investors / deliverables / other)
+        and store in task.extra.direction. Important directions get
+        badged in the To-Do block to call CEO attention."""
+        from app.models import Task as _Task
+        from app.services.task_direction import classify_directions
+
+        tasks = (
+            session.query(_Task)
+            .filter(_Task.source_kind == TaskSourceKind.fireflies)
+            .filter(_Task.source_conversation_id == row.fireflies_id)
+            .filter(_Task.deleted_at.is_(None))
+            .all()
+        )
+        if not tasks:
+            return
+        tasks_to_classify = [
+            {"id": t.id, "title": t.title or "", "description": t.description or ""}
+            for t in tasks
+            if not (isinstance(t.extra, dict) and t.extra.get("direction"))
+        ]
+        if not tasks_to_classify:
+            return
+        mapping = classify_directions(
+            tasks=tasks_to_classify,
+            meeting_context=(row.detailed_summary or "")[:3000] or None,
+            llm_backend=self._llm,
+            model=self._settings.fireflies_tasks_model,
+        )
+        for t in tasks:
+            direction = mapping.get(t.id, "other")
+            extra = dict(t.extra or {})
+            extra["direction"] = direction
+            t.extra = extra
+        log.info(
+            "fireflies_task_directions_applied",
+            fireflies_id=row.fireflies_id,
+            classified=len(mapping),
+            total=len(tasks),
+        )
+
     def _step_post_task_cards(
         self, session: Session, row: MeetingRecording
     ) -> int:
@@ -2639,6 +2716,17 @@ class FirefliesPipeline:
         except Exception as e:  # noqa: BLE001
             log.info(
                 "fireflies_task_dedupe_unexpected_error",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+        # FR-CR-05-163 — classify tasks by strategic direction
+        # (beta / budget / design / investors / deliverables / other).
+        # Used by _build_todo_section for important-task badges.
+        try:
+            with _trace_step("fireflies", "classify_directions", **ctx):
+                self._step_classify_directions(session, row)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_task_direction_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
         # Recount after dedupe.

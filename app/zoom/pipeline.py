@@ -1790,6 +1790,51 @@ class ZoomPipeline:
                     f.cancel()
         return sum(1 for r in results if r)
 
+    def _step_classify_directions(
+        self, session: Session, row: ZoomRecording,
+    ) -> None:
+        """FR-CR-05-163 — classify each task by strategic direction
+        (beta / budget / design / investors / deliverables / other)
+        and store in task.extra.direction. Important directions get
+        badged in the To-Do block to call CEO attention."""
+        from app.models import Task as _Task
+        from app.services.task_direction import classify_directions
+
+        tasks = (
+            session.query(_Task)
+            .filter(_Task.source_kind == TaskSourceKind.zoom)
+            .filter(_Task.source_conversation_id == row.zoom_id)
+            .filter(_Task.deleted_at.is_(None))
+            .all()
+        )
+        if not tasks:
+            return
+        # Skip tasks that already have direction set (idempotent re-run)
+        tasks_to_classify = [
+            {"id": t.id, "title": t.title or "", "description": t.description or ""}
+            for t in tasks
+            if not (isinstance(t.extra, dict) and t.extra.get("direction"))
+        ]
+        if not tasks_to_classify:
+            return
+        mapping = classify_directions(
+            tasks=tasks_to_classify,
+            meeting_context=(row.detailed_summary or "")[:3000] or None,
+            llm_backend=self._llm,
+            model=self._settings.fireflies_tasks_model,
+        )
+        for t in tasks:
+            direction = mapping.get(t.id, "other")
+            extra = dict(t.extra or {})
+            extra["direction"] = direction
+            t.extra = extra
+        log.info(
+            "zoom_task_directions_applied",
+            zoom_id=row.zoom_id,
+            classified=len(mapping),
+            total=len(tasks),
+        )
+
     # --- main entry-point -------------------------------------
 
     def process_one(
@@ -1920,6 +1965,18 @@ class ZoomPipeline:
             except Exception as e:  # noqa: BLE001
                 log.info(
                     "zoom_task_dedupe_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+        # FR-CR-05-163 — classify tasks by direction. Save direction
+        # в task.extra (без DB migration). Используется в _build_todo
+        # для badge'a важных задач.
+        if row.detailed_summarised:
+            try:
+                with _trace_step("zoom", "classify_directions", **ctx):
+                    self._step_classify_directions(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_task_direction_unexpected_error",
                     zoom_id=row.zoom_id, error=str(e),
                 )
         # Recount after dedupe.

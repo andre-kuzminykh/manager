@@ -222,6 +222,8 @@ Note Taker автоматически:
 | F-NT-14 | **GMeet ingest** | Через Drive API recordings + Meet API метаданные |
 | F-NT-15 | **Manual upload** | Drag-n-drop audio/video file через web UI или TG voice-note |
 | F-NT-16 | **Title push to Fireflies UI** | После calendar match — `updateMeetingTitle` мутация |
+| F-NT-24 | **Task direction classifier** (FR-CR-05-163) | Single LLM call per meeting tasks batch — classify each task в beta/budget/design/investors/deliverables/other; важные категории получают эмодзи-badge в To-Do block (📌 [ИНВЕСТОРЫ] etc). Stored в `task.extra.direction`. |
+| F-NT-25 | **To-Do block deadline render** (FR-CR-05-163) | В meeting summary To-Do — формат «N) [BADGE] Title — Owner • DD.MM.YYYY HH:MM». Default deadline = `today 18:00` если LLM не выявил конкретного дедлайна. |
 | F-NT-17 | **Backups** | pg_dump cron в Cloud Storage |
 | F-NT-18 | **Healthcheck endpoint** | HTTP `/health` с last-poll, errored-orphans метриками |
 

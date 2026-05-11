@@ -28,6 +28,19 @@ class Settings(BaseSettings):
     meeting_webhook_url: str = Field(
         default="", alias="MEETING_WEBHOOK_URL"
     )
+    # FR-CR-05-161 — watchdog + hard timeout, safety net против
+    # stuck-socket hang. Если listener tick не отрабатывает дольше
+    # этого окна — daemon thread убивает процесс, Docker revives.
+    watchdog_max_silence_seconds: int = Field(
+        default=600, alias="WATCHDOG_MAX_SILENCE_SECONDS"
+    )
+    # Hard timeout на _step_post_task_cards (ThreadPool). pool.map()
+    # без timeout зависает навсегда если хотя бы один worker на
+    # dead TCP socket; concurrent.futures.wait(timeout=N) выходит
+    # через N seconds, cancel'ит stuck workers.
+    zoom_post_task_cards_timeout_seconds: int = Field(
+        default=120, alias="ZOOM_POST_TASK_CARDS_TIMEOUT_SECONDS"
+    )
 
     # FR-CR-05-136 — Calendar-match for meeting titles. The
     # Apps Script Web App is the proxy that does the Calendar

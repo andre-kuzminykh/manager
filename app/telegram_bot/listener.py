@@ -377,6 +377,10 @@ class TelegramListener:
         ) = None
         self._google_tasks_pull_interval = 60
         self._last_google_tasks_pull_at = 0.0
+        # FR-CR-05-161 — watchdog state. monotonic() value to track
+        # last successful tick. Reset to fresh value on run_forever
+        # start; used by daemon watchdog thread to detect stuck loop.
+        self._last_tick_at: float = time.monotonic()
 
     def wire_google_tasks_pull(
         self,
@@ -2074,12 +2078,44 @@ class TelegramListener:
 
     # ---- main loop --------------------------------------------------------
 
+    def _watchdog_thread(self, max_silence_seconds: int) -> None:
+        """FR-CR-05-161 — daemon thread: проверяет каждые 60s что
+        listener жив (последний tick не дальше max_silence_seconds
+        назад). Если listener завис на stuck-сокете в LLM/TG/Slack/
+        Whisper API call, watchdog убивает процесс через os._exit(1).
+        Docker `--restart unless-stopped` revives. На pipeline-уровне
+        ничего не теряется — DB-state остаётся, listener orphan-retry
+        подхватит на следующем boot."""
+        import os as _os
+        import time as _t
+        while True:
+            try:
+                _t.sleep(60)
+                silence = _t.monotonic() - self._last_tick_at
+                if silence > max_silence_seconds:
+                    log.error(
+                        "telegram_listener_watchdog_kill",
+                        silence_seconds=round(silence, 1),
+                        max_allowed=max_silence_seconds,
+                        hint="probably stuck on a network socket; exit(1) → container restart",
+                    )
+                    _os._exit(1)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "telegram_listener_watchdog_error", error=str(e),
+                )
+
     def run_forever(self, *, sleep_on_idle: float = 1.0) -> None:
         """Block forever, ticking until the process is killed.
 
         On a long-poll timeout (no updates) Telegram returns an empty
         list immediately — we sleep `sleep_on_idle` seconds before
         the next iteration to avoid hot-spinning if the API misbehaves.
+
+        FR-CR-05-161 — daemon watchdog thread следит что tick'и
+        идут регулярно. Если listener завис (stuck socket в LLM/TG
+        API), watchdog убьёт процесс через 10 мин тишины → Docker
+        revive → восстановление автоматическое.
         """
         if not self.enabled:
             log.error(
@@ -2091,11 +2127,29 @@ class TelegramListener:
             "telegram_listener_starting",
             long_poll_timeout=self._long_poll_timeout,
         )
+        # FR-CR-05-161 — initialize watchdog state + spawn daemon
+        import threading as _thr
+        self._last_tick_at = time.monotonic()
+        watchdog_silence_seconds = int(
+            getattr(self._settings, "watchdog_max_silence_seconds", 600)
+        )
+        _thr.Thread(
+            target=self._watchdog_thread,
+            args=(watchdog_silence_seconds,),
+            daemon=True,
+            name="listener-watchdog",
+        ).start()
+        log.info(
+            "telegram_listener_watchdog_started",
+            max_silence_seconds=watchdog_silence_seconds,
+        )
         while True:
             try:
                 report = self.tick()
+                self._last_tick_at = time.monotonic()
             except Exception as e:  # noqa: BLE001
                 log.warning("telegram_listener_tick_failed", error=str(e))
+                self._last_tick_at = time.monotonic()  # tick attempted, count as alive
                 time.sleep(sleep_on_idle)
                 continue
             if report.updates_seen == 0:

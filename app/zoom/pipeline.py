@@ -1746,10 +1746,48 @@ class ZoomPipeline:
                     return False
 
         workers = max(1, min(10, len(task_ids)))
+        # FR-CR-05-161 — hard timeout на всю batch операцию (default
+        # 120s). pool.map() ждёт ВСЕХ futures, и если хотя бы одна
+        # sendMessage зависла на dead TCP socket — pipeline стоит
+        # навсегда. concurrent.futures.wait с timeout позволяет
+        # выйти через 120s даже если кто-то завис.
+        from concurrent.futures import wait as _futures_wait, FIRST_EXCEPTION
+        import time as _t
+
+        pool_timeout = int(
+            getattr(self._settings, "zoom_post_task_cards_timeout_seconds", 120)
+        )
+        _t0 = _t.monotonic()
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="zm-cards",
         ) as pool:
-            results = list(pool.map(_send_one, task_ids))
+            futures = {
+                pool.submit(_send_one, tid): tid for tid in task_ids
+            }
+            done, not_done = _futures_wait(
+                futures.keys(), timeout=pool_timeout
+            )
+            results: list[bool] = []
+            for f in done:
+                try:
+                    results.append(bool(f.result(timeout=1)))
+                except Exception as e:  # noqa: BLE001
+                    log.info(
+                        "zoom_task_card_future_error",
+                        task_id=futures[f], error=str(e),
+                    )
+                    results.append(False)
+            if not_done:
+                log.warning(
+                    "zoom_post_task_cards_timeout",
+                    pool_timeout=pool_timeout,
+                    not_done=len(not_done),
+                    done=len(done),
+                    elapsed_sec=round(_t.monotonic() - _t0, 1),
+                    cancelled_task_ids=[futures[f] for f in not_done],
+                )
+                for f in not_done:
+                    f.cancel()
         return sum(1 for r in results if r)
 
     # --- main entry-point -------------------------------------

@@ -437,18 +437,14 @@ def _build_todo_section(
     )
     if not tasks:
         return ""
-    # FR-CR-05-163 — direction badge + deadline render.
-    # Badge prefix только для важных направлений (beta/budget/design/
-    # investors/deliverables). «other» — без badge'a.
-    from app.services.task_direction import (
-        DIRECTIONS_IMPORTANT,
-        DIRECTION_BADGES,
-    )
+    # FR-CR-05-163 follow-up — operator-pinned: «надо убрать эмодзи
+    # и выводить в саммери только то что относится к бейджам этим,
+    # но сами бейджи не выводи». Фильтруем по important directions,
+    # рендерим без префикса.
+    from app.services.task_direction import DIRECTIONS_IMPORTANT
 
     def _format_deadline(task) -> str:  # noqa: ANN001
-        """DD.MM.YYYY HH:MM. Default = today 18:00 if both empty
-        (operator-pinned: «если сегодня то так и пишем
-        22.04.2028 18:00 — это дефолт»)."""
+        """DD.MM.YYYY HH:MM. Default = today 18:00 if both empty."""
         from datetime import date, time as _time
 
         d = task.due_date if getattr(task, "due_date", None) else date.today()
@@ -456,7 +452,19 @@ def _build_todo_section(
         return f"{d.strftime('%d.%m.%Y')} {t.strftime('%H:%M')}"
 
     items: list[str] = []
-    for i, t in enumerate(tasks, 1):
+    idx = 0
+    for t in tasks:
+        # FR-CR-05-163 follow-up — фильтр по important direction.
+        direction = None
+        try:
+            extra = t.extra or {}
+            if isinstance(extra, dict):
+                direction = extra.get("direction")
+        except Exception:  # noqa: BLE001
+            direction = None
+        if direction not in DIRECTIONS_IMPORTANT:
+            continue
+        idx += 1
         owner = (t.owner_display_name or "").strip()
         if compact:
             raw = (t.title or "").strip() or (t.description or "").strip()
@@ -465,25 +473,15 @@ def _build_todo_section(
             if len(raw) > 350:
                 cut = raw.rfind(" ", 0, 350)
                 raw = (raw[: cut if cut > 200 else 350]).rstrip(",;:- ") + "…"
-        # Direction badge if task.extra.direction ∈ important
-        direction = None
-        try:
-            extra = t.extra or {}
-            if isinstance(extra, dict):
-                direction = extra.get("direction")
-        except Exception:  # noqa: BLE001
-            direction = None
-        badge = ""
-        if direction in DIRECTIONS_IMPORTANT:
-            badge = (DIRECTION_BADGES.get(direction) or "") + " "
-        # Compose: "1) [BADGE] Title — Owner • DD.MM.YYYY HH:MM"
         suffix_parts: list[str] = []
         if owner:
             suffix_parts.append(owner)
-        deadline_str = _format_deadline(t)
-        suffix_parts.append(deadline_str)
+        suffix_parts.append(_format_deadline(t))
         suffix = " • ".join(suffix_parts)
-        items.append(f"{i}) {badge}{raw} — {suffix}")
+        items.append(f"{idx}) {raw} — {suffix}")
+    if not items:
+        # Нет ни одной important задачи — раздел не рендерим.
+        return ""
     # FR-CR-05-128 follow-up — operator regression: splitter was
     # cutting mid-task because the entire To-Do block was a
     # single paragraph («\n» between items). Use «\n\n» between

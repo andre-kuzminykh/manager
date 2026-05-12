@@ -200,7 +200,9 @@ def _stub_session_with_tasks(tasks_list):
     return _Sess()
 
 
-def test_todo_section_badge_for_important_direction():
+def test_todo_section_important_task_rendered_no_badge():
+    """FR-CR-05-163 follow-up: только important показывается, БЕЗ
+    emoji-префикса."""
     from app.fireflies.pipeline import _build_todo_section
     from app.models import TaskSourceKind
 
@@ -218,13 +220,16 @@ def test_todo_section_badge_for_important_direction():
         source_kind=TaskSourceKind.zoom,
         source_conversation_id="test-zoom-id",
     )
-    assert "📌 [БЕТА]" not in rendered  # это не beta
-    assert "💼 [ИНВЕСТОРЫ]" in rendered
+    # Никакого emoji-префикса
+    for badge in DIRECTION_BADGES.values():
+        assert badge not in rendered, f"unexpected badge {badge}"
+    # Но сам task должен быть отрендерен
     assert "Артем Соколов" in rendered
     assert "12.05.2026 15:00" in rendered
 
 
-def test_todo_section_no_badge_for_other_direction():
+def test_todo_section_other_direction_filtered_out():
+    """FR-CR-05-163 follow-up: task с direction=other НЕ показывается."""
     from app.fireflies.pipeline import _build_todo_section
     from app.models import TaskSourceKind
 
@@ -240,20 +245,19 @@ def test_todo_section_no_badge_for_other_direction():
         source_kind=TaskSourceKind.zoom,
         source_conversation_id="test-zoom-id",
     )
-    for badge in DIRECTION_BADGES.values():
-        assert badge not in rendered, f"unexpected badge {badge}"
-    assert "Алина" in rendered
-    assert "12.05.2026 18:00" in rendered
+    # Раздел пустой → ""
+    assert rendered == ""
 
 
 def test_todo_section_default_deadline_today_18_00():
+    """Important task без явного deadline — дефолт today 18:00."""
     from app.fireflies.pipeline import _build_todo_section
     from app.models import TaskSourceKind
 
     sess = _stub_session_with_tasks([
         _StubTask(
-            id_=3, title="Без явного дедлайна", owner="Дима",
-            direction="other",
+            id_=3, title="Подготовить P&L", owner="Дима",
+            direction="budget",
             due_date_=None, due_time_=None,
         ),
     ])
@@ -265,16 +269,19 @@ def test_todo_section_default_deadline_today_18_00():
     today_str = date.today().strftime("%d.%m.%Y")
     assert today_str in rendered
     assert "18:00" in rendered
+    # Без бейджа
+    for badge in DIRECTION_BADGES.values():
+        assert badge not in rendered
 
 
-def test_todo_section_handles_missing_direction_key():
-    """Task без direction вообще (старые row до фикса) — без badge."""
+def test_todo_section_missing_direction_filtered_out():
+    """Task без direction (старые row) — НЕ показывается."""
     from app.fireflies.pipeline import _build_todo_section
     from app.models import TaskSourceKind
 
     sess = _stub_session_with_tasks([
         _StubTask(
-            id_=4, title="Стариная задача без direction", owner="Артем",
+            id_=4, title="Старая задача без direction", owner="Артем",
             direction=None,
             due_date_=date(2026, 5, 11), due_time_=time(12, 0),
         ),
@@ -284,6 +291,44 @@ def test_todo_section_handles_missing_direction_key():
         source_kind=TaskSourceKind.zoom,
         source_conversation_id="test-zoom-id",
     )
+    assert rendered == ""
+
+
+def test_todo_section_mixed_keeps_only_important():
+    """Mix important + other → в выводе только important."""
+    from app.fireflies.pipeline import _build_todo_section
+    from app.models import TaskSourceKind
+
+    sess = _stub_session_with_tasks([
+        _StubTask(
+            id_=10, title="Pitch deck для investors", owner="Артем",
+            direction="investors",
+            due_date_=date(2026, 5, 14), due_time_=time(10, 0),
+        ),
+        _StubTask(
+            id_=11, title="Купить кофе в офис", owner="Алина",
+            direction="other",
+            due_date_=date(2026, 5, 14), due_time_=time(11, 0),
+        ),
+        _StubTask(
+            id_=12, title="Дизайн новой landing страницы", owner="Дима",
+            direction="design",
+            due_date_=date(2026, 5, 15), due_time_=time(14, 0),
+        ),
+    ])
+    rendered = _build_todo_section(
+        sess,  # type: ignore[arg-type]
+        source_kind=TaskSourceKind.zoom,
+        source_conversation_id="test-zoom-id",
+    )
+    # 2 important задачи в выводе, other скрыта
+    assert "Pitch deck" in rendered or "investors" in rendered.lower()
+    assert "Дизайн" in rendered or "design" in rendered.lower()
+    assert "Купить кофе" not in rendered  # other → filtered
+    # Нумерация — 1) и 2), не 1) и 3)
+    assert "1)" in rendered
+    assert "2)" in rendered
+    assert "3)" not in rendered
+    # Без бейджей
     for badge in DIRECTION_BADGES.values():
         assert badge not in rendered
-    assert "11.05.2026 12:00" in rendered

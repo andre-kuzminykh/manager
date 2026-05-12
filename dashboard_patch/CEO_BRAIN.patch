@@ -1,0 +1,1082 @@
+diff --git a/backend/services/ceo_brain.py b/backend/services/ceo_brain.py
+new file mode 100644
+index 0000000..f17f62e
+--- /dev/null
++++ b/backend/services/ceo_brain.py
+@@ -0,0 +1,373 @@
++"""CEO Brain analytics service.
++
++Reads from the external Humanoid CEO Brain Postgres database (the
++read-only role `zoom_colleague` via pg-proxy at 34.62.139.101:5433).
++Returns dicts that the Streamlit section renders as KPIs, charts,
++and tables.
++
++Connection: env var `CEO_BRAIN_DB_URL` (full postgresql:// DSN).
++Empty / invalid URL → all calls return safe defaults (zeros), and the
++section shows a "not configured" banner. No exceptions propagate.
++
++Read-only by design — service exposes only SELECT queries. Filters
++restrict by date range so the dashboard can show "last 7 days" /
++"last 30 days" / etc.
++"""
++from __future__ import annotations
++
++import logging
++import os
++from dataclasses import dataclass
++from datetime import date, datetime, timedelta, timezone
++from typing import Any
++
++log = logging.getLogger(__name__)
++
++
++@dataclass
++class CEOBrainFilters:
++    """Window для всех queries в CEO Brain section."""
++
++    start_date: date
++    end_date: date
++    source: str | None = None  # None / "telegram" / "slack" / "zoom" / "fireflies" / "email" / "manual"
++
++    @property
++    def start_dt(self) -> datetime:
++        return datetime.combine(self.start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
++
++    @property
++    def end_dt(self) -> datetime:
++        return datetime.combine(self.end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
++
++
++_DEFAULT_KPIS: dict[str, Any] = {
++    "tasks_total": 0,
++    "tasks_by_source": {},
++    "meetings_zoom_total": 0,
++    "meetings_fireflies_total": 0,
++    "meetings_zoom_summarised": 0,
++    "meetings_fireflies_summarised": 0,
++    "top_assignees": [],
++    "tasks_by_status": {},
++    "tasks_by_priority": {},
++    "tg_messages_total": 0,
++    "tg_messages_classified_as_task": 0,
++    "health": {
++        "configured": False,
++        "reason": "CEO_BRAIN_DB_URL not set",
++    },
++}
++
++
++def _connect():  # noqa: ANN202 — psycopg.Connection type optional
++    """Return a Postgres connection or None. Catches everything —
++    section must render even with broken DB credentials."""
++    dsn = os.environ.get("CEO_BRAIN_DB_URL", "").strip()
++    if not dsn:
++        return None
++    try:
++        import psycopg
++
++        return psycopg.connect(dsn, connect_timeout=5)
++    except Exception as e:  # noqa: BLE001
++        log.warning("ceo_brain_connect_failed: %s", e)
++        return None
++
++
++def get_kpis(filters: CEOBrainFilters) -> dict[str, Any]:
++    """Main KPI bundle used by the section's hero KPIs + breakdowns.
++
++    Failures (no DSN, connection error, missing table) → returns
++    `_DEFAULT_KPIS` with health.reason explaining why.
++    """
++    conn = _connect()
++    if conn is None:
++        return dict(_DEFAULT_KPIS)
++    result: dict[str, Any] = {}
++    start = filters.start_dt
++    end = filters.end_dt
++    src_filter = (filters.source or "").strip().lower()
++    try:
++        with conn:
++            with conn.cursor() as cur:
++                # Tasks total + by source
++                where_src = "AND source_kind = %s" if src_filter else ""
++                params: list[Any] = [start, end]
++                if src_filter:
++                    params.append(src_filter)
++                cur.execute(
++                    f"""
++                    SELECT source_kind, COUNT(*)
++                    FROM tasks
++                    WHERE created_at BETWEEN %s AND %s
++                      AND deleted_at IS NULL
++                      {where_src}
++                    GROUP BY source_kind
++                    """,
++                    params,
++                )
++                tasks_by_source = {row[0]: row[1] for row in cur.fetchall()}
++                result["tasks_by_source"] = tasks_by_source
++                result["tasks_total"] = sum(tasks_by_source.values())
++
++                # By status
++                cur.execute(
++                    f"""
++                    SELECT COALESCE(status, 'unknown'), COUNT(*)
++                    FROM tasks
++                    WHERE created_at BETWEEN %s AND %s
++                      AND deleted_at IS NULL
++                      {where_src}
++                    GROUP BY status
++                    """,
++                    params,
++                )
++                result["tasks_by_status"] = {row[0]: row[1] for row in cur.fetchall()}
++
++                # By priority
++                cur.execute(
++                    f"""
++                    SELECT COALESCE(priority, 'medium'), COUNT(*)
++                    FROM tasks
++                    WHERE created_at BETWEEN %s AND %s
++                      AND deleted_at IS NULL
++                      {where_src}
++                    GROUP BY priority
++                    """,
++                    params,
++                )
++                result["tasks_by_priority"] = {row[0]: row[1] for row in cur.fetchall()}
++
++                # Top assignees
++                cur.execute(
++                    f"""
++                    SELECT COALESCE(NULLIF(owner_display_name, ''), 'unassigned'),
++                           COUNT(*) AS n
++                    FROM tasks
++                    WHERE created_at BETWEEN %s AND %s
++                      AND deleted_at IS NULL
++                      {where_src}
++                    GROUP BY owner_display_name
++                    ORDER BY n DESC
++                    LIMIT 15
++                    """,
++                    params,
++                )
++                result["top_assignees"] = [
++                    {"assignee": row[0], "tasks": row[1]} for row in cur.fetchall()
++                ]
++
++                # Meetings — Zoom
++                cur.execute(
++                    """
++                    SELECT COUNT(*) AS total,
++                           COUNT(*) FILTER (WHERE short_summary IS NOT NULL) AS summarised
++                    FROM zoom_recordings
++                    WHERE meeting_date BETWEEN %s AND %s
++                    """,
++                    [start, end],
++                )
++                row = cur.fetchone()
++                if row:
++                    result["meetings_zoom_total"] = row[0] or 0
++                    result["meetings_zoom_summarised"] = row[1] or 0
++
++                # Meetings — Fireflies
++                cur.execute(
++                    """
++                    SELECT COUNT(*) AS total,
++                           COUNT(*) FILTER (WHERE short_summary IS NOT NULL) AS summarised
++                    FROM meeting_recordings
++                    WHERE meeting_date BETWEEN %s AND %s
++                    """,
++                    [start, end],
++                )
++                row = cur.fetchone()
++                if row:
++                    result["meetings_fireflies_total"] = row[0] or 0
++                    result["meetings_fireflies_summarised"] = row[1] or 0
++
++                # TG messages processed (telegram source = ingest output)
++                # `processed_telegram_messages` table holds the seen-dedup map;
++                # row count = messages observed by the listener.
++                try:
++                    cur.execute(
++                        """
++                        SELECT COUNT(*) AS total,
++                               COUNT(*) FILTER (WHERE task_id IS NOT NULL) AS task_extracted
++                        FROM processed_telegram_messages
++                        WHERE processed_at BETWEEN %s AND %s
++                        """,
++                        [start, end],
++                    )
++                    row = cur.fetchone()
++                    if row:
++                        result["tg_messages_total"] = row[0] or 0
++                        result["tg_messages_classified_as_task"] = row[1] or 0
++                except Exception as e:  # noqa: BLE001
++                    log.info("ceo_brain_tg_messages_unavailable: %s", e)
++                    result["tg_messages_total"] = 0
++                    result["tg_messages_classified_as_task"] = 0
++
++                # Health: latest tick + orphans + errors
++                health = _health_indicators(cur)
++                result["health"] = health
++
++    except Exception as e:  # noqa: BLE001
++        log.warning("ceo_brain_get_kpis_failed: %s", e)
++        out = dict(_DEFAULT_KPIS)
++        out["health"] = {"configured": True, "reason": f"query error: {e}"}
++        return out
++    finally:
++        try:
++            conn.close()
++        except Exception:  # noqa: BLE001
++            pass
++
++    return _backfill(result)
++
++
++def get_recent_meetings(filters: CEOBrainFilters, limit: int = 20) -> list[dict[str, Any]]:
++    """Recent meetings table — для отображения списком."""
++    conn = _connect()
++    if conn is None:
++        return []
++    out: list[dict[str, Any]] = []
++    try:
++        with conn:
++            with conn.cursor() as cur:
++                cur.execute(
++                    """
++                    SELECT 'zoom' AS src, zoom_id AS id, title, meeting_date,
++                           duration_seconds,
++                           tasks_extracted_count,
++                           length(short_summary) AS short_chars,
++                           google_doc_url
++                    FROM zoom_recordings
++                    WHERE meeting_date BETWEEN %s AND %s
++                    UNION ALL
++                    SELECT 'fireflies', fireflies_id, title, meeting_date,
++                           duration_seconds, tasks_extracted_count,
++                           length(short_summary), google_doc_url
++                    FROM meeting_recordings
++                    WHERE meeting_date BETWEEN %s AND %s
++                    ORDER BY 4 DESC
++                    LIMIT %s
++                    """,
++                    [filters.start_dt, filters.end_dt, filters.start_dt, filters.end_dt, limit],
++                )
++                for src, mid, title, mdate, dur, tcount, schars, gurl in cur.fetchall():
++                    out.append({
++                        "source": src,
++                        "id": mid,
++                        "title": (title or "")[:80],
++                        "meeting_date": mdate,
++                        "duration_min": (dur or 0) // 60 if dur else 0,
++                        "tasks_count": tcount or 0,
++                        "summary_chars": schars or 0,
++                        "google_doc_url": gurl,
++                        "published": bool(schars and schars > 0),
++                    })
++    except Exception as e:  # noqa: BLE001
++        log.warning("ceo_brain_get_recent_meetings_failed: %s", e)
++    finally:
++        try:
++            conn.close()
++        except Exception:  # noqa: BLE001
++            pass
++    return out
++
++
++def get_daily_tasks_series(filters: CEOBrainFilters) -> list[dict[str, Any]]:
++    """Tasks-per-day timeseries for plotting (split by source)."""
++    conn = _connect()
++    if conn is None:
++        return []
++    out: list[dict[str, Any]] = []
++    try:
++        with conn:
++            with conn.cursor() as cur:
++                cur.execute(
++                    """
++                    SELECT DATE(created_at) AS day,
++                           source_kind,
++                           COUNT(*) AS n
++                    FROM tasks
++                    WHERE created_at BETWEEN %s AND %s
++                      AND deleted_at IS NULL
++                    GROUP BY 1, 2
++                    ORDER BY 1
++                    """,
++                    [filters.start_dt, filters.end_dt],
++                )
++                for day, src, n in cur.fetchall():
++                    out.append({"day": day, "source": src, "tasks": n})
++    except Exception as e:  # noqa: BLE001
++        log.warning("ceo_brain_daily_series_failed: %s", e)
++    finally:
++        try:
++            conn.close()
++        except Exception:  # noqa: BLE001
++            pass
++    return out
++
++
++def _health_indicators(cur) -> dict[str, Any]:  # noqa: ANN001
++    """Tech-health snapshot: orphans, recent errors, last poll."""
++    out: dict[str, Any] = {"configured": True, "reason": None}
++    try:
++        cur.execute(
++            "SELECT COUNT(*) FROM zoom_recordings "
++            "WHERE tasks_extracted=false OR last_error IS NOT NULL"
++        )
++        out["zoom_orphans"] = cur.fetchone()[0]
++    except Exception:  # noqa: BLE001
++        out["zoom_orphans"] = None
++    try:
++        cur.execute(
++            "SELECT COUNT(*) FROM meeting_recordings "
++            "WHERE tasks_extracted=false OR last_error IS NOT NULL"
++        )
++        out["fireflies_orphans"] = cur.fetchone()[0]
++    except Exception:  # noqa: BLE001
++        out["fireflies_orphans"] = None
++    try:
++        cur.execute(
++            "SELECT MAX(processed_at) FROM zoom_recordings"
++        )
++        out["zoom_last_processed_at"] = cur.fetchone()[0]
++    except Exception:  # noqa: BLE001
++        out["zoom_last_processed_at"] = None
++    try:
++        cur.execute(
++            "SELECT MAX(processed_at) FROM meeting_recordings"
++        )
++        out["fireflies_last_processed_at"] = cur.fetchone()[0]
++    except Exception:  # noqa: BLE001
++        out["fireflies_last_processed_at"] = None
++    return out
++
++
++def _backfill(result: dict[str, Any]) -> dict[str, Any]:
++    """Заполняем missing keys значениями по умолчанию (для UI safety)."""
++    out = dict(_DEFAULT_KPIS)
++    out.update(result)
++    if "configured" not in out["health"]:
++        out["health"]["configured"] = True
++    return out
++
++
++def make_default_filters(days: int = 7) -> CEOBrainFilters:
++    end = date.today()
++    start = end - timedelta(days=days - 1)
++    return CEOBrainFilters(start_date=start, end_date=end)
++
++
++__all__ = [
++    "CEOBrainFilters",
++    "get_kpis",
++    "get_recent_meetings",
++    "get_daily_tasks_series",
++    "make_default_filters",
++]
+diff --git a/docs/SPEC_CEO_BRAIN.md b/docs/SPEC_CEO_BRAIN.md
+new file mode 100644
+index 0000000..a88b81e
+--- /dev/null
++++ b/docs/SPEC_CEO_BRAIN.md
+@@ -0,0 +1,195 @@
++# SPEC — CEO Brain section
++
++> **Версия:** v0.1, 2026-05-12
++> **Scope:** новая страница `CEO Brain` в существующем dashboard
++> **Источник данных:** внешний Postgres БД проекта Humanoid CEO Brain (read-only role `zoom_colleague` через pg-proxy)
++
++---
++
++## 1. Mission
++
++Дать CEO single-pane view технического health'a + операционных метрик AI-agent'ов (Note Taker, Task Extractor, Task Tracker):
++- Сколько сообщений приходило / сколько превратилось в задачи
++- Распределение задач по людям (bar chart) и по источникам
++- Сколько встреч обработано (Zoom + Fireflies, отдельно)
++- Сколько summary выпущено
++- Tech health: orphans, errors, last poll timestamps
++
++---
++
++## 2. Сценарии использования
++
++| Кто | Когда | Что хочет |
++|---|---|---|
++| CEO | Утром / в течение дня | Понять «работает ли всё» + куда уходят задачи |
++| Виктор (BI) | Раз в неделю | Снять stats, экспортировать csv (через копию SQL) |
++| Operator | После incident'a | Проверить orphans + last poll'ы |
++
++---
++
++## 3. Архитектура
++
++```mermaid
++flowchart LR
++    User[CEO] --> Browser
++    Browser -->|HTTPS| Streamlit[Streamlit Dashboard]
++    Streamlit -->|read-only psycopg| PG[(CEO Brain Postgres)]
++
++    subgraph "CEO Brain DB"
++        Tasks[(tasks)]
++        Zoom[(zoom_recordings)]
++        FF[(meeting_recordings)]
++        Processed[(processed_telegram_messages)]
++    end
++
++    PG --> Tasks
++    PG --> Zoom
++    PG --> FF
++    PG --> Processed
++```
++
++### Components
++
++| Слой | Файл | Назначение |
++|---|---|---|
++| Service | `backend/services/ceo_brain.py` | SQL queries; default-safe (no DSN → defaults) |
++| UI | `frontend/sections/ceo_brain.py` | Streamlit page: filters, KPIs, charts, table |
++| Nav | `frontend/main.py` | Adds CEO Brain entry |
++| Tests | `tests/test_ceo_brain.py` | Unit + mock-DB integration |
++| Config | env `CEO_BRAIN_DB_URL` | full postgresql:// DSN |
++
++---
++
++## 4. Features
++
++| ID | Фича | Описание |
++|---|---|---|
++| F-CB-01 | KPI strip | tasks_total / tg_messages / zoom_meetings / fireflies_meetings |
++| F-CB-02 | Tasks by source | bar chart (telegram / slack / zoom / fireflies / email / manual / recurring) |
++| F-CB-03 | Top assignees | horizontal bar chart top-15 |
++| F-CB-04 | Daily timeseries | line chart per source |
++| F-CB-05 | Tasks by status | pie chart (todo/in_progress/blocked/done/cancelled) |
++| F-CB-06 | Tasks by priority | pie chart (low/medium/high/urgent) |
++| F-CB-07 | Recent meetings table | last 30, with Google Doc link |
++| F-CB-08 | Tech health | orphans count + last processed timestamps |
++| F-CB-09 | Filters | period (7/14/30/90/custom) + source filter |
++
++---
++
++## 5. Data sources
++
++### Tables (read-only)
++
++| Table | Колонки используемые |
++|---|---|
++| `tasks` | `id, source_kind, owner_display_name, priority, status, created_at, deleted_at` |
++| `zoom_recordings` | `zoom_id, title, meeting_date, duration_seconds, short_summary, google_doc_url, tasks_extracted_count, tasks_extracted, last_error, processed_at` |
++| `meeting_recordings` | то же что zoom, но `fireflies_id` |
++| `processed_telegram_messages` | `chat_id, message_id, processed_at, task_id` |
++
++### Queries (sanitized)
++
++См. `backend/services/ceo_brain.py`. Все SELECT, без UPDATE/DELETE.
++
++---
++
++## 6. Functional Requirements
++
++| ID | Требование | Test |
++|---|---|---|
++| FR-CB-1.1 | Service возвращает default'ы при отсутствующем `CEO_BRAIN_DB_URL` | `test_get_kpis_without_db_returns_defaults` |
++| FR-CB-1.2 | Service возвращает default'ы при DB connection failure | `test_connect_failure_returns_defaults` |
++| FR-CB-1.3 | KPIs включают `tasks_total, tasks_by_source, meetings_zoom, meetings_fireflies, tg_messages, top_assignees, tasks_by_status, tasks_by_priority, health` | `test_get_kpis_with_mocked_db` |
++| FR-CB-1.4 | `make_default_filters(days=N)` → правильный date range | `test_make_default_filters_*` |
++| FR-CB-2.1 | Section показывает warning banner если DB не настроена | (UI smoke) |
++| FR-CB-2.2 | Filters: period (5 опций) + source (8 опций) | (UI smoke) |
++| FR-CB-2.3 | KPI strip — 4 cards | (UI smoke) |
++| FR-CB-2.4 | Tasks-by-source — bar chart | (UI smoke) |
++| FR-CB-2.5 | Top assignees — horizontal bar | (UI smoke) |
++| FR-CB-2.6 | Daily timeseries — line chart | (UI smoke) |
++| FR-CB-2.7 | Recent meetings — DataFrame с Doc link | (UI smoke) |
++| FR-CB-2.8 | Tech health — 4 KPIs (orphans + last processed) | (UI smoke) |
++
++---
++
++## 7. Non-Functional Requirements
++
++| ID | Требование | Цель |
++|---|---|---|
++| NFR-CB-P.1 | Section loads ≤ 3s на N=10000 tasks | ≤ 3s |
++| NFR-CB-R.1 | DB unavailability НЕ breaks rest of dashboard | enforced |
++| NFR-CB-S.1 | DB role `zoom_colleague` только SELECT | enforced |
++| NFR-CB-S.2 | DSN в env, не commit'ится в репо | enforced |
++| NFR-CB-O.1 | Service errors logged via stdlib logging WARNING | enforced |
++
++---
++
++## 8. Deployment
++
++### Env vars
++
++```bash
++# Required для активации секции
++CEO_BRAIN_DB_URL=postgresql://zoom_colleague:Zm9JxLg2nQpRtVc4@34.62.139.101:5433/slack_tasks?sslmode=disable
++```
++
++### Verification
++
++После deploy:
++1. Открой dashboard → CEO Brain section в sidebar
++2. Жди ≤ 3 секунды
++3. KPIs покажут реальные числа (если DB живая)
++4. Если "DB не настроена" — проверь env
++
++### Rollback
++
++Если что-то ломается:
++1. Удалить `CEO_BRAIN_DB_URL` из env → section покажет warning, rest dashboard работает
++2. Или комментировать строки в `main.py` где добавлен `ceo_brain` page
++
++---
++
++## 9. Tests
++
++### Test pyramid
++
++| Type | Count | Что |
++|---|---|---|
++| Unit | 5 | default-safe path, filters factory |
++| Integration (mocked) | 1 | full KPI pipeline mock SQL |
++| UI smoke | manual | Streamlit run + visual check |
++
++### Test files
++
++- `tests/test_ceo_brain.py` — 7 тестов:
++  - `test_get_kpis_without_db_returns_defaults`
++  - `test_get_recent_meetings_without_db_returns_empty`
++  - `test_get_daily_tasks_series_without_db_returns_empty`
++  - `test_make_default_filters_default_7_days`
++  - `test_make_default_filters_custom_days`
++  - `test_filters_start_end_dt_tzaware`
++  - `test_filters_source_normalized`
++  - `test_connect_failure_returns_defaults`
++  - `test_get_kpis_with_mocked_db`
++
++### Запуск
++
++```bash
++pytest tests/test_ceo_brain.py -v
++```
++
++---
++
++## 10. Open questions
++
++| ? | Why important | Кто отвечает |
++|---|---|---|
++| Cache layer (`@st.cache_data`) — нужен ли? | Performance на 100k tasks | CEO |
++| Date filter timezone — UTC vs local | UX | CEO |
++| Включать ли cost per task / cost per meeting? | Метрика для оптимизации LLM | CEO |
++| Export CSV button — реализовывать сейчас? | Виктор просит | Виктор |
++
++---
++
++**Версия:** v0.1, 2026-05-12
++**Maintainer:** Артём Соколов / Андрей Кузьминых
+diff --git a/frontend/main.py b/frontend/main.py
+index fa55be9..a6462fb 100644
+--- a/frontend/main.py
++++ b/frontend/main.py
+@@ -52,13 +52,14 @@ devs     = st.Page("sections/developers.py",   title="Developer Usage",  icon=":
+ keys     = st.Page("sections/api_keys.py",     title="API Keys",         icon=":material/key:")
+ models   = st.Page("sections/models.py",       title="Models",           icon=":material/smart_toy:")
+ alerts   = st.Page("sections/alerts.py",       title="Alerts",           icon=":material/notifications:")
++ceo_brain = st.Page("sections/ceo_brain.py",   title="CEO Brain",        icon=":material/psychology:")
+ settings = st.Page("sections/settings.py",     title="Settings",         icon=":material/settings:")
+ 
+-pages = [overview, ai_tools, costs, seats, devs, keys, models, alerts, settings]
++pages = [overview, ai_tools, costs, seats, devs, keys, models, alerts, ceo_brain, settings]
+ if CFG.github_enabled:
+     repos   = st.Page("sections/repositories.py", title="Repositories", icon=":material/folder:")
+     pr_qual = st.Page("sections/pr_quality.py",   title="PR Quality",   icon=":material/rule:")
+-    pages = [overview, ai_tools, costs, seats, devs, keys, repos, pr_qual, models, alerts, settings]
++    pages = [overview, ai_tools, costs, seats, devs, keys, repos, pr_qual, models, alerts, ceo_brain, settings]
+ 
+ # Hide the auto-rendered page picker so we can fully control sidebar order.
+ nav = st.navigation(pages, position="hidden")
+diff --git a/frontend/sections/ceo_brain.py b/frontend/sections/ceo_brain.py
+new file mode 100644
+index 0000000..b0de79f
+--- /dev/null
++++ b/frontend/sections/ceo_brain.py
+@@ -0,0 +1,282 @@
++"""CEO Brain — задачи / встречи / health.
++
++Section reads from the external Humanoid CEO Brain Postgres DB
++through `backend.services.ceo_brain` (no SQLite). Connection
++configured via `CEO_BRAIN_DB_URL` env var. If not set or DB
++unreachable — section renders an info banner and stays inert.
++"""
++from __future__ import annotations
++
++from datetime import date, datetime, timedelta
++
++import pandas as pd
++import plotly.express as px
++import streamlit as st
++
++from backend.services.ceo_brain import (
++    CEOBrainFilters,
++    get_daily_tasks_series,
++    get_kpis,
++    get_recent_meetings,
++    make_default_filters,
++)
++from frontend.components import fmt_int, hero, kpi_row, section
++
++
++_SOURCE_COLORS = {
++    "telegram": "#229ED9",
++    "slack": "#611f69",
++    "zoom": "#2D8CFF",
++    "fireflies": "#F7B500",
++    "email": "#34a853",
++    "manual": "#888888",
++    "google_tasks": "#4285F4",
++    "recurring": "#cc88aa",
++}
++
++
++def _filters_bar() -> CEOBrainFilters:
++    """Top filters: date range + source select."""
++    col1, col2, col3 = st.columns([2, 2, 2])
++    with col1:
++        period_label = st.selectbox(
++            "Period",
++            ["Last 7 days", "Last 14 days", "Last 30 days", "Last 90 days", "Custom"],
++            index=0,
++        )
++    today = date.today()
++    period_map = {
++        "Last 7 days": 7, "Last 14 days": 14,
++        "Last 30 days": 30, "Last 90 days": 90,
++    }
++    if period_label == "Custom":
++        with col2:
++            start = st.date_input("From", value=today - timedelta(days=7))
++        with col3:
++            end = st.date_input("To", value=today)
++    else:
++        days = period_map[period_label]
++        start = today - timedelta(days=days - 1)
++        end = today
++        col2.metric("From", start.strftime("%Y-%m-%d"))
++        col3.metric("To", end.strftime("%Y-%m-%d"))
++
++    src_col = st.columns([3, 1])[0]
++    with src_col:
++        source = st.selectbox(
++            "Source filter (tasks)",
++            ["All", "telegram", "slack", "zoom", "fireflies", "email", "manual", "google_tasks", "recurring"],
++            index=0,
++        )
++    return CEOBrainFilters(
++        start_date=start,
++        end_date=end,
++        source=None if source == "All" else source,
++    )
++
++
++hero(
++    "CEO Brain",
++    '<span class="accent">Tasks</span> & Meetings analytics',
++    "Сколько сообщений приходило / задач извлечено / встреч обработано — в разрезе источников и людей.",
++)
++
++filters = _filters_bar()
++kpis = get_kpis(filters)
++
++# --- Configuration / health banner -------------------------------
++health = kpis.get("health", {})
++if not health.get("configured"):
++    st.warning(
++        f"CEO Brain DB не настроена: {health.get('reason') or 'CEO_BRAIN_DB_URL не задан'}. "
++        "Передайте `CEO_BRAIN_DB_URL=postgresql://zoom_colleague:<pw>@<host>:5433/slack_tasks` "
++        "в env-vars, чтобы видеть данные.",
++        icon="⚠️",
++    )
++    st.stop()
++
++if health.get("reason"):
++    st.error(f"CEO Brain DB error: {health['reason']}", icon="❌")
++
++# --- KPIs ----------------------------------------------------------
++kpi_row(
++    [
++        {
++            "label": "Tasks extracted",
++            "value": fmt_int(kpis["tasks_total"]),
++            "note": "за выбранный период",
++        },
++        {
++            "label": "TG messages seen",
++            "value": fmt_int(kpis["tg_messages_total"]),
++            "note": f"{fmt_int(kpis['tg_messages_classified_as_task'])} классифицировано как задача",
++        },
++        {
++            "label": "Zoom meetings",
++            "value": fmt_int(kpis["meetings_zoom_total"]),
++            "note": f"{fmt_int(kpis['meetings_zoom_summarised'])} с summary",
++        },
++        {
++            "label": "Fireflies meetings",
++            "value": fmt_int(kpis["meetings_fireflies_total"]),
++            "note": f"{fmt_int(kpis['meetings_fireflies_summarised'])} с summary",
++        },
++    ],
++    cols=4,
++)
++
++# --- Per-source breakdown -----------------------------------------
++section("Задачи по источникам")
++
++by_source = kpis.get("tasks_by_source") or {}
++if by_source:
++    df_src = pd.DataFrame(
++        [{"source": k, "tasks": v} for k, v in by_source.items()]
++    ).sort_values("tasks", ascending=False)
++    fig = px.bar(
++        df_src,
++        x="source",
++        y="tasks",
++        text="tasks",
++        color="source",
++        color_discrete_map=_SOURCE_COLORS,
++    )
++    fig.update_traces(textposition="outside")
++    fig.update_layout(
++        showlegend=False, margin=dict(l=10, r=10, t=10, b=10), height=320,
++    )
++    st.plotly_chart(fig, use_container_width=True)
++else:
++    st.info("Нет задач за выбранный период.")
++
++# --- Top assignees -------------------------------------------------
++section("Топ assignees")
++
++top = kpis.get("top_assignees") or []
++if top:
++    df_a = pd.DataFrame(top).head(15)
++    fig = px.bar(
++        df_a,
++        x="tasks",
++        y="assignee",
++        orientation="h",
++        text="tasks",
++    )
++    fig.update_layout(
++        yaxis=dict(autorange="reversed"),
++        margin=dict(l=10, r=10, t=10, b=10), height=420,
++    )
++    fig.update_traces(textposition="outside")
++    st.plotly_chart(fig, use_container_width=True)
++else:
++    st.info("Нет данных по assignees.")
++
++# --- Daily timeseries ---------------------------------------------
++section("Динамика задач по дням")
++
++series = get_daily_tasks_series(filters)
++if series:
++    df_s = pd.DataFrame(series)
++    df_s["day"] = pd.to_datetime(df_s["day"])
++    fig = px.line(
++        df_s,
++        x="day", y="tasks", color="source", markers=True,
++        color_discrete_map=_SOURCE_COLORS,
++    )
++    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=320)
++    st.plotly_chart(fig, use_container_width=True)
++else:
++    st.info("Нет данных за выбранный период.")
++
++# --- Status / priority -------------------------------------------
++col1, col2 = st.columns(2)
++with col1:
++    section("Tasks by status")
++    by_status = kpis.get("tasks_by_status") or {}
++    if by_status:
++        df_status = pd.DataFrame(
++            [{"status": k, "tasks": v} for k, v in by_status.items()]
++        ).sort_values("tasks", ascending=False)
++        fig = px.pie(df_status, names="status", values="tasks")
++        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=300)
++        st.plotly_chart(fig, use_container_width=True)
++    else:
++        st.info("Нет данных.")
++
++with col2:
++    section("Tasks by priority")
++    by_prio = kpis.get("tasks_by_priority") or {}
++    if by_prio:
++        df_prio = pd.DataFrame(
++            [{"priority": k, "tasks": v} for k, v in by_prio.items()]
++        ).sort_values("tasks", ascending=False)
++        fig = px.pie(df_prio, names="priority", values="tasks")
++        fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=300)
++        st.plotly_chart(fig, use_container_width=True)
++    else:
++        st.info("Нет данных.")
++
++# --- Recent meetings list -----------------------------------------
++section("Свежие встречи")
++
++meetings = get_recent_meetings(filters, limit=30)
++if meetings:
++    df_m = pd.DataFrame(meetings)
++    df_m["meeting_date"] = pd.to_datetime(df_m["meeting_date"])
++    df_m = df_m.sort_values("meeting_date", ascending=False)
++    df_m_display = df_m.assign(
++        Published=df_m["published"].apply(lambda x: "✅" if x else "—"),
++        Doc=df_m["google_doc_url"].apply(
++            lambda x: f"[link]({x})" if x else "—"
++        ),
++    )[["source", "meeting_date", "title", "duration_min",
++       "tasks_count", "summary_chars", "Published", "Doc"]]
++    df_m_display.columns = ["Source", "Date", "Title", "Min", "Tasks", "Summary chars", "Published", "Doc"]
++    st.dataframe(df_m_display, hide_index=True, use_container_width=True)
++else:
++    st.info("Нет встреч за выбранный период.")
++
++# --- Tech health --------------------------------------------------
++section("Tech health")
++
++zoom_orphans = health.get("zoom_orphans")
++ff_orphans = health.get("fireflies_orphans")
++zoom_last = health.get("zoom_last_processed_at")
++ff_last = health.get("fireflies_last_processed_at")
++
++
++def _fmt_ago(dt) -> str:  # noqa: ANN001
++    if not dt:
++        return "—"
++    if isinstance(dt, str):
++        try:
++            dt = datetime.fromisoformat(dt)
++        except Exception:  # noqa: BLE001
++            return str(dt)
++    delta = datetime.now(tz=dt.tzinfo or None) - dt
++    mins = delta.total_seconds() // 60
++    if mins < 1:
++        return "just now"
++    if mins < 60:
++        return f"{int(mins)} min ago"
++    hrs = mins // 60
++    if hrs < 24:
++        return f"{int(hrs)}h ago"
++    days = hrs // 24
++    return f"{int(days)}d ago"
++
++
++kpi_row(
++    [
++        {"label": "Zoom orphans", "value": fmt_int(zoom_orphans or 0), "note": "tasks_extracted=false OR last_error"},
++        {"label": "Fireflies orphans", "value": fmt_int(ff_orphans or 0), "note": "stuck recordings"},
++        {"label": "Zoom last processed", "value": _fmt_ago(zoom_last), "note": "newest meeting"},
++        {"label": "Fireflies last processed", "value": _fmt_ago(ff_last), "note": "newest meeting"},
++    ],
++    cols=4,
++)
++
++st.caption(
++    "Note: CEO Brain DB read-only через role `zoom_colleague`. "
++    "Filters применяются к создан-датам tasks и meeting_date встреч."
++)
+diff --git a/tests/test_ceo_brain.py b/tests/test_ceo_brain.py
+new file mode 100644
+index 0000000..bc228bb
+--- /dev/null
++++ b/tests/test_ceo_brain.py
+@@ -0,0 +1,187 @@
++"""Tests for backend.services.ceo_brain.
++
++Service is intended to read from external Postgres (CEO Brain DB).
++В CI / тестовом окружении CEO_BRAIN_DB_URL обычно НЕ задан →
++service должен gracefully вернуть DEFAULT KPIs с health.configured=False.
++
++Если CEO_BRAIN_DB_URL задан валидно, можно гонять live-tests через
++real Postgres (skipped по default через env-flag).
++"""
++from __future__ import annotations
++
++import os
++from datetime import date, timedelta
++from unittest.mock import MagicMock, patch
++
++import pytest
++
++from backend.services.ceo_brain import (
++    CEOBrainFilters,
++    get_daily_tasks_series,
++    get_kpis,
++    get_recent_meetings,
++    make_default_filters,
++)
++
++
++# -- helpers ------------------------------------------------------------------
++
++
++@pytest.fixture
++def no_db_env(monkeypatch):
++    """Clear CEO_BRAIN_DB_URL so service returns safe defaults."""
++    monkeypatch.delenv("CEO_BRAIN_DB_URL", raising=False)
++
++
++@pytest.fixture
++def filters():
++    return make_default_filters(days=7)
++
++
++# -- DEFAULT path (no DB configured) ------------------------------------------
++
++
++def test_get_kpis_without_db_returns_defaults(no_db_env, filters):
++    """Service must NOT raise when CEO_BRAIN_DB_URL is missing."""
++    result = get_kpis(filters)
++    assert result["tasks_total"] == 0
++    assert result["meetings_zoom_total"] == 0
++    assert result["meetings_fireflies_total"] == 0
++    assert result["tasks_by_source"] == {}
++    assert result["top_assignees"] == []
++    assert result["health"]["configured"] is False
++    assert "CEO_BRAIN_DB_URL" in result["health"]["reason"]
++
++
++def test_get_recent_meetings_without_db_returns_empty(no_db_env, filters):
++    result = get_recent_meetings(filters)
++    assert result == []
++
++
++def test_get_daily_tasks_series_without_db_returns_empty(no_db_env, filters):
++    result = get_daily_tasks_series(filters)
++    assert result == []
++
++
++# -- FILTERS ------------------------------------------------------------------
++
++
++def test_make_default_filters_default_7_days():
++    f = make_default_filters()
++    assert f.end_date == date.today()
++    assert f.start_date == date.today() - timedelta(days=6)
++    assert f.source is None
++
++
++def test_make_default_filters_custom_days():
++    f = make_default_filters(days=30)
++    assert (f.end_date - f.start_date).days == 29
++
++
++def test_filters_start_end_dt_tzaware(filters):
++    assert filters.start_dt.tzinfo is not None
++    assert filters.end_dt.tzinfo is not None
++    assert filters.start_dt < filters.end_dt
++
++
++def test_filters_source_normalized():
++    f = CEOBrainFilters(
++        start_date=date(2026, 1, 1),
++        end_date=date(2026, 1, 7),
++        source="zoom",
++    )
++    assert f.source == "zoom"
++
++
++# -- DB CONNECTION FAILURE ----------------------------------------------------
++
++
++def test_connect_failure_returns_defaults(monkeypatch, filters):
++    """Bad DSN → connect raises → service returns defaults, no propagation."""
++    monkeypatch.setenv("CEO_BRAIN_DB_URL", "postgresql://no-such-host:1/none")
++    # The mock makes psycopg.connect raise OperationalError-style:
++    with patch("psycopg.connect", side_effect=Exception("conn refused")):
++        result = get_kpis(filters)
++    assert result["tasks_total"] == 0
++    assert result["health"]["configured"] is False
++
++
++# -- Query path via mocked connection (no real Postgres) ----------------------
++
++
++def _mock_conn_with_results(cursor_results: list[list]):
++    """Build a context-manager-aware mock connection.
++
++    `cursor_results` is a list of result-lists, one per `cur.execute()` call.
++    Each result-list is what `cur.fetchall()` returns (or `[result_for_fetchone]`
++    if the query uses fetchone).
++    """
++    cur = MagicMock()
++    cur.fetchall.side_effect = cursor_results
++    cur.fetchone.side_effect = [r[0] if r else None for r in cursor_results]
++
++    # `with conn.cursor() as cur` support
++    cur_ctx = MagicMock()
++    cur_ctx.__enter__.return_value = cur
++    cur_ctx.__exit__.return_value = False
++
++    conn = MagicMock()
++    conn.cursor.return_value = cur_ctx
++    # `with conn:` support (transaction manager)
++    conn.__enter__.return_value = conn
++    conn.__exit__.return_value = False
++    return conn, cur
++
++
++def test_get_kpis_with_mocked_db(monkeypatch, filters):
++    """Smoke-test the SQL pipeline by mocking psycopg.connect."""
++    monkeypatch.setenv("CEO_BRAIN_DB_URL", "postgresql://fake")
++    # Queries fired in order (see ceo_brain.get_kpis):
++    # 1. tasks_by_source → fetchall
++    # 2. tasks_by_status → fetchall
++    # 3. tasks_by_priority → fetchall
++    # 4. top_assignees → fetchall
++    # 5. zoom meetings → fetchone (count, summarised)
++    # 6. fireflies meetings → fetchone
++    # 7. processed_telegram_messages → fetchone (total, task_extracted)
++    # 8-11. health indicators → fetchone × 4
++    cur = MagicMock()
++    cur.fetchall.side_effect = [
++        [("telegram", 12), ("zoom", 5), ("fireflies", 3)],  # tasks_by_source
++        [("todo", 8), ("done", 12)],                          # tasks_by_status
++        [("medium", 15), ("high", 5)],                        # tasks_by_priority
++        [("Алина", 7), ("Дима", 5), ("Артем", 3)],            # top_assignees
++    ]
++    cur.fetchone.side_effect = [
++        (5, 4),                                  # zoom: total, summarised
++        (3, 3),                                  # fireflies: total, summarised
++        (120, 20),                               # processed_telegram_messages
++        (1,),                                    # zoom_orphans
++        (0,),                                    # fireflies_orphans
++        (None,),                                 # zoom_last_processed_at
++        (None,),                                 # fireflies_last_processed_at
++    ]
++    cur_ctx = MagicMock()
++    cur_ctx.__enter__.return_value = cur
++    cur_ctx.__exit__.return_value = False
++    conn = MagicMock()
++    conn.cursor.return_value = cur_ctx
++    conn.__enter__.return_value = conn
++    conn.__exit__.return_value = False
++
++    with patch("psycopg.connect", return_value=conn):
++        result = get_kpis(filters)
++
++    assert result["tasks_total"] == 12 + 5 + 3
++    assert result["tasks_by_source"] == {"telegram": 12, "zoom": 5, "fireflies": 3}
++    assert result["meetings_zoom_total"] == 5
++    assert result["meetings_zoom_summarised"] == 4
++    assert result["meetings_fireflies_total"] == 3
++    assert result["meetings_fireflies_summarised"] == 3
++    assert result["tg_messages_total"] == 120
++    assert result["tg_messages_classified_as_task"] == 20
++    assert result["top_assignees"][0]["assignee"] == "Алина"
++    assert result["top_assignees"][0]["tasks"] == 7
++    assert result["health"]["configured"] is True
++    assert result["health"]["zoom_orphans"] == 1
++    assert result["health"]["fireflies_orphans"] == 0

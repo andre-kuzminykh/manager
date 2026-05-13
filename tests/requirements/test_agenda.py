@@ -1,0 +1,498 @@
+"""FR-CR-05-165 — Pre-meeting agenda: unit tests.
+
+Covers the pure-logic surface:
+  - title normalisation rules
+  - prior-recording matching by normalised title
+  - open-tasks filtering by zoom_id + status
+  - candidate building (dedup, min_prior_meetings)
+  - idempotency persistence
+  - Slack message rendering
+
+LLM call + Calendar / Slack APIs are NOT exercised here — those
+live in `compose.py` and `runner.py` and need fakes. We test the
+LLM output coercion + Slack formatter via fake objects.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
+
+import pytest
+
+from app.agenda.compose import AgendaOutput, compose_agenda
+from app.agenda.service import (
+    AgendaCandidate,
+    AgendaService,
+    build_candidates,
+    find_prior_recordings,
+    normalise_title,
+    open_tasks_for_recordings,
+)
+from app.agenda.slack_format import render_agenda_text
+from app.models import MeetingAgenda, Task, TaskPriority, TaskStatus, ZoomRecording
+
+
+# -- normalise_title -----------------------------------------------------------
+
+
+def test_normalise_title_lowercases_collapses_ws_and_drops_punct():
+    assert normalise_title("Genia Xasis <> Humanoid (Weekly sync)") == \
+        "genia xasis humanoid weekly sync"
+
+
+def test_normalise_title_handles_cyrillic_and_eyo():
+    assert normalise_title("Лётучка — Подземелья") == "летучка подземелья"
+
+
+def test_normalise_title_empty_and_none():
+    assert normalise_title(None) == ""
+    assert normalise_title("") == ""
+    assert normalise_title("   ") == ""
+
+
+def test_normalise_title_is_stable_across_minor_variants():
+    a = normalise_title("Wellness Holding <> Humanoid")
+    b = normalise_title("wellness  holding <>  humanoid")
+    c = normalise_title("Wellness Holding<>Humanoid")
+    assert a == b == c
+
+
+# -- find_prior_recordings -----------------------------------------------------
+
+
+def test_find_prior_recordings_matches_normalised_title(session):
+    now = datetime(2026, 5, 13, 14, 0, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            ZoomRecording(
+                zoom_id="z1",
+                title="Genia Xasis <> Humanoid (Weekly fundraising sync)",
+                meeting_date=now - timedelta(days=7),
+            ),
+            ZoomRecording(
+                zoom_id="z2",
+                title="genia xasis  <>  humanoid (weekly fundraising sync)",
+                meeting_date=now - timedelta(days=14),
+            ),
+            # Different title — must NOT match.
+            ZoomRecording(
+                zoom_id="z3",
+                title="Wellness Holding <> Humanoid",
+                meeting_date=now - timedelta(days=7),
+            ),
+        ]
+    )
+    session.flush()
+
+    rows = find_prior_recordings(
+        session,
+        title="Genia Xasis <> Humanoid (Weekly fundraising sync)",
+        lookback_days=30,
+        now=now,
+    )
+    zoom_ids = [r.zoom_id for r in rows]
+    assert set(zoom_ids) == {"z1", "z2"}
+    assert "z3" not in zoom_ids
+    # Newest first.
+    assert zoom_ids[0] == "z1"
+
+
+def test_find_prior_recordings_respects_lookback_cutoff(session):
+    now = datetime(2026, 5, 13, 14, 0, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            ZoomRecording(
+                zoom_id="z_old",
+                title="Weekly sync",
+                meeting_date=now - timedelta(days=120),
+            ),
+            ZoomRecording(
+                zoom_id="z_recent",
+                title="Weekly sync",
+                meeting_date=now - timedelta(days=7),
+            ),
+        ]
+    )
+    session.flush()
+
+    rows = find_prior_recordings(
+        session, title="Weekly sync", lookback_days=30, now=now
+    )
+    ids = [r.zoom_id for r in rows]
+    assert ids == ["z_recent"]
+
+
+def test_find_prior_recordings_skips_future_scheduled(session):
+    """A future ZoomRecording with the same title shouldn't be
+    treated as «prior» — that's the upcoming instance itself."""
+    now = datetime(2026, 5, 13, 14, 0, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            ZoomRecording(
+                zoom_id="z_future",
+                title="Weekly sync",
+                meeting_date=now + timedelta(hours=1),
+            ),
+            ZoomRecording(
+                zoom_id="z_past",
+                title="Weekly sync",
+                meeting_date=now - timedelta(days=7),
+            ),
+        ]
+    )
+    session.flush()
+
+    rows = find_prior_recordings(
+        session, title="Weekly sync", lookback_days=30, now=now
+    )
+    assert [r.zoom_id for r in rows] == ["z_past"]
+
+
+# -- open_tasks_for_recordings -------------------------------------------------
+
+
+def test_open_tasks_for_recordings_filters_status_and_orders_by_priority(session):
+    """Done dropped (only TaskStatus.done is a terminal state in
+    current schema); remaining sorted urgent → high → medium →
+    low, then due asc.
+
+    FR-CR-05-165: cancelled / blocked do NOT exist in this
+    project's TaskStatus enum yet. If they're added later, update
+    the agenda filter AND this test together."""
+    session.add_all(
+        [
+            # Should appear:
+            Task(
+                title="Urgent open",
+                source_kind="zoom",
+                source_conversation_id="z1",
+                status=TaskStatus.todo,
+                priority=TaskPriority.urgent,
+            ),
+            Task(
+                title="High in_progress",
+                source_kind="zoom",
+                source_conversation_id="z2",
+                status=TaskStatus.in_progress,
+                priority=TaskPriority.high,
+            ),
+            # Filtered: done
+            Task(
+                title="Done",
+                source_kind="zoom",
+                source_conversation_id="z1",
+                status=TaskStatus.done,
+                priority=TaskPriority.high,
+            ),
+            # Filtered: not a zoom source
+            Task(
+                title="Slack task same id",
+                source_kind="slack",
+                source_conversation_id="z1",
+                status=TaskStatus.todo,
+                priority=TaskPriority.high,
+            ),
+            # Filtered: different zoom_id
+            Task(
+                title="Other zoom",
+                source_kind="zoom",
+                source_conversation_id="z_other",
+                status=TaskStatus.todo,
+                priority=TaskPriority.high,
+            ),
+        ]
+    )
+    session.flush()
+
+    rows = open_tasks_for_recordings(session, zoom_ids=["z1", "z2"])
+    titles = [r.title for r in rows]
+    # Urgent comes before High.
+    assert titles == ["Urgent open", "High in_progress"]
+
+
+def test_open_tasks_for_recordings_empty_list_returns_empty(session):
+    assert open_tasks_for_recordings(session, zoom_ids=[]) == []
+
+
+# -- build_candidates ----------------------------------------------------------
+
+
+def _evt(id_: str, title: str, when: datetime, **extras):
+    return {"id": id_, "title": title, "start": when, **extras}
+
+
+def test_build_candidates_drops_first_time_meetings(session):
+    """Event with NO prior recordings (= first time the title is
+    seen) must NOT yield a candidate; it's not «recurring yet»."""
+    now = datetime(2026, 5, 13, 14, 0, 0, tzinfo=timezone.utc)
+    # Empty DB → no priors.
+    events = [_evt("ev1", "Brand new sync", now + timedelta(minutes=10))]
+
+    candidates = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=1, now=now,
+    )
+    assert candidates == []
+
+
+def test_build_candidates_keeps_recurring_meeting(session):
+    now = datetime(2026, 5, 13, 14, 0, 0, tzinfo=timezone.utc)
+    session.add(
+        ZoomRecording(
+            zoom_id="z_prev",
+            title="Weekly sync",
+            meeting_date=now - timedelta(days=7),
+        )
+    )
+    session.flush()
+
+    events = [_evt("ev_x", "Weekly sync", now + timedelta(minutes=10))]
+    candidates = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=1, now=now,
+    )
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert c.calendar_event_id == "ev_x"
+    assert c.title == "Weekly sync"
+    assert c.scheduled_start_at == now + timedelta(minutes=10)
+    assert len(c.prior_recordings) == 1
+    assert c.prior_recordings[0]["zoom_id"] == "z_prev"
+
+
+def test_build_candidates_skips_already_posted(session):
+    now = datetime(2026, 5, 13, 14, 0, 0, tzinfo=timezone.utc)
+    session.add(
+        ZoomRecording(
+            zoom_id="z_prev",
+            title="Weekly sync",
+            meeting_date=now - timedelta(days=7),
+        )
+    )
+    # Already-posted row for the same calendar_event_id.
+    session.add(
+        MeetingAgenda(
+            calendar_event_id="ev_posted",
+            title="Weekly sync",
+            title_normalised=normalise_title("Weekly sync"),
+            scheduled_start_at=now + timedelta(minutes=10),
+            posted_at=now - timedelta(minutes=1),
+            slack_channel="D0",
+        )
+    )
+    session.flush()
+
+    events = [_evt("ev_posted", "Weekly sync", now + timedelta(minutes=10))]
+    candidates = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=1, now=now,
+    )
+    assert candidates == []
+
+
+def test_build_candidates_respects_min_prior_meetings(session):
+    """min_prior_meetings=2 means we need at least TWO prior
+    recordings before treating the event as recurring."""
+    now = datetime(2026, 5, 13, 14, 0, 0, tzinfo=timezone.utc)
+    session.add(
+        ZoomRecording(
+            zoom_id="z_only", title="Weekly sync",
+            meeting_date=now - timedelta(days=7),
+        )
+    )
+    session.flush()
+
+    events = [_evt("ev1", "Weekly sync", now + timedelta(minutes=10))]
+    # Only 1 prior → with threshold 2, no candidates.
+    assert build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=2, now=now,
+    ) == []
+
+
+# -- AgendaService idempotency -------------------------------------------------
+
+
+def test_agenda_service_is_already_posted_and_record_post(session):
+    now = datetime(2026, 5, 13, 14, 0, 0, tzinfo=timezone.utc)
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id="rec_root",
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=now + timedelta(minutes=10),
+    )
+    svc = AgendaService()
+    assert svc.is_already_posted(session, calendar_event_id="ev1") is False
+    svc.record_post(
+        session, candidate=candidate, slack_channel="D0",
+        slack_ts="111.222", google_doc_id="g1",
+        google_doc_url="https://docs.google.com/d/g1",
+        prior_zoom_ids=["z_prev"],
+    )
+    session.flush()
+    assert svc.is_already_posted(session, calendar_event_id="ev1") is True
+
+
+# -- compose_agenda (LLM stub) -------------------------------------------------
+
+
+def test_compose_agenda_happy_path():
+    """LLM returns a well-formed dict — `compose_agenda` wraps it
+    in an AgendaOutput dataclass."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 13, 14, tzinfo=timezone.utc),
+    )
+    llm = MagicMock()
+    llm.complete_json.return_value = {
+        "previous_recap": ["обсудили roadmap", "договорились про deck"],
+        "tasks_checklist": [
+            {"task_id": 1, "title": "Прислать deck", "status": "todo",
+             "owner": "admin", "due": "2026-05-15"},
+        ],
+        "open_questions": ["согласовать timing pre-seed"],
+        "doc_body_md": "## Из прошлого раза\n- обсудили roadmap\n",
+    }
+    out = compose_agenda(candidate, llm_backend=llm, model="gpt-test")
+    assert isinstance(out, AgendaOutput)
+    assert out.previous_recap == ["обсудили roadmap", "договорились про deck"]
+    assert len(out.tasks_checklist) == 1
+    assert out.open_questions == ["согласовать timing pre-seed"]
+    assert "Из прошлого раза" in out.doc_body_md
+
+
+def test_compose_agenda_returns_none_on_llm_exception():
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="t",
+        title_normalised="t",
+        scheduled_start_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+    )
+    llm = MagicMock()
+    llm.complete_json.side_effect = RuntimeError("network down")
+    assert compose_agenda(candidate, llm_backend=llm, model="m") is None
+
+
+def test_compose_agenda_returns_none_on_non_dict_output():
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="t",
+        title_normalised="t",
+        scheduled_start_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+    )
+    llm = MagicMock()
+    llm.complete_json.return_value = "not a dict"
+    assert compose_agenda(candidate, llm_backend=llm, model="m") is None
+
+
+# -- render_agenda_text --------------------------------------------------------
+
+
+def test_render_agenda_text_format_matches_operator_pin():
+    """Operator-pinned: «формат 12/05 - Повестка ко встрече "__"».
+    Header line must contain DD/MM dash «Повестка ко встрече» «<title>»."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 13, 15, tzinfo=timezone.utc),
+    )
+    output = AgendaOutput(
+        previous_recap=["обсудили roadmap"],
+        tasks_checklist=[
+            {"task_id": 1, "title": "Прислать deck", "status": "todo",
+             "owner": "admin", "due": "2026-05-15"},
+            {"task_id": 2, "title": "Старый таск", "status": "done",
+             "owner": "admin"},
+        ],
+        open_questions=["timing pre-seed"],
+        doc_body_md="…",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output,
+        doc_url="https://docs.google.com/document/d/g1/edit",
+    )
+    assert "13/05" in text
+    assert "Повестка ко встрече «Weekly sync»" in text
+    assert "📋" in text and "Из прошлого раза" in text
+    assert "✅" in text and "Задачи и их статусы" in text
+    assert "☐ Прислать deck" in text  # todo box
+    assert "☑ Старый таск" in text     # done box
+    assert "🎯" in text and "К обсуждению" in text
+    assert "📄" in text
+    assert "https://docs.google.com/document/d/g1/edit" in text
+
+
+def test_render_agenda_text_truncates_when_too_long():
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 13, 15, tzinfo=timezone.utc),
+    )
+    # Push the output well past 3000 chars.
+    output = AgendaOutput(
+        previous_recap=["x" * 500] * 5,
+        tasks_checklist=[
+            {"title": "y" * 200, "status": "todo", "owner": "a"}
+        ] * 30,
+        open_questions=["z" * 500] * 4,
+        doc_body_md="…",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output,
+        doc_url="https://docs.google.com/d/x",
+    )
+    assert len(text) <= 2950
+    assert "📄" in text  # doc link still present (in trailing chunk)
+
+
+def test_render_agenda_text_omits_doc_section_when_no_url():
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+    )
+    output = AgendaOutput(
+        previous_recap=["a"], tasks_checklist=[], open_questions=["b"],
+        doc_body_md="",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output, doc_url=None,
+    )
+    assert "📄" not in text
+
+
+# -- runner no-op safety -------------------------------------------------------
+
+
+def test_runner_disabled_no_op(monkeypatch):
+    """Sanity: when AGENDA_ENABLED=false, calling .start() returns
+    without spinning the thread (no Calendar / Slack / LLM I/O)."""
+    from app.agenda.runner import AgendaRunner
+    from app.config import Settings
+
+    s = Settings(
+        agenda_enabled=False,
+        agenda_slack_target_channel_id="D0",
+    )
+    runner = AgendaRunner(
+        settings=s,
+        slack_client=MagicMock(),
+        llm_backend=MagicMock(),
+        calendar_factory=lambda: None,
+        docs_factory=lambda: None,
+    )
+    runner.start()
+    # Thread was never created.
+    assert runner._thread is None

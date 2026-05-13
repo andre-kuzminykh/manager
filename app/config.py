@@ -48,6 +48,57 @@ class Settings(BaseSettings):
         default=False, alias="SLACK_INGEST_ENABLED"
     )
 
+    # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся
+    # встречи в Google Calendar (определяется по совпадению title с
+    # ≥1 прошлой записанной встречи из zoom_recordings) бот собирает
+    # повестку: что обсуждали прошлый раз + открытые задачи + открытые
+    # вопросы → отправляет в Slack DM оператору с гиперссылкой на
+    # подробный Google Doc.
+    #
+    # Default OFF. Включается только когда:
+    #   - GOOGLE_CALENDAR_ID настроен (multi-calendar OK)
+    #   - GOOGLE_SERVICE_ACCOUNT_JSON_PATH доступен (Calendar API)
+    #   - AGENDA_SLACK_TARGET_CHANNEL_ID непустой (куда слать DM)
+    agenda_enabled: bool = Field(
+        default=False, alias="AGENDA_ENABLED"
+    )
+    # Сколько минут до начала встречи отправлять повестку.
+    agenda_lead_time_minutes: int = Field(
+        default=10, alias="AGENDA_LEAD_TIME_MINUTES"
+    )
+    # Окно ±N минут вокруг target-time, чтобы не пропустить event если
+    # tick опоздал. Default 1 — runner тикает раз в 60s, плюс это окно
+    # = no-miss даже при минутной задержке.
+    agenda_window_minutes: int = Field(
+        default=1, alias="AGENDA_WINDOW_MINUTES"
+    )
+    # Сколько прошлых встреч искать для контекста (минимум 1 чтобы
+    # считать встречу «повторяющейся»).
+    agenda_lookback_days: int = Field(
+        default=90, alias="AGENDA_LOOKBACK_DAYS"
+    )
+    # Минимум прошлых recordings с тем же title чтобы считать встречу
+    # повторяющейся. 1 = первая повторная встреча уже триггерит. 2 =
+    # ждать пока встреча произойдёт минимум дважды.
+    agenda_min_prior_meetings: int = Field(
+        default=1, alias="AGENDA_MIN_PRIOR_MEETINGS"
+    )
+    # Slack channel / DM куда отправлять повестку. Это conversation id
+    # типа D0ASY5QF6UX (DM с оператором) или C0... (channel).
+    agenda_slack_target_channel_id: str = Field(
+        default="", alias="AGENDA_SLACK_TARGET_CHANNEL_ID"
+    )
+    # Интервал тика runner'a в секундах. Меньше = больше шанс попасть
+    # точно в lead-time, но больше calendar API quota. Default 60s.
+    agenda_tick_interval_seconds: int = Field(
+        default=60, alias="AGENDA_TICK_INTERVAL_SECONDS"
+    )
+    # OpenAI model для compose шага. Дефолт — текущий settings.openai_model.
+    # Можно переопределить если хочется дешевле/умнее.
+    agenda_compose_model: str = Field(
+        default="", alias="AGENDA_COMPOSE_MODEL"
+    )
+
     # FR-CR-05-136 — Calendar-match for meeting titles. The
     # Apps Script Web App is the proxy that does the Calendar
     # read with operator-level OAuth (no service account /

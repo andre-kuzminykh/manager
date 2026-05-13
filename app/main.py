@@ -132,6 +132,27 @@ def run() -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("employees_startup_sync_failed", error=str(e))
 
+    # FR-CR-05-165 — agenda runner (daemon thread). No-op when
+    # AGENDA_ENABLED=false; never blocks startup; failure here
+    # mustn't take down the Slack bot.
+    try:
+        from app.agenda.runner import AgendaRunner
+        from app.sync.factories import (
+            build_calendar_credentials_factory,
+            build_docs_factory,
+        )
+
+        agenda_runner = AgendaRunner(
+            settings=settings,
+            slack_client=app.client,
+            llm_backend=backend,
+            calendar_factory=build_calendar_credentials_factory(settings),
+            docs_factory=build_docs_factory(settings),
+        )
+        agenda_runner.start()
+    except Exception as e:  # noqa: BLE001
+        log.warning("agenda_runner_startup_failed", error=str(e))
+
     log.info("starting_socket_mode")
     run_socket_mode(app, settings.slack_app_token)
 

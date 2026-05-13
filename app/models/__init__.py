@@ -31,6 +31,7 @@ from app.models.task import (
     TaskSubscription,
 )
 from app.models.fireflies import MeetingRecording
+from app.models.meeting_agenda import MeetingAgenda
 from app.models.zoom import ZoomRecording
 from app.models.team import TeamMember
 from app.models.telegram import (
@@ -72,6 +73,7 @@ __all__ = [
     "TaskStatusHistory",
     "TaskSubscription",
     "TeamMember",
+    "MeetingAgenda",
     "MeetingRecording",
     "ZoomRecording",
 ]

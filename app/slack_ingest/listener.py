@@ -167,7 +167,7 @@ def _process(
                 conversation_id=channel_id,
                 kind="channel",  # public + private + im все идут как "channel"
                 source_message=source_message,
-                invocation_type=InvocationType.PASSIVE,
+                invocation_type=InvocationType.passive,
                 slack_user_id=author_slack_uid,
                 raw_event=event,
             )

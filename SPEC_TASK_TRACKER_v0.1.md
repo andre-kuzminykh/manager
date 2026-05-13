@@ -561,8 +561,9 @@ Feature: UC-TT-02 — Card lifecycle
 |---|---|---|---|---|
 | FR-TT-1.1 | Чтение TG через Supabase view (period: `VIEW_POLL_INTERVAL_SECONDS`, default 30s) | Must | UC-TT-01 | T-TT-001 |
 | FR-TT-1.2 | Получать до `VIEW_POLL_BATCH_SIZE` (default 500) последних сообщений | Must | UC-TT-01 | T-TT-001 |
-| FR-TT-1.3 | (TODO) Slack Socket Mode + ловить `message.channels`, `message.groups`, `message.im`, `message.mpim`, `app_mention` | Should | UC-TT-03 | T-TT-020 |
-| FR-TT-1.4 | (TODO) Slack: thread context (parent + last 5 replies) + main channel context (last 10 messages в окне 5 мин) | Should | UC-TT-03 | T-TT-021 |
+| FR-TT-1.3 | ✅ Slack Socket Mode + ловить `message.channels`, `message.groups`, `message.im`, `message.mpim`, `app_mention` (DELIVERED 2026-05-13, FR-CR-05-162) | Should | UC-TT-03 | T-TT-020 |
+| FR-TT-1.4 | ✅ Slack: thread context (parent + last 5 replies) + main channel context (last 10 messages в окне 5 мин) (DELIVERED 2026-05-13, FR-CR-05-162) | Should | UC-TT-03 | T-TT-021 |
+| FR-TT-1.3a | ✅ Slack ingest = TG feature-parity: multi-task per message, intra+cross dedup, owner resolution chain, TG-card delivery via `post_initial_card(for_slack_ingest=True)` (DELIVERED 2026-05-13, FR-CR-05-162) | Must | UC-TT-03 | tests/test_slack_ingest.py |
 | FR-TT-1.5 | (TODO) Email через Gmail label-фильтр | Should | UC-TT-04 | T-TT-030 |
 | FR-TT-1.6 | Auto-pickup tasks от Note Taker (через DB, source_kind ∈ {zoom, fireflies, gmeet, manual}) | Must | UC-TT-05 | T-TT-040 |
 | FR-TT-1.7 | (TODO) Manual `/task <text>` команда от admin в TG | Should | UC-TT-11 | T-TT-050 |
@@ -1211,23 +1212,62 @@ flowchart LR
 
 ## 13.1 Декомпозиция features
 
-### F-TT-11 Slack ingest (Q2-2026, M)
+### F-TT-11 Slack ingest (Q2-2026, M) — **DELIVERED 2026-05-13 via FR-CR-05-162**
 
-| Flow | Task | Subtask | AC |
-|---|---|---|---|
-| Slack-msg → task | Setup Slack App scopes | Add bot scopes | history scopes enabled |
-|   |   | Enable Socket Mode + xapp token | Token saved in env |
-|   |   | Reinstall to workspace | New xoxb token issued |
-|   | Implement listener | `app/slack_ingest/listener.py` | Bolt App handles `message.channels` event |
-|   |   | Thread-context fetch | parent + last 5 replies via conversations.replies |
-|   |   | Channel-context fetch | last 10 messages within 5 min via conversations.history |
-|   | Wire to IngestService | Adapter for Slack-event → IngestService | Test: msg "task X" → task in DB |
-|   | TG-card delivery | recipient = author + owner (mapped via slack_user_id↔telegram_user_id) + admins | Test: card delivered to mapped owner |
-|   | Disable Slack-side output | Бот не реагирует emoji, ack, DM | Slack channel остаётся silent |
-|   | Feature flag | `SLACK_INGEST_ENABLED=false` initially | Service no-op when off |
-|   | Tests | Unit + integration | All AC pass |
-|   | Deploy to dev (1 channel) | docker run | Test in `#bot-test` |
-|   | Roll out to prod | Add bot to all channels | Production ready |
+| Flow | Task | Subtask | AC | Status |
+|---|---|---|---|---|
+| Slack-msg → task | Setup Slack App scopes | Add bot scopes | history scopes enabled | ✅ |
+|   |   | Enable Socket Mode + xapp token | Token saved in env (`/home/admin_/tg-listener.env`) | ✅ |
+|   |   | Reinstall to workspace | New xoxb token issued (`xoxb-7293029581414-...`) | ✅ |
+|   | Implement listener | `app/slack_ingest/listener.py` | Bolt App handles `message.channels` event | ✅ |
+|   |   | Thread-context fetch | parent + last 5 replies via conversations.replies | ✅ (via `ContextRetriever`) |
+|   |   | Channel-context fetch | last 10 messages within 5 min via conversations.history | ✅ (via `ContextRetriever`) |
+|   |   | Anti-self-loop subtypes | skip bot_message + channel_join/leave + message_changed/deleted + thread_broadcast | ✅ (`_SKIPPED_SUBTYPES`) |
+|   |   | InvocationType.passive (lowercase) | bug-fix 2026-05-13: uppercase variant doesn't exist on enum | ✅ + regression test |
+|   |   | Real `Orchestrator` instance | bug-fix 2026-05-13: `orchestrator=None` blew up `persist_context_snapshot` | ✅ + regression test |
+|   | Multi-task extraction (parity w/ TG) | Loop over `classification.tasks` instead of single `classification.task` | One message → N tasks, each its own row | ✅ + regression test |
+|   |   | Intra-message dedup | Drop exact-title repeats inside one message before paying for cross-DB check | ✅ (`seen_titles` set) |
+|   |   | Cross-DB dedup | LLM-based `check_duplicate()` vs open tasks; skip duplicates silently | ✅ (reused `app.services.task_dedup`) |
+|   |   | Owner resolution chain | registry → LLM-picked uid → sender → admin (reused `_resolve_owner` from TG ingest) | ✅ + regression test |
+|   | Wire to IngestService | Inlined classify + persist (avoid single-task `classify_and_persist`) | Test: msg "task X" → task in DB with source_kind=slack | ✅ |
+|   | TG-card delivery | recipient = author + owner (mapped via slack_user_id↔telegram_user_id) + admins | Test: card delivered to mapped owner | ✅ (via `post_initial_card(for_slack_ingest=True)`) |
+|   |   | Bypass cards.py source_kind=slack guard | bug-fix 2026-05-13: guard blocked DM delivery (legacy `slack_bot.cards` path) | ✅ + regression test |
+|   | Disable Slack-side output | Бот не реагирует emoji, ack, DM | Slack channel остаётся silent | ✅ |
+|   | Feature flag | `SLACK_INGEST_ENABLED=false` initially | Service no-op when off | ✅ |
+|   | Tests | Unit + integration (`tests/test_slack_ingest.py`) | 11 tests, all AC pass | ✅ |
+|   | Deploy to dev (1 channel) | docker run | Test in `#test_ceo_brain` (C0B33BQFUB1) | ✅ |
+|   | Roll out to prod | Add bot to all channels | Production ready | 🔄 in progress |
+
+#### F-TT-11 — Pipeline diagram (DELIVERED, FR-CR-05-162)
+
+```
+Slack message in #channel where bot is added
+   │
+   ├── Bolt @app.event("message") receives event
+   │       Skip if: bot_user_id == self, bot_id set, subtype in _SKIPPED_SUBTYPES, empty text
+   │
+   ├── upsert_conversation + upsert_message (raw event stored)
+   ├── EmployeeDirectory.observed() + ensure_channel_synced()  (best-effort)
+   │
+   ├── ContextRetriever.build → history_before + thread_messages
+   ├── classifier.classify → IntentClassification (intent + tasks: list[TaskDraft])
+   │       If intent ≠ create_task or tasks == [] → log "slack_ingest_no_tasks" and exit
+   │
+   ├── For each TaskDraft td:
+   │       _resolve_owner(td, known_employees, sender_uid, sender_name, admin_uid)
+   │
+   ├── persist_context_snapshot (once)
+   │
+   └── For each TaskDraft td (loop 2):
+           intra-message dedup → seen_titles
+                  skip if td.title.lower() already seen → log "slack_ingest_skipped_intra_message_duplicate"
+           cross-DB dedup → check_duplicate(td, llm_backend)
+                  skip if dup.is_duplicate → log "slack_ingest_skipped_duplicate"
+           persist_inference + create_draft + create_task_from_draft (source_kind=slack)
+           log "slack_ingest_task_created"
+           post_initial_card(for_slack_ingest=True)  → DM to author + owner + admins via TG
+                  emits "slack_ingest_tg_sender_disabled" or "slack_ingest_tg_card_post_failed" on failure
+```
 
 ### F-TT-14 Morning digest (Q2-2026, S)
 

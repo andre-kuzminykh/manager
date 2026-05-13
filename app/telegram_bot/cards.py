@@ -178,6 +178,7 @@ def post_initial_card(
     chat_id: int,
     reply_to_message_id: int | None,
     author_user_id: str | None = None,
+    for_slack_ingest: bool = False,
 ) -> None:
     """DM the card to author + owner (if different) + admins.
 
@@ -190,13 +191,23 @@ def post_initial_card(
     `author_user_id` is the user who wrote the task-shaped message.
     Defaults to ``task.created_by_slack_user_id`` (the field is
     overloaded — for TG tasks it holds the TG user id).
+
+    `for_slack_ingest` (FR-CR-05-162): when True, bypass the
+    `source_kind == slack` guard. The default keeps the legacy
+    Slack-bot path (cards go through `slack_bot.cards` instead).
+    The Slack-ingest path (TG-only output, bot-in-chats model)
+    sets this to True so admins still get the DM.
     """
+    if not sender.enabled:
+        return
     # FR-CR-05-58 — Fireflies-extracted tasks get TG cards too
     # (they don't have a Telegram source message, but they're
     # delivered to the operator via the same DM channel as
-    # native TG captures). Slack-sourced tasks still skip — they
-    # have their own `slack_bot.cards` posting path.
-    if task.source_kind == TaskSourceKind.slack or not sender.enabled:
+    # native TG captures). Slack-sourced tasks normally skip —
+    # they have their own `slack_bot.cards` posting path. The
+    # FR-CR-05-162 Slack-ingest pipeline overrides via
+    # `for_slack_ingest=True`.
+    if task.source_kind == TaskSourceKind.slack and not for_slack_ingest:
         return
 
     author = author_user_id or task.created_by_slack_user_id or ""

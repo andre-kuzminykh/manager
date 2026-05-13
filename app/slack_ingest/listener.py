@@ -1,13 +1,33 @@
 """FR-CR-05-162 — Slack message → task ingestion, TG-only output.
 
 Listens to Slack channels via Socket Mode (where the bot is added),
-extracts tasks via LLM (using existing classify_and_persist pipeline),
-persists Task with source_kind='slack', and ships TG-карточки to
-owner + admins.
+extracts tasks via LLM, persists Tasks with source_kind='slack', and
+ships TG-карточки to author + owner + admins.
 
 NO Slack-side output: bot does NOT reply, ack with emoji, or DM
 back. Operator-pinned: «не выводить ни в диалогах ни в самом слаке,
 только в телеграме».
+
+Pipeline is feature-parity with the Telegram ingest path
+(`app/telegram_ingest/service.py`):
+
+  1. Skip self / bot / service messages.
+  2. Build context window via ContextRetriever (history before +
+     thread messages).
+  3. Classify the message via the LLM graph (returns
+     ``classification.tasks: list[TaskDraft]`` — a single message
+     can carry multiple tasks).
+  4. For each candidate task:
+       a. Resolve owner via the shared ``_resolve_owner`` chain
+          (registry → LLM-picked uid → sender fallback → admin).
+       b. Intra-message dedup — skip exact-title repeats inside
+          one message.
+       c. Cross-DB dedup via ``check_duplicate(...)`` — skip when
+          the LLM says the candidate duplicates an open task.
+       d. Persist context snapshot + inference + draft + Task row
+          (source_kind=slack).
+       e. Post TG card (author + owner + admins) via the
+          privacy-by-default DM path.
 
 Feature-flagged: requires SLACK_INGEST_ENABLED=true + SLACK_APP_TOKEN
 (xapp-...) for Socket Mode.
@@ -25,13 +45,23 @@ from app.context.retriever import ContextRetriever
 from app.db import session_scope
 from app.intent import IntentClassifier
 from app.logging_setup import get_logger
+from app.models import Employee
 from app.orchestrator.service import Orchestrator
 from app.persistence.tasks import create_task_from_draft
-from app.schemas.intent import InvocationType
+from app.schemas.intent import IntentType, InvocationType
 from app.services import EmployeeDirectory
-from app.slack_bot.handlers.shared import Services, classify_and_persist
+from app.services.task_dedup import check_duplicate
+from app.slack_bot.handlers.shared import (
+    Services,
+    upsert_conversation,
+    upsert_message,
+)
 from app.telegram_bot.cards import post_initial_card
 from app.telegram_bot.sender import TelegramSender
+from app.telegram_ingest.service import (
+    _admin_fallback_owner_id,
+    _resolve_owner,
+)
 
 log = get_logger(__name__)
 
@@ -79,9 +109,6 @@ def make_slack_ingest_app(
     )
     employees = EmployeeDirectory(client=app.client, settings=settings)
 
-    # FR-CR-05-162 — Orchestrator нужен для persist_context_snapshot /
-    # persist_inference / create_draft внутри classify_and_persist.
-    # Finalizer (Slack-side card output) не нужен — карточка идёт в TG.
     services = Services(
         slack=app.client,
         context_retriever=context_retriever,
@@ -93,7 +120,6 @@ def make_slack_ingest_app(
     @app.event("message")
     def _on_message(event: dict[str, Any], body: dict, client: WebClient, context, ack):  # noqa: ANN001
         ack()
-        # 1. Skip self / bot / service messages.
         if bot_user_id and event.get("user") == bot_user_id:
             return
         if event.get("bot_id"):
@@ -141,6 +167,32 @@ def make_slack_ingest_app(
     return app
 
 
+def _known_employees_from_db(session) -> list[dict[str, Any]]:
+    """Same shape as `_known_members_for` in TG-ingest — pulled from
+    the Employees table (synced from Slack via EmployeeDirectory)."""
+    return [
+        {
+            "slack_user_id": e.slack_user_id,
+            "display_name": e.display_name or e.real_name or e.slack_user_id,
+            "real_name": e.real_name,
+        }
+        for e in (
+            session.query(Employee)
+            .filter(Employee.is_bot.is_(False))
+            .all()
+        )
+    ]
+
+
+def _author_display_from_registry(
+    slack_uid: str, known_employees: list[dict[str, Any]]
+) -> str | None:
+    for e in known_employees or []:
+        if e.get("slack_user_id") == slack_uid:
+            return e.get("display_name") or e.get("real_name")
+    return None
+
+
 def _process(
     *,
     services: Services,
@@ -150,7 +202,12 @@ def _process(
     message_ts: str,
     tg_sender: TelegramSender | None,
 ) -> None:
-    """One-shot: classify → draft → persist Task → send TG card."""
+    """End-to-end multi-task pipeline matching TG-ingest semantics.
+
+    A single Slack message can carry multiple tasks. Each surviving
+    candidate (after intra+cross dedup) becomes its own Task row;
+    each Task gets its own TG card.
+    """
     source_message = {
         "ts": message_ts,
         "thread_ts": event.get("thread_ts"),
@@ -161,16 +218,52 @@ def _process(
     }
 
     with session_scope() as session:
+        # --- 1. Conversation + raw message upsert -------------------
+        conversation = upsert_conversation(
+            session, channel_id=channel_id, kind="channel",
+        )
+        upsert_message(
+            session,
+            conversation=conversation,
+            message=source_message,
+            raw=event,
+            subtype=event.get("subtype"),
+        )
+
+        # --- 2. Keep Employees directory fresh ----------------------
+        if services.employees is not None:
+            try:
+                services.employees.observed(
+                    session, slack_user_id=author_slack_uid
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                services.employees.ensure_channel_synced(
+                    session, channel_id=channel_id
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        # --- 3. Context window + classify ---------------------------
         try:
-            _classification, draft, _snapshot = classify_and_persist(
-                session,
-                services=services,
+            window = services.context_retriever.build(
                 conversation_id=channel_id,
-                kind="channel",  # public + private + im все идут как "channel"
                 source_message=source_message,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "slack_ingest_context_failed",
+                channel=channel_id, ts=message_ts, error=str(e),
+            )
+            return
+
+        known_employees = _known_employees_from_db(session)
+        try:
+            classification = services.classifier.classify(
+                context=window,
                 invocation_type=InvocationType.passive,
-                slack_user_id=author_slack_uid,
-                raw_event=event,
+                known_employees=known_employees,
             )
         except Exception as e:  # noqa: BLE001
             log.warning(
@@ -179,19 +272,33 @@ def _process(
             )
             return
 
-        if draft is None:
+        if (
+            classification.intent != IntentType.create_task
+            or not classification.tasks
+        ):
             log.info(
-                "slack_ingest_no_draft",
+                "slack_ingest_no_tasks",
                 channel=channel_id, ts=message_ts,
-                hint="non-task intent or duplicate",
+                intent=classification.intent.value,
+                hint="non-task intent or empty extraction",
             )
             return
 
-        # FR-CR-05-162 — поскольку invocation=PASSIVE, classify_and_persist
-        # сохраняет draft в state=proposed. Чтобы запустить TG-карточку
-        # как для подтверждённой задачи, надо превратить в Task сразу.
-        # operator-pinned: «вычленяет задачи и публикует в телеграме» —
-        # без human-in-the-loop на Slack-стороне.
+        # --- 4. Resolve owner per candidate -------------------------
+        admin_uid = _admin_fallback_owner_id()
+        sender_name = _author_display_from_registry(
+            author_slack_uid, known_employees
+        )
+        for td in classification.tasks:
+            _resolve_owner(
+                td,
+                known_employees=known_employees,
+                sender_user_id=author_slack_uid,
+                sender_user_name=sender_name,
+                admin_uid=admin_uid,
+            )
+
+        # --- 5. Permalink (best-effort) -----------------------------
         permalink: str | None = None
         try:
             permalink_resp = services.slack.chat_getPermalink(
@@ -209,48 +316,118 @@ def _process(
             "thread_ts": event.get("thread_ts"),
             "permalink": permalink,
         }
-        try:
-            task = create_task_from_draft(
-                session,
-                draft=draft,
-                source=source_dict,
-                context_snapshot_id=None,
-                fallback_author_slack_id=author_slack_uid,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "slack_ingest_persist_task_failed",
-                channel=channel_id, ts=message_ts, error=str(e),
-            )
-            return
 
-        log.info(
-            "slack_ingest_task_created",
-            task_id=task.id, title=task.title, owner=task.owner_display_name,
-            channel=channel_id, ts=message_ts,
+        # --- 6. Persist snapshot once, then loop tasks --------------
+        snapshot = services.orchestrator.persist_context_snapshot(
+            session, window.to_snapshot_dict()
         )
 
-        # FR-CR-05-162 — TG-карточка владельцу + админам.
-        if tg_sender is None or not getattr(tg_sender, "enabled", False):
+        created_tasks: list[Any] = []
+        seen_titles: set[str] = set()
+        for td in classification.tasks:
+            t_lower = (td.title or "").strip().lower()
+            if t_lower and t_lower in seen_titles:
+                log.info(
+                    "slack_ingest_skipped_intra_message_duplicate",
+                    title=td.title, channel=channel_id, ts=message_ts,
+                )
+                continue
+            seen_titles.add(t_lower)
+
+            try:
+                dup = check_duplicate(
+                    session,
+                    candidate=td.model_dump(mode="json"),
+                    llm_backend=getattr(services.classifier, "backend", None),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "slack_ingest_dedup_check_failed",
+                    title=td.title, error=str(e),
+                )
+                dup = None
+            if dup is not None and dup.is_duplicate:
+                log.info(
+                    "slack_ingest_skipped_duplicate",
+                    title=td.title,
+                    duplicate_of=dup.duplicate_of_task_id,
+                    reason=dup.reason,
+                )
+                continue
+
+            single = type(classification)(
+                intent=classification.intent,
+                confidence=classification.confidence,
+                reasoning=classification.reasoning,
+                task=td,
+            )
+            try:
+                inference = services.orchestrator.persist_inference(
+                    session,
+                    context_snapshot=snapshot,
+                    classification=single,
+                    invocation_type=InvocationType.passive,
+                )
+                draft = services.orchestrator.create_draft(
+                    session,
+                    inference=inference,
+                    classification=single,
+                    created_by_slack_user_id=author_slack_uid,
+                    slack_message_ts=message_ts,
+                )
+                task = create_task_from_draft(
+                    session,
+                    draft=draft,
+                    source=source_dict,
+                    context_snapshot_id=snapshot.id,
+                    fallback_author_slack_id=author_slack_uid,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "slack_ingest_persist_task_failed",
+                    title=td.title, channel=channel_id, ts=message_ts,
+                    error=str(e),
+                )
+                continue
+
             log.info(
-                "slack_ingest_tg_sender_disabled",
-                task_id=task.id,
-                hint="TELEGRAM_BOT_TOKEN missing — task created, no card sent",
+                "slack_ingest_task_created",
+                task_id=task.id, title=task.title,
+                owner=task.owner_display_name,
+                owner_uid=task.owner_user_id,
+                channel=channel_id, ts=message_ts,
             )
-            return
-        try:
-            post_initial_card(
-                sender=tg_sender,
-                session=session,
-                task=task,
-                chat_id=0,  # ignored — privacy-by-default DM path
-                reply_to_message_id=None,
-                author_user_id=author_slack_uid,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "slack_ingest_tg_card_post_failed",
-                task_id=task.id, error=str(e),
+            created_tasks.append(task)
+
+            # TG card per task — author + owner + admins
+            if tg_sender is None or not getattr(tg_sender, "enabled", False):
+                log.info(
+                    "slack_ingest_tg_sender_disabled",
+                    task_id=task.id,
+                    hint="TELEGRAM_BOT_TOKEN missing — task created, no card sent",
+                )
+                continue
+            try:
+                post_initial_card(
+                    sender=tg_sender,
+                    session=session,
+                    task=task,
+                    chat_id=0,  # ignored — privacy-by-default DM path
+                    reply_to_message_id=None,
+                    author_user_id=author_slack_uid,
+                    for_slack_ingest=True,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "slack_ingest_tg_card_post_failed",
+                    task_id=task.id, error=str(e),
+                )
+
+        if not created_tasks:
+            log.info(
+                "slack_ingest_no_tasks_persisted",
+                channel=channel_id, ts=message_ts,
+                hint="all candidates were duplicates or failed to persist",
             )
 
 

@@ -138,7 +138,7 @@ def run() -> None:
     try:
         from app.agenda.runner import AgendaRunner
         from app.sync.factories import (
-            build_calendar_credentials_factory,
+            build_calendar_credentials_factory_with_sa_fallback,
             build_docs_factory,
         )
 
@@ -146,7 +146,9 @@ def run() -> None:
             settings=settings,
             slack_client=app.client,
             llm_backend=backend,
-            calendar_factory=build_calendar_credentials_factory(settings),
+            calendar_factory=build_calendar_credentials_factory_with_sa_fallback(
+                settings
+            ),
             docs_factory=build_docs_factory(settings),
         )
         agenda_runner.start()

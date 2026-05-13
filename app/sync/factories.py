@@ -21,6 +21,7 @@ from app.config import Settings
 from app.db import session_scope
 from app.logging_setup import get_logger
 from app.sync.google_auth import (
+    GOOGLE_SCOPES_CALENDAR,
     GOOGLE_SCOPES_SHEETS,
     GOOGLE_SCOPES_TASKS,
     GOOGLE_USER_KEY_CALENDAR,
@@ -280,5 +281,91 @@ def build_calendar_credentials_factory(
                 )
                 return None
             return build_google_calendar_credentials(record, store)
+
+    return factory
+
+
+def build_calendar_sa_credentials_factory(
+    settings: Settings,
+) -> Callable[[], object | None] | None:
+    """FR-CR-05-165 — Service-Account path for Calendar reads.
+
+    When the operator hasn't set up the user-OAuth flow (or its
+    refresh token has been invalidated by a Client Secret rotation),
+    fall back to a service-account key. The SA must be:
+
+      1. Loadable via ``GOOGLE_SERVICE_ACCOUNT_JSON{,_PATH}``.
+      2. Granted **«See all event details»** on the target
+         calendar(s) via Google Calendar UI (one-time share — no
+         Domain-Wide Delegation required).
+
+    Read-only scope (`calendar.readonly`) is sufficient — the
+    agenda pipeline never writes to Calendar.
+
+    Returns None when no SA JSON is configured / the file path
+    doesn't exist. Caller (`AgendaRunner`) treats this as «no SA
+    fallback available» and continues with OAuth-only.
+    """
+
+    def factory():
+        try:
+            creds = load_service_account_credentials(GOOGLE_SCOPES_CALENDAR)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "calendar_sa_credentials_invalid", error=str(e),
+            )
+            return None
+        if creds is None:
+            log.info(
+                "calendar_sa_credentials_unavailable",
+                hint=(
+                    "GOOGLE_SERVICE_ACCOUNT_JSON[_PATH] missing — "
+                    "Calendar SA fallback disabled"
+                ),
+            )
+            return None
+        return creds
+
+    return factory
+
+
+def build_calendar_credentials_factory_with_sa_fallback(
+    settings: Settings,
+) -> Callable[[], object | None] | None:
+    """FR-CR-05-165 — Composite factory:
+
+      1. Try user OAuth (FR-CR-05-144). Best when the operator
+         has gone through the consent flow.
+      2. Fall back to Service Account (`calendar.readonly`) when
+         OAuth credentials are missing OR the OAuth refresh fails
+         at runtime (e.g. Client Secret rotated, refresh token
+         invalidated — operator hasn't re-bootstrapped yet).
+
+    Returns None ONLY when BOTH sources are unavailable.
+    """
+    oauth_inner = build_calendar_credentials_factory(settings)
+    sa_inner = build_calendar_sa_credentials_factory(settings)
+    if oauth_inner is None and sa_inner is None:
+        return None
+
+    def factory():
+        if oauth_inner is not None:
+            try:
+                creds = oauth_inner()
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "calendar_oauth_load_failed",
+                    error=str(e),
+                    hint="will try Service Account fallback",
+                )
+                creds = None
+            if creds is not None:
+                return creds
+        if sa_inner is not None:
+            sa_creds = sa_inner()
+            if sa_creds is not None:
+                log.info("calendar_using_sa_fallback")
+                return sa_creds
+        return None
 
     return factory

@@ -44,7 +44,7 @@ from app.services.calendar_match import (
     fetch_calendar_events_via_api,
 )
 from app.sync.factories import (
-    build_calendar_credentials_factory,
+    build_calendar_credentials_factory_with_sa_fallback,
     build_docs_factory,
 )
 
@@ -82,7 +82,9 @@ def _build_runner_for_oneshot():
         settings=settings,
         slack_client=slack_client,
         llm_backend=llm_backend,
-        calendar_factory=build_calendar_credentials_factory(settings),
+        calendar_factory=build_calendar_credentials_factory_with_sa_fallback(
+            settings
+        ),
         docs_factory=build_docs_factory(settings),
     )
 

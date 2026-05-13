@@ -589,3 +589,107 @@ def test_normalise_event_returns_none_on_missing_fields():
         {"start": datetime(2026, 5, 13, tzinfo=timezone.utc)}
     ) is None
     assert AgendaRunner._normalise_event({"title": "x"}) is None
+
+
+# -- SA Calendar fallback (FR-CR-05-165 follow-up) ---------------------------
+
+
+def test_composite_calendar_factory_prefers_oauth_when_available(monkeypatch):
+    """When OAuth load returns valid creds, the composite factory
+    must NOT touch the SA path."""
+    from app.sync.factories import (
+        build_calendar_credentials_factory_with_sa_fallback,
+    )
+
+    monkeypatch.setenv("GOOGLE_CALENDAR_CLIENT_ID", "x")
+    monkeypatch.setenv("GOOGLE_CALENDAR_CLIENT_SECRET", "y")
+
+    oauth_called = {"n": 0}
+    sa_called = {"n": 0}
+
+    def fake_oauth_factory(s):
+        def inner():
+            oauth_called["n"] += 1
+            return "OAUTH_CREDS_OBJ"
+        return inner
+
+    def fake_sa_factory(s):
+        def inner():
+            sa_called["n"] += 1
+            return "SA_CREDS_OBJ"
+        return inner
+
+    monkeypatch.setattr(
+        "app.sync.factories.build_calendar_credentials_factory",
+        fake_oauth_factory,
+    )
+    monkeypatch.setattr(
+        "app.sync.factories.build_calendar_sa_credentials_factory",
+        fake_sa_factory,
+    )
+
+    from app.config import Settings
+
+    factory = build_calendar_credentials_factory_with_sa_fallback(Settings())
+    assert factory is not None
+    creds = factory()
+    assert creds == "OAUTH_CREDS_OBJ"
+    assert oauth_called["n"] == 1
+    assert sa_called["n"] == 0
+
+
+def test_composite_calendar_factory_falls_back_to_sa_on_oauth_failure(monkeypatch):
+    """FR-CR-05-165 — when the OAuth inner factory raises
+    (e.g. `unauthorized_client` after Client Secret rotation),
+    composite must catch + try SA path."""
+    from app.sync.factories import (
+        build_calendar_credentials_factory_with_sa_fallback,
+    )
+
+    def fake_oauth_factory(s):
+        def inner():
+            raise RuntimeError("unauthorized_client: rotated")
+        return inner
+
+    def fake_sa_factory(s):
+        def inner():
+            return "SA_CREDS_OBJ"
+        return inner
+
+    monkeypatch.setattr(
+        "app.sync.factories.build_calendar_credentials_factory",
+        fake_oauth_factory,
+    )
+    monkeypatch.setattr(
+        "app.sync.factories.build_calendar_sa_credentials_factory",
+        fake_sa_factory,
+    )
+
+    from app.config import Settings
+
+    factory = build_calendar_credentials_factory_with_sa_fallback(Settings())
+    assert factory is not None
+    creds = factory()
+    assert creds == "SA_CREDS_OBJ"
+
+
+def test_composite_calendar_factory_returns_none_when_both_unavailable(monkeypatch):
+    """Both inner factories return None → composite itself is
+    None (so the runner's no-source guard fires correctly)."""
+    from app.sync.factories import (
+        build_calendar_credentials_factory_with_sa_fallback,
+    )
+
+    monkeypatch.setattr(
+        "app.sync.factories.build_calendar_credentials_factory",
+        lambda s: None,
+    )
+    monkeypatch.setattr(
+        "app.sync.factories.build_calendar_sa_credentials_factory",
+        lambda s: None,
+    )
+
+    from app.config import Settings
+
+    factory = build_calendar_credentials_factory_with_sa_fallback(Settings())
+    assert factory is None

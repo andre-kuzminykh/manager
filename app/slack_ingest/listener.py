@@ -25,6 +25,7 @@ from app.context.retriever import ContextRetriever
 from app.db import session_scope
 from app.intent import IntentClassifier
 from app.logging_setup import get_logger
+from app.orchestrator.service import Orchestrator
 from app.persistence.tasks import create_task_from_draft
 from app.schemas.intent import InvocationType
 from app.services import EmployeeDirectory
@@ -78,14 +79,14 @@ def make_slack_ingest_app(
     )
     employees = EmployeeDirectory(client=app.client, settings=settings)
 
-    # FR-CR-05-162 — finalizer / orchestrator NOT needed (no Slack
-    # output). Set to None placeholders compatible with Services
-    # dataclass.
+    # FR-CR-05-162 — Orchestrator нужен для persist_context_snapshot /
+    # persist_inference / create_draft внутри classify_and_persist.
+    # Finalizer (Slack-side card output) не нужен — карточка идёт в TG.
     services = Services(
         slack=app.client,
         context_retriever=context_retriever,
         classifier=classifier,
-        orchestrator=None,  # type: ignore[arg-type]
+        orchestrator=Orchestrator(settings=settings),
         employees=employees,
     )
 

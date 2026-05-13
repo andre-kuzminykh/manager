@@ -70,3 +70,22 @@ def test_listener_uses_lowercase_passive_in_classify_call():
     assert "InvocationType.PASSIVE" not in src, (
         "InvocationType.PASSIVE (uppercase) doesn't exist; use .passive"
     )
+
+
+def test_listener_constructs_real_orchestrator_not_none():
+    """Regression guard для bug-а 13.05.2026: listener передавал
+    `orchestrator=None` в Services. classify_and_persist в shared.py
+    зовёт services.orchestrator.persist_context_snapshot(...) —
+    AttributeError на NoneType. Реальный Orchestrator(settings=...)
+    нужен для persist_context_snapshot / persist_inference /
+    create_draft."""
+    from app.slack_ingest import listener
+
+    src = inspect.getsource(listener)
+    assert "Orchestrator(settings=settings)" in src, (
+        "Listener must construct a real Orchestrator (shared.py "
+        "classify_and_persist calls persist_context_snapshot on it)"
+    )
+    assert "orchestrator=None" not in src, (
+        "orchestrator=None breaks classify_and_persist at runtime"
+    )

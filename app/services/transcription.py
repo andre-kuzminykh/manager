@@ -22,6 +22,17 @@ log = get_logger(__name__)
 _AUDIO_MIMETYPE_PREFIX = "audio/"
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024  # Whisper's per-request cap.
 
+# FR-CR-05-164 — operator's own brand names that MUST be biased to
+# Whisper regardless of whether they're in the Sheets-managed
+# counterparties table. The counterparties sync is wipe-and-replace
+# from Google Sheets, so a missing/misspelled row would silently
+# regress transcripts (operator-pinned: «Humanoid» kept landing as
+# «Gamanoid» / «Гуманоид»). Add entries here only with operator
+# confirmation — every name burns Whisper prompt-token budget.
+_ALWAYS_INCLUDE_BRANDS: tuple[str, ...] = (
+    "Humanoid",
+)
+
 
 def is_audio_file(file_info: dict[str, Any]) -> bool:
     mimetype = (file_info.get("mimetype") or "").lower()
@@ -388,6 +399,9 @@ def build_whisper_bias_prompt(
     Whisper's `prompt` parameter accepts up to ~224 tokens; we
     cap at `max_chars` (≈600-1000 chars works empirically) and
     pack in priority order:
+      0. Always-include brand names (FR-CR-05-164) — operator-pinned
+         core names that MUST always be biased, even if the operator
+         hasn't added them to Sheets yet (e.g. own product brand).
       1. Meeting title (if provided) — high signal for the topic.
       2. Participants (if provided) — names the speakers say
          constantly.
@@ -412,6 +426,15 @@ def build_whisper_bias_prompt(
             return
         seen.add(key)
         pieces.append(s)
+
+    # FR-CR-05-164 — own product brand «Humanoid» reliably mutated to
+    # «Gamanoid» / «Гуманоид» in transcripts because nothing in the
+    # operator's Sheets row matched. Hardcode here so it survives
+    # the counterparties wipe-and-replace sync. Add more entries
+    # only after operator confirmation — every name burns Whisper
+    # token budget.
+    for brand in _ALWAYS_INCLUDE_BRANDS:
+        _push(brand)
 
     if meeting_title:
         _push(meeting_title)

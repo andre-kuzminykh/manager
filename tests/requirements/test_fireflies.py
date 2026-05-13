@@ -2050,11 +2050,77 @@ def test_build_whisper_bias_prompt_packs_team_and_counterparties(session):
 
 def test_build_whisper_bias_prompt_returns_none_when_empty(session):
     """No team rows + no counterparties + no meeting metadata →
-    None. Caller passes nothing to Whisper rather than an empty
-    string."""
+    only the FR-CR-05-164 always-include brands remain. They're
+    pinned and never empty, so we still return a real string.
+
+    To get None back the caller would have to also empty the
+    always-include list, which is a code-change ticket — covered
+    by patching the constant directly in the dedicated regression
+    test below."""
     from app.services.transcription import build_whisper_bias_prompt
 
-    assert build_whisper_bias_prompt(session) is None
+    prompt = build_whisper_bias_prompt(session)
+    assert prompt is not None
+    assert "Humanoid" in prompt
+
+
+def test_build_whisper_bias_prompt_always_includes_humanoid(session):
+    """FR-CR-05-164 — operator-pinned: «надо чтоб Humanoid было»
+    (after «Gamanoid» recurred in transcripts). Even with empty
+    counterparties (Sheet not synced yet, or wipe-and-replace in
+    progress), Whisper must still receive the brand name.
+
+    Guards against: dropping the always-include path, renaming the
+    constant without updating the bias builder, or accidentally
+    making the team/counterparty SQL crash silently take the
+    always-include with it."""
+    from app.services.transcription import (
+        _ALWAYS_INCLUDE_BRANDS,
+        build_whisper_bias_prompt,
+    )
+
+    assert "Humanoid" in _ALWAYS_INCLUDE_BRANDS, (
+        "FR-CR-05-164: «Humanoid» must remain in the always-include "
+        "brand list — Whisper otherwise transcribes as «Gamanoid»"
+    )
+
+    prompt = build_whisper_bias_prompt(
+        session,
+        meeting_title=None,
+        participants=None,
+    )
+    assert prompt is not None
+    assert "Humanoid" in prompt
+
+
+def test_build_whisper_bias_prompt_always_include_survives_with_data(session):
+    """FR-CR-05-164 — the always-include list must coexist with
+    team_members / counterparties / participants without being
+    dropped (e.g. by token-budget pressure pushing it out)."""
+    from app.models import Counterparty, TeamMember
+    from app.services.transcription import build_whisper_bias_prompt
+
+    session.add(
+        TeamMember(real_name="Артем", telegram_user_id=999, active=True)
+    )
+    session.add(
+        Counterparty(name="Tether", name_normalised="tether")
+    )
+    session.flush()
+
+    prompt = build_whisper_bias_prompt(
+        session,
+        meeting_title="Weekly sync",
+        participants=["Алина"],
+    )
+    assert prompt is not None
+    # Always-include comes FIRST (highest priority) so it survives
+    # the max_chars cap even under name-pressure.
+    assert prompt.lower().startswith("humanoid"), (
+        f"Humanoid must be the first packed name; got: {prompt[:80]!r}"
+    )
+    assert "Tether" in prompt
+    assert "Артем" in prompt
 
 
 def test_build_whisper_bias_prompt_caps_at_max_chars(session):

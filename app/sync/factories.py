@@ -336,10 +336,12 @@ def build_calendar_credentials_factory_with_sa_fallback(
 
       1. Try user OAuth (FR-CR-05-144). Best when the operator
          has gone through the consent flow.
-      2. Fall back to Service Account (`calendar.readonly`) when
-         OAuth credentials are missing OR the OAuth refresh fails
-         at runtime (e.g. Client Secret rotated, refresh token
-         invalidated — operator hasn't re-bootstrapped yet).
+      2. Eagerly refresh the OAuth access token here so a
+         `unauthorized_client` from a rotated Client Secret
+         surfaces NOW (not inside `googleapiclient.execute()`
+         five frames deep).
+      3. Fall back to Service Account (`calendar.readonly`) when
+         OAuth credentials are missing OR the refresh fails.
 
     Returns None ONLY when BOTH sources are unavailable.
     """
@@ -359,8 +361,24 @@ def build_calendar_credentials_factory_with_sa_fallback(
                     hint="will try Service Account fallback",
                 )
                 creds = None
+            # Force a refresh NOW so token-side errors (e.g.
+            # `unauthorized_client` after Client Secret rotation)
+            # surface here instead of deep inside googleapiclient.
             if creds is not None:
-                return creds
+                try:
+                    from google.auth.transport.requests import Request
+
+                    if hasattr(creds, "refresh") and not getattr(
+                        creds, "valid", False
+                    ):
+                        creds.refresh(Request())
+                    return creds
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "calendar_oauth_refresh_failed",
+                        error=str(e),
+                        hint="will try Service Account fallback",
+                    )
         if sa_inner is not None:
             sa_creds = sa_inner()
             if sa_creds is not None:

@@ -673,6 +673,48 @@ def test_composite_calendar_factory_falls_back_to_sa_on_oauth_failure(monkeypatc
     assert creds == "SA_CREDS_OBJ"
 
 
+def test_composite_calendar_factory_falls_back_when_oauth_refresh_fails(monkeypatch):
+    """FR-CR-05-165 — most production failures show up only when
+    googleapiclient tries to refresh (e.g. `unauthorized_client`
+    after a Client Secret rotation). The composite factory eagerly
+    triggers refresh and falls back to SA on failure."""
+    from app.sync.factories import (
+        build_calendar_credentials_factory_with_sa_fallback,
+    )
+
+    class FakeOAuthCreds:
+        valid = False  # force the refresh path
+
+        def refresh(self, _request):
+            raise RuntimeError("unauthorized_client: rotated")
+
+    def fake_oauth_factory(s):
+        def inner():
+            return FakeOAuthCreds()
+        return inner
+
+    def fake_sa_factory(s):
+        def inner():
+            return "SA_CREDS_OBJ"
+        return inner
+
+    monkeypatch.setattr(
+        "app.sync.factories.build_calendar_credentials_factory",
+        fake_oauth_factory,
+    )
+    monkeypatch.setattr(
+        "app.sync.factories.build_calendar_sa_credentials_factory",
+        fake_sa_factory,
+    )
+
+    from app.config import Settings
+
+    factory = build_calendar_credentials_factory_with_sa_fallback(Settings())
+    assert factory is not None
+    creds = factory()
+    assert creds == "SA_CREDS_OBJ"
+
+
 def test_composite_calendar_factory_returns_none_when_both_unavailable(monkeypatch):
     """Both inner factories return None → composite itself is
     None (so the runner's no-source guard fires correctly)."""

@@ -355,8 +355,13 @@ Scenario: LLM returns invalid JSON — runner skips and retries next tick
 | ID | Требование | Test |
 |---|---|---|
 | FR-MA-1.1 | Tick каждые `AGENDA_TICK_INTERVAL_SECONDS` (default 60s) | `test_runner_disabled_no_op` |
-| FR-MA-1.2 | Поллинг Calendar API в окне `[lead-window, lead+window]` через `fetch_calendar_events_via_api` | covered by runner code path |
+| FR-MA-1.2 | Поллинг Calendar API в окне `[lead-window, lead+window]` через `fetch_calendar_events_via_api` (приоритет) | covered by runner code path |
 | FR-MA-1.3 | Multi-calendar поддержка через `GOOGLE_CALENDAR_ID` (csv) | inherited from FR-CR-05-152 |
+| FR-MA-1.4 | Apps Script proxy fallback (FR-CR-05-136) когда `GOOGLE_CALENDAR_CLIENT_ID` не настроен, но `CALENDAR_APPS_SCRIPT_URL` есть | `test_runner_starts_with_apps_script_only` |
+| FR-MA-1.5 | Synthetic event id (`agenda_synth:<normalised_title>:<start_iso>`) когда источник не отдаёт нативный id (Apps Script) — стабильный across ticks | `test_normalise_event_synthesises_stable_id_for_apps_script_payload` |
+| FR-MA-1.6 | Native event id сохраняется когда есть (Google Calendar API path) | `test_normalise_event_keeps_native_id_when_present` |
+| FR-MA-1.7 | Event без title или без start → drop (защита от malformed payload) | `test_normalise_event_returns_none_on_missing_fields` |
+| FR-MA-1.8 | Runner НЕ стартует если нет ни одного calendar источника | `test_runner_exits_when_no_calendar_source` |
 
 ### Категория 2 — Recurrence detection
 

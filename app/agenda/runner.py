@@ -89,10 +89,17 @@ class AgendaRunner:
                 hint="set AGENDA_SLACK_TARGET_CHANNEL_ID to enable",
             )
             return
-        if self._calendar_factory is None:
+        if (
+            self._calendar_factory is None
+            and not self._settings.calendar_apps_script_url
+        ):
             log.warning(
-                "agenda_runner_no_calendar_factory",
-                hint="Calendar OAuth not configured — runner exits",
+                "agenda_runner_no_calendar_source",
+                hint=(
+                    "Neither Calendar OAuth (GOOGLE_CALENDAR_CLIENT_ID) "
+                    "nor Apps Script (CALENDAR_APPS_SCRIPT_URL) configured — "
+                    "runner exits"
+                ),
             )
             return
         log.info(
@@ -161,41 +168,98 @@ class AgendaRunner:
     # -- per-candidate steps ------------------------------------------
 
     def _fetch_events(self) -> list[dict[str, Any]]:
-        from app.services.calendar_match import fetch_calendar_events_via_api
+        """Fetch upcoming events.
+
+        Two paths (matches Fireflies/Zoom calendar_match priority):
+          1. **Direct Calendar API** (FR-CR-05-144) — when
+             ``GOOGLE_CALENDAR_CLIENT_ID`` + OAuth refresh token
+             in DB. Returns events with native Google event ids.
+          2. **Apps Script proxy** (FR-CR-05-136) — fallback when
+             only ``CALENDAR_APPS_SCRIPT_URL`` is configured.
+             Returns events WITHOUT a stable Google id — we
+             synthesise one from `title_normalised:start_iso` for
+             idempotency.
+        """
+        from app.services.calendar_match import (
+            fetch_calendar_events_around,
+            fetch_calendar_events_via_api,
+        )
 
         lead = int(self._settings.agenda_lead_time_minutes)
         window = max(1, int(self._settings.agenda_window_minutes))
         target = datetime.now(timezone.utc) + timedelta(minutes=lead)
-        events = fetch_calendar_events_via_api(
-            meeting_dt=target,
-            window_minutes=window,
-            credentials_factory=self._calendar_factory,
-            calendar_id=self._settings.google_calendar_id or "primary",
-        )
-        out: list[dict[str, Any]] = []
-        for ev in events:
-            ev_id = (
-                ev.get("id")
-                or ev.get("event_id")
-                or ev.get("ical_uid")
-                or ""
-            ).strip()
-            if not ev_id:
-                # `fetch_calendar_events_via_api` always sets `id` from
-                # the Calendar API; this guard is for unit-test events.
-                continue
-            out.append(
-                {
-                    "id": ev_id,
-                    "title": ev.get("title") or "",
-                    "start": ev.get("start"),
-                    "end": ev.get("end"),
-                    "description": ev.get("description") or "",
-                    "attendees": ev.get("attendees") or [],
-                    "recurring_event_id": ev.get("recurring_event_id"),
-                }
+
+        events_raw: list[dict[str, Any]] = []
+        # Path 1 — Calendar API.
+        if self._calendar_factory is not None:
+            try:
+                events_raw = fetch_calendar_events_via_api(
+                    meeting_dt=target,
+                    window_minutes=window,
+                    credentials_factory=self._calendar_factory,
+                    calendar_id=self._settings.google_calendar_id or "primary",
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "agenda_calendar_api_failed", error=str(e),
+                )
+
+        # Path 2 — Apps Script fallback (when API path returned
+        # nothing AND Apps Script url is set). NOT mutually
+        # exclusive — we prefer API events when both are present.
+        if not events_raw and self._settings.calendar_apps_script_url:
+            try:
+                events_raw = fetch_calendar_events_around(
+                    meeting_dt=target,
+                    window_minutes=window,
+                    apps_script_url=self._settings.calendar_apps_script_url,
+                    shared_token=self._settings.calendar_apps_script_shared_token,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "agenda_calendar_apps_script_failed", error=str(e),
+                )
+
+        return [self._normalise_event(ev) for ev in events_raw if ev]
+
+    @staticmethod
+    def _normalise_event(ev: dict[str, Any]) -> dict[str, Any] | None:
+        """Shape one Calendar event for the rest of the pipeline.
+
+        FR-CR-05-165: when the source doesn't supply a stable id
+        (Apps Script proxy is title+time only), synthesise one
+        from `title:start_iso` so the idempotency row in
+        `meeting_agendas` is still unique-per-event AND stable
+        across ticks within the lead-time window.
+        """
+        title = (ev.get("title") or "").strip()
+        start = ev.get("start")
+        if not title or start is None:
+            return None
+        ev_id = (
+            ev.get("id")
+            or ev.get("event_id")
+            or ev.get("ical_uid")
+            or ""
+        ).strip()
+        if not ev_id:
+            # Synthetic: normalised title + ISO start, no leakage
+            # of Calendar internals into our DB.
+            from app.agenda.service import normalise_title
+
+            start_iso = (
+                start.isoformat() if hasattr(start, "isoformat") else str(start)
             )
-        return out
+            ev_id = f"agenda_synth:{normalise_title(title)}:{start_iso}"
+        return {
+            "id": ev_id,
+            "title": title,
+            "start": start,
+            "end": ev.get("end"),
+            "description": ev.get("description") or "",
+            "attendees": ev.get("attendees") or [],
+            "recurring_event_id": ev.get("recurring_event_id"),
+        }
 
     def _process_candidate(self, candidate: AgendaCandidate) -> None:
         # Idempotency double-check — in case the tick window

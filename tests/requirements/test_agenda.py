@@ -496,3 +496,96 @@ def test_runner_disabled_no_op(monkeypatch):
     runner.start()
     # Thread was never created.
     assert runner._thread is None
+
+
+def test_runner_exits_when_no_calendar_source(monkeypatch):
+    """FR-CR-05-165: when AGENDA_ENABLED=true but neither
+    GOOGLE_CALENDAR_CLIENT_ID nor CALENDAR_APPS_SCRIPT_URL is set,
+    runner must NOT start the thread (no idle ticks against
+    nothing)."""
+    from app.agenda.runner import AgendaRunner
+    from app.config import Settings
+
+    monkeypatch.setenv("AGENDA_ENABLED", "true")
+    monkeypatch.setenv("AGENDA_SLACK_TARGET_CHANNEL_ID", "D0")
+    monkeypatch.setenv("CALENDAR_APPS_SCRIPT_URL", "")
+
+    runner = AgendaRunner(
+        settings=Settings(),
+        slack_client=MagicMock(),
+        llm_backend=MagicMock(),
+        calendar_factory=None,
+        docs_factory=lambda: None,
+    )
+    runner.start()
+    assert runner._thread is None
+
+
+def test_runner_starts_with_apps_script_only(monkeypatch):
+    """FR-CR-05-165: Apps Script proxy is a valid calendar source —
+    runner must NOT bail when calendar_factory is None as long as
+    CALENDAR_APPS_SCRIPT_URL is set."""
+    from app.agenda.runner import AgendaRunner
+    from app.config import Settings
+
+    monkeypatch.setenv("AGENDA_ENABLED", "true")
+    monkeypatch.setenv("AGENDA_SLACK_TARGET_CHANNEL_ID", "D0")
+    monkeypatch.setenv(
+        "CALENDAR_APPS_SCRIPT_URL",
+        "https://script.google.com/macros/s/AKfy/exec",
+    )
+    monkeypatch.setenv("CALENDAR_APPS_SCRIPT_SHARED_TOKEN", "shared-secret")
+
+    runner = AgendaRunner(
+        settings=Settings(),
+        slack_client=MagicMock(),
+        llm_backend=MagicMock(),
+        calendar_factory=None,
+        docs_factory=lambda: None,
+    )
+    runner.start()
+    assert runner._thread is not None
+    runner.stop()
+
+
+def test_normalise_event_synthesises_stable_id_for_apps_script_payload():
+    """FR-CR-05-165: Apps Script proxy returns events without `id`
+    (title + time only). Runner synthesises
+    `agenda_synth:<title>:<start>` so idempotency works across
+    ticks of the SAME event."""
+    from app.agenda.runner import AgendaRunner
+
+    start = datetime(2026, 5, 13, 15, 0, tzinfo=timezone.utc)
+    apps_script_event = {
+        "title": "Weekly sync",
+        "start": start,
+        "attendees": ["Артем"],
+    }
+    n1 = AgendaRunner._normalise_event(apps_script_event)
+    n2 = AgendaRunner._normalise_event(apps_script_event)
+    assert n1 is not None and n2 is not None
+    assert n1["id"] == n2["id"]
+    assert n1["id"].startswith("agenda_synth:weekly sync:")
+    assert n1["title"] == "Weekly sync"
+
+
+def test_normalise_event_keeps_native_id_when_present():
+    from app.agenda.runner import AgendaRunner
+
+    api_event = {
+        "id": "abc123",
+        "title": "Weekly sync",
+        "start": datetime(2026, 5, 13, 15, 0, tzinfo=timezone.utc),
+    }
+    n = AgendaRunner._normalise_event(api_event)
+    assert n is not None
+    assert n["id"] == "abc123"
+
+
+def test_normalise_event_returns_none_on_missing_fields():
+    from app.agenda.runner import AgendaRunner
+
+    assert AgendaRunner._normalise_event(
+        {"start": datetime(2026, 5, 13, tzinfo=timezone.utc)}
+    ) is None
+    assert AgendaRunner._normalise_event({"title": "x"}) is None

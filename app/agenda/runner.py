@@ -42,6 +42,20 @@ from app.logging_setup import get_logger
 log = get_logger(__name__)
 
 
+def _pick_prior_doc_url(candidate: AgendaCandidate) -> str | None:
+    """Return the most recent prior recording's `google_doc_url`,
+    or None when no prior has a Doc.
+
+    `prior_recordings` is already ordered «newest first» by
+    `find_prior_recordings`.
+    """
+    for r in candidate.prior_recordings or []:
+        url = (r.get("google_doc_url") or "").strip()
+        if url:
+            return url
+    return None
+
+
 def _doc_body(candidate: AgendaCandidate, output_md: str) -> str:
     """Wrap the LLM-rendered markdown with a stable header so the
     Doc title and the first heading match.
@@ -346,10 +360,20 @@ class AgendaRunner:
         if output is None:
             return
 
-        doc_url, doc_id = self._maybe_create_doc(candidate, output.doc_body_md)
+        # FR-CR-05-167 operator-pinned 2026-05-14: «гиперссылка должна
+        # вести на саммери встречи предыдущей». Prefer the most
+        # recent prior recording's Google Doc as the Slack-header
+        # hyperlink. Fall back to our own (newly-created) Doc when
+        # no prior has a doc_url, and to plain text when neither
+        # is available.
+        prior_doc_url = _pick_prior_doc_url(candidate)
+        own_doc_url, own_doc_id = self._maybe_create_doc(
+            candidate, output.doc_body_md,
+        )
+        header_url = prior_doc_url or own_doc_url
 
         text = render_agenda_text(
-            candidate=candidate, output=output, doc_url=doc_url,
+            candidate=candidate, output=output, doc_url=header_url,
         )
         slack_ts = self._send_slack_dm(text)
         if not slack_ts:
@@ -362,8 +386,8 @@ class AgendaRunner:
                 candidate=candidate,
                 slack_channel=self._settings.agenda_slack_target_channel_id,
                 slack_ts=slack_ts,
-                google_doc_id=doc_id,
-                google_doc_url=doc_url,
+                google_doc_id=own_doc_id,
+                google_doc_url=own_doc_url,
                 prior_zoom_ids=[
                     r.get("zoom_id") for r in candidate.prior_recordings
                     if r.get("zoom_id")
@@ -374,7 +398,8 @@ class AgendaRunner:
             calendar_event_id=candidate.calendar_event_id,
             title=candidate.title,
             slack_ts=slack_ts,
-            doc_url=doc_url,
+            header_doc_url=header_url,
+            own_doc_url=own_doc_url,
         )
 
     def _maybe_create_doc(

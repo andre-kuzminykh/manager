@@ -175,6 +175,12 @@ def main() -> int:
         "--dry-run", action="store_true",
         help="log what would happen, skip LLM / Docs / Slack / DB writes",
     )
+    parser.add_argument(
+        "--limit", type=int, default=1,
+        help="post at most N agendas — defaults to 1 so a single "
+             "wide-window run doesn't fan out a week of meetings. "
+             "Pass 0 / negative to disable the cap.",
+    )
     args = parser.parse_args()
 
     runner = _build_runner_for_oneshot()
@@ -244,6 +250,18 @@ def main() -> int:
         count=len(candidates),
         titles=[c.title for c in candidates],
     )
+
+    # FR-CR-05-167 follow-up 2026-05-14: «мне надо одну к
+    # сегодняшней встречи». Soonest first, then cap.
+    if args.limit > 0 and len(candidates) > args.limit:
+        log.info(
+            "agenda_run_once_limit_applied",
+            limit=args.limit,
+            dropped=len(candidates) - args.limit,
+            keeping=[c.title for c in candidates[: args.limit]],
+        )
+        candidates = candidates[: args.limit]
+
     if not candidates:
         log.info(
             "agenda_run_once_no_candidates",

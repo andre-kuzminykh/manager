@@ -1148,6 +1148,77 @@ def test_doc_body_includes_prior_recording_links():
     )
 
 
+def test_pick_prior_doc_url_returns_newest_with_url():
+    """FR-CR-05-167 operator-pinned 2026-05-14: «гиперссылка
+    должна вести на саммери встречи предыдущей»."""
+    from app.agenda.runner import _pick_prior_doc_url
+
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 14, 15, tzinfo=timezone.utc),
+        prior_recordings=[
+            {
+                "zoom_id": "z_newest",
+                "meeting_date": "2026-05-13T15:00:00+00:00",
+                "google_doc_url":
+                    "https://docs.google.com/document/d/newest/edit",
+            },
+            {
+                "zoom_id": "z_older",
+                "meeting_date": "2026-05-06T15:00:00+00:00",
+                "google_doc_url":
+                    "https://docs.google.com/document/d/older/edit",
+            },
+        ],
+    )
+    assert _pick_prior_doc_url(candidate) == (
+        "https://docs.google.com/document/d/newest/edit"
+    )
+
+
+def test_pick_prior_doc_url_skips_empty_and_falls_back():
+    """If the newest prior has no Doc URL, walk down the list."""
+    from app.agenda.runner import _pick_prior_doc_url
+
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 14, 15, tzinfo=timezone.utc),
+        prior_recordings=[
+            {"zoom_id": "z_newest", "google_doc_url": ""},
+            {
+                "zoom_id": "z_older",
+                "google_doc_url":
+                    "https://docs.google.com/document/d/older/edit",
+            },
+        ],
+    )
+    assert _pick_prior_doc_url(candidate) == (
+        "https://docs.google.com/document/d/older/edit"
+    )
+
+
+def test_pick_prior_doc_url_returns_none_when_none_available():
+    from app.agenda.runner import _pick_prior_doc_url
+
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="t",
+        title_normalised="t",
+        scheduled_start_at=datetime(2026, 5, 14, tzinfo=timezone.utc),
+        prior_recordings=[
+            {"zoom_id": "z", "google_doc_url": ""},
+        ],
+    )
+    assert _pick_prior_doc_url(candidate) is None
+
+
 def test_doc_body_omits_prior_section_when_no_urls():
     """No prior recording has a google_doc_url → skip the section
     entirely, don't render an empty heading."""

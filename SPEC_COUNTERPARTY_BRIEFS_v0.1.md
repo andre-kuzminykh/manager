@@ -7,13 +7,15 @@
 
 ---
 
-## v0.2 changes vs v0.1 (operator-pinned 2026-05-14)
+## v0.2.1 changes vs v0.1 (operator-pinned 2026-05-14)
 
-1. **Event-trigger, не lead-time.** Brief создаётся **как только в Calendar появляется встреча** с новым контрагентом, не за 4 часа до. Tick каждые 30 минут сканирует окно `[now, now + LOOKAHEAD_DAYS]` (default 14).
+1. **Event-trigger, не lead-time.** Brief создаётся **как только в Calendar появляется встреча** с новым контрагентом. Tick каждые 30 минут сканирует окно `[now, now + LOOKAHEAD_DAYS]` (default **7 — operator-pinned**).
 2. **Раздельные briefs.** Один Doc на компанию + по одному Doc'у на каждого ключевого бенефициара. В Slack — **один** DM на event со ссылками на все Doc'и.
 3. **Двухступенчатый research.** Сначала deep-research **компании** → LLM извлекает бенефициаров (CEO / CIO / Board / decision makers + attendees из event) → по каждому бенефициару отдельный deep-research.
-4. **Per-counterparty cache.** Doc на конкретного counterparty переиспользуется (TTL 14 дней), чтобы две встречи с одной компанией не вызывали два research'а.
-5. Idempotency по `(event_id)` (event обработан) + по `counterparty_key` (Doc создан) — две UNIQUE'и.
+4. **Per-counterparty cache.** Doc на конкретного counterparty переиспользуется (TTL **180 дней — operator-pinned «полгода»**), чтобы повторные встречи с одной компанией / человеком не вызывали новый research. После 180 дней — auto-refresh при следующей встрече.
+5. **Per-event budget $2 USD** (operator-pinned). Tally: org research (~$0.5-1) + до 5 person research'ей (~$0.5-1 каждый). Если бюджет исчерпан раньше — оставшиеся бенефициары рендерятся как «N/A — research budget exhausted».
+6. **Slack target** = тот же `D0ASY5QF6UX` что у Agenda runner (operator's DM).
+7. Idempotency по `(event_id)` (event обработан) + по `counterparty_key` (Doc создан) — две UNIQUE'и.
 
 ---
 
@@ -560,7 +562,7 @@ Scenario: deep-research budget exceeded
 | FR-CB-4.3 | **Stage 3 — Person research**: для каждого бенефициара отдельный `o4-mini-deep-research` call с web search. Output schema `PersonResearch`. | `test_brief_person_research_call` |
 | FR-CB-4.4 | Output validated against schema. Bad shape → None, runner skips this counterparty (но другие в этом же event продолжают). | `test_brief_research_output_schema` |
 | FR-CB-4.5 | Cost cap: per-event total cost ≤ `COUNTERPARTY_BRIEFS_LLM_BUDGET_USD` (default 5.0). Skip remaining person research'и когда budget исчерпан, log `brief_research_budget_exhausted`. | `test_brief_research_per_event_budget_cap` |
-| FR-CB-4.6 | TTL cache per-counterparty: re-use prior `counterparty_briefs.research_payload` within `COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS` (default 14). Cache hit → re-use Doc URL, no new research/Doc creation. | `test_brief_research_uses_cache_within_ttl` |
+| FR-CB-4.6 | TTL cache per-counterparty: re-use prior `counterparty_briefs.research_payload` within `COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS` (default **180 — operator-pinned «полгода»**). Cache hit → re-use Doc URL, no new research/Doc creation. After TTL — auto-refresh on next event. | `test_brief_research_uses_cache_within_ttl` |
 | FR-CB-4.7 | Failure of org research → skip the whole event (no beneficiaries possible without org context). | `test_brief_org_research_failure_skips_event` |
 | FR-CB-4.8 | Failure of one person research → continue with the rest, mark this person as «N/A — research failed» in the grouped Slack DM. | `test_brief_person_research_failure_continues_others` |
 
@@ -962,19 +964,23 @@ Total: **30 test cases** (v0.1 minimum).
 - FR-CR-05-165 — Agenda runner (architectural template)
 - FR-CR-05-167 — organizer/creator gate (re-used)
 
-### 16.3 Env vars added (v0.2)
+### 16.3 Env vars added (v0.2.1)
+
+Operator-pinned values 2026-05-14:
 
 ```bash
 COUNTERPARTY_BRIEFS_ENABLED=false                # default false
-COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID=     # required when enabled
-COUNTERPARTY_BRIEFS_LOOKAHEAD_DAYS=14            # how far forward we scan
+COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID=D0ASY5QF6UX  # operator's DM
+COUNTERPARTY_BRIEFS_LOOKAHEAD_DAYS=7             # 1 week ahead (operator-pinned)
 COUNTERPARTY_BRIEFS_TICK_INTERVAL_SECONDS=1800   # default 30min
-COUNTERPARTY_BRIEFS_LLM_BUDGET_USD=5.0           # per-event total cap
-COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS=14            # per-counterparty TTL
-COUNTERPARTY_BRIEFS_MAX_BENEFICIARIES=5          # ≤ 5 person briefs per event
+COUNTERPARTY_BRIEFS_LLM_BUDGET_USD=2.0           # per-event total cap (operator-pinned)
+COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS=180           # per-counterparty TTL (operator-pinned: «полгода»)
+COUNTERPARTY_BRIEFS_MAX_BENEFICIARIES=5          # ≤ 5 person briefs per event (operator-pinned)
 COUNTERPARTY_BRIEFS_RESEARCH_MODEL=o4-mini-deep-research
 COUNTERPARTY_BRIEFS_EXTRACT_MODEL=               # falls back to OPENAI_MODEL
 ```
+
+NB: per-event budget $2 fits ~1 org research ($0.5-1) + 1-2 person research'es ($0.5-1 each). С 5 beneficiaries придётся либо отказаться от части person research'ей (и отправлять «N/A — research budget exhausted» в DM), либо снизить prompt complexity. Trade-off для operator review после первых live runs.
 
 ---
 

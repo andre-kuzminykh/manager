@@ -290,6 +290,99 @@ def test_build_candidates_skips_already_posted(session):
     assert candidates == []
 
 
+def test_build_candidates_filters_by_organizer_email(session):
+    """FR-CR-05-167: when `organizer_email` is set, events
+    organised by anyone else are dropped at build_candidates
+    time — operator-pinned: «надо делать такие агенды где
+    организатор 1@thehumanoid.ai»."""
+    now = datetime(2026, 5, 14, 9, 0, 0, tzinfo=timezone.utc)
+    # Two prior recordings for «Летучка СЕО Office c Ириной»
+    # — this is the meeting we DON'T want an agenda for.
+    session.add_all(
+        [
+            _zr(
+                "irina1",
+                "Летучка СЕО Office c Ириной",
+                now - timedelta(days=1),
+            ),
+            _zr(
+                "irina2",
+                "Летучка СЕО Office c Ириной",
+                now - timedelta(days=2),
+            ),
+        ]
+    )
+    # Two prior recordings for «Fundraising daily» — Артемова
+    # серия, agenda needed.
+    session.add_all(
+        [
+            _zr(
+                "art1",
+                "Fundraising daily",
+                now - timedelta(days=1),
+            ),
+            _zr(
+                "art2",
+                "Fundraising daily",
+                now - timedelta(days=2),
+            ),
+        ]
+    )
+    session.flush()
+
+    events = [
+        {
+            "id": "ev_irina",
+            "title": "Летучка СЕО Office c Ириной",
+            "start": now + timedelta(minutes=10),
+            "organizer": {"email": "irina@thehumanoid.ai"},
+        },
+        {
+            "id": "ev_artem",
+            "title": "Fundraising daily",
+            "start": now + timedelta(minutes=10),
+            "organizer": {"email": "1@thehumanoid.ai"},
+        },
+    ]
+
+    cs = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=2, now=now,
+        organizer_email="1@thehumanoid.ai",
+    )
+    assert [c.title for c in cs] == ["Fundraising daily"]
+
+
+def test_build_candidates_organizer_filter_case_insensitive(session):
+    now = datetime(2026, 5, 14, 9, 0, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _zr(
+                "a", "Weekly sync", now - timedelta(days=1),
+            ),
+            _zr(
+                "b", "Weekly sync", now - timedelta(days=2),
+            ),
+        ]
+    )
+    session.flush()
+
+    events = [
+        {
+            "id": "ev",
+            "title": "Weekly sync",
+            "start": now + timedelta(minutes=10),
+            "organizer": {"email": "1@THEHumanoid.AI"},
+        }
+    ]
+    cs = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=2, now=now,
+        organizer_email="1@thehumanoid.ai",
+    )
+    assert len(cs) == 1
+
+
 def test_build_candidates_respects_min_prior_meetings(session):
     """min_prior_meetings=2 means we need at least TWO prior
     recordings before treating the event as recurring."""

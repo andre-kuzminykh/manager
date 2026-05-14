@@ -259,6 +259,7 @@ def build_candidates(
     lookback_days: int,
     min_prior_meetings: int,
     now: datetime | None = None,
+    organizer_email: str | None = None,
 ) -> list[AgendaCandidate]:
     """Filter+enrich Calendar events into candidates ready for
     LLM compose.
@@ -274,6 +275,7 @@ def build_candidates(
     """
     svc = AgendaService()
     out: list[AgendaCandidate] = []
+    org_filter = (organizer_email or "").strip().lower() or None
     for ev in events or []:
         ev_id = (ev.get("id") or "").strip()
         title = (ev.get("title") or "").strip()
@@ -287,6 +289,20 @@ def build_candidates(
                 continue
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
+        # FR-CR-05-167 — organizer filter. Calendar event's
+        # `organizer` carries email + displayName; teammates'
+        # meetings (e.g. Иринины «Летучка СЕО Office»,
+        # «Подземелья») are dropped here so the agenda runner
+        # only fires for events the operator hosts.
+        if org_filter:
+            org = ev.get("organizer") or {}
+            org_email = ""
+            if isinstance(org, dict):
+                org_email = (org.get("email") or "").strip().lower()
+            elif isinstance(org, str):
+                org_email = org.strip().lower()
+            if org_email != org_filter:
+                continue
         # Skip already-posted.
         if svc.is_already_posted(session, calendar_event_id=ev_id):
             continue

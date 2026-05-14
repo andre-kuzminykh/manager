@@ -170,6 +170,7 @@ def fetch_calendar_events_via_api(
             if ev_id:
                 seen_event_ids.add(ev_id)
             out.append({
+                "id": ev_id,
                 "title": ev.get("summary") or "",
                 "start": (ev.get("start") or {}).get("dateTime")
                          or (ev.get("start") or {}).get("date") or "",
@@ -177,6 +178,7 @@ def fetch_calendar_events_via_api(
                         or (ev.get("end") or {}).get("date") or "",
                 "attendees": ev.get("attendees") or [],
                 "description": ev.get("description") or "",
+                "organizer": ev.get("organizer") or {},
                 "_calendar_id": cid,  # for trace / debugging
             })
     return out

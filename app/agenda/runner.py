@@ -150,6 +150,7 @@ class AgendaRunner:
                 events=events,
                 lookback_days=self._settings.agenda_lookback_days,
                 min_prior_meetings=self._settings.agenda_min_prior_meetings,
+                organizer_email=self._settings.zoom_required_email or None,
             )
 
         log.info(
@@ -290,6 +291,7 @@ class AgendaRunner:
             "end": ev.get("end"),
             "description": ev.get("description") or "",
             "attendees": ev.get("attendees") or [],
+            "organizer": ev.get("organizer") or {},
             "recurring_event_id": ev.get("recurring_event_id"),
         }
 

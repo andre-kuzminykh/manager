@@ -236,6 +236,7 @@ def main() -> int:
             events=events,
             lookback_days=settings.agenda_lookback_days,
             min_prior_meetings=settings.agenda_min_prior_meetings,
+            organizer_email=settings.zoom_required_email or None,
         )
 
     log.info(

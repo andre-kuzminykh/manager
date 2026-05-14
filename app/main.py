@@ -136,15 +136,26 @@ def run() -> None:
     # AGENDA_ENABLED=false; never blocks startup; failure here
     # mustn't take down the Slack bot.
     try:
+        from slack_sdk import WebClient
+
         from app.agenda.runner import AgendaRunner
         from app.sync.factories import (
             build_calendar_credentials_factory_with_sa_fallback,
             build_docs_factory,
         )
 
+        # FR-CR-05-167 — let the operator post agendas through a
+        # different Slack App when the main bot token can't see
+        # the target DM (e.g. manager/.env has the old App's
+        # token but AGENDA_SLACK_TARGET_CHANNEL_ID was opened
+        # with the new ingest App).
+        agenda_slack = app.client
+        if settings.agenda_slack_bot_token:
+            agenda_slack = WebClient(token=settings.agenda_slack_bot_token)
+
         agenda_runner = AgendaRunner(
             settings=settings,
-            slack_client=app.client,
+            slack_client=agenda_slack,
             llm_backend=backend,
             calendar_factory=build_calendar_credentials_factory_with_sa_fallback(
                 settings

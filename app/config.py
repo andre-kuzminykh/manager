@@ -98,6 +98,19 @@ class Settings(BaseSettings):
     agenda_compose_model: str = Field(
         default="", alias="AGENDA_COMPOSE_MODEL"
     )
+    # FR-CR-05-167 — Slack bot token для отправки повесток.
+    # Optional override: если задан, runner шлёт `chat.postMessage`
+    # через этот токен, а не через основной `SLACK_BOT_TOKEN`. Полезно
+    # когда:
+    #   - В manager/.env основной токен от старого Slack App,
+    #     а DM (`AGENDA_SLACK_TARGET_CHANNEL_ID`) открыт с
+    #     новым App (FR-CR-05-162 slack ingest token).
+    #   - Хочется отделить identity бота, который шлёт повестки,
+    #     от identity того, что обрабатывает task-команды.
+    # Пусто (default) → fallback на settings.slack_bot_token.
+    agenda_slack_bot_token: str = Field(
+        default="", alias="AGENDA_SLACK_BOT_TOKEN"
+    )
     # FR-CR-05-166 — Источник «upcoming meetings».
     #
     #   - "calendar"      — Google Calendar API (FR-CR-05-165) либо OAuth,

@@ -72,7 +72,12 @@ def _build_runner_for_oneshot():
         log.error("agenda_run_once_sdk_missing", error=str(e))
         return None
 
-    slack_client = WebClient(token=settings.slack_bot_token)
+    slack_client = WebClient(
+        token=(
+            settings.agenda_slack_bot_token
+            or settings.slack_bot_token
+        )
+    )
     llm_backend = OpenAIBackend(
         OpenAI(api_key=settings.openai_api_key),
         settings.openai_model,

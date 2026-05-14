@@ -41,6 +41,31 @@ _STATUS_LABEL = {
 }
 
 
+def _format_attendees(items: list[Any]) -> str:
+    """Calendar API returns attendees as
+    ``[{email, displayName, responseStatus, organizer?}, ...]``.
+    Apps Script proxy returns plain strings. Accept both shapes
+    and emit a comma-separated display string. Prefer
+    `displayName`, fall back to `email`.
+    """
+    out: list[str] = []
+    for it in items or []:
+        if isinstance(it, str):
+            s = it.strip()
+            if s:
+                out.append(s)
+        elif isinstance(it, dict):
+            name = (
+                it.get("displayName")
+                or it.get("name")
+                or it.get("email")
+                or ""
+            ).strip()
+            if name:
+                out.append(name)
+    return ", ".join(out)
+
+
 def _ddmm(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -108,9 +133,10 @@ def render_agenda_text(
         f"{candidate.title} - Повестка"
     )
 
-    if candidate.attendees:
+    names = _format_attendees(candidate.attendees)
+    if names:
         lines.append("")
-        lines.append(f"Участники: {', '.join(candidate.attendees)}")
+        lines.append(f"Участники: {names}")
 
     # «На прошлой встрече» — free prose joined from previous_recap
     # bullets. Operator wants a paragraph, not a bullet list.

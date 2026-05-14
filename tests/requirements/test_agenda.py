@@ -503,6 +503,34 @@ def test_render_agenda_text_omits_doc_section_when_no_url():
     assert "Подробно" not in text
 
 
+def test_render_agenda_text_attendees_accepts_dict_or_string():
+    """FR-CR-05-167 bug-fix 2026-05-14: Calendar API returns
+    attendees as `[{email, displayName, ...}]` while the Apps
+    Script proxy emits plain strings. Slack renderer must accept
+    both without crashing on `", ".join` of dicts."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Mixed",
+        title_normalised="mixed",
+        scheduled_start_at=datetime(2026, 5, 14, 11, tzinfo=timezone.utc),
+        attendees=[
+            "Artem Sokolov",
+            {"displayName": "Irina Shipilova", "email": "irina@x"},
+            {"email": "third@x"},  # no displayName — falls back to email
+            {"foo": "bar"},  # garbage — silently dropped
+        ],
+    )
+    output = AgendaOutput(
+        previous_recap=[], tasks_checklist=[], open_questions=[],
+        doc_body_md="",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output, doc_url=None,
+    )
+    assert "Участники: Artem Sokolov, Irina Shipilova, third@x" in text
+
+
 def test_render_agenda_text_done_tasks_show_status_label():
     """FR-CR-05-167: done / cancelled tasks should still appear in
     «К обсуждению» (operator wants the full status snapshot), with

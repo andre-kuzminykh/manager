@@ -182,6 +182,15 @@ def render_recording_for_prompt(r: ZoomRecording) -> dict[str, Any]:
 
 
 def render_task_for_prompt(t: Task) -> dict[str, Any]:
+    due_date_iso = t.due_date.isoformat() if t.due_date else None
+    # `due_time` is a `time` object on the Task model (FR-CR-04-29).
+    due_time = getattr(t, "due_time", None)
+    due_time_str: str | None = None
+    if due_time is not None:
+        try:
+            due_time_str = due_time.strftime("%H:%M")
+        except Exception:  # noqa: BLE001
+            due_time_str = None
     return {
         "id": t.id,
         "title": t.title or "",
@@ -190,7 +199,8 @@ def render_task_for_prompt(t: Task) -> dict[str, Any]:
         "priority": getattr(t.priority, "value", str(t.priority)),
         "owner_display_name": t.owner_display_name or "",
         "owner_user_id": t.owner_user_id or "",
-        "due_date": t.due_date.isoformat() if t.due_date else None,
+        "due_date": due_date_iso,
+        "due_time": due_time_str,
     }
 
 

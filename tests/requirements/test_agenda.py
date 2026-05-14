@@ -482,10 +482,13 @@ def test_compose_agenda_returns_none_on_non_dict_output():
 
 
 def test_render_agenda_text_format_matches_operator_pin():
-    """FR-CR-05-167 operator-pinned 2026-05-14: повестка в стиле
-    post-meeting summary. Без эмодзи. Хедер «DD/MM - <title> -
-    Повестка». Recap абзацем «На прошлой встрече: ...». Задачи
-    нумерованным списком «1) title - description — owner • DD.MM.YYYY»."""
+    """FR-CR-05-167 operator-pinned 2026-05-14 (final):
+    Header is a Slack-mrkdwn hyperlink to the Google Doc:
+      *<url|DD/MM - Агенда к <title>>*
+    Section heading is «Статус задач к обсуждению:».
+    «На прошлой встрече: » appears exactly once. Due renders
+    as DD.MM.YYYY HH:MM when due_time is present.
+    No emojis."""
     candidate = AgendaCandidate(
         calendar_event_id="ev1",
         recurring_event_id=None,
@@ -507,6 +510,7 @@ def test_render_agenda_text_format_matches_operator_pin():
                 "status": "todo",
                 "owner": "Irina Shipilova",
                 "due": "2026-05-13",
+                "due_time": "18:00",
             },
             {
                 "task_id": 2,
@@ -524,27 +528,111 @@ def test_render_agenda_text_format_matches_operator_pin():
         candidate=candidate, output=output,
         doc_url="https://docs.google.com/document/d/g1/edit",
     )
-    # Header
-    assert text.startswith("14/05 - Fundraising daily - Повестка")
+    # Header — Slack mrkdwn hyperlink
+    assert text.startswith(
+        "*<https://docs.google.com/document/d/g1/edit|"
+        "14/05 - Агенда к Fundraising daily>*"
+    )
     # No emojis
     for em in ("📋", "✅", "🎯", "📄", "☐", "☑", "▣", "⛔", "✕"):
         assert em not in text, f"emoji {em} must not appear in agenda"
     # Attendees section
     assert "Участники: Artem Sokolov, Irina Shipilova" in text
-    # Recap as prose paragraph
-    assert "На прошлой встрече: " in text
+    # Recap as prose paragraph — label appears exactly once
+    assert text.count("На прошлой встрече:") == 1
     assert "Разобрали список инвесторов" in text
-    # Numbered task list
-    assert "К обсуждению:" in text
+    # Section heading
+    assert "Статус задач к обсуждению:" in text
+    assert "К обсуждению:" not in text  # old name retired
+    # Numbered task list with time
     assert "1) Bracket Capital - отправить аутрич" in text
     assert "— Irina Shipilova" in text
-    assert "13.05.2026" in text
+    assert "13.05.2026 18:00" in text  # due_time present
+    assert "14.05.2026" in text  # due_time absent — date only
     # in_progress status surfaces as a [..] suffix
     assert "[in_progress]" in text
     # Open question is appended as a continuation item
     assert "Утром начать outreach" in text
-    # Doc link (no emoji prefix)
-    assert "Подробно: https://docs.google.com/document/d/g1/edit" in text
+    # No trailing «Подробно:» (it's in the header link now)
+    assert "Подробно:" not in text
+
+
+def test_render_agenda_text_strips_duplicate_recap_label():
+    """LLM sometimes prepends «На прошлой встрече» even though
+    the prompt forbids it. Renderer must strip the duplicate so
+    the label appears exactly once."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Fundraising daily",
+        title_normalised="fundraising daily",
+        scheduled_start_at=datetime(2026, 5, 14, 11, tzinfo=timezone.utc),
+    )
+    output = AgendaOutput(
+        previous_recap=[
+            "На прошлой встрече обсуждали roadmap",
+            "Договорились про deck",
+        ],
+        tasks_checklist=[], open_questions=[], doc_body_md="",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output, doc_url=None,
+    )
+    # «На прошлой встрече» appears exactly once (the renderer's
+    # own label), not twice.
+    assert text.count("На прошлой встрече") == 1
+    assert "обсуждали roadmap" in text
+
+
+def test_render_agenda_text_header_without_doc_url_is_plain():
+    """No Doc URL → header is plain bold text, no hyperlink."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Fundraising daily",
+        title_normalised="fundraising daily",
+        scheduled_start_at=datetime(2026, 5, 14, 11, tzinfo=timezone.utc),
+    )
+    output = AgendaOutput(
+        previous_recap=[], tasks_checklist=[], open_questions=[],
+        doc_body_md="",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output, doc_url=None,
+    )
+    assert text.startswith("*14/05 - Агенда к Fundraising daily*")
+    # No Slack-mrkdwn link markers
+    assert "<https" not in text
+
+
+def test_render_agenda_text_caps_task_count_in_slack_and_points_to_doc():
+    """FR-CR-05-167 follow-up: long task lists overflow Slack's
+    3000-char cap. Cap at 12 in Slack, mention the overflow with
+    a pointer to the Doc."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Fundraising daily",
+        title_normalised="fundraising daily",
+        scheduled_start_at=datetime(2026, 5, 14, 11, tzinfo=timezone.utc),
+    )
+    output = AgendaOutput(
+        previous_recap=[],
+        tasks_checklist=[
+            {"title": f"T{i}", "status": "todo", "owner": "admin"}
+            for i in range(1, 21)
+        ],
+        open_questions=[],
+        doc_body_md="",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output,
+        doc_url="https://docs.google.com/document/d/g1/edit",
+    )
+    assert "1) T1" in text
+    assert "12) T12" in text
+    assert "13) T13" not in text  # capped
+    assert "ещё 8 пунктов в Google Doc" in text
 
 
 def test_render_agenda_text_truncates_when_too_long():
@@ -569,7 +657,10 @@ def test_render_agenda_text_truncates_when_too_long():
         doc_url="https://docs.google.com/d/x",
     )
     assert len(text) <= 2950
-    assert "Подробно" in text  # doc link mention survives the trim
+    # Header hyperlink survives the trim (Doc reachable from there)
+    assert "<https://docs.google.com/d/x|" in text
+    # Trailing overflow marker is added
+    assert "Google Doc" in text
 
 
 def test_render_agenda_text_omits_doc_section_when_no_url():

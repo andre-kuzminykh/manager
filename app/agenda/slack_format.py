@@ -1,27 +1,25 @@
 """FR-CR-05-165 — Slack mrkdwn renderer for the agenda DM.
 
-FR-CR-05-167 (operator-pinned 2026-05-14): match the style of the
-post-meeting summary the operator already gets — no emojis,
-numbered task list, recap rendered as prose. Concretely:
+FR-CR-05-167 operator-pinned 2026-05-14 — final format:
 
-    DD/MM - <meeting title> - Повестка
+    *<doc-url|14/05 - Агенда к Fundraising daily>*
 
-    Участники: <comma-separated names>
+    Участники: A, B, C
 
-    На прошлой встрече: <free text 2-4 sentences>
+    На прошлой встрече: <free prose, single label>
 
-    К обсуждению:
+    Статус задач к обсуждению:
 
-    1) <task title> - <short description> — <owner> • <DD.MM.YYYY HH:MM> [<status>]
+    1) <task title> - <description> — <owner> • DD.MM.YYYY HH:MM [<status>]
     2) ...
 
-    Подробно: <google doc url>
+The header line is a Slack-style hyperlink to the Google Doc when
+one was created — clicking opens the full agenda (full task list,
+no Slack 3000-char cap). Without a doc URL we render plain bold
+text.
 
-Status suffix lives at the end of the line and is shown only when
-the task is not in the default `todo` state — keeps the «open
-items» feel of the operator's pinned format. Long bodies are
-trimmed to fit Slack's 3000-char `text` cap; the Doc carries the
-full version.
+Status suffix appears only when the task is NOT `todo` — keeps
+default-state items visually clean.
 """
 from __future__ import annotations
 
@@ -39,6 +37,14 @@ _STATUS_LABEL = {
     "done": "done",
     "cancelled": "cancelled",
 }
+
+# Slack `text` field is capped near 3000 chars; we cap a bit
+# tighter so the trailing «… полный список в Google Doc» line
+# fits.
+_SLACK_TEXT_CAP = 2900
+# Cap the number of tasks we render directly in Slack — the full
+# list always lives in the Doc.
+_SLACK_TASK_LIMIT = 12
 
 
 def _format_attendees(items: list[Any]) -> str:
@@ -72,23 +78,44 @@ def _ddmm(dt: datetime) -> str:
     return dt.strftime("%d/%m")
 
 
-def _fmt_due(due_iso: str | None) -> str:
-    """Render `due` as `DD.MM.YYYY` (operator-pinned format).
-    Falls back to empty string on parse error."""
+def _fmt_due(due_iso: str | None, due_time: str | None = None) -> str:
+    """Render `due` as `DD.MM.YYYY` or `DD.MM.YYYY HH:MM` when a
+    time is available. Falls back to empty string on parse
+    error."""
     if not due_iso:
         return ""
     try:
         d = datetime.fromisoformat(due_iso).date()
-        return d.strftime("%d.%m.%Y")
     except ValueError:
         return ""
+    base = d.strftime("%d.%m.%Y")
+    if due_time and isinstance(due_time, str) and due_time.strip():
+        return f"{base} {due_time.strip()}"
+    return base
+
+
+def _strip_recap_label(text: str) -> str:
+    """LLM occasionally re-prepends «На прошлой встрече: » even
+    though the prompt says not to. Strip it so the renderer's own
+    label isn't doubled up.
+
+    Operator-pinned: «не надо два раза писать "на прошлой встрече"».
+    """
+    if not text:
+        return ""
+    s = text.strip()
+    lower = s.lower()
+    for prefix in ("на прошлой встрече:", "на прошлой встрече ", "на прошлой встрече —", "на прошлой встрече,"):
+        if lower.startswith(prefix):
+            s = s[len(prefix):].lstrip(" :,-—")
+            break
+    return s
 
 
 def _fmt_task_line(idx: int, t: dict[str, Any]) -> str:
     title = (t.get("title") or "").strip()
     desc = (t.get("description") or "").strip()
     if desc:
-        # Keep desc compact — full body lives in Google Doc.
         if len(desc) > 220:
             desc = desc[:217].rstrip() + "…"
         head = f"{idx}) {title} - {desc}"
@@ -100,7 +127,7 @@ def _fmt_task_line(idx: int, t: dict[str, Any]) -> str:
     if owner:
         tail_parts.append(owner)
 
-    due = _fmt_due(t.get("due"))
+    due = _fmt_due(t.get("due"), t.get("due_time"))
     if due:
         tail_parts.append(due)
 
@@ -114,48 +141,47 @@ def _fmt_task_line(idx: int, t: dict[str, Any]) -> str:
     return f"{head} — " + " • ".join(tail_parts)
 
 
+def _render_header(candidate: AgendaCandidate, doc_url: str | None) -> str:
+    """`<url|DD/MM - Агенда к <title>>` — Slack mrkdwn hyperlink.
+    Without a URL: plain bold text. Same shape Fireflies / Zoom
+    use for the meeting summary header line."""
+    label = f"{_ddmm(candidate.scheduled_start_at)} - Агенда к {candidate.title}"
+    if doc_url:
+        return f"*<{doc_url}|{label}>*"
+    return f"*{label}*"
+
+
 def render_agenda_text(
     *,
     candidate: AgendaCandidate,
     output: AgendaOutput,
     doc_url: str | None,
 ) -> str:
-    """Build the Slack-mrkdwn body in the operator-pinned style.
-
-    The Doc URL is rendered as a plain hyperlink so Slack collapses
-    it to «Подробно» — same look as Fireflies/Zoom summary cards.
-    """
+    """Build the Slack-mrkdwn body in the operator-pinned style."""
     lines: list[str] = []
-
-    # Header — date + title + section name.
-    lines.append(
-        f"{_ddmm(candidate.scheduled_start_at)} - "
-        f"{candidate.title} - Повестка"
-    )
+    lines.append(_render_header(candidate, doc_url))
 
     names = _format_attendees(candidate.attendees)
     if names:
         lines.append("")
         lines.append(f"Участники: {names}")
 
-    # «На прошлой встрече» — free prose joined from previous_recap
-    # bullets. Operator wants a paragraph, not a bullet list.
+    # Recap rendered as a single paragraph with EXACTLY ONE
+    # «На прошлой встрече: » label — strip any duplicate the LLM
+    # might have prepended.
     recap_blob = " ".join(
         item.strip().rstrip(".") + "." for item in output.previous_recap
         if item and item.strip()
     )
+    recap_blob = _strip_recap_label(recap_blob).strip()
     if recap_blob:
         lines.append("")
         lines.append(f"На прошлой встрече: {recap_blob}")
 
-    # «К обсуждению» = open tasks with status + free-form
-    # discussion bullets the LLM produced. Tasks render as the
-    # operator-pinned numbered list; open_questions append below
-    # the task list as continuation items.
+    # Task list + free-form open_questions, in a single numbered
+    # list under one section heading. Cap at _SLACK_TASK_LIMIT —
+    # full list always available in the Doc.
     discussion_items: list[dict[str, Any]] = list(output.tasks_checklist or [])
-    # Treat free-form open_questions as no-status items so they
-    # land in the same numbered list — operator pinned: «к
-    # обсуждению: список задач из предыдущего и их статус».
     for q in output.open_questions or []:
         q = (q or "").strip()
         if not q:
@@ -164,20 +190,23 @@ def render_agenda_text(
 
     if discussion_items:
         lines.append("")
-        lines.append("К обсуждению:")
+        lines.append("Статус задач к обсуждению:")
         lines.append("")
-        for i, t in enumerate(discussion_items[:30], 1):
+        rendered = discussion_items[:_SLACK_TASK_LIMIT]
+        for i, t in enumerate(rendered, 1):
             lines.append(_fmt_task_line(i, t))
-
-    if doc_url:
-        lines.append("")
-        lines.append(f"Подробно: {doc_url}")
+        if len(discussion_items) > _SLACK_TASK_LIMIT and doc_url:
+            lines.append("")
+            lines.append(
+                f"…ещё {len(discussion_items) - _SLACK_TASK_LIMIT} "
+                "пунктов в Google Doc"
+            )
 
     out = "\n".join(lines)
-    # Slack's chat.postMessage `text` field is capped near 3000
-    # chars; trim defensively so the post call doesn't fail.
-    if len(out) > 2900:
-        out = out[:2880].rstrip() + "\n…\nПодробно в Google Doc"
+    if len(out) > _SLACK_TEXT_CAP:
+        suffix = "\n…\nполный список в Google Doc" if doc_url else "\n…"
+        cap = _SLACK_TEXT_CAP - len(suffix)
+        out = out[:cap].rstrip() + suffix
     return out
 
 

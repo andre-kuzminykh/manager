@@ -1,9 +1,19 @@
-# SPEC v0.1 — Counterparty Briefs (FR-CR-05-168)
+# SPEC v0.2 — Counterparty Briefs (FR-CR-05-168)
 
-> **Версия:** v0.1, 2026-05-14
-> **Scope:** новая фича — за N часов до встречи с внешним контрагентом бот собирает «справку» (profile + history) и кладёт её в Google Doc, ссылку шлёт в Slack DM
+> **Версия:** v0.2, 2026-05-14 (revised)
+> **Scope:** новая фича — как только в Calendar появляется встреча с новым контрагентом, бот автоматически собирает справки (отдельно по компании + отдельно по каждому бенефициару) и кладёт ссылки в Slack DM
 > **Источники данных:** Google Calendar API (предстоящие встречи), таблица `counterparties` + `counterparty_attributes` (FR-CR-05-124), Zoom/Fireflies summary прошлых встреч, OpenAI `o4-mini-deep-research` (web research для unknown)
 > **Зависит от:** FR-CR-05-124 (counterparties hub + satellite), FR-CR-05-127 (whisper bias names), FR-CR-05-144 / FR-CR-05-152 (Calendar OAuth), FR-CR-05-165 / FR-CR-05-167 (Agenda runner — переиспользуется как pattern)
+
+---
+
+## v0.2 changes vs v0.1 (operator-pinned 2026-05-14)
+
+1. **Event-trigger, не lead-time.** Brief создаётся **как только в Calendar появляется встреча** с новым контрагентом, не за 4 часа до. Tick каждые 30 минут сканирует окно `[now, now + LOOKAHEAD_DAYS]` (default 14).
+2. **Раздельные briefs.** Один Doc на компанию + по одному Doc'у на каждого ключевого бенефициара. В Slack — **один** DM на event со ссылками на все Doc'и.
+3. **Двухступенчатый research.** Сначала deep-research **компании** → LLM извлекает бенефициаров (CEO / CIO / Board / decision makers + attendees из event) → по каждому бенефициару отдельный deep-research.
+4. **Per-counterparty cache.** Doc на конкретного counterparty переиспользуется (TTL 14 дней), чтобы две встречи с одной компанией не вызывали два research'а.
+5. Idempotency по `(event_id)` (event обработан) + по `counterparty_key` (Doc создан) — две UNIQUE'и.
 
 ---
 
@@ -114,23 +124,37 @@ Open: отправить JV proposal + materials + data room
 
 ### 4.2 Как решает
 
-1. **Discovery** — Calendar API tick → upcoming events в окне `[now+4h ± 5min]` (как Agenda runner)
-2. **Filter** — organizer + creator == operator (FR-CR-05-167)
-3. **Counterparty extraction** — LLM-извлечение **имени контрагента** + **компании** из event title / description / attendees. Например `Samer Nawaf Zawaideh - SDF` → person=Samer, org=SDF.
-4. **Lookup**:
-   - Person → search `counterparty_mentions` + `counterparty_attributes` по name normalised
-   - Org → search `counterparties` (FR-CR-05-124 hub) по name normalised
-   - Past meetings → join `zoom_recordings` / `meeting_recordings` где title содержит counterparty name (используем `_force_meeting_title_first_line` FR-CR-05-152 + normalise)
-5. **Research** (только для unknown counterparties):
-   - Call OpenAI `o4-mini-deep-research` с web-search tool
-   - Prompt: «Build a profile brief on <person/company name + organization> in the format below»
-   - Cache result in `counterparty_briefs.research_payload` JSON для повторного использования
-6. **Doc generation** — Google Docs API:
-   - Insert hero photo (LinkedIn picture URL if found — bare image URL appended; Docs autodetects + embeds)
-   - Header: `<Name> - <Role> at <Company>`
-   - Sections (§6.2) — markdown table for positions / investments
-7. **Slack DM** — short body + Doc URL (similar to Agenda)
-8. **Idempotency** — `counterparty_briefs` table UNIQUE on `(calendar_event_id, counterparty_key)` так что multi-ticks не дубль и multi-counterparty в одной встрече = разные briefs
+1. **Discovery** — Calendar API tick каждые 30 мин → events в окне `[now, now + LOOKAHEAD_DAYS]` (default 14)
+2. **Per-event idempotency** — если `event_id` уже в `counterparty_briefs_events` — skip (мы его уже обработали)
+3. **Filter** — organizer + creator == operator (FR-CR-05-167)
+4. **Counterparty extraction** — LLM-извлечение **компании (org)** + initial person'ов из event title / description / attendees. Например `SDF <> Humanoid | Intro call` + attendee `samer.zawaideh@sdf.ae` → org=Strategic Development Fund, initial_persons=[Samer Nawaf Zawaideh].
+5. **Org Doc** (always — per event):
+   - **DB lookup** в `counterparties` (FR-CR-05-124) — может уже знаем компанию
+   - **Cache check** — есть ли свежий `counterparty_briefs` row на этот org_key (TTL ≤ 14 дней)? Если есть — re-use existing Doc URL, skip research
+   - **Если нет cache + budget OK** → `o4-mini-deep-research` на org: who are they / sectors / leadership / portfolio / news. Output JSON-schema (`OrgResearch`).
+   - **Build org Doc** через `DocsExportService` (FR-CR-05-43): Doc «<DD/MM> - Brief: Strategic Development Fund (org)» по template §6.2-org
+   - **Persist** `counterparty_briefs` row с `kind='org'`
+6. **Beneficiary extraction** (LLM call, входной материал = `OrgResearch.leadership` + initial_persons из event):
+   - LLM выбирает ≤ 5 ключевых бенефициаров: CEO, CIO, CFO, Board members, founders, существующие контакты, attendees из event
+   - Output: list of `{person_name, person_role, evidence}` — где `evidence` это «почему мы считаем что это релевантный человек»
+   - Дедуп по name normalised
+7. **Person Docs** (по одному на каждого бенефициара):
+   - DB lookup `counterparty_mentions` + cache check (как для org)
+   - Если нет cache + budget OK → `o4-mini-deep-research` на person: career, current role, links, photo, deals
+   - Build person Doc по template §6.2-person (operator-pinned формат с фото вверху)
+   - Persist `counterparty_briefs` row с `kind='person'`
+8. **Single Slack DM** — ОДИН message в `COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID` со ссылками на org Doc + все person Docs:
+
+   ```
+   *Новая встреча 14/05 16:00: SDF <> Humanoid | Intro call*
+
+   Справки готовы:
+   • <org-doc-url|🏢 Strategic Development Fund>
+   • <person-doc-url|👤 Samer Nawaf Zawaideh — CIO>
+   • <person-doc-url|👤 Khaled Al Hashemi — CEO>
+   ```
+
+9. **Persist** `counterparty_briefs_events` row с `event_id` (UNIQUE) — чтобы не повторить tick
 
 ### 4.3 Почему лучше альтернатив
 
@@ -497,15 +521,16 @@ Scenario: deep-research budget exceeded
 
 ## 10. Functional Requirements
 
-### Категория 1 — Discovery
+### Категория 1 — Discovery (event-trigger, v0.2)
 
 | ID | Требование | Test |
 |---|---|---|
-| FR-CB-1.1 | Tick каждые `BRIEF_TICK_INTERVAL_SECONDS` (default 300) | `test_brief_runner_disabled_no_op` |
-| FR-CB-1.2 | Calendar API в окне `[now + LEAD_HOURS - WINDOW, +]` (default LEAD_HOURS=4, WINDOW=5min) | `test_brief_window_lookahead` |
+| FR-CB-1.1 | Tick каждые `BRIEF_TICK_INTERVAL_SECONDS` (default 1800 = 30 min) | `test_brief_runner_disabled_no_op` |
+| FR-CB-1.2 | Calendar API в окне `[now, now + COUNTERPARTY_BRIEFS_LOOKAHEAD_DAYS]` (default 14) | `test_brief_window_lookahead_days` |
 | FR-CB-1.3 | Organizer + creator gate (FR-CR-05-167) | `test_brief_organizer_creator_filter` |
 | FR-CB-1.4 | Multi-calendar поддержка через `GOOGLE_CALENDAR_ID` | inherited |
-| FR-CB-1.5 | Поддерживать `--lookahead-hours N` в CLI | `test_brief_cli_lookahead_arg` |
+| FR-CB-1.5 | Per-event idempotency: `counterparty_briefs_events.event_id` UNIQUE | `test_brief_event_idempotency_skips_processed` |
+| FR-CB-1.6 | Поддерживать `--lookahead-days N` в CLI | `test_brief_cli_lookahead_arg` |
 
 ### Категория 2 — Counterparty extraction
 
@@ -526,45 +551,54 @@ Scenario: deep-research budget exceeded
 | FR-CB-3.3 | Past meetings join — `zoom_recordings` / `meeting_recordings` где title contains normalised counterparty name | `test_brief_lookup_finds_past_meetings` |
 | FR-CB-3.4 | Open tasks join — `tasks` where `source_conversation_id IN past_meeting_ids AND status != done` | `test_brief_lookup_finds_open_tasks` |
 
-### Категория 4 — Deep research
+### Категория 4 — Deep research (two-stage, v0.2)
 
 | ID | Требование | Test |
 |---|---|---|
-| FR-CB-4.1 | OpenAI `o4-mini-deep-research` call с web search tool | `test_brief_research_calls_openai_o4_mini_deep_research` |
-| FR-CB-4.2 | Output validated against profile JSON schema (Personal Info, Positions, Investments, Achievements, etc.) | `test_brief_research_output_schema` |
-| FR-CB-4.3 | Cost cap: skip call if estimated > `COUNTERPARTY_BRIEFS_LLM_BUDGET_USD` | `test_brief_research_skips_over_budget` |
-| FR-CB-4.4 | TTL cache: re-use prior research within `COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS` (default 14) | `test_brief_research_uses_cache_within_ttl` |
-| FR-CB-4.5 | Failure → fall back to DB-only Doc (no exception) | `test_brief_research_failure_falls_back_to_db_only` |
+| FR-CB-4.1 | **Stage 1 — Org research**: OpenAI `o4-mini-deep-research` call с web search tool на компанию (sectors / leadership / portfolio / news). Output schema `OrgResearch`. | `test_brief_org_research_call` |
+| FR-CB-4.2 | **Stage 2 — Beneficiary extraction**: LLM (cheaper model — `OPENAI_MODEL`) на основе `OrgResearch.leadership` + `event.attendees` выбирает ≤ 5 ключевых бенефициаров. Output: list of `{person_name, person_role, evidence}`. | `test_brief_beneficiary_extraction_picks_top_n` |
+| FR-CB-4.3 | **Stage 3 — Person research**: для каждого бенефициара отдельный `o4-mini-deep-research` call с web search. Output schema `PersonResearch`. | `test_brief_person_research_call` |
+| FR-CB-4.4 | Output validated against schema. Bad shape → None, runner skips this counterparty (но другие в этом же event продолжают). | `test_brief_research_output_schema` |
+| FR-CB-4.5 | Cost cap: per-event total cost ≤ `COUNTERPARTY_BRIEFS_LLM_BUDGET_USD` (default 5.0). Skip remaining person research'и когда budget исчерпан, log `brief_research_budget_exhausted`. | `test_brief_research_per_event_budget_cap` |
+| FR-CB-4.6 | TTL cache per-counterparty: re-use prior `counterparty_briefs.research_payload` within `COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS` (default 14). Cache hit → re-use Doc URL, no new research/Doc creation. | `test_brief_research_uses_cache_within_ttl` |
+| FR-CB-4.7 | Failure of org research → skip the whole event (no beneficiaries possible without org context). | `test_brief_org_research_failure_skips_event` |
+| FR-CB-4.8 | Failure of one person research → continue with the rest, mark this person as «N/A — research failed» in the grouped Slack DM. | `test_brief_person_research_failure_continues_others` |
 
-### Категория 5 — Doc generation
+### Категория 5 — Doc generation (per-counterparty)
 
 | ID | Требование | Test |
 |---|---|---|
 | FR-CB-5.1 | Создаёт Google Doc через существующий `DocsExportService` (FR-CR-05-43) | `test_brief_doc_uses_docs_export_service` |
-| FR-CB-5.2 | Title формат «DD/MM - Brief: <Counterparty Name>» | `test_brief_doc_title_format` |
-| FR-CB-5.3 | Inline photo, если в research есть public URL картинки | `test_brief_doc_inserts_photo_when_url_available` |
+| FR-CB-5.2a | Org Doc title: «DD/MM - Brief: <Org Name> (org)» | `test_brief_org_doc_title_format` |
+| FR-CB-5.2b | Person Doc title: «DD/MM - Brief: <Person Name>» | `test_brief_person_doc_title_format` |
+| FR-CB-5.3 | Inline photo вверху Person Doc, если в research есть public URL | `test_brief_doc_inserts_photo_when_url_available` |
 | FR-CB-5.4 | Skip photo если URL private/missing | `test_brief_doc_skips_photo_when_no_url` |
-| FR-CB-5.5 | Все секции §6.2 присутствуют (или «N/A») | `test_brief_doc_renders_all_sections` |
-| FR-CB-5.6 | DD/MM Саммари использует наш summary из последнего zoom/fireflies recording | `test_brief_doc_dd_mm_summary_pulled_from_zoom_recordings` |
+| FR-CB-5.5a | Org Doc: секции Overview / Leadership / Portfolio / Recent Activity / Past meetings c нами / Open tasks | `test_brief_org_doc_renders_all_sections` |
+| FR-CB-5.5b | Person Doc: секции из §6.2 (operator-pinned: Personal Info / DD/MM Саммари / To-Do / Profile Overview / Current Position / Previous Positions / Investment Highlights / Investments / Exits / Achievements / Honors / Education / Publications / Skills / Languages) | `test_brief_person_doc_renders_all_sections` |
+| FR-CB-5.6 | DD/MM Саммари в person Doc использует наш summary из последнего zoom/fireflies recording с этим контрагентом | `test_brief_doc_dd_mm_summary_pulled_from_zoom_recordings` |
 | FR-CB-5.7 | To-Do — open tasks linked to past meetings с counterparty | `test_brief_doc_todo_contains_open_tasks` |
 
-### Категория 6 — Slack delivery
+### Категория 6 — Slack delivery (single grouped DM per event)
 
 | ID | Требование | Test |
 |---|---|---|
-| FR-CB-6.1 | `chat.postMessage` в `COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID` | `test_brief_slack_post` |
-| FR-CB-6.2 | Header format: `*<doc-url\|DD/MM - Brief: <Name> (<Org>)>*` | `test_brief_slack_header_format` |
-| FR-CB-6.3 | Slack-safe `<>` escape в name / org | `test_brief_slack_safe_brackets` |
-| FR-CB-6.4 | Body ≤ 2900 chars | `test_brief_slack_body_cap` |
+| FR-CB-6.1 | ОДИН `chat.postMessage` в `COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID` per event | `test_brief_slack_grouped_post_per_event` |
+| FR-CB-6.2 | Header format: `*Новая встреча DD/MM HH:MM: <Title>*` + bulleted list ссылок | `test_brief_slack_header_format` |
+| FR-CB-6.3 | Slack-safe `<>` escape в name / org / event title | `test_brief_slack_safe_brackets` |
+| FR-CB-6.4 | Body ≤ 2900 chars; больше 10 person-briefs → cut с «… ещё N»  | `test_brief_slack_body_cap` |
 | FR-CB-6.5 | Failure не блокирует tick loop | inherited |
+| FR-CB-6.6 | Каждая ссылка с emoji prefix: 🏢 для org, 👤 для person | `test_brief_slack_links_have_kind_emoji` |
 
-### Категория 7 — Idempotency
+### Категория 7 — Idempotency (two layers)
 
 | ID | Требование | Test |
 |---|---|---|
-| FR-CB-7.1 | `counterparty_briefs` UNIQUE on `(calendar_event_id, counterparty_key)` | migration test |
-| FR-CB-7.2 | Repeated tick within same lead window → skip | `test_brief_idempotency_skips_already_posted` |
-| FR-CB-7.3 | `--force` CLI flag bypasses idempotency | `test_brief_cli_force_flag` |
+| FR-CB-7.1a | `counterparty_briefs_events.event_id` UNIQUE — event обработан = skip всех счетов | migration test |
+| FR-CB-7.1b | `counterparty_briefs.counterparty_key` UNIQUE — Doc per counterparty переиспользуется across events | migration test |
+| FR-CB-7.2 | Repeated tick → skip event | `test_brief_event_idempotency_skips_processed` |
+| FR-CB-7.3 | Counterparty cache TTL — внутри 14 дней Doc URL переиспользуется | `test_brief_counterparty_cache_reuses_doc` |
+| FR-CB-7.4 | `--force-event` CLI flag re-processes event (delete events row) | `test_brief_cli_force_event_flag` |
+| FR-CB-7.5 | `--force-counterparty NAME` CLI flag refresh research для конкретного counterparty | `test_brief_cli_force_counterparty_flag` |
 
 ### Категория 8 — Feature flag
 
@@ -628,47 +662,55 @@ SPEC_COUNTERPARTY_BRIEFS_v0.1.md        # NEW
 
 ### 12.2 Data Layer
 
-#### ER Diagram
+#### ER Diagram (v0.2 — two tables)
 
 ```mermaid
 erDiagram
+    COUNTERPARTY_BRIEFS_EVENTS ||--o{ COUNTERPARTY_BRIEF_LINKS : "event"
+    COUNTERPARTY_BRIEF_LINKS }o--|| COUNTERPARTY_BRIEFS : "counterparty"
     COUNTERPARTY_BRIEFS ||--o| COUNTERPARTIES : "counterparty_id (nullable)"
-    COUNTERPARTIES ||--o{ COUNTERPARTY_ATTRIBUTES : "by counterparty_id"
-    COUNTERPARTIES ||--o{ COUNTERPARTY_MENTIONS : "by counterparty_id"
-    COUNTERPARTY_BRIEFS ||--o{ ZOOM_RECORDINGS : "past_meeting_zoom_ids JSON"
-    COUNTERPARTY_BRIEFS ||--o{ MEETING_RECORDINGS : "past_meeting_fireflies_ids JSON"
 
-    COUNTERPARTY_BRIEFS {
+    COUNTERPARTY_BRIEFS_EVENTS {
         int id PK
-        string calendar_event_id
-        string counterparty_key UNIQUE_WITH_event
-        string display_name
-        string org_name
-        int counterparty_id FK NULLABLE
+        string calendar_event_id UNIQUE
+        string event_title
         timestamptz scheduled_meeting_at
         timestamptz posted_at
         string slack_channel
-        string slack_ts NULLABLE
-        string google_doc_id NULLABLE
-        string google_doc_url NULLABLE
-        json research_payload NULLABLE
+        string slack_ts
+        decimal total_cost_usd
+        json link_summary "[(brief_id,kind)]"
+    }
+    COUNTERPARTY_BRIEFS {
+        int id PK
+        string counterparty_key UNIQUE
+        string kind "org | person"
+        string display_name
+        string org_name NULLABLE "for kind=person"
+        int counterparty_id FK NULLABLE
+        json research_payload "OrgResearch or PersonResearch"
         decimal cost_usd
+        string google_doc_id
+        string google_doc_url
+        timestamptz researched_at
         timestamptz created_at
         timestamptz updated_at
+    }
+    COUNTERPARTY_BRIEF_LINKS {
+        int id PK
+        int event_id FK
+        int brief_id FK
     }
     COUNTERPARTIES {
         int id PK
         string name
         string name_normalised UNIQUE
     }
-    COUNTERPARTY_MENTIONS {
-        int id PK
-        int counterparty_id FK
-        string mention_text
-    }
 ```
 
-UNIQUE: `(calendar_event_id, counterparty_key)`
+Two UNIQUE constraints:
+  - `counterparty_briefs_events.calendar_event_id` — event обработан = skip
+  - `counterparty_briefs.counterparty_key` — Doc per counterparty (TTL refresh, reuse across events)
 
 ### 12.3 Service Layer Surface
 
@@ -695,28 +737,70 @@ CounterpartyBriefRunner(settings, slack_client, llm_backend, calendar_factory, d
     .start() / .stop()
 ```
 
-### 12.4 LLM Prompts
+### 12.4 LLM Prompts (v0.2 — three stages)
 
-#### `extract.md` (FR-CB-2.1)
+#### `extract.md` (FR-CB-2.1) — stage 0, event → org + initial persons
 
-System: «Extract external counterparties from a calendar event. Returns a JSON list. Each item: {person_name, person_role, org_name}. Skip internal attendees with @thehumanoid.ai. Return [] if no external counterparty.»
+System: «Extract the EXTERNAL ORGANISATION + any external persons mentioned in this calendar event. Returns one JSON object with `org_name` (string or null) and `initial_persons` (list of `{person_name, person_role}`). Skip internal attendees with @thehumanoid.ai. Return `{org_name: null, initial_persons: []}` when nothing external.»
 
 Output schema:
 ```json
 {
-  "counterparties": [
-    {"person_name": "Samer Nawaf Zawaideh",
-     "person_role": "Chief Investment Officer",
-     "org_name": "Strategic Development Fund"}
+  "org_name": "Strategic Development Fund",
+  "initial_persons": [
+    {"person_name": "Samer Nawaf Zawaideh", "person_role": "CIO"}
   ]
 }
 ```
 
-#### `research.md` (FR-CB-4.1)
+#### `research_org.md` (FR-CB-4.1) — stage 1, org deep research
 
-System: «Build a structured profile brief on a person + their company. Use web search. Return the JSON schema below. If a field is unknown, set it to null or "N/A".»
+Model: `o4-mini-deep-research` (web search tool ON).
+
+System: «Build a deep research brief on an ORGANISATION. Use web search. Return the schema below.»
+
+Output schema (`OrgResearch`):
+```json
+{
+  "name": "Strategic Development Fund",
+  "official_name": "Tawazun Strategic Development Fund (SDF)",
+  "website": "https://www.sdf.ae",
+  "headquarters": "Abu Dhabi, UAE",
+  "type": "Sovereign Wealth Fund",
+  "sector_focus": ["Defense", "Aerospace", "IT"],
+  "leadership": [
+    {"name": "Samer Nawaf Zawaideh", "role": "CIO", "linkedin_url": "...", "evidence_url": "..."},
+    {"name": "Khaled Al Hashemi", "role": "CEO", "linkedin_url": "...", "evidence_url": "..."}
+  ],
+  "portfolio_highlights": [{"name": "HiSky", "deal_size": "$30M", "year": "2021"}],
+  "recent_news": [{"date": "2026-04-...", "title": "...", "url": "..."}],
+  "overview_paragraph": "...150-250 words..."
+}
+```
+
+#### `extract_beneficiaries.md` (FR-CB-4.2) — stage 2, beneficiary picker
+
+Model: cheap (`OPENAI_MODEL`).
+
+Input: `OrgResearch.leadership` + `event.attendees` + `initial_persons` from extract step.
+Output: ≤ 5 beneficiaries (operator-pinned: «вычленяй ллм и по каждому тоже дип ресерч»).
 
 Output schema:
+```json
+{
+  "beneficiaries": [
+    {"person_name": "Samer Nawaf Zawaideh",
+     "person_role": "CIO",
+     "evidence": "appears as attendee + listed in OrgResearch.leadership"}
+  ]
+}
+```
+
+#### `research_person.md` (FR-CB-4.3) — stage 3, person deep research
+
+Model: `o4-mini-deep-research` (web search tool ON).
+
+Output schema (`PersonResearch`) — operator-pinned format §6.2-person:
 ```json
 {
   "photo_url": "https://...",
@@ -878,18 +962,18 @@ Total: **30 test cases** (v0.1 minimum).
 - FR-CR-05-165 — Agenda runner (architectural template)
 - FR-CR-05-167 — organizer/creator gate (re-used)
 
-### 16.3 Env vars added
+### 16.3 Env vars added (v0.2)
 
 ```bash
-COUNTERPARTY_BRIEFS_ENABLED=false              # default false
-COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID=   # required when enabled
-COUNTERPARTY_BRIEFS_LEAD_HOURS=4               # default 4
-COUNTERPARTY_BRIEFS_WINDOW_MINUTES=5           # default 5
-COUNTERPARTY_BRIEFS_TICK_INTERVAL_SECONDS=300  # default 5min
-COUNTERPARTY_BRIEFS_LLM_BUDGET_USD=2.0         # default 2.0
-COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS=14          # default 14
+COUNTERPARTY_BRIEFS_ENABLED=false                # default false
+COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID=     # required when enabled
+COUNTERPARTY_BRIEFS_LOOKAHEAD_DAYS=14            # how far forward we scan
+COUNTERPARTY_BRIEFS_TICK_INTERVAL_SECONDS=1800   # default 30min
+COUNTERPARTY_BRIEFS_LLM_BUDGET_USD=5.0           # per-event total cap
+COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS=14            # per-counterparty TTL
+COUNTERPARTY_BRIEFS_MAX_BENEFICIARIES=5          # ≤ 5 person briefs per event
 COUNTERPARTY_BRIEFS_RESEARCH_MODEL=o4-mini-deep-research
-COUNTERPARTY_BRIEFS_EXTRACT_MODEL=             # falls back to OPENAI_MODEL
+COUNTERPARTY_BRIEFS_EXTRACT_MODEL=               # falls back to OPENAI_MODEL
 ```
 
 ---

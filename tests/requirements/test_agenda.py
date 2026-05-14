@@ -404,6 +404,67 @@ def test_compose_agenda_returns_none_on_llm_exception():
     assert compose_agenda(candidate, llm_backend=llm, model="m") is None
 
 
+def test_compose_agenda_uses_openai_client_fallback():
+    """FR-CR-05-167 hotfix: the production `OpenAIBackend` exposes
+    `_client` (an OpenAI SDK object) but NOT `complete_json`. The
+    compose layer must drive `client.chat.completions.create`
+    directly with `response_format=json_object` and parse the
+    body."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 13, 14, tzinfo=timezone.utc),
+    )
+
+    # Fake backend exposing only `_client` (no `complete_json`).
+    class FakeBackend:
+        def __init__(self, response_text: str):
+            self._response_text = response_text
+            self.last_call = None
+
+        @property
+        def _client(self):
+            backend = self
+
+            class _FakeChoices:
+                def __init__(self):
+                    self.message = type(
+                        "M", (), {"content": backend._response_text}
+                    )()
+
+            class _FakeResp:
+                def __init__(self):
+                    self.choices = [_FakeChoices()]
+
+            class _FakeCompletions:
+                def create(self, **kwargs):
+                    backend.last_call = kwargs
+                    return _FakeResp()
+
+            class _FakeChat:
+                completions = _FakeCompletions()
+
+            class _FakeClient:
+                chat = _FakeChat()
+
+            return _FakeClient()
+
+    json_str = (
+        '{"previous_recap": ["обсудили план"],'
+        '"tasks_checklist": [{"task_id": 1, "title": "X",'
+        '"status": "todo", "owner": "admin", "due": "2026-05-15",'
+        '"description": ""}],'
+        '"open_questions": [], "doc_body_md": "## ..."}'
+    )
+    backend = FakeBackend(json_str)
+    out = compose_agenda(candidate, llm_backend=backend, model="gpt-test")
+    assert out is not None
+    assert out.previous_recap == ["обсудили план"]
+    assert backend.last_call["response_format"] == {"type": "json_object"}
+
+
 def test_compose_agenda_returns_none_on_non_dict_output():
     candidate = AgendaCandidate(
         calendar_event_id="ev1",

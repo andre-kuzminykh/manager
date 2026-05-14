@@ -4,6 +4,17 @@ so unit tests of the pure logic don't drag in OpenAI).
 The runner calls ``compose_agenda(candidate, llm_backend, model)``
 once per candidate. Errors are caught and logged — the runner
 must NOT crash the tick loop on a single bad event.
+
+LLM backend interface: we accept anything that either
+  (a) exposes ``complete_json(messages, model=...)`` returning a
+      ``dict``, OR
+  (b) exposes a ``._client`` attribute that's an OpenAI SDK
+      client (we call ``chat.completions.create`` with
+      ``response_format=json_object`` and parse ``message.content``
+      ourselves).
+
+(b) is the path the production OpenAIBackend supports — it doesn't
+have a ``complete_json`` method, just a ``_client`` reference.
 """
 from __future__ import annotations
 
@@ -113,6 +124,32 @@ def _coerce_output(payload: dict[str, Any]) -> AgendaOutput:
     )
 
 
+def _call_llm_json(
+    llm_backend: Any, messages: list[dict[str, str]], *, model: str
+) -> dict[str, Any] | None:
+    """Try `complete_json` first (test fakes use it); fall back
+    to the OpenAI SDK on `backend._client`."""
+    if hasattr(llm_backend, "complete_json"):
+        return llm_backend.complete_json(messages, model=model)
+    client = getattr(llm_backend, "_client", None)
+    if client is None:
+        raise RuntimeError(
+            "llm_backend has neither complete_json nor _client"
+        )
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        response_format={"type": "json_object"},
+        temperature=0.2,
+    )
+    content = ""
+    if resp and resp.choices:
+        content = (resp.choices[0].message.content or "").strip()
+    if not content:
+        return None
+    return json.loads(content)
+
+
 def compose_agenda(
     candidate: AgendaCandidate,
     *,
@@ -126,7 +163,7 @@ def compose_agenda(
         {"role": "user", "content": _build_user_prompt(candidate)},
     ]
     try:
-        raw = llm_backend.complete_json(messages, model=model)
+        raw = _call_llm_json(llm_backend, messages, model=model)
     except Exception as e:  # noqa: BLE001
         log.warning(
             "agenda_llm_call_failed",

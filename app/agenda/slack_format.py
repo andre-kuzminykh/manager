@@ -227,11 +227,12 @@ def render_agenda_text(
         lines.append("")
         lines.append(f"Участники: {names}")
 
-    # Recap rendered as a single paragraph under «Суть: » —
-    # matches the post-meeting summary format the operator uses
-    # (FR-CR-05-167 operator-pinned 2026-05-14: «формате такой же
-    # [как у summary]»). Strip any duplicate label the LLM might
-    # have prepended.
+    # Recap rendered as a single paragraph under
+    # «На прошлой встрече: » — operator-pinned 2026-05-14 (2nd
+    # revision): labels distinguish AGENDA from a summary:
+    # summaries use «Суть:» / «To-Do:», agendas use
+    # «На прошлой встрече:» / «Статус задач к обсуждению:».
+    # Strip any duplicate the LLM might have prepended.
     recap_blob = " ".join(
         item.strip().rstrip(".") + "." for item in output.previous_recap
         if item and item.strip()
@@ -239,11 +240,12 @@ def render_agenda_text(
     recap_blob = _slack_safe(_strip_recap_label(recap_blob).strip())
     if recap_blob:
         lines.append("")
-        lines.append(f"Суть: {recap_blob}")
+        lines.append(f"На прошлой встрече: {recap_blob}")
 
-    # Task list + free-form open_questions under «To-Do:» heading,
-    # one numbered item per line. Cap at _SLACK_TASK_LIMIT —
-    # full list always available in the Doc.
+    # Task list + free-form open_questions under
+    # «Статус задач к обсуждению:», one numbered item per line.
+    # Cap at _SLACK_TASK_LIMIT — full list always available in
+    # the Doc.
     discussion_items: list[dict[str, Any]] = list(output.tasks_checklist or [])
     for q in output.open_questions or []:
         q = (q or "").strip()
@@ -253,7 +255,7 @@ def render_agenda_text(
 
     if discussion_items:
         lines.append("")
-        lines.append("To-Do:")
+        lines.append("Статус задач к обсуждению:")
         lines.append("")
         rendered = discussion_items[:_SLACK_TASK_LIMIT]
         for i, t in enumerate(rendered, 1):

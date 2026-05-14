@@ -790,13 +790,14 @@ def test_render_agenda_text_format_matches_operator_pin():
         assert em not in text, f"emoji {em} must not appear in agenda"
     # Attendees section
     assert "Участники: Artem Sokolov, Irina Shipilova" in text
-    # Recap as prose paragraph — label appears exactly once
-    assert text.count("Суть:") == 1
+    # Recap as prose paragraph — agenda label «На прошлой
+    # встрече:» (distinct from summary «Суть:»), appears once
+    assert text.count("На прошлой встрече:") == 1
     assert "Разобрали список инвесторов" in text
-    # Section heading matches post-meeting summary style
-    assert "To-Do:" in text
-    assert "Статус задач к обсуждению:" not in text  # old name retired
-    assert "К обсуждению:" not in text  # old name retired
+    # Section heading distinguishes agenda from summary's «To-Do:»
+    assert "Статус задач к обсуждению:" in text
+    assert "To-Do:" not in text
+    assert "К обсуждению:" not in text  # earlier short name retired
     # Numbered task list with time
     assert "1) Bracket Capital - отправить аутрич" in text
     assert "— Irina Shipilova" in text
@@ -899,10 +900,8 @@ def test_render_agenda_text_strips_duplicate_recap_label():
         candidate=candidate, output=output, doc_url=None,
     )
     # «На прошлой встрече» from LLM is stripped; renderer's own
-    # label is now «Суть:» so the stale phrase shouldn't appear
-    # at all.
-    assert "На прошлой встрече" not in text
-    assert "Суть:" in text
+    # label adds it back exactly once.
+    assert text.count("На прошлой встрече") == 1
     assert "обсуждали roadmap" in text
 
 

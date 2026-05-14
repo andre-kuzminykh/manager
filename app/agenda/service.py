@@ -264,6 +264,64 @@ def open_tasks_for_recordings(
     return rows[: max(1, int(limit))]
 
 
+def _attendee_match_keys(label: str) -> set[str]:
+    """Comparable keys for matching an attendee label against
+    task owner fields. Lowercase + collapse whitespace + ё→е +
+    drop diacritics so «Артём Соколов», «Артем  соколов», and
+    «artem sokolov» all hash to the same set."""
+    s = (label or "").strip().lower().replace("ё", "е")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return set()
+    keys: set[str] = {s}
+    # «Artem Sokolov» → also match «Artem» / «Sokolov» so a task
+    # whose owner column carries only the first or last name still
+    # matches an attendee with full name.
+    for piece in s.split(" "):
+        if len(piece) >= 3:
+            keys.add(piece)
+    return keys
+
+
+def _filter_tasks_by_attendees(
+    tasks: list[dict[str, Any]],
+    attendees: list[str],
+) -> list[dict[str, Any]]:
+    """FR-CR-05-167 operator-pinned 2026-05-14: «возьми список
+    участников и в агенде сделай что обсуждали / и что обсудить
+    задачи только по участникам встречи».
+
+    Drop tasks whose owner_display_name / owner_user_id doesn't
+    overlap with the meeting attendees. Pass-through unchanged
+    when:
+      - attendees list is empty (no signal — show everything);
+      - a task has no owner at all (don't hide unassigned).
+    """
+    if not attendees:
+        return tasks
+    attendee_keys: set[str] = set()
+    for a in attendees:
+        attendee_keys |= _attendee_match_keys(a)
+    if not attendee_keys:
+        return tasks
+    out: list[dict[str, Any]] = []
+    for t in tasks:
+        owner_name = t.get("owner_display_name") or t.get("owner") or ""
+        owner_uid = t.get("owner_user_id") or ""
+        if not owner_name and not owner_uid:
+            # No owner — keep (unassigned items are still worth
+            # surfacing on the agenda).
+            out.append(t)
+            continue
+        name_keys = _attendee_match_keys(str(owner_name))
+        uid_keys = _attendee_match_keys(str(owner_uid))
+        if attendee_keys & (name_keys | uid_keys):
+            out.append(t)
+    return out
+
+
 def render_recording_for_prompt(r: ZoomRecording) -> dict[str, Any]:
     """Pick exactly the fields the agenda LLM needs — keeps the
     prompt small."""
@@ -412,6 +470,15 @@ def build_candidates(
         open_tasks = open_tasks_for_recordings(
             session, zoom_ids=zoom_ids,
         )
+        rendered_tasks = [render_task_for_prompt(t) for t in open_tasks]
+        resolved_attendees = _resolve_attendees(
+            ev.get("attendees") or [], session,
+        )
+        # FR-CR-05-167 — keep only tasks belonging to people who
+        # are actually in the meeting (operator-pinned).
+        rendered_tasks = _filter_tasks_by_attendees(
+            rendered_tasks, resolved_attendees,
+        )
         candidate = AgendaCandidate(
             calendar_event_id=ev_id,
             recurring_event_id=ev.get("recurring_event_id"),
@@ -419,13 +486,11 @@ def build_candidates(
             title_normalised=normalise_title(title),
             scheduled_start_at=start,
             description=ev.get("description"),
-            attendees=_resolve_attendees(
-                ev.get("attendees") or [], session,
-            ),
+            attendees=resolved_attendees,
             prior_recordings=[
                 render_recording_for_prompt(r) for r in prior
             ],
-            open_tasks=[render_task_for_prompt(t) for t in open_tasks],
+            open_tasks=rendered_tasks,
         )
         out.append(candidate)
     out.sort(key=lambda c: c.scheduled_start_at)

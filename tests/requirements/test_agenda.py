@@ -353,6 +353,64 @@ def test_build_candidates_filters_by_organizer_email(session):
     assert [c.title for c in cs] == ["Fundraising daily"]
 
 
+def test_filter_tasks_by_attendees_keeps_owners_in_meeting():
+    """FR-CR-05-167 operator-pinned 2026-05-14: keep only tasks
+    whose owner is one of the meeting attendees."""
+    from app.agenda.service import _filter_tasks_by_attendees
+
+    tasks = [
+        {"title": "T1", "owner_display_name": "Артём Соколов", "owner": "Артём Соколов"},
+        {"title": "T2", "owner_display_name": "Olga Ponomarenko", "owner": "Olga Ponomarenko"},
+        # Different person — must be dropped.
+        {"title": "T3", "owner_display_name": "Petya Ivanov", "owner": "Petya Ivanov"},
+    ]
+    attendees = ["Артем Соколов", "Olga Ponomarenko"]
+    filtered = _filter_tasks_by_attendees(tasks, attendees)
+    assert [t["title"] for t in filtered] == ["T1", "T2"]
+
+
+def test_filter_tasks_by_attendees_matches_first_or_last_name():
+    """An attendee «Artem Sokolov» should still match a task
+    owner recorded only as «Artem» (display-name truncation
+    happens often in TG-extracted tasks)."""
+    from app.agenda.service import _filter_tasks_by_attendees
+
+    tasks = [
+        {"title": "T1", "owner_display_name": "Артем", "owner": "Артем"},
+        {"title": "T2", "owner_display_name": "Соколов", "owner": "Соколов"},
+        {"title": "T3", "owner_display_name": "Petya", "owner": "Petya"},
+    ]
+    filtered = _filter_tasks_by_attendees(tasks, ["Артем Соколов"])
+    assert {t["title"] for t in filtered} == {"T1", "T2"}
+
+
+def test_filter_tasks_by_attendees_passes_through_when_no_attendees():
+    """No attendees signal → don't drop anything, the agenda
+    pre-filter shouldn't kill all tasks on Calendar events with
+    empty attendee lists."""
+    from app.agenda.service import _filter_tasks_by_attendees
+
+    tasks = [
+        {"title": "T1", "owner_display_name": "Petya"},
+        {"title": "T2", "owner_display_name": "Vasya"},
+    ]
+    assert _filter_tasks_by_attendees(tasks, []) == tasks
+
+
+def test_filter_tasks_by_attendees_keeps_unassigned_tasks():
+    """Tasks with no owner at all are kept — they're worth
+    surfacing on the agenda even when the meeting roster filter
+    is active (operator can pick someone to take them)."""
+    from app.agenda.service import _filter_tasks_by_attendees
+
+    tasks = [
+        {"title": "Орфан", "owner_display_name": "", "owner_user_id": ""},
+        {"title": "Petya", "owner_display_name": "Petya"},
+    ]
+    filtered = _filter_tasks_by_attendees(tasks, ["Артем"])
+    assert [t["title"] for t in filtered] == ["Орфан"]
+
+
 def test_build_candidates_resolves_attendees_via_team_members(session):
     """FR-CR-05-167: operator-pinned 2026-05-14 «переводи почты
     в конкретные имена из списка людей». Attendees with a matching

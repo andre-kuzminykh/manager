@@ -166,6 +166,29 @@ def run() -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("agenda_runner_startup_failed", error=str(e))
 
+    # FR-CR-05-168 — counterparty briefs runner (daemon thread).
+    # Same safety profile as the agenda runner: no-op when flag off,
+    # never blocks startup, exceptions logged but not propagated.
+    try:
+        from app.counterparty_briefs.runner import CounterpartyBriefRunner
+
+        brief_slack = app.client
+        if settings.agenda_slack_bot_token:
+            brief_slack = WebClient(token=settings.agenda_slack_bot_token)
+
+        brief_runner = CounterpartyBriefRunner(
+            settings=settings,
+            slack_client=brief_slack,
+            llm_backend=backend,
+            calendar_factory=build_calendar_credentials_factory_with_sa_fallback(
+                settings
+            ),
+            docs_factory=build_docs_factory(settings),
+        )
+        brief_runner.start()
+    except Exception as e:  # noqa: BLE001
+        log.warning("brief_runner_startup_failed", error=str(e))
+
     log.info("starting_socket_mode")
     run_socket_mode(app, settings.slack_app_token)
 

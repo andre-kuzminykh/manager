@@ -9,6 +9,11 @@ from app.models.counterparty_prompt import (
     CounterpartyPrompt,
     CounterpartyPromptBatch,
 )
+from app.models.counterparty_brief import (
+    CounterpartyBrief,
+    CounterpartyBriefLink,
+    CounterpartyBriefsEvent,
+)
 from app.models.daily_plan import DailyPlanItem
 from app.models.employee import Employee
 from app.models.intent import ActionDraft, ActionDraftState, IntentInference
@@ -47,6 +52,9 @@ __all__ = [
     "Counterparty",
     "CounterpartyAttribute",
     "CounterpartyMention",
+    "CounterpartyBrief",
+    "CounterpartyBriefLink",
+    "CounterpartyBriefsEvent",
     "CounterpartyPrompt",
     "CounterpartyPromptBatch",
     "ActionDraftState",

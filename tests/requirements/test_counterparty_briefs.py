@@ -24,13 +24,7 @@ from unittest.mock import MagicMock
 import pytest
 
 
-pytestmark = pytest.mark.xfail(
-    reason=(
-        "FR-CR-05-168 v0.2 implementation pending — SPEC + tests "
-        "written first."
-    ),
-    strict=True,
-)
+# FR-CR-05-168 v0.2 implementation landed — xfail layer removed.
 
 
 # -- Category 1: Discovery (event-trigger, FR-CB-1.x) ----------------------
@@ -105,12 +99,21 @@ def test_brief_event_idempotency_skips_processed(session):
     assert event_already_processed(session, calendar_event_id="ev1")
 
 
-def test_brief_cli_lookahead_arg():
+def test_brief_cli_lookahead_arg(monkeypatch):
     """FR-CB-1.6 — CLI accepts `--lookahead-days N`."""
     import sys
     from unittest.mock import patch
 
     from ops import brief_run_once
+
+    from app.config import get_settings
+
+    monkeypatch.setenv("COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID", "D0")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(
+        "ops.brief_run_once._fetch_events_wide", lambda r, d: []
+    )
+    get_settings.cache_clear()
 
     with patch.object(
         sys, "argv",
@@ -373,7 +376,7 @@ def test_brief_research_uses_cache_within_ttl(session):
     from app.models import CounterpartyBrief
 
     session.add(CounterpartyBrief(
-        counterparty_key="strategic-development-fund",
+        counterparty_key="strategic development fund",
         kind="org",
         display_name="Strategic Development Fund",
         org_name="Strategic Development Fund",
@@ -390,6 +393,7 @@ def test_brief_research_uses_cache_within_ttl(session):
         session=session, ttl_days=14,
         llm_backend=llm, model="o4-mini-deep-research", budget_usd=5.0,
     )
+    assert out is not None
     assert out.cached is True
     assert llm.complete_json.call_count == 0
 
@@ -645,7 +649,7 @@ def test_brief_counterparty_cache_reuses_doc(session):
     from app.models import CounterpartyBrief
 
     session.add(CounterpartyBrief(
-        counterparty_key="strategic-development-fund",
+        counterparty_key="strategic development fund",
         kind="org", display_name="Strategic Development Fund",
         org_name="Strategic Development Fund",
         google_doc_url="https://docs/.../sdf",
@@ -656,13 +660,13 @@ def test_brief_counterparty_cache_reuses_doc(session):
 
     cached = find_cached_brief(
         session,
-        counterparty_key="strategic-development-fund", ttl_days=14,
+        counterparty_key="strategic development fund", ttl_days=14,
     )
     assert cached is not None
     assert cached.google_doc_url == "https://docs/.../sdf"
 
 
-def test_brief_cli_force_event_flag(session):
+def test_brief_cli_force_event_flag(session, patched_session_scope):
     """FR-CB-7.4 — `--force-event ID` deletes the events row,
     forcing reprocessing."""
     import sys
@@ -679,15 +683,27 @@ def test_brief_cli_force_event_flag(session):
     ))
     session.flush()
 
-    with patch.object(
-        sys, "argv",
-        ["brief_run_once", "--force-event", "ev1", "--dry-run"],
-    ):
-        rc = brief_run_once.main()
-    assert rc == 0
+    from app.config import get_settings
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setenv("COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID", "D0")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setattr(
+            "ops.brief_run_once._fetch_events_wide", lambda r, d: []
+        )
+        get_settings.cache_clear()
+        with patch.object(
+            sys, "argv",
+            ["brief_run_once", "--force-event", "ev1", "--dry-run"],
+        ):
+            rc = brief_run_once.main()
+        assert rc == 0
+    finally:
+        monkeypatch.undo()
 
 
-def test_brief_cli_force_counterparty_flag(session):
+def test_brief_cli_force_counterparty_flag(session, patched_session_scope):
     """FR-CB-7.5 — `--force-counterparty NAME` deletes the
     `counterparty_briefs` row by `counterparty_key`."""
     import sys
@@ -702,12 +718,24 @@ def test_brief_cli_force_counterparty_flag(session):
         researched_at=datetime.now(timezone.utc),
     ))
     session.flush()
-    with patch.object(
-        sys, "argv",
-        ["brief_run_once", "--force-counterparty", "X", "--dry-run"],
-    ):
-        rc = brief_run_once.main()
-    assert rc == 0
+    from app.config import get_settings
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setenv("COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID", "D0")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setattr(
+            "ops.brief_run_once._fetch_events_wide", lambda r, d: []
+        )
+        get_settings.cache_clear()
+        with patch.object(
+            sys, "argv",
+            ["brief_run_once", "--force-counterparty", "X", "--dry-run"],
+        ):
+            rc = brief_run_once.main()
+        assert rc == 0
+    finally:
+        monkeypatch.undo()
 
 
 # -- Category 8: Feature flag / safety (FR-CB-8.x) --------------------------

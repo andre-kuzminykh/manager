@@ -48,6 +48,40 @@ class Settings(BaseSettings):
         default=False, alias="SLACK_INGEST_ENABLED"
     )
 
+    # FR-CR-05-168 — Pre-meeting counterparty briefs. Event-trigger:
+    # when a new Calendar event appears with an external
+    # counterparty, the runner generates a brief Google Doc (org +
+    # per-beneficiary person Docs) and posts ONE grouped DM to Slack.
+    # Default OFF. See SPEC_COUNTERPARTY_BRIEFS_v0.1.md.
+    counterparty_briefs_enabled: bool = Field(
+        default=False, alias="COUNTERPARTY_BRIEFS_ENABLED"
+    )
+    counterparty_briefs_slack_target_channel_id: str = Field(
+        default="", alias="COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID"
+    )
+    counterparty_briefs_lookahead_days: int = Field(
+        default=7, alias="COUNTERPARTY_BRIEFS_LOOKAHEAD_DAYS"
+    )
+    counterparty_briefs_tick_interval_seconds: int = Field(
+        default=1800, alias="COUNTERPARTY_BRIEFS_TICK_INTERVAL_SECONDS"
+    )
+    counterparty_briefs_llm_budget_usd: float = Field(
+        default=2.0, alias="COUNTERPARTY_BRIEFS_LLM_BUDGET_USD"
+    )
+    counterparty_briefs_cache_ttl_days: int = Field(
+        default=180, alias="COUNTERPARTY_BRIEFS_CACHE_TTL_DAYS"
+    )
+    counterparty_briefs_max_beneficiaries: int = Field(
+        default=5, alias="COUNTERPARTY_BRIEFS_MAX_BENEFICIARIES"
+    )
+    counterparty_briefs_research_model: str = Field(
+        default="o4-mini-deep-research",
+        alias="COUNTERPARTY_BRIEFS_RESEARCH_MODEL",
+    )
+    counterparty_briefs_extract_model: str = Field(
+        default="", alias="COUNTERPARTY_BRIEFS_EXTRACT_MODEL"
+    )
+
     # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся
     # встречи в Google Calendar (определяется по совпадению title с
     # ≥1 прошлой записанной встречи из zoom_recordings) бот собирает

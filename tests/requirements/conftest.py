@@ -93,6 +93,8 @@ def patched_session_scope(monkeypatch, SessionFactory):  # noqa: N803
         "app.sync.factories.session_scope",
         "app.sync.task_sync.session_scope",
         "app.telegram_bot.listener.session_scope",
+        "ops.brief_run_once.session_scope",
+        "app.counterparty_briefs.runner.session_scope",
     ]
     for t in targets:
         monkeypatch.setattr(t, fake_scope, raising=False)

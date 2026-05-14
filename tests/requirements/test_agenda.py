@@ -395,39 +395,69 @@ def test_compose_agenda_returns_none_on_non_dict_output():
 
 
 def test_render_agenda_text_format_matches_operator_pin():
-    """Operator-pinned: «формат 12/05 - Повестка ко встрече "__"».
-    Header line must contain DD/MM dash «Повестка ко встрече» «<title>»."""
+    """FR-CR-05-167 operator-pinned 2026-05-14: повестка в стиле
+    post-meeting summary. Без эмодзи. Хедер «DD/MM - <title> -
+    Повестка». Recap абзацем «На прошлой встрече: ...». Задачи
+    нумерованным списком «1) title - description — owner • DD.MM.YYYY»."""
     candidate = AgendaCandidate(
         calendar_event_id="ev1",
         recurring_event_id=None,
-        title="Weekly sync",
-        title_normalised="weekly sync",
-        scheduled_start_at=datetime(2026, 5, 13, 15, tzinfo=timezone.utc),
+        title="Fundraising daily",
+        title_normalised="fundraising daily",
+        scheduled_start_at=datetime(2026, 5, 14, 11, tzinfo=timezone.utc),
+        attendees=["Artem Sokolov", "Irina Shipilova"],
     )
     output = AgendaOutput(
-        previous_recap=["обсудили roadmap"],
-        tasks_checklist=[
-            {"task_id": 1, "title": "Прислать deck", "status": "todo",
-             "owner": "admin", "due": "2026-05-15"},
-            {"task_id": 2, "title": "Старый таск", "status": "done",
-             "owner": "admin"},
+        previous_recap=[
+            "Разобрали список инвесторов к AIM Summit",
+            "Зафиксировали приоритетные контакты",
         ],
-        open_questions=["timing pre-seed"],
+        tasks_checklist=[
+            {
+                "task_id": 1,
+                "title": "Bracket Capital",
+                "description": "отправить аутрич как релевантному фонду",
+                "status": "todo",
+                "owner": "Irina Shipilova",
+                "due": "2026-05-13",
+            },
+            {
+                "task_id": 2,
+                "title": "Cambridge Source",
+                "description": "follow-up по интро",
+                "status": "in_progress",
+                "owner": "Irina Shipilova",
+                "due": "2026-05-14",
+            },
+        ],
+        open_questions=["Утром начать outreach"],
         doc_body_md="…",
     )
     text = render_agenda_text(
         candidate=candidate, output=output,
         doc_url="https://docs.google.com/document/d/g1/edit",
     )
-    assert "13/05" in text
-    assert "Повестка ко встрече «Weekly sync»" in text
-    assert "📋" in text and "Из прошлого раза" in text
-    assert "✅" in text and "Задачи и их статусы" in text
-    assert "☐ Прислать deck" in text  # todo box
-    assert "☑ Старый таск" in text     # done box
-    assert "🎯" in text and "К обсуждению" in text
-    assert "📄" in text
-    assert "https://docs.google.com/document/d/g1/edit" in text
+    # Header
+    assert text.startswith("14/05 - Fundraising daily - Повестка")
+    # No emojis
+    for em in ("📋", "✅", "🎯", "📄", "☐", "☑", "▣", "⛔", "✕"):
+        assert em not in text, f"emoji {em} must not appear in agenda"
+    # Attendees section
+    assert "Участники: Artem Sokolov, Irina Shipilova" in text
+    # Recap as prose paragraph
+    assert "На прошлой встрече: " in text
+    assert "Разобрали список инвесторов" in text
+    # Numbered task list
+    assert "К обсуждению:" in text
+    assert "1) Bracket Capital - отправить аутрич" in text
+    assert "— Irina Shipilova" in text
+    assert "13.05.2026" in text
+    # in_progress status surfaces as a [..] suffix
+    assert "[in_progress]" in text
+    # Open question is appended as a continuation item
+    assert "Утром начать outreach" in text
+    # Doc link (no emoji prefix)
+    assert "Подробно: https://docs.google.com/document/d/g1/edit" in text
 
 
 def test_render_agenda_text_truncates_when_too_long():
@@ -438,13 +468,13 @@ def test_render_agenda_text_truncates_when_too_long():
         title_normalised="weekly sync",
         scheduled_start_at=datetime(2026, 5, 13, 15, tzinfo=timezone.utc),
     )
-    # Push the output well past 3000 chars.
     output = AgendaOutput(
-        previous_recap=["x" * 500] * 5,
+        previous_recap=["x" * 400] * 5,
         tasks_checklist=[
-            {"title": "y" * 200, "status": "todo", "owner": "a"}
+            {"title": "y" * 100, "description": "z" * 200,
+             "status": "todo", "owner": "a"}
         ] * 30,
-        open_questions=["z" * 500] * 4,
+        open_questions=["w" * 200] * 4,
         doc_body_md="…",
     )
     text = render_agenda_text(
@@ -452,7 +482,7 @@ def test_render_agenda_text_truncates_when_too_long():
         doc_url="https://docs.google.com/d/x",
     )
     assert len(text) <= 2950
-    assert "📄" in text  # doc link still present (in trailing chunk)
+    assert "Подробно" in text  # doc link mention survives the trim
 
 
 def test_render_agenda_text_omits_doc_section_when_no_url():
@@ -470,7 +500,38 @@ def test_render_agenda_text_omits_doc_section_when_no_url():
     text = render_agenda_text(
         candidate=candidate, output=output, doc_url=None,
     )
-    assert "📄" not in text
+    assert "Подробно" not in text
+
+
+def test_render_agenda_text_done_tasks_show_status_label():
+    """FR-CR-05-167: done / cancelled tasks should still appear in
+    «К обсуждению» (operator wants the full status snapshot), with
+    a `[done]` / `[cancelled]` suffix marking them."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 13, tzinfo=timezone.utc),
+    )
+    output = AgendaOutput(
+        previous_recap=[],
+        tasks_checklist=[
+            {"title": "Sent deck", "status": "done", "owner": "admin"},
+            {"title": "Drop investor X", "status": "cancelled", "owner": "admin"},
+            {"title": "Reach out Y", "status": "todo", "owner": "admin"},
+        ],
+        open_questions=[],
+        doc_body_md="",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output, doc_url=None,
+    )
+    assert "1) Sent deck — admin • [done]" in text
+    assert "2) Drop investor X — admin • [cancelled]" in text
+    # todo gets no status suffix (operator's default for the list)
+    assert "3) Reach out Y — admin" in text
+    assert "[todo]" not in text
 
 
 # -- runner no-op safety -------------------------------------------------------

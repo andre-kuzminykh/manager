@@ -1,62 +1,92 @@
 """FR-CR-05-165 — Slack mrkdwn renderer for the agenda DM.
 
-Operator-pinned: «отправлять в слак коротко и гиперссылкой более
-подробный контекст, формат `12/05 - Повестка ко встрече "__"`».
+FR-CR-05-167 (operator-pinned 2026-05-14): match the style of the
+post-meeting summary the operator already gets — no emojis,
+numbered task list, recap rendered as prose. Concretely:
 
-So the Slack message is:
-  *12/05 — Повестка ко встрече «<title>»*
+    DD/MM - <meeting title> - Повестка
 
-  📋 *Из прошлого раза*
-  • …
-  • …
+    Участники: <comma-separated names>
 
-  ✅ *Задачи и их статусы*
-  ☐ Title (owner, до 15/05)
-  ☑ Title — done (owner)
-  …
+    На прошлой встрече: <free text 2-4 sentences>
 
-  🎯 *К обсуждению*
-  • …
+    К обсуждению:
 
-  📄 <https://docs.google.com/...|Подробно (Google Doc)>
+    1) <task title> - <short description> — <owner> • <DD.MM.YYYY HH:MM> [<status>]
+    2) ...
 
-Keep the message under Slack's 3000-char text cap by truncating
-each section if it gets long. The Doc link always carries the
+    Подробно: <google doc url>
+
+Status suffix lives at the end of the line and is shown only when
+the task is not in the default `todo` state — keeps the «open
+items» feel of the operator's pinned format. Long bodies are
+trimmed to fit Slack's 3000-char `text` cap; the Doc carries the
 full version.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 from app.agenda.compose import AgendaOutput
 from app.agenda.service import AgendaCandidate
 
 
-_STATUS_BOX = {
-    "todo": "☐",
-    "in_progress": "▣",
-    "blocked": "⛔",
-    "done": "☑",
-    "cancelled": "✕",
+_STATUS_LABEL = {
+    "todo": "",          # default — render blank suffix
+    "in_progress": "in_progress",
+    "blocked": "blocked",
+    "done": "done",
+    "cancelled": "cancelled",
 }
 
 
 def _ddmm(dt: datetime) -> str:
-    # Render the meeting date as DD/MM regardless of timezone; the
-    # operator's source format on cards.
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.strftime("%d/%m")
 
 
 def _fmt_due(due_iso: str | None) -> str:
+    """Render `due` as `DD.MM.YYYY` (operator-pinned format).
+    Falls back to empty string on parse error."""
     if not due_iso:
         return ""
     try:
         d = datetime.fromisoformat(due_iso).date()
-        return f"до {d.strftime('%d/%m')}"
+        return d.strftime("%d.%m.%Y")
     except ValueError:
         return ""
+
+
+def _fmt_task_line(idx: int, t: dict[str, Any]) -> str:
+    title = (t.get("title") or "").strip()
+    desc = (t.get("description") or "").strip()
+    if desc:
+        # Keep desc compact — full body lives in Google Doc.
+        if len(desc) > 220:
+            desc = desc[:217].rstrip() + "…"
+        head = f"{idx}) {title} - {desc}"
+    else:
+        head = f"{idx}) {title}"
+
+    tail_parts: list[str] = []
+    owner = (t.get("owner") or "").strip()
+    if owner:
+        tail_parts.append(owner)
+
+    due = _fmt_due(t.get("due"))
+    if due:
+        tail_parts.append(due)
+
+    status = (t.get("status") or "todo").strip().lower()
+    status_label = _STATUS_LABEL.get(status, status)
+    if status_label:
+        tail_parts.append(f"[{status_label}]")
+
+    if not tail_parts:
+        return head
+    return f"{head} — " + " • ".join(tail_parts)
 
 
 def render_agenda_text(
@@ -65,60 +95,63 @@ def render_agenda_text(
     output: AgendaOutput,
     doc_url: str | None,
 ) -> str:
-    """Build the Slack-mrkdwn body. Doc URL is rendered as a
-    hyperlink so the user sees a compact «Подробно» label.
+    """Build the Slack-mrkdwn body in the operator-pinned style.
 
-    Long sections get truncated with «…» to stay under the
-    3000-char message cap; the Doc carries the full version.
+    The Doc URL is rendered as a plain hyperlink so Slack collapses
+    it to «Подробно» — same look as Fireflies/Zoom summary cards.
     """
     lines: list[str] = []
-    header = (
-        f"*{_ddmm(candidate.scheduled_start_at)} — Повестка ко встрече "
-        f"«{candidate.title}»*"
+
+    # Header — date + title + section name.
+    lines.append(
+        f"{_ddmm(candidate.scheduled_start_at)} - "
+        f"{candidate.title} - Повестка"
     )
-    lines.append(header)
 
-    if output.previous_recap:
+    if candidate.attendees:
         lines.append("")
-        lines.append("📋 *Из прошлого раза*")
-        for item in output.previous_recap[:5]:
-            line = (item or "").strip()
-            if not line:
-                continue
-            lines.append(f"• {line}")
+        lines.append(f"Участники: {', '.join(candidate.attendees)}")
 
-    if output.tasks_checklist:
+    # «На прошлой встрече» — free prose joined from previous_recap
+    # bullets. Operator wants a paragraph, not a bullet list.
+    recap_blob = " ".join(
+        item.strip().rstrip(".") + "." for item in output.previous_recap
+        if item and item.strip()
+    )
+    if recap_blob:
         lines.append("")
-        lines.append("✅ *Задачи и их статусы*")
-        for t in output.tasks_checklist[:30]:
-            status = (t.get("status") or "todo").strip().lower()
-            box = _STATUS_BOX.get(status, "☐")
-            title = (t.get("title") or "").strip()
-            owner = (t.get("owner") or "").strip()
-            due = _fmt_due(t.get("due"))
-            tail_parts = [p for p in (owner, due) if p]
-            tail = f" ({', '.join(tail_parts)})" if tail_parts else ""
-            lines.append(f"{box} {title}{tail}")
+        lines.append(f"На прошлой встрече: {recap_blob}")
 
-    if output.open_questions:
+    # «К обсуждению» = open tasks with status + free-form
+    # discussion bullets the LLM produced. Tasks render as the
+    # operator-pinned numbered list; open_questions append below
+    # the task list as continuation items.
+    discussion_items: list[dict[str, Any]] = list(output.tasks_checklist or [])
+    # Treat free-form open_questions as no-status items so they
+    # land in the same numbered list — operator pinned: «к
+    # обсуждению: список задач из предыдущего и их статус».
+    for q in output.open_questions or []:
+        q = (q or "").strip()
+        if not q:
+            continue
+        discussion_items.append({"title": q, "status": "todo"})
+
+    if discussion_items:
         lines.append("")
-        lines.append("🎯 *К обсуждению*")
-        for item in output.open_questions[:4]:
-            line = (item or "").strip()
-            if not line:
-                continue
-            lines.append(f"• {line}")
+        lines.append("К обсуждению:")
+        lines.append("")
+        for i, t in enumerate(discussion_items[:30], 1):
+            lines.append(_fmt_task_line(i, t))
 
     if doc_url:
         lines.append("")
-        lines.append(f"📄 <{doc_url}|Подробно (Google Doc)>")
+        lines.append(f"Подробно: {doc_url}")
 
     out = "\n".join(lines)
-    # Slack's chat.postMessage cap is 40 KB for blocks but ~3000 chars
-    # for the legacy `text` field. We post via `text` for simplicity,
-    # so trim defensively.
+    # Slack's chat.postMessage `text` field is capped near 3000
+    # chars; trim defensively so the post call doesn't fail.
     if len(out) > 2900:
-        out = out[:2880] + "\n…\n📄 detail in Google Doc"
+        out = out[:2880].rstrip() + "\n…\nПодробно в Google Doc"
     return out
 
 

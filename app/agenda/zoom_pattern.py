@@ -42,16 +42,27 @@ log = get_logger(__name__)
 
 
 @dataclass
-class WeeklyPattern:
-    """A weekly recurrence inferred from past zoom_recordings."""
+class RecurrencePattern:
+    """A recurring pattern inferred from past zoom_recordings.
+
+    `period_days` is the inter-instance interval (1=daily,
+    7=weekly, 14=bi-weekly). `weekday` is meaningful only when
+    period_days is a multiple of 7 (otherwise the pattern lands
+    on different weekdays).
+    """
 
     title: str
     title_normalised: str
-    weekday: int        # 0 = Monday, 6 = Sunday — same as datetime.weekday()
-    hour: int           # UTC hour of the typical start
-    minute: int         # UTC minute of the typical start
-    instances: int      # how many prior recordings agreed with the pattern
+    period_days: int
+    weekday: int | None  # set only for weekly / bi-weekly
+    hour: int            # UTC hour of the typical start
+    minute: int          # UTC minute of the typical start
+    instances: int       # how many prior recordings agreed
     last_instance_at: datetime  # tz-aware
+
+
+# Back-compat alias for code that imported the v0.1 name.
+WeeklyPattern = RecurrencePattern
 
 
 def _hour_minute_close(
@@ -65,15 +76,34 @@ def _hour_minute_close(
     return delta <= tolerance_minutes
 
 
-def _detect_weekly(
+# Period candidates the heuristic recognises (in days). Sorted so
+# we prefer the *shortest* matching period when multiple fit
+# (e.g. 6-day delta should snap to daily not weekly).
+_PERIOD_CANDIDATES = (
+    (1, 0.7, 1.5),    # daily — operator's Иринины Подземелья
+    (7, 6.0, 10.0),   # weekly — most fundraising syncs
+    (14, 12.0, 16.0), # bi-weekly
+)
+
+
+def _detect_pattern(
     recordings: list[ZoomRecording],
     *,
-    weekday_tolerance_days: int = 1,
     time_tolerance_minutes: int = 30,
-) -> WeeklyPattern | None:
-    """Find a weekly pattern in `recordings` (already sorted asc by
-    meeting_date). Returns None when fewer than 2 valid
-    instances OR the deltas don't look weekly."""
+) -> RecurrencePattern | None:
+    """Find any recurring pattern in `recordings` (already sorted
+    asc by meeting_date). Returns None when fewer than 2 valid
+    instances OR the deltas don't match any known cadence.
+
+    Periods tried (in this order — shortest first):
+      * 1 day  — daily standup-style series
+      * 7 days — weekly
+      * 14 days — bi-weekly
+
+    Time-of-day stability is required for ALL cadences. Same
+    weekday is required for ≥7-day cadences only (daily lands
+    on different weekdays by definition).
+    """
     if len(recordings) < 2:
         return None
 
@@ -88,36 +118,16 @@ def _detect_weekly(
     if len(valid_dates) < 2:
         return None
 
-    # All consecutive deltas should be ≈ 7 days.
-    # Tolerance: a recording started 1 hour late is fine, but a
-    # delta of 14 days means we skipped an iteration — still
-    # weekly-ish, so accept up to ~10 days. A delta > 10 days
-    # means the pattern broke.
     deltas = [
         (b - a).total_seconds() / 86400.0
         for a, b in zip(valid_dates, valid_dates[1:])
     ]
-    # FR-CR-05-166: accept 6-10 days as «weekly». 14 days = skipped
-    # iteration is questionable; for now require all deltas in
-    # window.
-    if not all(6.0 <= d <= 10.0 for d in deltas):
-        return None
-
     last = valid_dates[-1]
-    typical_weekday = last.weekday()
     typical_time = last.timetz()
-
-    # Reject groups where the weekday wanders more than 1 day —
-    # operator's recurring calls don't shift across the week.
-    weekday_mismatches = sum(
-        1 for dt in valid_dates
-        if abs(dt.weekday() - typical_weekday) > weekday_tolerance_days
-    )
-    if weekday_mismatches >= len(valid_dates) // 2:
-        return None
 
     # Time-of-day stability — at least half the instances should
     # start within `time_tolerance_minutes` of the typical time.
+    # Cheap check, run once across the group.
     time_matches = sum(
         1 for dt in valid_dates
         if _hour_minute_close(dt.timetz(), typical_time, time_tolerance_minutes)
@@ -125,32 +135,57 @@ def _detect_weekly(
     if time_matches < len(valid_dates) // 2 + 1:
         return None
 
-    return WeeklyPattern(
-        title=recordings[-1].title or "",
-        title_normalised=normalise_title(recordings[-1].title or ""),
-        weekday=typical_weekday,
-        hour=typical_time.hour,
-        minute=typical_time.minute,
-        instances=len(valid_dates),
-        last_instance_at=last,
-    )
+    for period_days, lo, hi in _PERIOD_CANDIDATES:
+        # Require MOST deltas (≥80%) to fit this period. One outlier
+        # is fine (operator skipped a week) but a noisy group is
+        # rejected.
+        fits = sum(1 for d in deltas if lo <= d <= hi)
+        if fits < max(1, int(round(0.8 * len(deltas)))):
+            continue
+
+        weekday: int | None = None
+        if period_days % 7 == 0:
+            typical_weekday = last.weekday()
+            weekday_matches = sum(
+                1 for dt in valid_dates
+                if abs(dt.weekday() - typical_weekday) <= 1
+            )
+            if weekday_matches < len(valid_dates) // 2 + 1:
+                continue
+            weekday = typical_weekday
+
+        return RecurrencePattern(
+            title=recordings[-1].title or "",
+            title_normalised=normalise_title(recordings[-1].title or ""),
+            period_days=period_days,
+            weekday=weekday,
+            hour=typical_time.hour,
+            minute=typical_time.minute,
+            instances=len(valid_dates),
+            last_instance_at=last,
+        )
+
+    return None
 
 
-def _next_instance_at(pattern: WeeklyPattern, *, now: datetime) -> datetime:
-    """Predict the next start_dt for a weekly pattern.
+# Back-compat — old callers imported `_detect_weekly`.
+_detect_weekly = _detect_pattern
 
-    Returns the first candidate `>= now`. Adding 7-day increments
-    to ``pattern.last_instance_at`` (normalised to the typical
-    time-of-day) gives the chain; we step until the candidate
-    catches up with `now`. If `now` exactly matches a predicted
-    instance, that instance is returned (so an agenda tick fired
-    at `now = start` still picks up the event).
+
+def _next_instance_at(pattern: RecurrencePattern, *, now: datetime) -> datetime:
+    """Predict the next start_dt for a recurring pattern.
+
+    Returns the first candidate `>= now`. Adding `period_days`
+    increments to ``pattern.last_instance_at`` (normalised to the
+    typical time-of-day) gives the chain; we step until the
+    candidate catches up with `now`.
     """
     candidate = pattern.last_instance_at.replace(
         hour=pattern.hour, minute=pattern.minute, second=0, microsecond=0,
     )
+    step = timedelta(days=max(1, pattern.period_days))
     while candidate < now:
-        candidate += timedelta(days=7)
+        candidate += step
     return candidate
 
 
@@ -205,13 +240,22 @@ def predict_upcoming_events(
         grouped[key].append(r)
 
     events: list[dict[str, Any]] = []
+    diagnosed: list[dict[str, Any]] = []
     for key, group in grouped.items():
         if len(group) < max(2, int(min_prior_meetings)):
             continue
-        pattern = _detect_weekly(group)
+        pattern = _detect_pattern(group)
         if pattern is None:
             continue
         predicted = _next_instance_at(pattern, now=target_dt)
+        diagnosed.append(
+            {
+                "title": pattern.title,
+                "period_days": pattern.period_days,
+                "instances": pattern.instances,
+                "predicted": predicted.isoformat(),
+            }
+        )
         if not (earliest <= predicted <= latest):
             continue
         synth_id = f"agenda_synth:{key}:{predicted.isoformat()}"
@@ -230,9 +274,11 @@ def predict_upcoming_events(
     log.info(
         "zoom_pattern_predicted",
         groups=len(grouped),
+        patterns_found=len(diagnosed),
         matched=len(events),
         target_iso=target_dt.isoformat(),
         window_minutes=window,
+        diagnosed=diagnosed[:30],  # cap for log volume
     )
     return events
 

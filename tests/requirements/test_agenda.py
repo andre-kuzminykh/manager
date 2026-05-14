@@ -777,20 +777,54 @@ def test_zoom_pattern_predicts_next_weekly_instance(session):
     assert ev["id"].startswith("agenda_synth:weekly sync:")
 
 
-def test_zoom_pattern_skips_non_weekly_groups(session):
-    """Two recordings 1 day apart → not weekly → no prediction."""
+def test_zoom_pattern_detects_daily_groups(session):
+    """FR-CR-05-166 follow-up: daily-cadence series (operator's
+    «Подземелья» style) are detected too. Two days in a row at
+    the same time → predict next day."""
     from app.agenda.zoom_pattern import predict_upcoming_events
 
     session.add_all(
         [
             _zr(
                 "a",
-                "Quick chat",
+                "Daily standup",
                 datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc),
             ),
             _zr(
                 "b",
-                "Quick chat",
+                "Daily standup",
+                datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    session.flush()
+
+    # Next predicted instance = 2026-05-13 12:00 (last+1 day).
+    target = datetime(2026, 5, 13, 12, 0, tzinfo=timezone.utc)
+    events = predict_upcoming_events(
+        session, target_dt=target, window_minutes=1, lookback_days=30,
+        min_prior_meetings=2,
+    )
+    assert len(events) == 1
+    assert events[0]["title"] == "Daily standup"
+    assert events[0]["start"] == target
+
+
+def test_zoom_pattern_skips_irregular_groups(session):
+    """Two recordings 3 days apart fit NO known cadence (1, 7,
+    or 14 days) → no prediction."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    session.add_all(
+        [
+            _zr(
+                "a",
+                "Irregular chat",
+                datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc),
+            ),
+            _zr(
+                "b",
+                "Irregular chat",
                 datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc),
             ),
         ]
@@ -805,6 +839,42 @@ def test_zoom_pattern_skips_non_weekly_groups(session):
         )
         == []
     )
+
+
+def test_zoom_pattern_detects_biweekly_groups(session):
+    """FR-CR-05-166 follow-up: bi-weekly cadence (every 14 days
+    same weekday + time) is detected too."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    # Tuesdays 2026-04-21, 2026-05-05, 2026-05-19 — 14 days apart
+    session.add_all(
+        [
+            _zr(
+                "a",
+                "Biweekly review",
+                datetime(2026, 4, 21, 15, 0, tzinfo=timezone.utc),
+            ),
+            _zr(
+                "b",
+                "Biweekly review",
+                datetime(2026, 5, 5, 15, 0, tzinfo=timezone.utc),
+            ),
+            _zr(
+                "c",
+                "Biweekly review",
+                datetime(2026, 5, 19, 15, 0, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    session.flush()
+
+    target = datetime(2026, 6, 2, 15, 0, tzinfo=timezone.utc)
+    events = predict_upcoming_events(
+        session, target_dt=target, window_minutes=1, lookback_days=90,
+        min_prior_meetings=2,
+    )
+    assert len(events) == 1
+    assert events[0]["title"] == "Biweekly review"
 
 
 def test_zoom_pattern_requires_min_prior_meetings(session):

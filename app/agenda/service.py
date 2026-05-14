@@ -36,9 +36,11 @@ from sqlalchemy.orm import Session
 
 from app.logging_setup import get_logger
 from app.models import (
+    Employee,
     MeetingAgenda,
     Task,
     TaskStatus,
+    TeamMember,
     ZoomRecording,
 )
 
@@ -79,6 +81,98 @@ def normalise_title(title: str | None) -> str:
     return s
 
 
+def _build_email_to_name_map(session: Session) -> dict[str, str]:
+    """FR-CR-05-167 — operator-pinned 2026-05-14: «переводи почты
+    в конкретные имена из списка людей (у нас есть в бд)».
+
+    Pull both directories the project maintains and union them
+    into a single email-lowercase → display-name map. Operator
+    edits `team_members` via the Google Sheet (FR-CR-05-10);
+    `employees` is what Slack ingest populates from
+    `users.list`. Either is a valid source of truth — we prefer
+    `team_members` because it's hand-curated.
+    """
+    out: dict[str, str] = {}
+    try:
+        rows = (
+            session.query(Employee)
+            .filter(Employee.email.is_not(None))
+            .all()
+        )
+        for e in rows:
+            email = (e.email or "").strip().lower()
+            name = (e.real_name or e.display_name or "").strip()
+            if email and name:
+                out[email] = name
+    except Exception as e:  # noqa: BLE001
+        log.info("agenda_email_resolve_employees_query_failed", error=str(e))
+    try:
+        rows = (
+            session.query(TeamMember)
+            .filter(TeamMember.email.is_not(None))
+            .filter(TeamMember.active.is_(True))
+            .all()
+        )
+        for tm in rows:
+            email = (tm.email or "").strip().lower()
+            name = (tm.real_name or "").strip()
+            if email and name:
+                # team_members wins — it's the hand-curated Sheet.
+                out[email] = name
+    except Exception as e:  # noqa: BLE001
+        log.info("agenda_email_resolve_team_members_query_failed", error=str(e))
+    return out
+
+
+def _resolve_attendee_label(item: Any, email_to_name: dict[str, str]) -> str:
+    """Best-effort: turn a Calendar API attendee item into a
+    display label. Falls back to displayName → email when no
+    DB hit; drops garbage."""
+    if isinstance(item, str):
+        s = item.strip()
+        # If the string is itself an email, try the lookup.
+        if s and "@" in s:
+            cand = email_to_name.get(s.lower())
+            if cand:
+                return cand
+        return s
+    if not isinstance(item, dict):
+        return ""
+    email = (item.get("email") or "").strip().lower()
+    if email:
+        cand = email_to_name.get(email)
+        if cand:
+            return cand
+    return (
+        (item.get("displayName") or item.get("name") or item.get("email") or "")
+        .strip()
+    )
+
+
+def _resolve_attendees(
+    items: list[Any], session: Session
+) -> list[str]:
+    """Map a list of Calendar attendee dicts to display names via
+    `team_members` / `employees` email lookup. Unresolved entries
+    fall back to displayName → email — never raises, returns an
+    ordered, dedup-by-label list."""
+    if not items:
+        return []
+    email_to_name = _build_email_to_name_map(session)
+    seen: set[str] = set()
+    out: list[str] = []
+    for it in items:
+        label = _resolve_attendee_label(it, email_to_name)
+        if not label:
+            continue
+        key = label.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(label)
+    return out
+
+
 @dataclass
 class AgendaCandidate:
     """The result of a discovery tick: a calendar event we want
@@ -90,6 +184,9 @@ class AgendaCandidate:
     title_normalised: str
     scheduled_start_at: datetime
     description: str | None = None
+    # Resolved display labels (real names or email fallback) — see
+    # `_resolve_attendees`. Calendar API gives dict shapes; we
+    # flatten them to strings before storing on the candidate.
     attendees: list[str] = field(default_factory=list)
     prior_recordings: list[dict[str, Any]] = field(default_factory=list)
     open_tasks: list[dict[str, Any]] = field(default_factory=list)
@@ -322,7 +419,9 @@ def build_candidates(
             title_normalised=normalise_title(title),
             scheduled_start_at=start,
             description=ev.get("description"),
-            attendees=list(ev.get("attendees") or []),
+            attendees=_resolve_attendees(
+                ev.get("attendees") or [], session,
+            ),
             prior_recordings=[
                 render_recording_for_prompt(r) for r in prior
             ],

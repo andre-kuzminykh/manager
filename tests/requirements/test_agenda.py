@@ -353,6 +353,107 @@ def test_build_candidates_filters_by_organizer_email(session):
     assert [c.title for c in cs] == ["Fundraising daily"]
 
 
+def test_build_candidates_resolves_attendees_via_team_members(session):
+    """FR-CR-05-167: operator-pinned 2026-05-14 «переводи почты
+    в конкретные имена из списка людей». Attendees with a matching
+    `team_members.email` should render as the real_name, not the
+    raw email."""
+    from app.models import TeamMember
+
+    now = datetime(2026, 5, 14, 9, 0, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            TeamMember(
+                real_name="Артём Соколов",
+                email="1@thehumanoid.ai",
+                active=True,
+                telegram_user_id=111,
+            ),
+            TeamMember(
+                real_name="Ирина Шипилова",
+                email="irina.shipilova@thehumanoid.ai",
+                active=True,
+                telegram_user_id=222,
+            ),
+            # 2 prior recordings for the title — enough to clear
+            # min_prior_meetings=2.
+            _zr("a", "Weekly sync", now - timedelta(days=1)),
+            _zr("b", "Weekly sync", now - timedelta(days=2)),
+        ]
+    )
+    session.flush()
+
+    events = [
+        {
+            "id": "ev1",
+            "title": "Weekly sync",
+            "start": now + timedelta(minutes=10),
+            "organizer": {"email": "1@thehumanoid.ai"},
+            "attendees": [
+                {"email": "1@thehumanoid.ai"},
+                {"email": "irina.shipilova@thehumanoid.ai"},
+                # Unknown email — should fall back as-is.
+                {"email": "unknown@external.com"},
+                # displayName only — preserved.
+                {"displayName": "Жёлтый Гость"},
+            ],
+        }
+    ]
+    cs = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=2, now=now,
+        organizer_email="1@thehumanoid.ai",
+    )
+    assert len(cs) == 1
+    assert cs[0].attendees == [
+        "Артём Соколов",
+        "Ирина Шипилова",
+        "unknown@external.com",
+        "Жёлтый Гость",
+    ]
+
+
+def test_build_candidates_resolve_dedupes_by_label(session):
+    """If two attendee dicts resolve to the same name (e.g. same
+    person added twice with different email aliases mapped to the
+    same row), keep only one — better than duplicating in the DM."""
+    from app.models import TeamMember
+
+    now = datetime(2026, 5, 14, 9, 0, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            TeamMember(
+                real_name="Артём Соколов",
+                email="1@thehumanoid.ai",
+                active=True,
+                telegram_user_id=111,
+            ),
+            _zr("a", "Weekly sync", now - timedelta(days=1)),
+            _zr("b", "Weekly sync", now - timedelta(days=2)),
+        ]
+    )
+    session.flush()
+    events = [
+        {
+            "id": "ev1",
+            "title": "Weekly sync",
+            "start": now + timedelta(minutes=10),
+            "organizer": {"email": "1@thehumanoid.ai"},
+            "attendees": [
+                {"email": "1@thehumanoid.ai"},
+                # Plain-string duplicate of the same name.
+                "Артём Соколов",
+            ],
+        }
+    ]
+    cs = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=2, now=now,
+        organizer_email="1@thehumanoid.ai",
+    )
+    assert cs[0].attendees == ["Артём Соколов"]
+
+
 def test_build_candidates_organizer_filter_case_insensitive(session):
     now = datetime(2026, 5, 14, 9, 0, 0, tzinfo=timezone.utc)
     session.add_all(

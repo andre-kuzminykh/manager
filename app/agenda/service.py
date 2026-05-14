@@ -81,18 +81,41 @@ def normalise_title(title: str | None) -> str:
     return s
 
 
+# FR-CR-05-167 — operator-pinned fallback. The Google Sheet
+# `team_members.email` is wipe-and-replace synced, and the
+# operator doesn't always keep emails in the Sheet — so a sync
+# can leave the DB without any email→name mapping. To stop the
+# agenda DM from regressing to raw emails, we keep a hard-coded
+# core dictionary here as the absolute last fallback.
+# Update only with operator confirmation; otherwise edit the
+# Sheet (which still wins — DB rows override this map).
+_AGENDA_EMAIL_NAME_FALLBACK: dict[str, str] = {
+    "1@thehumanoid.ai":               "Артем Соколов",
+    "kaa@thehumanoid.ai":             "Alina Kolpakova",
+    "oponomarenko@cohengresser.com":  "Ольга Пономаренко",
+    "dmitry.sedov@thehumanoid.ai":    "Дмитрий Седов",
+    "irina.shipilova@thehumanoid.ai": "Ирина Шипилова",
+    "elena.radionova@sokolov.ch":     "Елена Радионова",
+}
+
+
 def _build_email_to_name_map(session: Session) -> dict[str, str]:
     """FR-CR-05-167 — operator-pinned 2026-05-14: «переводи почты
     в конкретные имена из списка людей (у нас есть в бд)».
 
-    Pull both directories the project maintains and union them
-    into a single email-lowercase → display-name map. Operator
-    edits `team_members` via the Google Sheet (FR-CR-05-10);
-    `employees` is what Slack ingest populates from
-    `users.list`. Either is a valid source of truth — we prefer
-    `team_members` because it's hand-curated.
+    Resolution chain (last write wins):
+
+      0. Hard-coded `_AGENDA_EMAIL_NAME_FALLBACK` — always
+         present so wipe-and-replace sync of `team_members`
+         doesn't regress the agenda DM to raw emails.
+      1. `employees` (Slack ingest sync from `users.info`).
+         Empty when Slack scope `users:read.email` isn't
+         granted.
+      2. `team_members` (hand-curated Sheet; FR-CR-05-10). Highest
+         priority — operator-curated row WINS over both Slack
+         and the hard-coded fallback.
     """
-    out: dict[str, str] = {}
+    out: dict[str, str] = dict(_AGENDA_EMAIL_NAME_FALLBACK)
     try:
         rows = (
             session.query(Employee)
@@ -444,19 +467,31 @@ def build_candidates(
                 continue
         if start.tzinfo is None:
             start = start.replace(tzinfo=timezone.utc)
-        # FR-CR-05-167 — organizer filter. Calendar event's
-        # `organizer` carries email + displayName; teammates'
-        # meetings (e.g. Иринины «Летучка СЕО Office»,
-        # «Подземелья») are dropped here so the agenda runner
-        # only fires for events the operator hosts.
+        # FR-CR-05-167 — organizer filter. On Workspace / shared
+        # calendars `organizer.email` is sometimes rewritten to
+        # the calendar owner (a teammate's meeting copied into
+        # your shared calendar still lists YOU as organizer).
+        # Check BOTH `organizer.email` and `creator.email` and
+        # require the operator email to match AT LEAST ONE of
+        # them. `creator` keeps the original author and is the
+        # right gate against teammates' events sneaking through.
         if org_filter:
-            org = ev.get("organizer") or {}
-            org_email = ""
-            if isinstance(org, dict):
-                org_email = (org.get("email") or "").strip().lower()
-            elif isinstance(org, str):
-                org_email = org.strip().lower()
-            if org_email != org_filter:
+            def _email_of(field: Any) -> str:
+                if isinstance(field, dict):
+                    return (field.get("email") or "").strip().lower()
+                if isinstance(field, str):
+                    return field.strip().lower()
+                return ""
+
+            org_email = _email_of(ev.get("organizer"))
+            creator_email = _email_of(ev.get("creator"))
+            if org_filter not in {org_email, creator_email}:
+                continue
+            # AND the operator must NOT be just a participant on
+            # a teammate's meeting (the shared-calendar rewrite
+            # case): if creator IS set and points elsewhere, drop
+            # the event regardless of how `organizer` reads.
+            if creator_email and creator_email != org_filter:
                 continue
         # Skip already-posted.
         if svc.is_already_posted(session, calendar_event_id=ev_id):
@@ -474,11 +509,12 @@ def build_candidates(
         resolved_attendees = _resolve_attendees(
             ev.get("attendees") or [], session,
         )
-        # FR-CR-05-167 — keep only tasks belonging to people who
-        # are actually in the meeting (operator-pinned).
-        rendered_tasks = _filter_tasks_by_attendees(
-            rendered_tasks, resolved_attendees,
-        )
+        # FR-CR-05-167 revert 2026-05-14: keep ALL open tasks for
+        # the recurring title — operator wants the full status
+        # picture, not a per-attendee subset. Earlier we filtered
+        # by `attendee ∋ owner`; that was over-restrictive and
+        # also leaked teammates' meetings when their attendees
+        # accidentally overlapped.
         candidate = AgendaCandidate(
             calendar_event_id=ev_id,
             recurring_event_id=ev.get("recurring_event_id"),

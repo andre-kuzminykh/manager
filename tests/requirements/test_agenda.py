@@ -353,62 +353,40 @@ def test_build_candidates_filters_by_organizer_email(session):
     assert [c.title for c in cs] == ["Fundraising daily"]
 
 
-def test_filter_tasks_by_attendees_keeps_owners_in_meeting():
-    """FR-CR-05-167 operator-pinned 2026-05-14: keep only tasks
-    whose owner is one of the meeting attendees."""
-    from app.agenda.service import _filter_tasks_by_attendees
+def test_email_to_name_map_includes_hardcoded_fallback(session):
+    """FR-CR-05-167 revert 2026-05-14: hard-coded core mapping
+    is ALWAYS in the resolver, even when both `team_members` and
+    `employees` are empty (operator hasn't filled the Sheet yet,
+    Slack `users:read.email` scope not granted)."""
+    from app.agenda.service import _build_email_to_name_map
 
-    tasks = [
-        {"title": "T1", "owner_display_name": "Артём Соколов", "owner": "Артём Соколов"},
-        {"title": "T2", "owner_display_name": "Olga Ponomarenko", "owner": "Olga Ponomarenko"},
-        # Different person — must be dropped.
-        {"title": "T3", "owner_display_name": "Petya Ivanov", "owner": "Petya Ivanov"},
-    ]
-    attendees = ["Артем Соколов", "Olga Ponomarenko"]
-    filtered = _filter_tasks_by_attendees(tasks, attendees)
-    assert [t["title"] for t in filtered] == ["T1", "T2"]
-
-
-def test_filter_tasks_by_attendees_matches_first_or_last_name():
-    """An attendee «Artem Sokolov» should still match a task
-    owner recorded only as «Artem» (display-name truncation
-    happens often in TG-extracted tasks)."""
-    from app.agenda.service import _filter_tasks_by_attendees
-
-    tasks = [
-        {"title": "T1", "owner_display_name": "Артем", "owner": "Артем"},
-        {"title": "T2", "owner_display_name": "Соколов", "owner": "Соколов"},
-        {"title": "T3", "owner_display_name": "Petya", "owner": "Petya"},
-    ]
-    filtered = _filter_tasks_by_attendees(tasks, ["Артем Соколов"])
-    assert {t["title"] for t in filtered} == {"T1", "T2"}
+    m = _build_email_to_name_map(session)
+    assert m["1@thehumanoid.ai"] == "Артем Соколов"
+    assert m["kaa@thehumanoid.ai"] == "Alina Kolpakova"
+    assert m["oponomarenko@cohengresser.com"] == "Ольга Пономаренко"
+    assert m["dmitry.sedov@thehumanoid.ai"] == "Дмитрий Седов"
+    assert m["irina.shipilova@thehumanoid.ai"] == "Ирина Шипилова"
+    assert m["elena.radionova@sokolov.ch"] == "Елена Радионова"
 
 
-def test_filter_tasks_by_attendees_passes_through_when_no_attendees():
-    """No attendees signal → don't drop anything, the agenda
-    pre-filter shouldn't kill all tasks on Calendar events with
-    empty attendee lists."""
-    from app.agenda.service import _filter_tasks_by_attendees
+def test_email_to_name_map_db_overrides_hardcoded(session):
+    """A DB row with the same email wins over the hard-coded
+    fallback so operator updates take effect."""
+    from app.models import TeamMember
+    from app.agenda.service import _build_email_to_name_map
 
-    tasks = [
-        {"title": "T1", "owner_display_name": "Petya"},
-        {"title": "T2", "owner_display_name": "Vasya"},
-    ]
-    assert _filter_tasks_by_attendees(tasks, []) == tasks
+    session.add(
+        TeamMember(
+            real_name="Artem (custom)",
+            email="1@thehumanoid.ai",
+            active=True,
+            telegram_user_id=42,
+        )
+    )
+    session.flush()
 
-
-def test_filter_tasks_by_attendees_keeps_unassigned_tasks():
-    """Tasks with no owner at all are kept — they're worth
-    surfacing on the agenda even when the meeting roster filter
-    is active (operator can pick someone to take them)."""
-    from app.agenda.service import _filter_tasks_by_attendees
-
-    tasks = [
-        {"title": "Орфан", "owner_display_name": "", "owner_user_id": ""},
-        {"title": "Petya", "owner_display_name": "Petya"},
-    ]
-    filtered = _filter_tasks_by_attendees(tasks, ["Артем"])
-    assert [t["title"] for t in filtered] == ["Орфан"]
+    m = _build_email_to_name_map(session)
+    assert m["1@thehumanoid.ai"] == "Artem (custom)"
 
 
 def test_build_candidates_resolves_attendees_via_team_members(session):
@@ -510,6 +488,71 @@ def test_build_candidates_resolve_dedupes_by_label(session):
         organizer_email="1@thehumanoid.ai",
     )
     assert cs[0].attendees == ["Артём Соколов"]
+
+
+def test_build_candidates_drops_event_when_creator_is_someone_else(session):
+    """FR-CR-05-167 2026-05-14 «Viktor ‹› Irina» regression:
+    when a shared-calendar quirk makes `organizer.email` = the
+    operator (because they own the calendar that holds the
+    event), `creator.email` still reveals the real author.
+    Drop the event when `creator.email` ≠ operator."""
+    now = datetime(2026, 5, 14, 9, 0, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _zr(
+                "a", "Viktor Irina sync",
+                now - timedelta(days=1),
+            ),
+            _zr(
+                "b", "Viktor Irina sync",
+                now - timedelta(days=2),
+            ),
+        ]
+    )
+    session.flush()
+
+    events = [
+        {
+            "id": "ev_viktor",
+            "title": "Viktor Irina sync",
+            "start": now + timedelta(minutes=10),
+            "organizer": {"email": "1@thehumanoid.ai"},
+            "creator":   {"email": "irina.shipilova@thehumanoid.ai"},
+        }
+    ]
+    cs = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=2, now=now,
+        organizer_email="1@thehumanoid.ai",
+    )
+    assert cs == []
+
+
+def test_build_candidates_keeps_event_when_creator_is_operator(session):
+    """Normal case: operator both organizes AND creates."""
+    now = datetime(2026, 5, 14, 9, 0, 0, tzinfo=timezone.utc)
+    session.add_all(
+        [
+            _zr("a", "Weekly sync", now - timedelta(days=1)),
+            _zr("b", "Weekly sync", now - timedelta(days=2)),
+        ]
+    )
+    session.flush()
+    events = [
+        {
+            "id": "ev",
+            "title": "Weekly sync",
+            "start": now + timedelta(minutes=10),
+            "organizer": {"email": "1@thehumanoid.ai"},
+            "creator":   {"email": "1@thehumanoid.ai"},
+        }
+    ]
+    cs = build_candidates(
+        session, events=events, lookback_days=30,
+        min_prior_meetings=2, now=now,
+        organizer_email="1@thehumanoid.ai",
+    )
+    assert len(cs) == 1
 
 
 def test_build_candidates_organizer_filter_case_insensitive(session):

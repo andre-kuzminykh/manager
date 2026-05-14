@@ -368,6 +368,10 @@ Scenario: LLM returns invalid JSON — runner skips and retries next tick
 | FR-MA-1.12 | zoom_pattern synthetic id стабилен across ticks (idempotency invariant) | `test_zoom_pattern_synth_id_is_stable_across_calls` |
 | FR-MA-1.13 | zoom_pattern уважает window — target_dt вне окна prediction → пусто | `test_zoom_pattern_window_misses_when_target_off` |
 | FR-MA-1.14 | Runner стартует в `zoom_pattern` mode БЕЗ любого Calendar источника | `test_runner_starts_with_zoom_pattern_source_no_calendar` |
+| FR-MA-1.15 | Filter by `organizer.email == operator_email` (CALENDAR source, FR-CR-05-167) — Иринины Подземельи / Летучка отсеиваются | `test_build_candidates_filters_by_organizer_email` |
+| FR-MA-1.16 | Calendar source также проверяет `creator.email` — на shared-Workspace календарях `organizer.email` иногда переписан на owner of calendar, а реальный автор хранится в `creator`. Operator должен быть **AND** в `organizer`, **AND** в `creator` (когда `creator` set). | `test_build_candidates_drops_event_when_creator_is_someone_else` |
+| FR-MA-1.17 | Email → real-name resolution через 3-layer chain: hard-coded fallback (FR-CR-05-167) → `employees.email` (Slack ingest) → `team_members.email` (Sheet, wins). Hard-coded fallback есть всегда, чтобы wipe-and-replace sync не вернул raw emails. | `test_email_to_name_map_includes_hardcoded_fallback` + `test_email_to_name_map_db_overrides_hardcoded` |
+| FR-MA-1.18 | НЕ фильтровать tasks по attendees — все open tasks для recurring title попадают в Слак-DM (operator-pinned revert 2026-05-14: «убери правило что отправляешь только по тем кто в списках участников»). | (negative — отсутствие старого `_filter_tasks_by_attendees`) |
 
 ### Категория 2 — Recurrence detection
 

@@ -178,7 +178,15 @@ def fetch_calendar_events_via_api(
                         or (ev.get("end") or {}).get("date") or "",
                 "attendees": ev.get("attendees") or [],
                 "description": ev.get("description") or "",
+                # FR-CR-05-167 — keep both `organizer` and
+                # `creator`. On shared / Workspace calendars
+                # `organizer.email` is sometimes rewritten to the
+                # calendar owner (even when somebody else created
+                # the event). `creator.email` keeps the original
+                # author, so the agenda runner checks both before
+                # accepting an event as «hosted by operator».
                 "organizer": ev.get("organizer") or {},
+                "creator": ev.get("creator") or {},
                 "_calendar_id": cid,  # for trace / debugging
             })
     return out

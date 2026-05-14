@@ -44,12 +44,44 @@ log = get_logger(__name__)
 
 def _doc_body(candidate: AgendaCandidate, output_md: str) -> str:
     """Wrap the LLM-rendered markdown with a stable header so the
-    Doc title and the first heading match."""
+    Doc title and the first heading match.
+
+    FR-CR-05-167 polish 2026-05-14: prepend a «Подробно по прошлой
+    встрече» section pointing to the Google Docs of the most
+    recent prior recordings (operator wants one click to the last
+    summary). Google Docs auto-detects bare URLs and renders them
+    as hyperlinks — no extra Docs-API styling pass needed.
+    """
     header = (
         f"# {candidate.scheduled_start_at.strftime('%d/%m')} — "
         f"Повестка ко встрече «{candidate.title}»\n\n"
     )
-    return header + (output_md or "").strip() + "\n"
+    # Up to 3 most-recent prior recordings with a non-empty
+    # google_doc_url. Format: «DD/MM — <url>» one per line.
+    links: list[str] = []
+    for r in candidate.prior_recordings[:3]:
+        url = (r.get("google_doc_url") or "").strip()
+        if not url:
+            continue
+        date_label = ""
+        meeting_iso = r.get("meeting_date") or ""
+        if meeting_iso:
+            try:
+                date_label = (
+                    datetime.fromisoformat(meeting_iso).strftime("%d/%m")
+                )
+            except ValueError:
+                date_label = ""
+        prefix = f"{date_label} — " if date_label else ""
+        links.append(f"- {prefix}{url}")
+    prior_section = ""
+    if links:
+        prior_section = (
+            "## Подробно по прошлой встрече\n"
+            + "\n".join(links)
+            + "\n\n"
+        )
+    return header + prior_section + (output_md or "").strip() + "\n"
 
 
 class AgendaRunner:

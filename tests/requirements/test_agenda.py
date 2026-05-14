@@ -1109,6 +1109,62 @@ def test_normalise_event_keeps_native_id_when_present():
     assert n["id"] == "abc123"
 
 
+def test_doc_body_includes_prior_recording_links():
+    """FR-CR-05-167 polish: the Google Doc body should start with
+    a «Подробно по прошлой встрече» section listing URLs of the
+    last few prior recordings' summary Docs."""
+    from app.agenda.runner import _doc_body
+
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 14, 15, tzinfo=timezone.utc),
+        prior_recordings=[
+            {
+                "zoom_id": "z1",
+                "meeting_date": "2026-05-07T15:00:00+00:00",
+                "google_doc_url":
+                    "https://docs.google.com/document/d/older/edit",
+            },
+            {
+                "zoom_id": "z2",
+                "meeting_date": "2026-04-30T15:00:00+00:00",
+                "google_doc_url":
+                    "https://docs.google.com/document/d/even_older/edit",
+            },
+        ],
+    )
+    body = _doc_body(candidate, "## LLM body here\n")
+    assert "Подробно по прошлой встрече" in body
+    assert "https://docs.google.com/document/d/older/edit" in body
+    assert "https://docs.google.com/document/d/even_older/edit" in body
+    # Date prefix on each line.
+    assert "07/05 — https://docs.google.com/document/d/older/edit" in body
+    # Header still at the top.
+    assert body.startswith(
+        "# 14/05 — Повестка ко встрече «Weekly sync»"
+    )
+
+
+def test_doc_body_omits_prior_section_when_no_urls():
+    """No prior recording has a google_doc_url → skip the section
+    entirely, don't render an empty heading."""
+    from app.agenda.runner import _doc_body
+
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 14, 15, tzinfo=timezone.utc),
+        prior_recordings=[{"zoom_id": "z1", "google_doc_url": ""}],
+    )
+    body = _doc_body(candidate, "## LLM body\n")
+    assert "Подробно по прошлой встрече" not in body
+
+
 def test_normalise_event_returns_none_on_missing_fields():
     from app.agenda.runner import AgendaRunner
 

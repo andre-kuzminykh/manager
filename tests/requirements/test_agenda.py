@@ -650,6 +650,72 @@ def test_render_agenda_text_format_matches_operator_pin():
     assert "Подробно:" not in text
 
 
+def test_render_agenda_text_escapes_angle_brackets_in_title():
+    """FR-CR-05-167 bugfix 2026-05-14: title «EQT Group <>
+    Humanoid» broke the Slack link parser when wrapped in
+    `<url|...>`. Renderer must replace `<` `>` with Unicode small
+    angles (‹ ›) before putting the title into the hyperlink
+    label (matches `slack_mirror._link_sub` rule)."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="EQT Group <> Humanoid / Intro call",
+        title_normalised="eqt group humanoid intro call",
+        scheduled_start_at=datetime(2026, 5, 14, 13, tzinfo=timezone.utc),
+    )
+    output = AgendaOutput(
+        previous_recap=[], tasks_checklist=[], open_questions=[],
+        doc_body_md="",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output,
+        doc_url="https://docs.google.com/document/d/g1/edit",
+    )
+    # `<` and `>` removed from the title; `‹›` substituted
+    assert "‹›" in text
+    # The raw markup that broke the Slack client must NOT appear
+    # — only the link-wrapper angles remain.
+    assert "<> Humanoid" not in text
+    # The link wrapper itself is still well-formed.
+    assert "<https://docs.google.com/document/d/g1/edit|" in text
+    # Pipe replaced with slash inside the label so it doesn't
+    # split the link.
+    assert "| Intro call" not in text
+
+
+def test_render_agenda_text_escapes_angle_brackets_in_task_body():
+    """A task title or description containing `<` `>` is escaped
+    in the body too (defence-in-depth — `<text>` in plain mrkdwn
+    is also interpreted as a link / mention by Slack)."""
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Weekly sync",
+        title_normalised="weekly sync",
+        scheduled_start_at=datetime(2026, 5, 14, 13, tzinfo=timezone.utc),
+    )
+    output = AgendaOutput(
+        previous_recap=[],
+        tasks_checklist=[
+            {
+                "title": "Acme <> NewCorp follow-up",
+                "description": "summarise the <demo> notes",
+                "status": "todo",
+                "owner": "admin",
+            }
+        ],
+        open_questions=[],
+        doc_body_md="",
+    )
+    text = render_agenda_text(
+        candidate=candidate, output=output, doc_url=None,
+    )
+    assert "Acme ‹› NewCorp" in text
+    assert "‹demo›" in text
+    assert "<>" not in text
+    assert "<demo>" not in text
+
+
 def test_render_agenda_text_strips_duplicate_recap_label():
     """LLM sometimes prepends «На прошлой встрече» even though
     the prompt forbids it. Renderer must strip the duplicate so

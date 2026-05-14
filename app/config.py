@@ -78,10 +78,13 @@ class Settings(BaseSettings):
         default=90, alias="AGENDA_LOOKBACK_DAYS"
     )
     # Минимум прошлых recordings с тем же title чтобы считать встречу
-    # повторяющейся. 1 = первая повторная встреча уже триггерит. 2 =
-    # ждать пока встреча произойдёт минимум дважды.
+    # повторяющейся. Default 2 (operator-pinned 2026-05-14: «EQT
+    # Group <> Humanoid - почему вообще выводится? разве такое было
+    # регулярно?») — intro/one-off встречи с min=1 попадали в окно
+    # с одной prior записью и слали повестку. 2 = ждать пока серия
+    # реально подтвердится.
     agenda_min_prior_meetings: int = Field(
-        default=1, alias="AGENDA_MIN_PRIOR_MEETINGS"
+        default=2, alias="AGENDA_MIN_PRIOR_MEETINGS"
     )
     # Slack channel / DM куда отправлять повестку. Это conversation id
     # типа D0ASY5QF6UX (DM с оператором) или C0... (channel).

@@ -47,6 +47,26 @@ _SLACK_TEXT_CAP = 2900
 _SLACK_TASK_LIMIT = 12
 
 
+def _slack_safe(text: str) -> str:
+    """Escape Slack mrkdwn metachars `<` `>` so user-supplied
+    text (meeting titles, task names, descriptions) doesn't get
+    mis-parsed as link / mention markup. Same rule as
+    `_slack_link_label_safe` but without the pipe → slash swap
+    (which is only needed inside `<url|label>` blocks)."""
+    return (
+        (text or "")
+        .replace("&amp;", "&")
+        .replace("&lt;", "‹")
+        .replace("&gt;", "›")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
+        .replace("<", "‹")
+        .replace(">", "›")
+    )
+
+
 def _format_attendees(items: list[Any]) -> str:
     """Calendar API returns attendees as
     ``[{email, displayName, responseStatus, organizer?}, ...]``.
@@ -76,6 +96,32 @@ def _ddmm(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.strftime("%d/%m")
+
+
+def _slack_link_label_safe(text: str) -> str:
+    """Slack mrkdwn link is ``<URL|LABEL>``; literal `<`, `>`, `|`
+    inside LABEL break the parser and the link renders as raw
+    text. Operator hit this with «EQT Group <> Humanoid / Intro
+    call» — the `<>` in the title turned the entire agenda
+    message into garbage on the client side.
+
+    Replace with the visually similar Unicode small angles
+    (U+2039 / U+203A) and pipe → slash, matching the
+    `slack_mirror._link_sub` rule used elsewhere in the project.
+    """
+    return (
+        (text or "")
+        .replace("&amp;", "&")
+        .replace("&lt;", "‹")
+        .replace("&gt;", "›")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&apos;", "'")
+        .replace("<", "‹")
+        .replace(">", "›")
+        .replace("|", "/")
+    )
 
 
 def _fmt_due(due_iso: str | None, due_time: str | None = None) -> str:
@@ -113,8 +159,8 @@ def _strip_recap_label(text: str) -> str:
 
 
 def _fmt_task_line(idx: int, t: dict[str, Any]) -> str:
-    title = (t.get("title") or "").strip()
-    desc = (t.get("description") or "").strip()
+    title = _slack_safe((t.get("title") or "").strip())
+    desc = _slack_safe((t.get("description") or "").strip())
     if desc:
         if len(desc) > 220:
             desc = desc[:217].rstrip() + "…"
@@ -123,7 +169,7 @@ def _fmt_task_line(idx: int, t: dict[str, Any]) -> str:
         head = f"{idx}) {title}"
 
     tail_parts: list[str] = []
-    owner = (t.get("owner") or "").strip()
+    owner = _slack_safe((t.get("owner") or "").strip())
     if owner:
         tail_parts.append(owner)
 
@@ -144,8 +190,18 @@ def _fmt_task_line(idx: int, t: dict[str, Any]) -> str:
 def _render_header(candidate: AgendaCandidate, doc_url: str | None) -> str:
     """`<url|DD/MM - Агенда к <title>>` — Slack mrkdwn hyperlink.
     Without a URL: plain bold text. Same shape Fireflies / Zoom
-    use for the meeting summary header line."""
-    label = f"{_ddmm(candidate.scheduled_start_at)} - Агенда к {candidate.title}"
+    use for the meeting summary header line.
+
+    FR-CR-05-167 bugfix 2026-05-14: titles like «EQT Group <>
+    Humanoid» have literal `<>` characters which Slack would
+    otherwise interpret as more link markup, breaking the entire
+    message. Escape them to Unicode small angles before wrapping
+    in the link.
+    """
+    safe_title = _slack_link_label_safe(candidate.title)
+    label = (
+        f"{_ddmm(candidate.scheduled_start_at)} - Агенда к {safe_title}"
+    )
     if doc_url:
         return f"*<{doc_url}|{label}>*"
     return f"*{label}*"
@@ -161,7 +217,7 @@ def render_agenda_text(
     lines: list[str] = []
     lines.append(_render_header(candidate, doc_url))
 
-    names = _format_attendees(candidate.attendees)
+    names = _slack_safe(_format_attendees(candidate.attendees))
     if names:
         lines.append("")
         lines.append(f"Участники: {names}")
@@ -173,7 +229,7 @@ def render_agenda_text(
         item.strip().rstrip(".") + "." for item in output.previous_recap
         if item and item.strip()
     )
-    recap_blob = _strip_recap_label(recap_blob).strip()
+    recap_blob = _slack_safe(_strip_recap_label(recap_blob).strip())
     if recap_blob:
         lines.append("")
         lines.append(f"На прошлой встрече: {recap_blob}")

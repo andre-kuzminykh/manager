@@ -77,6 +77,13 @@ class ZoomRecording(Base, TimestampMixin):
     zoom_share_url: Mapped[str | None] = mapped_column(
         String(2048), nullable=True
     )
+    # FR-CR-05-166 — host email from `ZoomRecordingMeta`. Filled
+    # at ingest time so the agenda pattern-detector can exclude
+    # teammates' recurring series (operator-pinned: only post
+    # agendas for meetings hosted by `1@thehumanoid.ai`).
+    host_email: Mapped[str | None] = mapped_column(
+        String(256), nullable=True
+    )
 
     audio_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     transcript_text: Mapped[str | None] = mapped_column(Text, nullable=True)

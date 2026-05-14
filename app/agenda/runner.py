@@ -206,6 +206,7 @@ class AgendaRunner:
                     min_prior_meetings=max(
                         2, self._settings.agenda_min_prior_meetings,
                     ),
+                    host_email=self._settings.zoom_required_email or None,
                 )
         except Exception as e:  # noqa: BLE001
             log.warning(

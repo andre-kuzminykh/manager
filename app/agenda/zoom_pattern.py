@@ -196,10 +196,16 @@ def predict_upcoming_events(
     window_minutes: int,
     lookback_days: int = 90,
     min_prior_meetings: int = 2,
+    host_email: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return a list of synthetic «events» for recurring patterns
     whose next predicted instance falls within
     ``[target_dt - window, target_dt + window]``.
+
+    `host_email` (FR-CR-05-166): when set, only consider
+    recordings whose `host_email` matches (case-insensitive).
+    Recordings with NULL host_email are SKIPPED — better to miss
+    a series than to post an agenda for a teammate's meeting.
 
     Same return shape as ``fetch_calendar_events_via_api``:
         {id, title, start, end, attendees, description, ...}
@@ -227,6 +233,10 @@ def predict_upcoming_events(
             .where(ZoomRecording.meeting_date < target_dt)
             .order_by(ZoomRecording.meeting_date.asc())
         )
+        if host_email:
+            stmt = stmt.where(
+                ZoomRecording.host_email == host_email.strip().lower()
+            )
         rows = list(session.execute(stmt).scalars().all())
     except Exception as e:  # noqa: BLE001
         log.warning("zoom_pattern_query_failed", error=str(e))

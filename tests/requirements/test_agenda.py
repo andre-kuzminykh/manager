@@ -740,9 +740,17 @@ def test_composite_calendar_factory_returns_none_when_both_unavailable(monkeypat
 # -- FR-CR-05-166 — calendar-less zoom-pattern source ----------------------
 
 
-def _zr(zoom_id: str, title: str, meeting_date: datetime) -> ZoomRecording:
+def _zr(
+    zoom_id: str,
+    title: str,
+    meeting_date: datetime,
+    host_email: str | None = None,
+) -> ZoomRecording:
     return ZoomRecording(
-        zoom_id=zoom_id, title=title, meeting_date=meeting_date,
+        zoom_id=zoom_id,
+        title=title,
+        meeting_date=meeting_date,
+        host_email=host_email,
     )
 
 
@@ -839,6 +847,131 @@ def test_zoom_pattern_skips_irregular_groups(session):
         )
         == []
     )
+
+
+def test_zoom_pattern_filters_by_host_email(session):
+    """FR-CR-05-166 — when `host_email` filter is passed, only
+    recordings hosted by that email participate in pattern
+    detection. Operator-pinned: «надо делать такие агенды где
+    хост 1@thehumanoid.ai»."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    # Daily Иринины «Подземелья» — should NOT yield an agenda.
+    session.add_all(
+        [
+            _zr(
+                "irina1",
+                "Подземелья",
+                datetime(2026, 5, 11, 9, 0, tzinfo=timezone.utc),
+                host_email="irina@thehumanoid.ai",
+            ),
+            _zr(
+                "irina2",
+                "Подземелья",
+                datetime(2026, 5, 12, 9, 0, tzinfo=timezone.utc),
+                host_email="irina@thehumanoid.ai",
+            ),
+        ]
+    )
+    # Weekly Артемова встреча — SHOULD yield.
+    session.add_all(
+        [
+            _zr(
+                "artem1",
+                "Genia Xasis weekly",
+                datetime(2026, 5, 5, 15, 0, tzinfo=timezone.utc),
+                host_email="1@thehumanoid.ai",
+            ),
+            _zr(
+                "artem2",
+                "Genia Xasis weekly",
+                datetime(2026, 5, 12, 15, 0, tzinfo=timezone.utc),
+                host_email="1@thehumanoid.ai",
+            ),
+        ]
+    )
+    session.flush()
+
+    # Target: next Tuesday 15:00 — both daily (predict 13/05 09:00)
+    # and weekly (predict 19/05 15:00) would NORMALLY produce
+    # events. With host filter, only Артемова weekly survives,
+    # and only because target_dt is set to its predicted next
+    # instance.
+    target = datetime(2026, 5, 19, 15, 0, tzinfo=timezone.utc)
+    events = predict_upcoming_events(
+        session, target_dt=target, window_minutes=1, lookback_days=30,
+        min_prior_meetings=2,
+        host_email="1@thehumanoid.ai",
+    )
+    assert len(events) == 1
+    assert events[0]["title"] == "Genia Xasis weekly"
+
+
+def test_zoom_pattern_skips_null_host_when_filter_set(session):
+    """FR-CR-05-166 — recordings with NULL `host_email` (old rows
+    pre-migration) are skipped when the filter is active. Better
+    safe than sending an agenda for somebody else's meeting."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    session.add_all(
+        [
+            _zr(
+                "x1",
+                "Old recording",
+                datetime(2026, 5, 5, 15, 0, tzinfo=timezone.utc),
+                host_email=None,
+            ),
+            _zr(
+                "x2",
+                "Old recording",
+                datetime(2026, 5, 12, 15, 0, tzinfo=timezone.utc),
+                host_email=None,
+            ),
+        ]
+    )
+    session.flush()
+
+    target = datetime(2026, 5, 19, 15, 0, tzinfo=timezone.utc)
+    assert (
+        predict_upcoming_events(
+            session, target_dt=target, window_minutes=1, lookback_days=30,
+            min_prior_meetings=2,
+            host_email="1@thehumanoid.ai",
+        )
+        == []
+    )
+
+
+def test_zoom_pattern_no_filter_picks_all_hosts(session):
+    """Without host_email filter (e.g. agenda for everybody) the
+    detector continues to operate on the full set."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    session.add_all(
+        [
+            _zr(
+                "x1",
+                "Mixed",
+                datetime(2026, 5, 5, 15, 0, tzinfo=timezone.utc),
+                host_email="alice@thehumanoid.ai",
+            ),
+            _zr(
+                "x2",
+                "Mixed",
+                datetime(2026, 5, 12, 15, 0, tzinfo=timezone.utc),
+                host_email="bob@thehumanoid.ai",
+            ),
+        ]
+    )
+    session.flush()
+
+    target = datetime(2026, 5, 19, 15, 0, tzinfo=timezone.utc)
+    events = predict_upcoming_events(
+        session, target_dt=target, window_minutes=1, lookback_days=30,
+        min_prior_meetings=2,
+    )
+    assert len(events) == 1
+    assert events[0]["title"] == "Mixed"
 
 
 def test_zoom_pattern_detects_biweekly_groups(session):

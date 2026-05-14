@@ -113,6 +113,7 @@ def _fetch_events_wide(runner: AgendaRunner, lookahead_minutes: int) -> list[dic
                     min_prior_meetings=max(
                         2, settings.agenda_min_prior_meetings,
                     ),
+                    host_email=settings.zoom_required_email or None,
                 )
         except Exception as e:  # noqa: BLE001
             log.warning("agenda_run_once_zoom_pattern_failed", error=str(e))

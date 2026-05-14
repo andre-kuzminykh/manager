@@ -106,6 +106,7 @@ class ZoomPipeline:
                 participants=list(m.participants),
                 audio_url=m.audio_url,
                 zoom_share_url=m.share_url,
+                host_email=m.host_email,
             )
             session.add(row)
             session.flush()
@@ -118,6 +119,10 @@ class ZoomPipeline:
                 row.audio_url = m.audio_url
             if m.share_url and not row.zoom_share_url:
                 row.zoom_share_url = m.share_url
+            # FR-CR-05-166 — backfill host_email on next sync if
+            # the column was added after the row was first created.
+            if m.host_email and not row.host_email:
+                row.host_email = m.host_email
         return row
 
     # --- step 1: download audio -------------------------------

@@ -346,6 +346,50 @@ def test_zoom_client_list_recordings_falls_back_to_participants_check():
     assert len(participant_calls) == 2
 
 
+def test_zoom_client_list_recordings_strict_host_skips_participant_fallback():
+    """FR-CR-05-167 — operator-pinned 2026-05-14: «14/05 -
+    Летучка СЕО Office c Ириной — почему это выводится вообще
+    в слак, если там не хост 1@thehumanoid.ai». strict_host=True
+    drops recordings whose host_email doesn't match, without
+    making the `/past_meetings/{uuid}/participants` fallback
+    call. Иринины Летучки where Артем joined as a participant
+    are skipped."""
+    fake = _FakeRequestFunc(
+        responses=[
+            {"access_token": "tok-1", "expires_in": 3600},
+            {
+                "meetings": [
+                    # Host = Артем → keep.
+                    {"uuid": "artem-call", "id": 1,
+                     "topic": "Artem call",
+                     "host_email": "1@thehumanoid.ai",
+                     "recording_files": []},
+                    # Host = Ирина, Артем мог быть в participants —
+                    # с strict_host=True участники не проверяются.
+                    {"uuid": "irina-call", "id": 2,
+                     "topic": "Летучка СЕО Office c Ириной",
+                     "host_email": "jpog@thehumanoid.ai",
+                     "recording_files": []},
+                ]
+            },
+        ]
+    )
+    c = ZoomClient(
+        account_id="acc", client_id="cid", client_secret="csecret",
+        request_func=fake,
+    )
+    metas = c.list_recordings(
+        limit=10, required_email="1@thehumanoid.ai",
+        strict_host=True,
+    )
+    assert [m.id for m in metas] == ["artem-call"]
+    # No /past_meetings/.../participants call.
+    participant_calls = [
+        c for c in fake.calls if "/past_meetings/" in c[0]
+    ]
+    assert participant_calls == []
+
+
 def test_zoom_client_list_recordings_empty_required_email_disables_filter():
     """Passing `required_email=None` (default) preserves legacy
     behaviour — accept every recording, no participants call."""

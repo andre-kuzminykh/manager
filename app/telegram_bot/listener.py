@@ -809,9 +809,13 @@ class TelegramListener:
                 (getattr(settings, "zoom_required_email", "") or "").strip()
                 or None
             )
+            strict = bool(
+                getattr(settings, "zoom_required_email_strict_host", False)
+            )
             metas = self._zoom_pipeline._client.list_recordings(  # noqa: SLF001
                 limit=self._zoom_poll_batch,
                 required_email=req,
+                strict_host=strict,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("listener_zoom_poll_list_failed", error=str(e))

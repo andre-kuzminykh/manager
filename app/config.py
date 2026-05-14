@@ -435,6 +435,16 @@ class Settings(BaseSettings):
     zoom_required_email: str = Field(
         default="", alias="ZOOM_REQUIRED_EMAIL"
     )
+    # FR-CR-05-167 — operator-pinned 2026-05-14: «14/05 - Летучка
+    # СЕО Office c Ириной — почему это выводится вообще в слак,
+    # если там не хост 1@thehumanoid.ai». Default behaviour
+    # (FR-CR-05-143) kept any recording where Artem was in the
+    # participants list — Иринины встречи c Артемом-гостем
+    # просачивались. Strict mode: only keep when host_email ==
+    # ZOOM_REQUIRED_EMAIL exactly, no participants fallback.
+    zoom_required_email_strict_host: bool = Field(
+        default=False, alias="ZOOM_REQUIRED_EMAIL_STRICT_HOST"
+    )
     # FR-CR-05-118 — listener-side periodic poll for Zoom Cloud
     # Recordings, mirrors `FIREFLIES_REALTIME_ENABLED`. Idempotent:
     # ZoomPipeline.process_one short-circuits already-processed

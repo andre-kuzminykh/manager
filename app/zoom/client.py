@@ -215,6 +215,7 @@ class ZoomClient:
         self, *, limit: int = 20, page_size: int = 30,
         from_date: str | None = None, to_date: str | None = None,
         required_email: str | None = None,
+        strict_host: bool = False,
     ) -> list[ZoomRecordingMeta]:
         """Return up to `limit` most-recent cloud recordings.
 
@@ -269,6 +270,15 @@ class ZoomClient:
             if required:
                 host_matches = (row_host == required)
                 if not host_matches:
+                    # FR-CR-05-167 — strict_host: skip immediately.
+                    # Operator wants ONLY meetings hosted by the
+                    # required email; «I was a participant on
+                    # somebody else's call» recordings (the
+                    # FR-CR-05-143 fallback) leak teammates'
+                    # content into the agenda / summary stream.
+                    if strict_host:
+                        skipped_no_match += 1
+                        continue
                     # Host doesn't match — fall back to checking
                     # the participants list (extra API call).
                     p_emails = self._fetch_meeting_participant_emails(

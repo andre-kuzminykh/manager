@@ -98,6 +98,28 @@ def _fetch_events_wide(runner: AgendaRunner, lookahead_minutes: int) -> list[dic
     half = max(1, int(lookahead_minutes)) // 2
     center = now + timedelta(minutes=half)
 
+    source = (settings.agenda_source or "calendar").strip().lower()
+
+    if source == "zoom_pattern":
+        from app.agenda.zoom_pattern import predict_upcoming_events
+
+        try:
+            with session_scope() as session:
+                events_raw = predict_upcoming_events(
+                    session,
+                    target_dt=center,
+                    window_minutes=half,
+                    lookback_days=settings.agenda_lookback_days,
+                    min_prior_meetings=max(
+                        2, settings.agenda_min_prior_meetings,
+                    ),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("agenda_run_once_zoom_pattern_failed", error=str(e))
+            events_raw = []
+        return [runner._normalise_event(ev) for ev in events_raw if ev]
+
+    # default: calendar
     events_raw: list[dict] = []
     if runner._calendar_factory is not None:
         try:

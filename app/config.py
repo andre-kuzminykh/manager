@@ -98,6 +98,22 @@ class Settings(BaseSettings):
     agenda_compose_model: str = Field(
         default="", alias="AGENDA_COMPOSE_MODEL"
     )
+    # FR-CR-05-166 — Источник «upcoming meetings».
+    #
+    #   - "calendar"      — Google Calendar API (FR-CR-05-165) либо OAuth,
+    #                       либо Service Account (read access на календарь).
+    #                       Требует enable Calendar API + share с SA.
+    #                       Самый точный (видит ad-hoc сдвиги/cancel).
+    #   - "zoom_pattern"  — heuristic: парсим zoom_recordings, ищем
+    #                       weekly-pattern (одинаковый title + delta 7 ± 1
+    #                       день между instance'ами + один weekday+time),
+    #                       предсказываем next = last + 7 days.
+    #                       Не требует Calendar API. Слабость: если ты
+    #                       сдвинул встречу в Calendar — heuristic не
+    #                       знает.
+    agenda_source: str = Field(
+        default="calendar", alias="AGENDA_SOURCE"
+    )
 
     # FR-CR-05-136 — Calendar-match for meeting titles. The
     # Apps Script Web App is the proxy that does the Calendar

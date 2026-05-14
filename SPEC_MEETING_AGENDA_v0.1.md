@@ -362,6 +362,12 @@ Scenario: LLM returns invalid JSON — runner skips and retries next tick
 | FR-MA-1.6 | Native event id сохраняется когда есть (Google Calendar API path) | `test_normalise_event_keeps_native_id_when_present` |
 | FR-MA-1.7 | Event без title или без start → drop (защита от malformed payload) | `test_normalise_event_returns_none_on_missing_fields` |
 | FR-MA-1.8 | Runner НЕ стартует если нет ни одного calendar источника | `test_runner_exits_when_no_calendar_source` |
+| FR-MA-1.9 | `AGENDA_SOURCE=zoom_pattern` (FR-CR-05-166) — heuristic mode без Calendar API: weekly-recurrence detection из `zoom_recordings`, predict next instance = last + 7 days at same weekday+time-of-day | `test_zoom_pattern_predicts_next_weekly_instance` |
+| FR-MA-1.10 | zoom_pattern skip non-weekly groups (delta ≠ 7 days) | `test_zoom_pattern_skips_non_weekly_groups` |
+| FR-MA-1.11 | zoom_pattern требует ≥2 prior recordings per title | `test_zoom_pattern_requires_min_prior_meetings` |
+| FR-MA-1.12 | zoom_pattern synthetic id стабилен across ticks (idempotency invariant) | `test_zoom_pattern_synth_id_is_stable_across_calls` |
+| FR-MA-1.13 | zoom_pattern уважает window — target_dt вне окна prediction → пусто | `test_zoom_pattern_window_misses_when_target_off` |
+| FR-MA-1.14 | Runner стартует в `zoom_pattern` mode БЕЗ любого Calendar источника | `test_runner_starts_with_zoom_pattern_source_no_calendar` |
 
 ### Категория 2 — Recurrence detection
 

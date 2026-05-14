@@ -735,3 +735,177 @@ def test_composite_calendar_factory_returns_none_when_both_unavailable(monkeypat
 
     factory = build_calendar_credentials_factory_with_sa_fallback(Settings())
     assert factory is None
+
+
+# -- FR-CR-05-166 — calendar-less zoom-pattern source ----------------------
+
+
+def _zr(zoom_id: str, title: str, meeting_date: datetime) -> ZoomRecording:
+    return ZoomRecording(
+        zoom_id=zoom_id, title=title, meeting_date=meeting_date,
+    )
+
+
+def test_zoom_pattern_predicts_next_weekly_instance(session):
+    """3 weekly instances on Tuesdays at 15:00 UTC → predict next
+    Tuesday at 15:00 UTC. Target window centered on that
+    prediction → predict_upcoming_events returns one event."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    # Tuesdays: 2026-04-28, 2026-05-05, 2026-05-12
+    base = [
+        datetime(2026, 4, 28, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 5, 5, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 5, 12, 15, 0, tzinfo=timezone.utc),
+    ]
+    session.add_all(
+        [_zr(f"z{i}", "Weekly sync", b) for i, b in enumerate(base)]
+    )
+    session.flush()
+
+    # Tick at 14:50 on the next Tuesday (2026-05-19). lead_time=10
+    # so target_dt = 15:00, window=1.
+    target = datetime(2026, 5, 19, 15, 0, tzinfo=timezone.utc)
+    events = predict_upcoming_events(
+        session, target_dt=target, window_minutes=1, lookback_days=60,
+        min_prior_meetings=2,
+    )
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["title"] == "Weekly sync"
+    assert ev["start"] == target
+    assert ev["id"].startswith("agenda_synth:weekly sync:")
+
+
+def test_zoom_pattern_skips_non_weekly_groups(session):
+    """Two recordings 1 day apart → not weekly → no prediction."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    session.add_all(
+        [
+            _zr(
+                "a",
+                "Quick chat",
+                datetime(2026, 5, 11, 12, 0, tzinfo=timezone.utc),
+            ),
+            _zr(
+                "b",
+                "Quick chat",
+                datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    session.flush()
+
+    target = datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc)
+    assert (
+        predict_upcoming_events(
+            session, target_dt=target, window_minutes=1, lookback_days=30,
+            min_prior_meetings=2,
+        )
+        == []
+    )
+
+
+def test_zoom_pattern_requires_min_prior_meetings(session):
+    """A single recording is never a pattern even when alone in a
+    title-group."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    session.add(
+        _zr(
+            "solo",
+            "One-off sync",
+            datetime(2026, 5, 12, 15, 0, tzinfo=timezone.utc),
+        ),
+    )
+    session.flush()
+
+    target = datetime(2026, 5, 19, 15, 0, tzinfo=timezone.utc)
+    assert (
+        predict_upcoming_events(
+            session, target_dt=target, window_minutes=1, lookback_days=30,
+            min_prior_meetings=2,
+        )
+        == []
+    )
+
+
+def test_zoom_pattern_synth_id_is_stable_across_calls(session):
+    """Idempotency invariant: calling predict_upcoming_events twice
+    for the same target time MUST produce the same `id` so the
+    `meeting_agendas` UNIQUE on `calendar_event_id` keeps the
+    second tick from sending a duplicate."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    base = [
+        datetime(2026, 4, 28, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 5, 5, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 5, 12, 15, 0, tzinfo=timezone.utc),
+    ]
+    session.add_all(
+        [_zr(f"z{i}", "Weekly sync", b) for i, b in enumerate(base)]
+    )
+    session.flush()
+
+    target = datetime(2026, 5, 19, 15, 0, tzinfo=timezone.utc)
+    e1 = predict_upcoming_events(
+        session, target_dt=target, window_minutes=1, lookback_days=60,
+        min_prior_meetings=2,
+    )
+    e2 = predict_upcoming_events(
+        session, target_dt=target, window_minutes=1, lookback_days=60,
+        min_prior_meetings=2,
+    )
+    assert len(e1) == 1 and len(e2) == 1
+    assert e1[0]["id"] == e2[0]["id"]
+
+
+def test_zoom_pattern_window_misses_when_target_off(session):
+    """When `target_dt` is off the predicted instance by more than
+    `window_minutes`, the prediction is not returned."""
+    from app.agenda.zoom_pattern import predict_upcoming_events
+
+    base = [
+        datetime(2026, 4, 28, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 5, 5, 15, 0, tzinfo=timezone.utc),
+        datetime(2026, 5, 12, 15, 0, tzinfo=timezone.utc),
+    ]
+    session.add_all(
+        [_zr(f"z{i}", "Weekly sync", b) for i, b in enumerate(base)]
+    )
+    session.flush()
+
+    # Predicted next is 2026-05-19 15:00 UTC. Tick at 09:00 same
+    # day with window=1min → miss.
+    target = datetime(2026, 5, 19, 9, 0, tzinfo=timezone.utc)
+    assert (
+        predict_upcoming_events(
+            session, target_dt=target, window_minutes=1, lookback_days=60,
+            min_prior_meetings=2,
+        )
+        == []
+    )
+
+
+def test_runner_starts_with_zoom_pattern_source_no_calendar(monkeypatch):
+    """FR-CR-05-166 — when AGENDA_SOURCE=zoom_pattern, the runner
+    starts even without ANY calendar source (no OAuth, no SA, no
+    Apps Script)."""
+    from app.agenda.runner import AgendaRunner
+    from app.config import Settings
+
+    monkeypatch.setenv("AGENDA_ENABLED", "true")
+    monkeypatch.setenv("AGENDA_SLACK_TARGET_CHANNEL_ID", "D0")
+    monkeypatch.setenv("AGENDA_SOURCE", "zoom_pattern")
+
+    runner = AgendaRunner(
+        settings=Settings(),
+        slack_client=MagicMock(),
+        llm_backend=MagicMock(),
+        calendar_factory=None,
+        docs_factory=lambda: None,
+    )
+    runner.start()
+    assert runner._thread is not None
+    runner.stop()

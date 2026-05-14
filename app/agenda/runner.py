@@ -89,16 +89,19 @@ class AgendaRunner:
                 hint="set AGENDA_SLACK_TARGET_CHANNEL_ID to enable",
             )
             return
-        if (
+        source = (self._settings.agenda_source or "calendar").strip().lower()
+        if source == "calendar" and (
             self._calendar_factory is None
             and not self._settings.calendar_apps_script_url
         ):
             log.warning(
                 "agenda_runner_no_calendar_source",
                 hint=(
-                    "Neither Calendar OAuth (GOOGLE_CALENDAR_CLIENT_ID) "
-                    "nor Apps Script (CALENDAR_APPS_SCRIPT_URL) configured — "
-                    "runner exits"
+                    "AGENDA_SOURCE=calendar but neither Calendar OAuth "
+                    "(GOOGLE_CALENDAR_CLIENT_ID) nor Apps Script "
+                    "(CALENDAR_APPS_SCRIPT_URL) is configured. Set "
+                    "AGENDA_SOURCE=zoom_pattern to skip Calendar entirely "
+                    "and predict from zoom_recordings."
                 ),
             )
             return
@@ -170,16 +173,48 @@ class AgendaRunner:
     def _fetch_events(self) -> list[dict[str, Any]]:
         """Fetch upcoming events.
 
-        Two paths (matches Fireflies/Zoom calendar_match priority):
-          1. **Direct Calendar API** (FR-CR-05-144) — when
-             ``GOOGLE_CALENDAR_CLIENT_ID`` + OAuth refresh token
-             in DB. Returns events with native Google event ids.
-          2. **Apps Script proxy** (FR-CR-05-136) — fallback when
-             only ``CALENDAR_APPS_SCRIPT_URL`` is configured.
-             Returns events WITHOUT a stable Google id — we
-             synthesise one from `title_normalised:start_iso` for
-             idempotency.
+        Three paths (priority by ``AGENDA_SOURCE``):
+          - ``"zoom_pattern"`` (FR-CR-05-166): predict next
+            recurring instances from `zoom_recordings` weekly
+            patterns. NO Calendar API call.
+          - ``"calendar"`` (default, FR-CR-05-165):
+              1. Direct Calendar API (FR-CR-05-144) — when
+                 ``GOOGLE_CALENDAR_CLIENT_ID`` + OAuth/SA available.
+              2. Apps Script proxy (FR-CR-05-136) — fallback when
+                 only ``CALENDAR_APPS_SCRIPT_URL`` is configured.
         """
+        source = (self._settings.agenda_source or "calendar").strip().lower()
+
+        if source == "zoom_pattern":
+            return self._fetch_events_from_zoom_pattern()
+        return self._fetch_events_from_calendar()
+
+    def _fetch_events_from_zoom_pattern(self) -> list[dict[str, Any]]:
+        from app.agenda.zoom_pattern import predict_upcoming_events
+        from app.db import session_scope
+
+        lead = int(self._settings.agenda_lead_time_minutes)
+        window = max(1, int(self._settings.agenda_window_minutes))
+        target = datetime.now(timezone.utc) + timedelta(minutes=lead)
+        try:
+            with session_scope() as session:
+                events_raw = predict_upcoming_events(
+                    session,
+                    target_dt=target,
+                    window_minutes=window,
+                    lookback_days=self._settings.agenda_lookback_days,
+                    min_prior_meetings=max(
+                        2, self._settings.agenda_min_prior_meetings,
+                    ),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "agenda_zoom_pattern_failed", error=str(e),
+            )
+            return []
+        return [self._normalise_event(ev) for ev in events_raw if ev]
+
+    def _fetch_events_from_calendar(self) -> list[dict[str, Any]]:
         from app.services.calendar_match import (
             fetch_calendar_events_around,
             fetch_calendar_events_via_api,
@@ -190,7 +225,6 @@ class AgendaRunner:
         target = datetime.now(timezone.utc) + timedelta(minutes=lead)
 
         events_raw: list[dict[str, Any]] = []
-        # Path 1 — Calendar API.
         if self._calendar_factory is not None:
             try:
                 events_raw = fetch_calendar_events_via_api(
@@ -204,9 +238,6 @@ class AgendaRunner:
                     "agenda_calendar_api_failed", error=str(e),
                 )
 
-        # Path 2 — Apps Script fallback (when API path returned
-        # nothing AND Apps Script url is set). NOT mutually
-        # exclusive — we prefer API events when both are present.
         if not events_raw and self._settings.calendar_apps_script_url:
             try:
                 events_raw = fetch_calendar_events_around(

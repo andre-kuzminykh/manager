@@ -31,9 +31,14 @@ from app.agenda.service import AgendaCandidate
 
 
 _STATUS_LABEL = {
-    "todo": "",          # default — render blank suffix
-    "in_progress": "in_progress",
-    "blocked": "blocked",
+    # FR-CR-05-167 2026-05-14 — operator's reference format does
+    # not show a `[status]` suffix; we suppress it for all states
+    # by default. Closed states (done / cancelled) still get a
+    # label — operator wants to see that a previous-meeting task
+    # is already finished.
+    "todo": "",
+    "in_progress": "",
+    "blocked": "",
     "done": "done",
     "cancelled": "cancelled",
 }
@@ -222,9 +227,11 @@ def render_agenda_text(
         lines.append("")
         lines.append(f"Участники: {names}")
 
-    # Recap rendered as a single paragraph with EXACTLY ONE
-    # «На прошлой встрече: » label — strip any duplicate the LLM
-    # might have prepended.
+    # Recap rendered as a single paragraph under «Суть: » —
+    # matches the post-meeting summary format the operator uses
+    # (FR-CR-05-167 operator-pinned 2026-05-14: «формате такой же
+    # [как у summary]»). Strip any duplicate label the LLM might
+    # have prepended.
     recap_blob = " ".join(
         item.strip().rstrip(".") + "." for item in output.previous_recap
         if item and item.strip()
@@ -232,10 +239,10 @@ def render_agenda_text(
     recap_blob = _slack_safe(_strip_recap_label(recap_blob).strip())
     if recap_blob:
         lines.append("")
-        lines.append(f"На прошлой встрече: {recap_blob}")
+        lines.append(f"Суть: {recap_blob}")
 
-    # Task list + free-form open_questions, in a single numbered
-    # list under one section heading. Cap at _SLACK_TASK_LIMIT —
+    # Task list + free-form open_questions under «To-Do:» heading,
+    # one numbered item per line. Cap at _SLACK_TASK_LIMIT —
     # full list always available in the Doc.
     discussion_items: list[dict[str, Any]] = list(output.tasks_checklist or [])
     for q in output.open_questions or []:
@@ -246,7 +253,7 @@ def render_agenda_text(
 
     if discussion_items:
         lines.append("")
-        lines.append("Статус задач к обсуждению:")
+        lines.append("To-Do:")
         lines.append("")
         rendered = discussion_items[:_SLACK_TASK_LIMIT]
         for i, t in enumerate(rendered, 1):

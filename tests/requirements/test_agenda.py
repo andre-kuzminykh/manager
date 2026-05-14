@@ -791,18 +791,20 @@ def test_render_agenda_text_format_matches_operator_pin():
     # Attendees section
     assert "Участники: Artem Sokolov, Irina Shipilova" in text
     # Recap as prose paragraph — label appears exactly once
-    assert text.count("На прошлой встрече:") == 1
+    assert text.count("Суть:") == 1
     assert "Разобрали список инвесторов" in text
-    # Section heading
-    assert "Статус задач к обсуждению:" in text
+    # Section heading matches post-meeting summary style
+    assert "To-Do:" in text
+    assert "Статус задач к обсуждению:" not in text  # old name retired
     assert "К обсуждению:" not in text  # old name retired
     # Numbered task list with time
     assert "1) Bracket Capital - отправить аутрич" in text
     assert "— Irina Shipilova" in text
     assert "13.05.2026 18:00" in text  # due_time present
     assert "14.05.2026" in text  # due_time absent — date only
-    # in_progress status surfaces as a [..] suffix
-    assert "[in_progress]" in text
+    # FR-CR-05-167 2026-05-14: `[in_progress]` suffix removed
+    # from the operator's reference format
+    assert "[in_progress]" not in text
     # Open question is appended as a continuation item
     assert "Утром начать outreach" in text
     # No trailing «Подробно:» (it's in the header link now)
@@ -896,9 +898,11 @@ def test_render_agenda_text_strips_duplicate_recap_label():
     text = render_agenda_text(
         candidate=candidate, output=output, doc_url=None,
     )
-    # «На прошлой встрече» appears exactly once (the renderer's
-    # own label), not twice.
-    assert text.count("На прошлой встрече") == 1
+    # «На прошлой встрече» from LLM is stripped; renderer's own
+    # label is now «Суть:» so the stale phrase shouldn't appear
+    # at all.
+    assert "На прошлой встрече" not in text
+    assert "Суть:" in text
     assert "обсуждали roadmap" in text
 
 
@@ -1051,11 +1055,17 @@ def test_render_agenda_text_done_tasks_show_status_label():
     text = render_agenda_text(
         candidate=candidate, output=output, doc_url=None,
     )
+    # Closed states keep their [done]/[cancelled] suffix so the
+    # operator can tell a previous-meeting task is already
+    # finished.
     assert "1) Sent deck — admin • [done]" in text
     assert "2) Drop investor X — admin • [cancelled]" in text
-    # todo gets no status suffix (operator's default for the list)
+    # Other states render WITHOUT a suffix per operator's
+    # reference format (FR-CR-05-167 2026-05-14).
     assert "3) Reach out Y — admin" in text
     assert "[todo]" not in text
+    assert "[in_progress]" not in text
+    assert "[blocked]" not in text
 
 
 # -- runner no-op safety -------------------------------------------------------

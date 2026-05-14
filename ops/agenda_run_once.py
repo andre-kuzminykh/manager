@@ -278,13 +278,56 @@ def main() -> int:
     posted = 0
     for c in candidates:
         if args.dry_run:
+            # FR-CR-05-167 — operator-pinned: «не отправляй,
+            # только выдай, чтобы мы сначала посмотрели». Do the
+            # full compose + render, but skip Doc creation /
+            # Slack post / DB write. Operator can copy-paste the
+            # rendered body, decide, and re-run without --dry-run
+            # to actually send.
+            from app.agenda.compose import compose_agenda
+            from app.agenda.runner import _pick_prior_doc_url
+            from app.agenda.slack_format import render_agenda_text
+
             log.info(
-                "agenda_run_once_dry_run_skip",
+                "agenda_run_once_dry_run_preview_start",
                 calendar_event_id=c.calendar_event_id,
                 title=c.title,
                 prior_count=len(c.prior_recordings),
                 open_tasks_count=len(c.open_tasks),
+                attendees=c.attendees,
             )
+            model = (
+                runner._settings.agenda_compose_model
+                or runner._settings.openai_model
+            )
+            output = compose_agenda(
+                c, llm_backend=runner._llm, model=model,
+            )
+            if output is None:
+                log.warning(
+                    "agenda_run_once_dry_run_llm_failed",
+                    calendar_event_id=c.calendar_event_id,
+                )
+                continue
+            header_url = _pick_prior_doc_url(c)
+            slack_body = render_agenda_text(
+                candidate=c, output=output, doc_url=header_url,
+            )
+            print()
+            print("=" * 72)
+            print(f"DRY-RUN PREVIEW for calendar_event_id={c.calendar_event_id}")
+            print(f"Header hyperlink → {header_url or '(none, plain header)'}")
+            print("-" * 72)
+            print("--- SLACK MESSAGE BODY (would post to "
+                  f"{runner._settings.agenda_slack_target_channel_id}) ---")
+            print(slack_body)
+            print("-" * 72)
+            print("--- GOOGLE DOC BODY (would create) ---")
+            from app.agenda.runner import _doc_body
+
+            print(_doc_body(c, output.doc_body_md))
+            print("=" * 72)
+            print()
             continue
         try:
             runner._process_candidate(c)

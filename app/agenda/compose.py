@@ -59,8 +59,31 @@ class AgendaOutput:
     doc_body_md: str
 
 
+def _attendees_to_csv(items: list[Any]) -> str:
+    """Calendar API gives attendees as
+    ``[{email, displayName, ...}, ...]``; Apps Script proxy emits
+    plain strings. Accept both, prefer displayName, fall back to
+    email, drop garbage."""
+    out: list[str] = []
+    for it in items or []:
+        if isinstance(it, str):
+            s = it.strip()
+            if s:
+                out.append(s)
+        elif isinstance(it, dict):
+            name = (
+                it.get("displayName")
+                or it.get("name")
+                or it.get("email")
+                or ""
+            ).strip()
+            if name:
+                out.append(name)
+    return ", ".join(out) if out else "—"
+
+
 def _build_user_prompt(candidate: AgendaCandidate) -> str:
-    attendees_csv = ", ".join(candidate.attendees) if candidate.attendees else "—"
+    attendees_csv = _attendees_to_csv(candidate.attendees)
     prior_json = json.dumps(
         candidate.prior_recordings, ensure_ascii=False, indent=2
     )

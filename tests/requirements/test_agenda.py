@@ -337,6 +337,32 @@ def test_agenda_service_is_already_posted_and_record_post(session):
 # -- compose_agenda (LLM stub) -------------------------------------------------
 
 
+def test_compose_build_user_prompt_handles_attendees_as_dicts():
+    """FR-CR-05-167 hotfix: `_build_user_prompt` previously did
+    `", ".join(candidate.attendees)`, which crashed on Calendar
+    API's `[{email, displayName, ...}]` shape. Must accept both
+    string and dict items."""
+    from app.agenda.compose import _build_user_prompt
+
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Mixed attendees",
+        title_normalised="mixed attendees",
+        scheduled_start_at=datetime(2026, 5, 14, 11, tzinfo=timezone.utc),
+        attendees=[
+            "Artem Sokolov",
+            {"displayName": "Irina Shipilova", "email": "irina@x"},
+            {"email": "third@x"},
+        ],
+    )
+    prompt = _build_user_prompt(candidate)
+    # Should not crash + names should appear correctly.
+    assert "Artem Sokolov" in prompt
+    assert "Irina Shipilova" in prompt
+    assert "third@x" in prompt
+
+
 def test_compose_agenda_happy_path():
     """LLM returns a well-formed dict — `compose_agenda` wraps it
     in an AgendaOutput dataclass."""

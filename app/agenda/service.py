@@ -94,7 +94,9 @@ _AGENDA_EMAIL_NAME_FALLBACK: dict[str, str] = {
     "kaa@thehumanoid.ai":             "Alina Kolpakova",
     "oponomarenko@cohengresser.com":  "Ольга Пономаренко",
     "dmitry.sedov@thehumanoid.ai":    "Дмитрий Седов",
+    "dmitry.sedov@sedovbrothers.com": "Дмитрий Седов",
     "irina.shipilova@thehumanoid.ai": "Ирина Шипилова",
+    "irina.shipilova@skl.vc":         "Ирина Шипилова",
     "elena.radionova@sokolov.ch":     "Елена Радионова",
 }
 

@@ -1113,6 +1113,63 @@ def test_render_agenda_text_done_tasks_show_status_label():
 # -- runner no-op safety -------------------------------------------------------
 
 
+def test_process_candidate_skips_when_output_is_empty(monkeypatch):
+    """FR-CR-05-167 polish 2026-05-15: «пришла пустая и почему
+    пустая?» — when the LLM returned no recap, no tasks, and no
+    open_questions, the body is just header+attendees. Don't post
+    that — log `agenda_skipped_empty_body` and return.
+    """
+    from unittest.mock import MagicMock
+
+    from app.agenda.compose import AgendaOutput
+    from app.agenda.runner import AgendaRunner
+
+    slack = MagicMock()
+    runner = AgendaRunner(
+        settings=MagicMock(
+            agenda_enabled=True,
+            agenda_slack_target_channel_id="D0",
+            agenda_compose_model="",
+            openai_model="gpt-test",
+        ),
+        slack_client=slack,
+        llm_backend=MagicMock(),
+        calendar_factory=lambda: None,
+        docs_factory=lambda: None,
+    )
+
+    candidate = AgendaCandidate(
+        calendar_event_id="ev1",
+        recurring_event_id=None,
+        title="Дмитрий Седов",
+        title_normalised="дмитрий седов",
+        scheduled_start_at=datetime(2026, 5, 15, 14, tzinfo=timezone.utc),
+        prior_recordings=[
+            {"zoom_id": "z1", "short_summary": "", "google_doc_url": ""}
+        ],
+        open_tasks=[],
+    )
+    monkeypatch.setattr(
+        "app.agenda.runner.compose_agenda",
+        lambda *a, **kw: AgendaOutput(
+            previous_recap=[], tasks_checklist=[], open_questions=[],
+            doc_body_md="",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.agenda.runner.session_scope",
+        lambda: __import__("contextlib").nullcontext(MagicMock(
+            __enter__=lambda *_: MagicMock(),
+        )),
+    )
+    # Patch out the idempotency check helpers so we exercise the
+    # empty-output guard, not the «already posted» short-circuit.
+    runner._svc = MagicMock(is_already_posted=MagicMock(return_value=False))
+    runner._process_candidate(candidate)
+    # Slack must not be called for a fully empty agenda.
+    assert slack.chat_postMessage.call_count == 0
+
+
 def test_runner_disabled_no_op(monkeypatch):
     """Sanity: when AGENDA_ENABLED=false, calling .start() returns
     without spinning the thread (no Calendar / Slack / LLM I/O)."""

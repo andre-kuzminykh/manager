@@ -372,6 +372,31 @@ class AgendaRunner:
         )
         header_url = prior_doc_url or own_doc_url
 
+        # FR-CR-05-167 polish 2026-05-15: «пришла пустая и почему
+        # пустая?» — when LLM produced no recap, no tasks, no
+        # open-questions, the body is just the header + attendees.
+        # Skip the DM and the idempotency row so the next tick can
+        # try again once context lands (e.g. Fireflies summary fills
+        # in short_summary later, or operator creates an open task).
+        if not (
+            (output.previous_recap and any(s.strip() for s in output.previous_recap))
+            or output.tasks_checklist
+            or (output.open_questions and any(q.strip() for q in output.open_questions))
+        ):
+            log.info(
+                "agenda_skipped_empty_body",
+                calendar_event_id=candidate.calendar_event_id,
+                title=candidate.title,
+                prior_count=len(candidate.prior_recordings),
+                open_tasks_count=len(candidate.open_tasks),
+                hint=(
+                    "no recap text in zoom_recordings.short_summary AND "
+                    "no open tasks for this title — nothing useful to "
+                    "post; will retry on next tick"
+                ),
+            )
+            return
+
         text = render_agenda_text(
             candidate=candidate, output=output, doc_url=header_url,
         )

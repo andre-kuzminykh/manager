@@ -197,10 +197,16 @@ def _call_openai_responses_json(
     """Call the OpenAI Responses API with the web-search tool and
     extract a JSON object from the model's output.
 
-    Responses API uses `input` (a single concatenated string or a
-    structured list) instead of `messages`. We concatenate the
-    system + user prompts and append a strict «return JSON only»
-    reminder so the parser has something to work with.
+    `o4-mini-deep-research` regularly runs for 5-20 minutes (web
+    search + reasoning). Default OpenAI SDK timeout is 10 min,
+    which times out on the longer cases. We:
+
+      1. Bump the per-call timeout to 30 min via `with_options`.
+      2. Concatenate system + user prompts into one `input`.
+      3. Append a strict «return JSON only» footer so the parser
+         always has something to work with.
+      4. Try the `reasoning={"effort":"medium"}` + `background`
+         kwargs (older SDKs reject them — fall back without).
     """
     prompt_parts: list[str] = []
     for m in messages:
@@ -213,22 +219,28 @@ def _call_openai_responses_json(
     )
     prompt = "\n\n".join(prompt_parts)
 
+    # 30 min per-call timeout — overrides the SDK default (10 min)
+    # for this single request. Old SDKs without `with_options`
+    # silently degrade to the default.
     try:
-        resp = client.responses.create(
-            model=model,
-            input=prompt,
-            tools=[{"type": "web_search"}],
+        timed_client = client.with_options(timeout=30 * 60)
+    except Exception:  # noqa: BLE001
+        timed_client = client
+
+    common_kwargs: dict[str, Any] = {
+        "model": model,
+        "input": prompt,
+        "tools": [{"type": "web_search"}],
+    }
+    try:
+        resp = timed_client.responses.create(
+            **common_kwargs,
             reasoning={"effort": "medium"},
             background=False,
         )
     except TypeError:
-        # Older SDKs may not accept `background` / `reasoning`.
-        # Retry without the optional kwargs.
-        resp = client.responses.create(
-            model=model,
-            input=prompt,
-            tools=[{"type": "web_search"}],
-        )
+        # Older SDKs reject the optional kwargs.
+        resp = timed_client.responses.create(**common_kwargs)
 
     text = getattr(resp, "output_text", None)
     if not text:

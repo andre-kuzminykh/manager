@@ -18,6 +18,139 @@ from datetime import datetime, timezone
 from typing import Any
 
 
+def markdown_to_html(md: str) -> str:
+    """Tiny Markdown → HTML converter used for Brief Docs.
+
+    Handles only what we emit: H1/H2/H3, bold, italic, list items,
+    plain paragraphs, fenced code blocks, GitHub-flavoured tables,
+    bare URLs (autolinked) and `[label](url)` hyperlinks. Anything
+    we don't recognise is preserved as a paragraph. No external
+    deps so the runtime image stays minimal.
+    """
+    import html
+    import re
+
+    def _esc(s: str) -> str:
+        return html.escape(s, quote=False)
+
+    def _inline(s: str) -> str:
+        # `[label](url)` — wrap in <a>. Run BEFORE bare-url
+        # autolinking so we don't double-wrap.
+        s = re.sub(
+            r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
+            lambda m: f'<a href="{_esc(m.group(2))}">{_esc(m.group(1))}</a>',
+            s,
+        )
+        # Bare URLs → <a>
+        def _bare(m: "re.Match[str]") -> str:
+            url = m.group(1)
+            return f'<a href="{_esc(url)}">{_esc(url)}</a>'
+        s = re.sub(
+            r"(?<!href=\")(https?://[^\s<>)]+)",
+            _bare,
+            s,
+        )
+        # **bold**
+        s = re.sub(r"\*\*([^*\n]+?)\*\*", r"<strong>\1</strong>", s)
+        # _italic_ (only when wrapped by spaces / start / end)
+        s = re.sub(
+            r"(^|\W)_([^_\n]+?)_(?=\W|$)",
+            r"\1<em>\2</em>",
+            s,
+        )
+        return s
+
+    out: list[str] = []
+    in_list = False
+    in_table = False
+    table_rows: list[list[str]] = []
+
+    def _flush_list() -> None:
+        nonlocal in_list
+        if in_list:
+            out.append("</ul>")
+            in_list = False
+
+    def _flush_table() -> None:
+        nonlocal in_table, table_rows
+        if not in_table:
+            return
+        if table_rows:
+            head = table_rows[0]
+            body_rows = [r for r in table_rows[1:] if r and not all(
+                set(c.strip()) <= {"-", ":", " "} for c in r
+            )]
+            out.append("<table border=\"1\" cellspacing=\"0\" cellpadding=\"4\">")
+            out.append("<thead><tr>" + "".join(
+                f"<th>{_inline(_esc(h.strip()))}</th>" for h in head
+            ) + "</tr></thead>")
+            out.append("<tbody>")
+            for row in body_rows:
+                out.append("<tr>" + "".join(
+                    f"<td>{_inline(_esc(c.strip()))}</td>" for c in row
+                ) + "</tr>")
+            out.append("</tbody></table>")
+        table_rows = []
+        in_table = False
+
+    for raw_line in (md or "").splitlines():
+        line = raw_line.rstrip("\r")
+        stripped = line.strip()
+
+        # Markdown table row?
+        if stripped.startswith("|") and stripped.endswith("|") and "|" in stripped[1:-1]:
+            _flush_list()
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            table_rows.append(cells)
+            in_table = True
+            continue
+        if in_table:
+            _flush_table()
+
+        if not stripped:
+            _flush_list()
+            out.append("")
+            continue
+        if stripped.startswith("# "):
+            _flush_list()
+            out.append(f"<h1>{_inline(_esc(stripped[2:].strip()))}</h1>")
+            continue
+        if stripped.startswith("## "):
+            _flush_list()
+            out.append(f"<h2>{_inline(_esc(stripped[3:].strip()))}</h2>")
+            continue
+        if stripped.startswith("### "):
+            _flush_list()
+            out.append(f"<h3>{_inline(_esc(stripped[4:].strip()))}</h3>")
+            continue
+        if stripped.startswith("- ") or stripped.startswith("* "):
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{_inline(_esc(stripped[2:].strip()))}</li>")
+            continue
+        # Plain bare URL on its own line — likely the hero photo.
+        if re.match(r"^https?://\S+$", stripped):
+            _flush_list()
+            out.append(
+                f'<p><img src="{_esc(stripped)}" alt="" /></p>'
+            )
+            continue
+
+        _flush_list()
+        out.append(f"<p>{_inline(_esc(stripped))}</p>")
+
+    _flush_list()
+    _flush_table()
+
+    return (
+        "<!DOCTYPE html><html><head>"
+        '<meta charset="utf-8"></head><body>'
+        + "\n".join(out)
+        + "</body></html>"
+    )
+
+
 def build_doc_title(
     *,
     kind: str,

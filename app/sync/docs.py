@@ -139,6 +139,62 @@ class DocsExportService:
         wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
         retry=retry_if_exception_type(HttpError),
     )
+    def export_html_as_doc(
+        self,
+        *,
+        title: str,
+        html_body: str,
+        parent_folder_id: str = "",
+        share_role: str | None = "writer",
+    ) -> tuple[str, str]:
+        """FR-CR-05-168 — upload an HTML body and let Drive
+        convert it into a properly-formatted Google Doc (headings,
+        bold, italic, hyperlinks all rendered natively, not as
+        markdown literals). Same return contract as
+        ``export_summary``.
+        """
+        from io import BytesIO
+
+        from googleapiclient.http import MediaIoBaseUpload
+
+        media = MediaIoBaseUpload(
+            BytesIO(html_body.encode("utf-8")),
+            mimetype="text/html",
+            resumable=False,
+        )
+        body: dict[str, Any] = {
+            "name": title or "Counterparty Brief",
+            "mimeType": "application/vnd.google-apps.document",
+        }
+        if parent_folder_id:
+            body["parents"] = [parent_folder_id]
+        file = (
+            self._drive.files()
+            .create(
+                body=body,
+                media_body=media,
+                fields="id",
+                supportsAllDrives=True,
+            )
+            .execute()
+        )
+        doc_id = file["id"]
+        if share_role:
+            try:
+                self._share_anyone_with_link(doc_id, role=share_role)
+            except HttpError as e:
+                log.warning(
+                    "docs_share_anyone_with_link_failed",
+                    doc_id=doc_id, error=str(e),
+                )
+        return doc_id, f"https://docs.google.com/document/d/{doc_id}/edit"
+
+    @retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=8),
+        retry=retry_if_exception_type(HttpError),
+    )
     def _move_to_folder(self, doc_id: str, folder_id: str) -> None:
         # Find the doc's current parents to remove them, then add
         # the configured folder as the new parent.

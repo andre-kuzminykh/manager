@@ -644,6 +644,17 @@ class CounterpartyBriefRunner:
     def _maybe_create_doc(
         self, *, title: str, body: str,
     ) -> tuple[str | None, str | None]:
+        """FR-CR-05-168 — render Markdown body to HTML, upload as
+        Drive file with mimeType=document. Drive auto-converts:
+        headings, bold/italic, hyperlinks and inline `<img>`
+        all render natively in the resulting Google Doc.
+
+        Falls back to plain-text `export_summary` if the new
+        `export_html_as_doc` method is not present (older
+        DocsExportService deployments).
+        """
+        from app.counterparty_briefs.doc import markdown_to_html
+
         if self._docs_factory is None:
             return None, None
         try:
@@ -654,12 +665,21 @@ class CounterpartyBriefRunner:
         if svc is None:
             return None, None
         try:
-            doc_id, doc_url = svc.export_summary(
-                title=title, body=body,
-                parent_folder_id=getattr(
-                    self._settings, "fireflies_docs_folder_id", ""
-                ) or "",
-            )
+            html = markdown_to_html(body)
+            if hasattr(svc, "export_html_as_doc"):
+                doc_id, doc_url = svc.export_html_as_doc(
+                    title=title, html_body=html,
+                    parent_folder_id=getattr(
+                        self._settings, "fireflies_docs_folder_id", ""
+                    ) or "",
+                )
+            else:
+                doc_id, doc_url = svc.export_summary(
+                    title=title, body=body,
+                    parent_folder_id=getattr(
+                        self._settings, "fireflies_docs_folder_id", ""
+                    ) or "",
+                )
             return doc_url, doc_id
         except Exception as e:  # noqa: BLE001
             log.warning("brief_doc_export_failed", title=title, error=str(e))

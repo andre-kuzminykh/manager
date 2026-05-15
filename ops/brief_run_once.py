@@ -121,6 +121,12 @@ def main() -> int:
     parser.add_argument("--force-counterparty", default="")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
+        "--skip-slack", action="store_true",
+        help="do the full LLM + Docs work but DO NOT post the "
+             "grouped Slack DM (operator-test mode — lets you "
+             "inspect generated Docs before the daemon goes live)",
+    )
+    parser.add_argument(
         "--limit", type=int, default=0,
         help="post at most N events (0 = unlimited)",
     )
@@ -210,7 +216,7 @@ def main() -> int:
             )
             continue
         try:
-            runner.process_event(ev)
+            runner.process_event(ev, skip_slack=args.skip_slack)
             posted += 1
         except Exception as e:  # noqa: BLE001
             log.warning(

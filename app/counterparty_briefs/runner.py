@@ -299,9 +299,15 @@ class CounterpartyBriefRunner:
 
     # -- per-event pipeline ------------------------------------------
 
-    def process_event(self, ev: dict[str, Any]) -> None:
+    def process_event(self, ev: dict[str, Any], *, skip_slack: bool = False) -> None:
         """Run the full pipeline for a single event. Used by the
-        daemon AND the one-shot CLI."""
+        daemon AND the one-shot CLI.
+
+        ``skip_slack=True`` — operator-pinned test mode: do the
+        full LLM + Docs work and persist the brief rows, but DO
+        NOT post a Slack DM. Lets the operator inspect generated
+        Docs before the daemon starts blasting messages.
+        """
         ev_id = (ev or {}).get("id") or ""
         if not ev_id:
             return
@@ -575,9 +581,17 @@ class CounterpartyBriefRunner:
             org_brief=org_payload,
             person_briefs=person_payloads,
         )
-        ts = self._send_slack_dm(text=text)
-        if not ts:
-            return
+        ts: str | None = None
+        if skip_slack:
+            log.info(
+                "brief_event_slack_skipped",
+                event_id=ev_id,
+                hint="--skip-slack — Docs created, no DM sent",
+            )
+        else:
+            ts = self._send_slack_dm(text=text)
+            if not ts:
+                return
 
         with session_scope() as s:
             evrow = CounterpartyBriefsEvent(

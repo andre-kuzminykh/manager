@@ -152,6 +152,16 @@ def _estimate_cost_usd(*, model: str, prompt_chars: int) -> float:
 def _call_llm_json(
     llm_backend: Any, messages: list[dict[str, str]], *, model: str
 ) -> Any:
+    """Dispatch to the right OpenAI endpoint based on the model.
+
+    `o4-mini-deep-research` and the rest of the deep-research
+    family is only exposed via the **Responses API**
+    (`POST /v1/responses`) — calling it through
+    `chat.completions` 404s with «This model is only supported
+    in v1/responses». Detect by substring «deep-research» in the
+    model name and route accordingly. Other models continue to
+    use the regular JSON-mode chat completion.
+    """
     if hasattr(llm_backend, "complete_json"):
         return llm_backend.complete_json(messages, model=model)
     client = getattr(llm_backend, "_client", None)
@@ -159,6 +169,14 @@ def _call_llm_json(
         raise RuntimeError(
             "llm_backend has neither complete_json nor _client"
         )
+    if "deep-research" in (model or "").lower():
+        return _call_openai_responses_json(client, messages, model=model)
+    return _call_openai_chat_json(client, messages, model=model)
+
+
+def _call_openai_chat_json(
+    client: Any, messages: list[dict[str, str]], *, model: str
+) -> Any:
     resp = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -171,6 +189,82 @@ def _call_llm_json(
     if not content:
         return None
     return json.loads(content)
+
+
+def _call_openai_responses_json(
+    client: Any, messages: list[dict[str, str]], *, model: str
+) -> Any:
+    """Call the OpenAI Responses API with the web-search tool and
+    extract a JSON object from the model's output.
+
+    Responses API uses `input` (a single concatenated string or a
+    structured list) instead of `messages`. We concatenate the
+    system + user prompts and append a strict «return JSON only»
+    reminder so the parser has something to work with.
+    """
+    prompt_parts: list[str] = []
+    for m in messages:
+        role = m.get("role", "user").upper()
+        prompt_parts.append(f"# {role}\n{m.get('content', '')}")
+    prompt_parts.append(
+        "# RESPONSE FORMAT\nReturn ONLY a single valid JSON object "
+        "matching the schema above. No markdown, no commentary, "
+        "no code fences."
+    )
+    prompt = "\n\n".join(prompt_parts)
+
+    try:
+        resp = client.responses.create(
+            model=model,
+            input=prompt,
+            tools=[{"type": "web_search"}],
+            reasoning={"effort": "medium"},
+            background=False,
+        )
+    except TypeError:
+        # Older SDKs may not accept `background` / `reasoning`.
+        # Retry without the optional kwargs.
+        resp = client.responses.create(
+            model=model,
+            input=prompt,
+            tools=[{"type": "web_search"}],
+        )
+
+    text = getattr(resp, "output_text", None)
+    if not text:
+        # Walk the `.output` array — Responses API returns a list
+        # of items (web-search calls, tool calls, message items).
+        # We grab the text content of the message item(s).
+        for item in getattr(resp, "output", None) or []:
+            item_type = getattr(item, "type", None) or (
+                isinstance(item, dict) and item.get("type")
+            )
+            if item_type != "message":
+                continue
+            content = (
+                getattr(item, "content", None)
+                if not isinstance(item, dict) else item.get("content")
+            ) or []
+            for piece in content:
+                p_type = getattr(piece, "type", None) or (
+                    isinstance(piece, dict) and piece.get("type")
+                )
+                if p_type not in ("output_text", "text"):
+                    continue
+                p_text = (
+                    getattr(piece, "text", None)
+                    if not isinstance(piece, dict) else piece.get("text")
+                )
+                if p_text:
+                    text = (text or "") + p_text
+
+    text = (text or "").strip()
+    if not text:
+        return None
+    # Tolerate models that wrap the JSON in ```json fences anyway.
+    if text.startswith("```"):
+        text = text.strip("`").lstrip("json").strip()
+    return json.loads(text)
 
 
 def _coerce_org(payload: dict[str, Any]) -> OrgResearch:

@@ -196,6 +196,11 @@ def main() -> int:
     )
 
     if args.list:
+        from app.counterparty_briefs.extract import (
+            extract_event_counterparties,
+        )
+        from app.counterparty_briefs.runner import event_passes_host_gate
+
         events_sorted = sorted(
             events,
             key=lambda e: (
@@ -203,6 +208,19 @@ def main() -> int:
                 if hasattr(e.get("start"), "isoformat") else str(e.get("start"))
             ),
         )
+        # Cheap LLM (extract model) — run Stage 0 per event so the
+        # operator sees who would actually be researched.
+        extract_model = (
+            runner._settings.counterparty_briefs_extract_model
+            or runner._settings.openai_model
+        )
+        # Pre-load idempotency rows so we can flag already-processed.
+        with session_scope() as s:
+            processed_ids = {
+                row.calendar_event_id
+                for row in s.query(CounterpartyBriefsEvent).all()
+            }
+
         print(f"\n# {len(events_sorted)} events in window\n")
         for e in events_sorted:
             start = e.get("start")
@@ -210,11 +228,35 @@ def main() -> int:
                 start.strftime("%Y-%m-%d %H:%M")
                 if hasattr(start, "strftime") else str(start)
             )
-            org = (e.get("organizer") or {}).get("email") or "?"
+            org_email = (e.get("organizer") or {}).get("email") or "?"
+            flags: list[str] = []
+            if not event_passes_host_gate(e, runner._operator_email):
+                flags.append("SKIP:host")
+            if e.get("id") in processed_ids:
+                flags.append("DONE")
+            flag_s = f"  [{', '.join(flags)}]" if flags else ""
             print(
-                f"{start_s}  {e.get('id'):<60s}  "
-                f"[{org}]  {e.get('title')}"
+                f"\n{start_s}  {e.get('id')}{flag_s}\n"
+                f"  organizer: {org_email}\n"
+                f"  title:     {e.get('title')}"
             )
+            if "SKIP:host" in flags:
+                continue
+            try:
+                ex = extract_event_counterparties(
+                    event=e, llm_backend=runner._llm, model=extract_model,
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(f"  extract:   ERROR ({exc})")
+                continue
+            org_name = ex.org_name or "—"
+            print(f"  org:       {org_name}")
+            if ex.initial_persons:
+                for p in ex.initial_persons:
+                    role = f" ({p.person_role})" if p.person_role else ""
+                    print(f"    👤 {p.person_name}{role}")
+            else:
+                print("    (no initial persons — beneficiaries picked at stage 2)")
         return 0
     if args.calendar_event_id:
         events = [e for e in events if e.get("id") == args.calendar_event_id]

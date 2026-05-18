@@ -579,9 +579,11 @@ Scenario: deep-research budget exceeded
 | FR-CB-5.5b | Person Doc: секции из §6.2 (operator-pinned: Personal Info / DD/MM Саммари / To-Do / Profile Overview / Current Position / Previous Positions / Investment Highlights / Investments / Exits / Achievements / Honors / Education / Publications / Skills / Languages) | `test_brief_person_doc_renders_all_sections` |
 | FR-CB-5.6 | DD/MM Саммари в person Doc использует наш summary из последнего zoom/fireflies recording с этим контрагентом | `test_brief_doc_dd_mm_summary_pulled_from_zoom_recordings` |
 | FR-CB-5.7 | To-Do — open tasks linked to past meetings с counterparty | `test_brief_doc_todo_contains_open_tasks` |
-| FR-CB-5.8 | Doc body Markdown→HTML конвертирует `([host.tld])` в `<a href="https://host.tld">host.tld</a>` для Drive HTML import | `test_brief_doc_linkifies_bare_host_citations` |
-| FR-CB-5.9 | Doc body Markdown→HTML конвертирует `(host.tld)` (без скобок) в `<a>`, парентезы с не-host-контентом не трогает | `test_brief_doc_linkifies_plain_paren_citations` |
+| FR-CB-5.8 | Doc body Markdown→HTML — citation `([host.tld])` цепляется как `<a href>` к ПРЕДЫДУЩЕМУ слову (визуальный URL пропадает) | `test_brief_doc_linkifies_bare_host_citations` |
+| FR-CB-5.9 | Doc body Markdown→HTML — `(host.tld)` (без скобок) → `<a>` на предыдущее слово, парентезы с не-host-контентом не трогает | `test_brief_doc_linkifies_plain_paren_citations` |
 | FR-CB-5.10 | CLI флаг `--re-render-docs <key1,key2,…\|all>` пересоздаёт Doc-и из кэшированного payload без LLM-вызовов | `test_brief_cli_re_render_docs` (manual) |
+| FR-CB-5.11 | Повторные цитаты одного и того же URL после первой ссылки силенсно дропаются (один URL — один word-anchor) | `test_brief_doc_dedups_repeat_citation_urls` |
+| FR-CB-5.12 | Билдер-вершимые `[label](url)` (Leadership, Recent News, Past meetings) НЕ трактуются как citation; label остаётся видимым `<a>label</a>` | `test_brief_doc_renders_all_sections` + manual |
 
 ### Категория 6 — Slack delivery (single grouped DM per event)
 
@@ -595,9 +597,12 @@ Scenario: deep-research budget exceeded
 | FR-CB-6.6 | Каждая ссылка с emoji prefix: 🏢 для org, 👤 для person | `test_brief_slack_links_have_kind_emoji` |
 | FR-CB-6.7 | Top-message: org-name + emoji обёрнут в Slack-mrkdwn гиперссылку `<doc-url\|🏢 *Org*>`; footer «👇 Информация о N контактах — в треде ниже» | `test_brief_org_top_message_has_pointer_to_thread` |
 | FR-CB-6.8 | Каждый person брифинг идёт thread-reply с `thread_ts=<top.ts>`; формат `<doc-url\|👤 *Name* — Role>` + gist | `test_brief_person_thread_reply_singular_payload` |
-| FR-CB-6.9 | Citation marker `([host.tld])` (Responses API native) → Slack-гиперссылка `<https://host.tld\|host.tld>` | `test_brief_slack_linkifies_bare_host_citations` |
-| FR-CB-6.10 | Markdown-link `[label](url[#:~:text=...])` → Slack-гиперссылка `<url-без-anchor\|label>` | `test_brief_slack_linkifies_markdown_citations` |
-| FR-CB-6.11 | Plain-paren `(host.tld)` (без скобок) → Slack-гиперссылка; парентезы с не-host-контентом (`(陳衍均)`, `(US$20B)`) НЕ трогаем | `test_brief_slack_linkifies_plain_paren_citations` |
+| FR-CB-6.9 | Citation marker `([host.tld])` — host text дропается, гиперссылка цепляется к ПРЕДЫДУЩЕМУ слову как `<https://host.tld\|word>` | `test_brief_slack_linkifies_bare_host_citations` |
+| FR-CB-6.10 | Markdown-link `([label](url[#:~:text=...]))` — anchor `#:~:text=` дропается из URL; word-anchor на предыдущее слово | `test_brief_slack_linkifies_markdown_citations` |
+| FR-CB-6.11 | Plain-paren `(host.tld)` — word-anchor; парентезы с не-host-контентом (`(陳衍均)`, `(US$20B)`) НЕ трогаем | `test_brief_slack_linkifies_plain_paren_citations` |
+| FR-CB-6.12 | Повторные цитаты одного URL после первой ссылки силенсно дропаются | `test_brief_slack_dedups_repeat_citation_urls` |
+| FR-CB-6.13 | Word-anchor поддерживает compound слова с точкой/дефисом/апострофом: `WEB.DE`, `Mr.Smith`, `Asia-Pacific`, `don't` — линкуются целиком | inherited via `_WORD_TAIL_RE` regex |
+| FR-CB-6.14 | Standalone `[label](url)` (builder-emitted) → Slack `<url\|label>` (label остаётся видимым) — НЕ word-anchor | `test_brief_slack_linkifies_markdown_citations` |
 
 ### Категория 7 — Idempotency (two layers)
 
@@ -609,6 +614,9 @@ Scenario: deep-research budget exceeded
 | FR-CB-7.3 | Counterparty cache TTL — внутри 14 дней Doc URL переиспользуется | `test_brief_counterparty_cache_reuses_doc` |
 | FR-CB-7.4 | `--force-event` CLI flag re-processes event (delete events row) | `test_brief_cli_force_event_flag` |
 | FR-CB-7.5 | `--force-counterparty NAME` CLI flag refresh research для конкретного counterparty | `test_brief_cli_force_counterparty_flag` |
+| FR-CB-7.6 | `--seed-existing-events` CLI: пред-заполняет idempotency для всех встреч в текущем окне БЕЗ LLM/Slack — daemon потом видит их processed и реагирует только на новые | `test_brief_cli_seed_existing_events` (manual) |
+| FR-CB-7.7 | `--list` CLI: печатает события в окне + результат Stage-0 extract без side-effects (для предпросмотра кого подтянет) | manual |
+| FR-CB-7.8 | `--lookback-days N` CLI: расширяет окно поиска на N дней в прошлое (для перепрогона прошедших встреч) | manual |
 
 ### Категория 8 — Feature flag
 

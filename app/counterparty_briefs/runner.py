@@ -557,22 +557,67 @@ class CounterpartyBriefRunner:
             log.info("brief_event_yielded_no_briefs", event_id=ev_id)
             return
 
-        org_payload = next(
-            (
-                {"display_name": lk.display_name, "doc_url": lk.doc_url}
-                for lk in links if lk.kind == "org" and lk.doc_url
-            ),
-            None,
-        )
-        person_payloads = [
-            {
+        # FR-CR-05-168 polish 2026-05-18: each Slack line carries
+        # a one-line «gist» (overview paragraph) so the DM is
+        # readable without clicking each Doc. Pull org gist from
+        # OrgResearch.overview_paragraph; person gist from
+        # PersonResearch.profile_overview.
+        org_payload: dict[str, Any] | None = None
+        for lk in links:
+            if lk.kind != "org" or not lk.doc_url:
+                continue
+            org_payload = {
+                "display_name": lk.display_name,
+                "doc_url": lk.doc_url,
+                "gist": (
+                    org_research.overview_paragraph
+                    if org_research is not None else ""
+                ),
+            }
+            break
+
+        # Build a lookup of person_key → research payload so we
+        # can pull `profile_overview` for each person link.
+        person_research_by_key: dict[str, PersonResearch] = {}
+        try:
+            with session_scope() as _s:
+                rows = (
+                    _s.query(CounterpartyBrief)
+                    .filter(CounterpartyBrief.kind == "person")
+                    .filter(CounterpartyBrief.id.in_([
+                        lk.brief_id for lk in links
+                        if lk.kind == "person" and lk.brief_id
+                    ] or [-1]))
+                    .all()
+                )
+                for r in rows:
+                    payload = r.research_payload or {}
+                    person_research_by_key[r.counterparty_key] = PersonResearch(
+                        profile_overview=str(
+                            payload.get("profile_overview") or ""
+                        ),
+                    )
+        except Exception as e:  # noqa: BLE001
+            log.info("brief_person_gist_lookup_failed", error=str(e))
+
+        person_payloads: list[dict[str, Any]] = []
+        for lk in links:
+            if lk.kind != "person":
+                continue
+            from app.counterparty_briefs.lookup import normalise_counterparty_name
+
+            key = normalise_counterparty_name(lk.display_name)
+            gist_text = ""
+            pr = person_research_by_key.get(key)
+            if pr is not None:
+                gist_text = pr.profile_overview
+            person_payloads.append({
                 "display_name": lk.display_name,
                 "role": lk.role,
                 "doc_url": lk.doc_url,
                 "note": lk.note,
-            }
-            for lk in links if lk.kind == "person"
-        ]
+                "gist": gist_text,
+            })
         text = render_event_briefs_slack_text(
             event_title=ev.get("title") or "",
             scheduled_at=ev["start"]

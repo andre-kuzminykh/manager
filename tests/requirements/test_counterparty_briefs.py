@@ -568,9 +568,15 @@ def test_brief_slack_grouped_post_per_event():
     )
     assert "Новая встреча 14/05 16:00" in text
     assert "SDF ‹› Humanoid / Intro call" in text  # `<>` and `|` escaped
-    assert "<https://docs/.../org-doc|" in text
-    assert "<https://docs/.../samer-doc|" in text
-    assert "<https://docs/.../khaled-doc|" in text
+    # FR-CR-05-168 polish 2026-05-18: bullets replaced with
+    # «emoji *Name* — gist \n <url-on-its-own-line>» — Slack
+    # auto-unfurls bare URLs into clickable Doc previews.
+    assert "🏢 *Strategic Development Fund*" in text
+    assert "https://docs/.../org-doc" in text
+    assert "👤 *Samer Nawaf Zawaideh* — CIO" in text
+    assert "https://docs/.../samer-doc" in text
+    assert "👤 *Khaled Al Hashemi* — CEO" in text
+    assert "https://docs/.../khaled-doc" in text
 
 
 def test_brief_slack_links_have_kind_emoji():

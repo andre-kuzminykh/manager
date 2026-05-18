@@ -131,11 +131,14 @@ Output JSON со схемой (operator-pinned §6.2):
 
 
 def _estimate_cost_usd(*, model: str, prompt_chars: int) -> float:
-    """Conservative cost estimator. o4-mini-deep-research пока без
-    публичных pricing API — берём worst-case оценку $0.80 per
-    call (включая web search). Можно переопределить через ENV
-    `COUNTERPARTY_BRIEFS_PER_CALL_COST_USD_OVERRIDE` если operator
-    хочет более жёсткий лимит.
+    """Per-call cost estimator. o4-mini-deep-research empirically
+    runs $0.3-0.7 per call (depends on prompt length + how much
+    web search the model decides to do). Use a slightly-padded
+    average so a 1-org + 1-2-person event fits the default $2
+    budget without spurious budget-exhaustion skips.
+
+    Override via `COUNTERPARTY_BRIEFS_PER_CALL_COST_USD_OVERRIDE`
+    env when operator wants a hard cap.
     """
     import os
     override = os.getenv(
@@ -146,7 +149,9 @@ def _estimate_cost_usd(*, model: str, prompt_chars: int) -> float:
             return float(override)
         except ValueError:
             pass
-    return 0.8  # USD per deep-research call (conservative)
+    # 0.5 fits «1 org + 1 person» at $1 (default budget = $2 — room
+    # for 4 calls; default $3 — room for 6).
+    return 0.5
 
 
 def _call_llm_json(

@@ -323,6 +323,21 @@ def build_app(
             else:
                 employees.observed(session, slack_user_id=slack_user_id)
 
+    # FR-CB2-200 — CEO Brain Bot rides on the same App instance.
+    # Registers its own `message` / `app_mention` handlers; both
+    # the task bot and CEO Brain see every event. The call is a
+    # no-op when CEO_BRAIN_ENABLED=false.
+    try:
+        from app.ceo_brain.slack_handler import register_ceo_brain_handlers
+
+        register_ceo_brain_handlers(app, settings=settings)
+    except Exception as e:  # noqa: BLE001
+        # Don't take the task bot down if CEO Brain wire-up fails.
+        from app.logging_setup import get_logger as _glog
+        _glog(__name__).warning(
+            "ceo_brain_wire_up_failed", error=str(e),
+        )
+
     return app
 
 

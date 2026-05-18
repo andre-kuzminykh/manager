@@ -436,7 +436,7 @@ def test_responder_passes_mcp_servers(monkeypatch):
 
     monkeypatch.setenv(
         "MCP_SERVERS",
-        '[{"name":"slack","url":"https://x","type":"sse","auth":"t"}]',
+        '[{"name":"slack","url":"https://x","authorization_token":"t"}]',
     )
     req = build_anthropic_request(thread_history=[])
     assert any(s["name"] == "slack" for s in req.get("mcp_servers") or [])
@@ -599,25 +599,27 @@ def test_mcp_config_loaded_and_validated(monkeypatch):
 
     monkeypatch.setenv(
         "MCP_SERVERS",
-        '[{"name":"slack","url":"https://x","type":"sse","auth":"t"}]',
+        '[{"name":"slack","url":"https://x","authorization_token":"t"}]',
     )
     servers = load_mcp_servers()
     assert servers[0]["name"] == "slack"
     assert servers[0]["url"] == "https://x"
-    assert servers[0]["type"] == "sse"
+    # Normalised to Anthropic Messages API shape (`type: "url"`)
+    assert servers[0]["type"] == "url"
+    assert servers[0]["authorization_token"] == "t"
 
 
-def test_mcp_supports_sse_and_http(monkeypatch):
-    """FR-CB2-4.2 — both `sse` and `http` transport types."""
+def test_mcp_accepts_legacy_auth_field(monkeypatch):
+    """FR-CB2-4.2 — back-compat: `auth` keyword in env JSON
+    normalises to `authorization_token` for Anthropic API."""
     from app.ceo_brain.mcp import load_mcp_servers
 
     monkeypatch.setenv(
         "MCP_SERVERS",
-        '[{"name":"a","url":"u1","type":"sse"},'
-        ' {"name":"b","url":"u2","type":"http"}]',
+        '[{"name":"a","url":"u1","auth":"legacy-tok"}]',
     )
-    types = {s["type"] for s in load_mcp_servers()}
-    assert types == {"sse", "http"}
+    out = load_mcp_servers()
+    assert out[0]["authorization_token"] == "legacy-tok"
 
 
 def test_mcp_oauth_token_resolution(monkeypatch):
@@ -629,14 +631,14 @@ def test_mcp_oauth_token_resolution(monkeypatch):
 
 
 def test_mcp_oauth_token_falls_back_to_json_auth(monkeypatch):
-    """FR-CB2-4.3 — when no per-server env var, the `auth` field
-    from MCP_SERVERS JSON is used."""
+    """FR-CB2-4.3 — when no per-server env var, the
+    `authorization_token` field from MCP_SERVERS JSON is used."""
     from app.ceo_brain.mcp import resolve_oauth_token
 
     monkeypatch.delenv("MCP_GMAIL_OAUTH_TOKEN", raising=False)
     monkeypatch.setenv(
         "MCP_SERVERS",
-        '[{"name":"gmail","url":"u","type":"sse","auth":"json-tok"}]',
+        '[{"name":"gmail","url":"u","authorization_token":"json-tok"}]',
     )
     assert resolve_oauth_token("gmail") == "json-tok"
 
@@ -646,8 +648,8 @@ def test_mcp_partial_failure_degraded():
     from app.ceo_brain.mcp import filter_reachable_servers
 
     servers = [
-        {"name": "slack", "url": "http://localhost:1", "type": "sse"},
-        {"name": "gmail", "url": "http://localhost:2", "type": "sse"},
+        {"name": "slack", "url": "http://localhost:1", "type": "url"},
+        {"name": "gmail", "url": "http://localhost:2", "type": "url"},
     ]
     reachable = filter_reachable_servers(
         servers, probe=lambda u: u.endswith("2"),

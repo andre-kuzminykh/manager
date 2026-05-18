@@ -12,13 +12,13 @@ from typing import Any, Callable
 from sqlalchemy.orm import Session
 
 from app.ceo_brain.archive import should_archive_channel, write_archive
+from app.ceo_brain.archive.pg_sink import _find as _find_archive_row
 from app.ceo_brain.cache import (
     resolve_channel_name,
     resolve_user_display_name,
 )
 from app.ceo_brain.config import get_archive_dir
 from app.logging_setup import get_logger
-from app.models import ProcessedSlackEvent
 
 log = get_logger(__name__)
 
@@ -43,25 +43,17 @@ def _is_self(payload: dict[str, Any], bot_user_id: str | None) -> bool:
     return (payload.get("user") or "") == bot_user_id
 
 
-def _is_duplicate(session: Session, event_id: str | None) -> bool:
-    """Re-use the existing ``processed_slack_events`` table for
-    event_id dedup. The table predates this feature but is
-    structurally identical to what we need (UNIQUE(event_id))."""
-    if not event_id:
+def _is_duplicate_archive(
+    session: Session, *, channel_id: str, ts: str,
+) -> bool:
+    """Dedup using the archive's own UNIQUE(channel_id, ts) — this
+    keeps CEO Brain's dedup state independent of the existing
+    slack-task-bot's ``processed_slack_events`` flow."""
+    if not channel_id or not ts:
         return False
-    row = (
-        session.query(ProcessedSlackEvent)
-        .filter(ProcessedSlackEvent.event_id == event_id)
-        .first()
-    )
-    return row is not None
-
-
-def _mark_processed(session: Session, event_id: str | None) -> None:
-    if not event_id:
-        return
-    session.add(ProcessedSlackEvent(event_id=event_id))
-    session.flush()
+    return _find_archive_row(
+        session, channel_id=channel_id, ts=ts,
+    ) is not None
 
 
 def _channel_type(payload: dict[str, Any]) -> str | None:
@@ -98,14 +90,13 @@ def handle_event(
         result.skipped_self = True
         return result
 
-    # FR-CB2-1.5 — dedup by event_id.
-    event_id = payload.get("event_id")
-    if event_id and _is_duplicate(session, event_id):
-        result.duplicate = True
-        return result
-
     channel_id = payload.get("channel") or ""
     ts = payload.get("ts") or payload.get("event_ts") or ""
+
+    # FR-CB2-1.5 — dedup by archive's UNIQUE(channel_id, ts).
+    if _is_duplicate_archive(session, channel_id=channel_id, ts=ts):
+        result.duplicate = True
+        return result
 
     archive_supported = event_type in {
         "message", "app_mention",
@@ -130,12 +121,6 @@ def handle_event(
             raw_payload=payload,
         )
         result.archived = True
-
-    if event_id:
-        try:
-            _mark_processed(session, event_id)
-        except Exception as e:  # noqa: BLE001
-            log.warning("brain_dedup_mark_failed", error=str(e))
 
     # Responder dispatch — only on @mention / DM, and only if a
     # responder callable was passed in (Sprint 1 starts archive-only).

@@ -101,7 +101,18 @@ def get_mcp_servers_raw(
 def get_mcp_servers(settings: Settings | None = None) -> list[dict]:
     """FR-CB2-4.1 — parse the ``MCP_SERVERS`` env JSON. Returns
     an empty list when unset / unparseable rather than raising,
-    so the responder still starts in degraded mode."""
+    so the responder still starts in degraded mode.
+
+    Output is normalised to the Anthropic Messages API shape::
+
+        {"type": "url", "url": ..., "name": ...,
+         "authorization_token"?: ...}
+
+    Accepts either ``authorization_token`` (Anthropic-native) or
+    the legacy ``auth`` field for backward compatibility. Drops
+    the entry's ``type`` field from the input — Anthropic only
+    supports ``"url"`` here; transport (SSE vs HTTP) is decided
+    server-side."""
     raw = get_mcp_servers_raw(settings)
     if not raw:
         return []
@@ -117,16 +128,13 @@ def get_mcp_servers(settings: Settings | None = None) -> list[dict]:
             continue
         name = (item.get("name") or "").strip()
         url = (item.get("url") or "").strip()
-        kind = (item.get("type") or "sse").strip().lower()
         if not name or not url:
             continue
-        if kind not in {"sse", "http"}:
-            continue
-        normalised = {"name": name, "url": url, "type": kind}
-        auth = item.get("auth")
+        entry: dict = {"type": "url", "url": url, "name": name}
+        auth = item.get("authorization_token") or item.get("auth")
         if auth:
-            normalised["auth"] = auth
-        out.append(normalised)
+            entry["authorization_token"] = auth
+        out.append(entry)
     return out
 
 

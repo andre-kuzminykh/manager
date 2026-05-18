@@ -46,7 +46,7 @@ def resolve_oauth_token(server_name: str) -> str | None:
         return token
     for s in get_mcp_servers():
         if s.get("name") == server_name:
-            auth = s.get("auth")
+            auth = s.get("authorization_token") or s.get("auth")
             return auth if isinstance(auth, str) and auth else None
     return None
 

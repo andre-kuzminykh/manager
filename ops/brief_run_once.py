@@ -142,6 +142,12 @@ def main() -> int:
         "--limit", type=int, default=0,
         help="post at most N events (0 = unlimited)",
     )
+    parser.add_argument(
+        "--list", action="store_true",
+        help="just print events in the window (id / start / title) "
+             "and exit — useful for picking a --calendar-event-id "
+             "to re-run.",
+    )
     args = parser.parse_args()
 
     runner = _build_runner_for_oneshot()
@@ -188,6 +194,28 @@ def main() -> int:
         lookahead_days=args.lookahead_days,
         lookback_days=args.lookback_days,
     )
+
+    if args.list:
+        events_sorted = sorted(
+            events,
+            key=lambda e: (
+                e.get("start").isoformat()
+                if hasattr(e.get("start"), "isoformat") else str(e.get("start"))
+            ),
+        )
+        print(f"\n# {len(events_sorted)} events in window\n")
+        for e in events_sorted:
+            start = e.get("start")
+            start_s = (
+                start.strftime("%Y-%m-%d %H:%M")
+                if hasattr(start, "strftime") else str(start)
+            )
+            org = (e.get("organizer") or {}).get("email") or "?"
+            print(
+                f"{start_s}  {e.get('id'):<60s}  "
+                f"[{org}]  {e.get('title')}"
+            )
+        return 0
     if args.calendar_event_id:
         events = [e for e in events if e.get("id") == args.calendar_event_id]
         log.info(

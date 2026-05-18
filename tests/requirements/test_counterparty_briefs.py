@@ -689,6 +689,43 @@ def test_brief_slack_linkifies_markdown_citations():
     assert "#:~:text=" not in reply
 
 
+def test_brief_slack_linkifies_plain_paren_citations():
+    """FR-CB-6.11 — `(host.tld)` (plain parens, no brackets) is
+    also a Responses API citation idiom; convert to a Slack
+    hyperlink. Skip pure-Chinese / numeric parentheticals."""
+    from app.counterparty_briefs.slack_format import render_person_thread_reply
+
+    reply = render_person_thread_reply(person={
+        "display_name": "Brendan Chen",
+        "role": "CCM",
+        "doc_url": "https://docs/.../brendan",
+        "gist": (
+            "Brendan Chen (陳衍均) is a Taiwanese investment "
+            "professional at CDIB Capital Group (tw.linkedin.com). "
+            "Manages ~US$20B (contactout.com)."
+        ),
+        "note": None,
+    })
+    assert "<https://tw.linkedin.com|tw.linkedin.com>" in reply
+    assert "<https://contactout.com|contactout.com>" in reply
+    # Chinese characters parenthetical must stay intact
+    assert "(陳衍均)" in reply
+
+
+def test_brief_doc_linkifies_plain_paren_citations():
+    """FR-CB-5.9 — `markdown_to_html` converts `(host.tld)` plain
+    paren citations into `<a>` tags."""
+    from app.counterparty_briefs.doc import markdown_to_html
+
+    html = markdown_to_html(
+        "Brendan Chen (陳衍均) is at CDIB Capital Group "
+        "(tw.linkedin.com). Manages ~US$20B (contactout.com)."
+    )
+    assert '<a href="https://tw.linkedin.com">tw.linkedin.com</a>' in html
+    assert '<a href="https://contactout.com">contactout.com</a>' in html
+    assert "(陳衍均)" in html
+
+
 def test_brief_doc_linkifies_bare_host_citations():
     """FR-CB-5.8 — `markdown_to_html` converts `([host.tld])`
     markers into `<a href="https://host.tld">host.tld</a>` so the

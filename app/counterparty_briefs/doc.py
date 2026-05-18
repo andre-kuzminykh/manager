@@ -34,10 +34,17 @@ def markdown_to_html(md: str) -> str:
         return html.escape(s, quote=False)
 
     def _inline(s: str) -> str:
+        # `[label](url)` — wrap in <a>. Run BEFORE the bare-host
+        # patterns so we don't accidentally treat a URL like
+        # `(https://...)` as a citation paren.
+        s = re.sub(
+            r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
+            lambda m: f'<a href="{_esc(m.group(2))}">{_esc(m.group(1))}</a>',
+            s,
+        )
         # `([host.tld])` — bare bracketed citation marker
         # (Responses API native). Convert to a clickable <a>
-        # pointing at `https://host.tld`. Operator-pinned
-        # 2026-05-18: «ну ты же умеешь делать гиперссылки».
+        # pointing at `https://host.tld`.
         s = re.sub(
             r"\(\[([a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*)\]\)",
             lambda m: (
@@ -46,11 +53,15 @@ def markdown_to_html(md: str) -> str:
             ),
             s,
         )
-        # `[label](url)` — wrap in <a>. Run BEFORE bare-url
-        # autolinking so we don't double-wrap.
+        # `(host.tld)` — plain-parens citation (LLM often emits
+        # «...at CDIB (tw.linkedin.com).»). Lowercase host with
+        # ≥1 dot so we don't grab «(US$20 billion)» or «(陳衍均)».
         s = re.sub(
-            r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
-            lambda m: f'<a href="{_esc(m.group(2))}">{_esc(m.group(1))}</a>',
+            r"\(([a-z][a-z0-9\-]*(?:\.[a-z][a-z0-9\-]*)+)\)",
+            lambda m: (
+                f'(<a href="https://{_esc(m.group(1))}">'
+                f'{_esc(m.group(1))}</a>)'
+            ),
             s,
         )
         # Bare URLs → <a>

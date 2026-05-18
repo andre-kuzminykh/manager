@@ -64,6 +64,16 @@ _CITATION_PATTERNS = (
         ),
         "bare_host",
     ),
+    # «(host.tld)» — plain-parens bare host (LLM often emits
+    # citations like «...professional at CDIB (tw.linkedin.com).»).
+    # Require lowercase letter at start so we don't grab
+    # parentheticals like `(US$20 billion)` or `(陳衍均)`.
+    (
+        re.compile(
+            r"\(([a-z][a-z0-9\-]*(?:\.[a-z][a-z0-9\-]*)+)\)"
+        ),
+        "bare_host_no_brackets",
+    ),
 )
 
 # Two private-use chars wrap each placeholder token so neither
@@ -100,7 +110,7 @@ def _linkify_citations(text: str) -> tuple[str, list[tuple[str, str]]]:
 
     for pattern, kind in _CITATION_PATTERNS:
         def _sub(m: re.Match[str], _kind: str = kind) -> str:
-            if _kind == "bare_host":
+            if _kind in ("bare_host", "bare_host_no_brackets"):
                 host = m.group(1).rstrip("/").lstrip("/")
                 return _emit(f"https://{host}", host)
             label, url = m.group(1), m.group(2)

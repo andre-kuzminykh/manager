@@ -579,17 +579,25 @@ Scenario: deep-research budget exceeded
 | FR-CB-5.5b | Person Doc: секции из §6.2 (operator-pinned: Personal Info / DD/MM Саммари / To-Do / Profile Overview / Current Position / Previous Positions / Investment Highlights / Investments / Exits / Achievements / Honors / Education / Publications / Skills / Languages) | `test_brief_person_doc_renders_all_sections` |
 | FR-CB-5.6 | DD/MM Саммари в person Doc использует наш summary из последнего zoom/fireflies recording с этим контрагентом | `test_brief_doc_dd_mm_summary_pulled_from_zoom_recordings` |
 | FR-CB-5.7 | To-Do — open tasks linked to past meetings с counterparty | `test_brief_doc_todo_contains_open_tasks` |
+| FR-CB-5.8 | Doc body Markdown→HTML конвертирует `([host.tld])` в `<a href="https://host.tld">host.tld</a>` для Drive HTML import | `test_brief_doc_linkifies_bare_host_citations` |
+| FR-CB-5.9 | Doc body Markdown→HTML конвертирует `(host.tld)` (без скобок) в `<a>`, парентезы с не-host-контентом не трогает | `test_brief_doc_linkifies_plain_paren_citations` |
+| FR-CB-5.10 | CLI флаг `--re-render-docs <key1,key2,…\|all>` пересоздаёт Doc-и из кэшированного payload без LLM-вызовов | `test_brief_cli_re_render_docs` (manual) |
 
 ### Категория 6 — Slack delivery (single grouped DM per event)
 
 | ID | Требование | Test |
 |---|---|---|
-| FR-CB-6.1 | ОДИН `chat.postMessage` в `COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID` per event | `test_brief_slack_grouped_post_per_event` |
-| FR-CB-6.2 | Header format: `*Новая встреча DD/MM HH:MM: <Title>*` + bulleted list ссылок | `test_brief_slack_header_format` |
+| FR-CB-6.1 | ОДИН top-`chat.postMessage` per event + N thread replies в `COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID` | `test_brief_slack_grouped_post_per_event` |
+| FR-CB-6.2 | Header format: `*Новая встреча DD/MM HH:MM: <Title>*` + org block + thread pointer | `test_brief_slack_header_format` |
 | FR-CB-6.3 | Slack-safe `<>` escape в name / org / event title | `test_brief_slack_safe_brackets` |
 | FR-CB-6.4 | Body ≤ 2900 chars; больше 10 person-briefs → cut с «… ещё N»  | `test_brief_slack_body_cap` |
 | FR-CB-6.5 | Failure не блокирует tick loop | inherited |
 | FR-CB-6.6 | Каждая ссылка с emoji prefix: 🏢 для org, 👤 для person | `test_brief_slack_links_have_kind_emoji` |
+| FR-CB-6.7 | Top-message: org-name + emoji обёрнут в Slack-mrkdwn гиперссылку `<doc-url\|🏢 *Org*>`; footer «👇 Информация о N контактах — в треде ниже» | `test_brief_org_top_message_has_pointer_to_thread` |
+| FR-CB-6.8 | Каждый person брифинг идёт thread-reply с `thread_ts=<top.ts>`; формат `<doc-url\|👤 *Name* — Role>` + gist | `test_brief_person_thread_reply_singular_payload` |
+| FR-CB-6.9 | Citation marker `([host.tld])` (Responses API native) → Slack-гиперссылка `<https://host.tld\|host.tld>` | `test_brief_slack_linkifies_bare_host_citations` |
+| FR-CB-6.10 | Markdown-link `[label](url[#:~:text=...])` → Slack-гиперссылка `<url-без-anchor\|label>` | `test_brief_slack_linkifies_markdown_citations` |
+| FR-CB-6.11 | Plain-paren `(host.tld)` (без скобок) → Slack-гиперссылка; парентезы с не-host-контентом (`(陳衍均)`, `(US$20B)`) НЕ трогаем | `test_brief_slack_linkifies_plain_paren_citations` |
 
 ### Категория 7 — Idempotency (two layers)
 

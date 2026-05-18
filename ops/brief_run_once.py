@@ -191,6 +191,74 @@ def _re_render_docs(runner: CounterpartyBriefRunner, spec: str) -> int:
     return 0
 
 
+def _seed_existing_events(
+    runner: CounterpartyBriefRunner, lookahead_days: int,
+) -> int:
+    """Mark every event in the current Calendar window as
+    already-processed so the daemon will skip them on the next
+    tick. Filters by the same organizer/creator gate the daemon
+    applies, so only meetings the daemon WOULD have briefed get
+    seeded — internal events stay un-touched.
+
+    No LLM calls. No Slack posts. No Docs created.
+    """
+    from decimal import Decimal
+
+    from app.counterparty_briefs.runner import (
+        event_already_processed,
+        event_passes_host_gate,
+    )
+    from app.models import CounterpartyBriefsEvent
+
+    events = _fetch_events_wide(
+        runner, lookahead_days=lookahead_days, lookback_days=0,
+    )
+    if not events:
+        log.info("brief_run_once_seed_no_events")
+        return 0
+
+    seeded = 0
+    skipped_host = 0
+    skipped_done = 0
+    with session_scope() as s:
+        for ev in events:
+            ev_id = (ev or {}).get("id") or ""
+            if not ev_id:
+                continue
+            if not event_passes_host_gate(ev, runner._operator_email):
+                skipped_host += 1
+                continue
+            if event_already_processed(s, calendar_event_id=ev_id):
+                skipped_done += 1
+                continue
+            start = ev.get("start")
+            scheduled_at = (
+                start if isinstance(start, datetime)
+                else datetime.now(timezone.utc)
+            )
+            s.add(CounterpartyBriefsEvent(
+                calendar_event_id=ev_id,
+                event_title=ev.get("title") or "",
+                scheduled_meeting_at=scheduled_at,
+                posted_at=datetime.now(timezone.utc),
+                slack_channel=(
+                    runner._settings.counterparty_briefs_slack_target_channel_id
+                ),
+                slack_ts=None,
+                total_cost_usd=Decimal("0.0"),
+                link_summary=[{"note": "seeded_as_existing"}],
+            ))
+            seeded += 1
+    log.info(
+        "brief_run_once_seed_done",
+        seeded=seeded,
+        skipped_host=skipped_host,
+        already_processed=skipped_done,
+        total_events=len(events),
+    )
+    return 0
+
+
 def main() -> int:
     setup_logging()
     parser = argparse.ArgumentParser(
@@ -230,6 +298,15 @@ def main() -> int:
              "Use after Doc-body / Markdown-to-HTML changes to "
              "refresh in-DB Doc URLs.",
     )
+    parser.add_argument(
+        "--seed-existing-events", action="store_true",
+        help="pre-populate counterparty_briefs_events idempotency "
+             "rows for every Calendar event in the current window "
+             "WITHOUT calling the LLM or posting to Slack. Use "
+             "BEFORE turning the daemon on so it skips meetings "
+             "that already exist and only sends briefs for events "
+             "created later.",
+    )
     args = parser.parse_args()
 
     runner = _build_runner_for_oneshot()
@@ -241,6 +318,11 @@ def main() -> int:
     # doc-body changes.
     if args.re_render_docs:
         return _re_render_docs(runner, args.re_render_docs)
+
+    # --seed-existing-events: mark already-existing meetings as
+    # processed so the daemon only acts on NEW ones.
+    if args.seed_existing_events:
+        return _seed_existing_events(runner, args.lookahead_days)
 
     # --force-event: delete the events idempotency row so the
     # event is reprocessed.

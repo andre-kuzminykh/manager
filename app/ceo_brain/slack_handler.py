@@ -1,13 +1,22 @@
-"""FR-CB2-1.x wire-up: register CEO Brain handlers onto the
-existing slack-task-bot Bolt ``App``.
+"""FR-CB2-1.x wire-up: CEO Brain Slack listeners.
 
-Slack Bolt allows multiple handlers per event — adding a CEO
-Brain ``@app.event("message")`` / ``@app.event("app_mention")``
-alongside the task-bot's handlers means both features see every
-event without code-sharing or token splitting.
+Two modes:
 
-Operator-pinned 2026-05-18: «мне не надо новый app создавать,
-мне в текущем надо». Single Slack app, two consumers.
+1. **Piggyback** — when ``CEO_BRAIN_SLACK_*_TOKEN`` env vars are
+   absent OR identical to the project-wide ``SLACK_*_TOKEN``,
+   the handlers are registered on the existing slack-task-bot
+   Bolt ``App`` (zero extra connections; both features see every
+   event).
+
+2. **Standalone** — when CEO Brain has dedicated tokens (i.e. it
+   lives in a *different* workspace than the task bot), spin up a
+   second Bolt ``App`` + Socket-Mode handler in its own daemon
+   thread so events from the right workspace actually land.
+
+Operator pin 2026-05-18: «мне не надо новый app создавать, мне в
+текущем надо» (humanoidheadquarters) — the standalone path
+applies because the project's main bot lives in another
+workspace.
 """
 from __future__ import annotations
 
@@ -15,7 +24,7 @@ import threading
 from typing import Any
 
 from app.ceo_brain.cache import set_channel_fetcher, set_user_fetcher
-from app.ceo_brain.config import get_archive_dir
+from app.ceo_brain.config import get_archive_dir, get_slack_tokens
 from app.ceo_brain.dispatcher import handle_event
 from app.ceo_brain.responder import (
     post_placeholder,
@@ -34,10 +43,8 @@ def _build_responder_callback(
     slack_client: Any,
     bot_user_id: str | None,
 ):
-    """Return a callable suitable for the dispatcher's
-    ``responder=`` parameter. The callable runs the full Claude
-    responder pipeline in a daemon thread so the Bolt listener
-    can return immediately."""
+    """Daemon-threaded callable suitable for the dispatcher's
+    ``responder=`` parameter."""
     try:
         from anthropic import Anthropic
     except ImportError:
@@ -66,9 +73,6 @@ def _build_responder_callback(
             )
             if not placeholder_ts:
                 return
-            # Pull thread context from Slack so the model sees the
-            # surrounding conversation. Falls back to just the
-            # @mention text if Slack returns nothing.
             history: list[dict[str, Any]] = []
             try:
                 resp = slack_client.conversations_replies(
@@ -81,8 +85,7 @@ def _build_responder_callback(
                         text = (m or {}).get("text") or ""
                         if text:
                             history.append({
-                                "role": "user",
-                                "content": text,
+                                "role": "user", "content": text,
                             })
             except Exception as e:  # noqa: BLE001
                 log.info(
@@ -105,8 +108,6 @@ def _build_responder_callback(
                     slack_event_ts=ts,
                 )
 
-        # Spawn so the Bolt event-loop isn't blocked while Claude
-        # streams (can take ≥30 sec).
         threading.Thread(
             target=_run,
             name="ceo-brain-responder-run",
@@ -116,24 +117,21 @@ def _build_responder_callback(
     return _responder
 
 
-def register_ceo_brain_handlers(app: Any, *, settings: Settings) -> None:
-    """Attach CEO Brain `message` / `app_mention` listeners onto a
-    Bolt ``App``. Does NOTHING when ``CEO_BRAIN_ENABLED=false`` —
-    so it's safe to call unconditionally from the build path."""
-    if not settings.ceo_brain_enabled:
-        log.info("ceo_brain_handler_disabled")
-        return
-
+def _attach_handlers(app: Any, settings: Settings) -> None:
+    """Wire `@app.event("message")` + `@app.event("app_mention")`
+    on the given Bolt ``App``. Shared between piggyback and
+    standalone modes."""
     slack_client = app.client
 
-    # Plug Slack lookups into the LRU caches so archive rows carry
-    # human-readable channel + user names.
     def _users_info(user_id: str) -> dict:
         try:
             r = slack_client.users_info(user=user_id)
             return r.data if hasattr(r, "data") else dict(r)
         except Exception as e:  # noqa: BLE001
-            log.info("ceo_brain_users_info_failed", user_id=user_id, error=str(e))
+            log.info(
+                "ceo_brain_users_info_failed",
+                user_id=user_id, error=str(e),
+            )
             return {}
 
     def _conv_info(channel_id: str) -> dict:
@@ -150,13 +148,14 @@ def register_ceo_brain_handlers(app: Any, *, settings: Settings) -> None:
     set_user_fetcher(_users_info)
     set_channel_fetcher(_conv_info)
 
-    # Capture the bot user id for the self-skip guard.
     try:
         auth = slack_client.auth_test()
         bot_user_id = auth.get("user_id")
+        bot_team = auth.get("team")
     except Exception as e:  # noqa: BLE001
         log.warning("ceo_brain_auth_test_failed", error=str(e))
         bot_user_id = None
+        bot_team = None
 
     responder = (
         None if settings.ceo_brain_archive_only else
@@ -180,10 +179,6 @@ def register_ceo_brain_handlers(app: Any, *, settings: Settings) -> None:
         except Exception as e:  # noqa: BLE001
             log.warning("ceo_brain_dispatch_failed", error=str(e))
 
-    # Subtype-less message — main archive path. Bolt fires `message`
-    # for `message.channels` / `message.groups` / `message.im` /
-    # `message.mpim` events. We register the listener; the dispatcher
-    # decides what to do per event.
     @app.event("message")  # type: ignore[misc]
     def _ceo_brain_on_message(event, ack):  # noqa: ANN001
         ack()
@@ -198,7 +193,99 @@ def register_ceo_brain_handlers(app: Any, *, settings: Settings) -> None:
         "ceo_brain_handlers_registered",
         archive_only=settings.ceo_brain_archive_only,
         bot_user_id=bot_user_id,
+        team=bot_team,
     )
 
 
-__all__ = ["register_ceo_brain_handlers"]
+def _needs_standalone(settings: Settings) -> bool:
+    """Decide whether to spawn a dedicated Bolt App. True when
+    CEO Brain tokens are EXPLICITLY set (different workspace);
+    false when we should piggyback on the existing app."""
+    cb_app, cb_bot = get_slack_tokens(settings)
+    same_as_main = (
+        cb_bot == settings.slack_bot_token
+        and cb_app == settings.slack_app_token
+    )
+    if same_as_main:
+        return False
+    # Explicit override values present
+    return bool(cb_bot)
+
+
+def register_ceo_brain_handlers(app: Any, *, settings: Settings) -> None:
+    """Piggyback path — attach CEO Brain listeners to the main
+    slack-task-bot ``App``. Skipped when:
+
+      * ``CEO_BRAIN_ENABLED=false``
+      * Standalone mode is required (different workspace tokens)
+    """
+    if not settings.ceo_brain_enabled:
+        log.info("ceo_brain_handler_disabled")
+        return
+    if _needs_standalone(settings):
+        log.info(
+            "ceo_brain_handler_standalone_required",
+            hint=(
+                "CEO_BRAIN_SLACK_*_TOKEN differs from main "
+                "SLACK_*_TOKEN — handlers will be attached by "
+                "start_standalone_ceo_brain_bot() instead"
+            ),
+        )
+        return
+    _attach_handlers(app, settings)
+
+
+def start_standalone_ceo_brain_bot(*, settings: Settings) -> threading.Thread | None:
+    """FR-CB2-5.5b — when CEO Brain lives in a different Slack
+    workspace than the main task bot, spawn a second Bolt App +
+    Socket-Mode handler with the dedicated tokens. Returns the
+    daemon thread (or None if disabled / misconfigured)."""
+    if not settings.ceo_brain_enabled:
+        return None
+    cb_app_token, cb_bot_token = get_slack_tokens(settings)
+    if not cb_app_token or not cb_bot_token:
+        log.warning(
+            "ceo_brain_standalone_no_tokens",
+            hint=(
+                "set CEO_BRAIN_SLACK_APP_TOKEN + "
+                "CEO_BRAIN_SLACK_BOT_TOKEN to spawn the dedicated "
+                "Socket-Mode listener"
+            ),
+        )
+        return None
+
+    try:
+        from slack_bolt import App
+        from slack_bolt.adapter.socket_mode import SocketModeHandler
+    except ImportError as e:
+        log.warning(
+            "ceo_brain_standalone_bolt_missing", error=str(e),
+        )
+        return None
+
+    def _loop() -> None:
+        try:
+            app = App(
+                token=cb_bot_token,
+                # signing_secret only needed for HTTP variant
+                signing_secret=settings.ceo_brain_signing_secret or None,
+            )
+            _attach_handlers(app, settings)
+            log.info("ceo_brain_standalone_socket_mode_starting")
+            SocketModeHandler(app, cb_app_token).start()
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ceo_brain_standalone_socket_failed", error=str(e),
+            )
+
+    t = threading.Thread(
+        target=_loop, name="ceo-brain-socket", daemon=True,
+    )
+    t.start()
+    return t
+
+
+__all__ = [
+    "register_ceo_brain_handlers",
+    "start_standalone_ceo_brain_bot",
+]

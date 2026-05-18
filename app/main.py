@@ -189,6 +189,16 @@ def run() -> None:
     except Exception as e:  # noqa: BLE001
         log.warning("brief_runner_startup_failed", error=str(e))
 
+    # FR-CB2-5.5b — standalone CEO Brain Bot listener (separate
+    # workspace from the main slack-task-bot). No-op when the
+    # dedicated tokens aren't set / CEO_BRAIN_ENABLED=false.
+    try:
+        from app.ceo_brain.slack_handler import start_standalone_ceo_brain_bot
+
+        start_standalone_ceo_brain_bot(settings=settings)
+    except Exception as e:  # noqa: BLE001
+        log.warning("ceo_brain_standalone_startup_failed", error=str(e))
+
     log.info("starting_socket_mode")
     run_socket_mode(app, settings.slack_app_token)
 

@@ -34,14 +34,12 @@ def markdown_to_html(md: str) -> str:
         return html.escape(s, quote=False)
 
     # Citation extractors mirror app.counterparty_briefs.slack_format.
-    # ORDER MATTERS — longer / more-specific patterns first.
+    # ORDER MATTERS — longer / more-specific patterns first. Standalone
+    # `[label](url)` is NOT a citation here — it's a builder-emitted
+    # link processed by `_DOC_MD_LINK_RE` below.
     _CITATION_EXTRACTORS_DOC = (
         (
             re.compile(r"\(\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)\)"),
-            lambda m: (m.group(2), m.group(1)),
-        ),
-        (
-            re.compile(r"\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)"),
             lambda m: (m.group(2), m.group(1)),
         ),
         (
@@ -54,6 +52,9 @@ def markdown_to_html(md: str) -> str:
             re.compile(r"\(([a-z][a-z0-9\-]*(?:\.[a-z][a-z0-9\-]*)+)\)"),
             lambda m: (f"https://{m.group(1)}", m.group(1)),
         ),
+    )
+    _DOC_MD_LINK_RE = re.compile(
+        r"\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)"
     )
     _DOC_CITE_SENTINEL = "\x01"
     _DOC_LINK_SENTINEL = "\x02"
@@ -139,14 +140,33 @@ def markdown_to_html(md: str) -> str:
             if idx < 0 or idx >= len(placeholders):
                 return ""
             url, label = placeholders[idx]
-            return f'<a href="{_esc(url)}">{_esc(label)}</a>'
+            # URL and label come from one of two sources:
+            #  (a) constructed by us as `https://host.tld` —
+            #      no special chars, escaping is a no-op.
+            #  (b) extracted from the markdown link `[label](url)`
+            #      AFTER the outer `_esc` has already run on the
+            #      whole line — so they're already HTML-safe.
+            # Either way, don't escape AGAIN here or we get
+            # double-encoded `&amp;amp;` URLs.
+            return f'<a href="{url}">{label}</a>'
 
         return _DOC_LINK_RE.sub(_sub, s)
 
     def _inline(s: str) -> str:
-        # Pass 1+2: turn citation markers into <a> tags attached
-        # to the preceding word (matches Slack rendering).
+        # Pass 1+2: turn citation markers into placeholders that
+        # anchor on the preceding word (matches Slack rendering).
         s, doc_links = _linkify_doc_citations(s)
+
+        # Pass 3: convert remaining standalone `[label](url)`
+        # markdown links into LINK placeholders (builder-emitted
+        # hyperlinks where the label IS the visible text).
+        def _md_sub(m: "re.Match[str]") -> str:
+            label = m.group(1)
+            url = m.group(2).split("#", 1)[0]
+            doc_links.append((url, label))
+            return _DOC_LINK_SENTINEL + chr(0xE100 + len(doc_links) - 1)
+        s = _DOC_MD_LINK_RE.sub(_md_sub, s)
+
         # Bare URLs → <a> (catches anything that wasn't a citation
         # marker but is still a plain URL in the prose).
         def _bare(m: "re.Match[str]") -> str:

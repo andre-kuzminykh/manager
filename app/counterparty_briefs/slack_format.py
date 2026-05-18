@@ -48,18 +48,16 @@ def _slack_safe(text: str) -> str:
     )
 
 
-# Citation patterns + URL extractors. Order matters: longer /
-# more-specific forms first so we don't consume a substring of a
-# bigger marker by accident.
+# Citation patterns + URL extractors. ORDER MATTERS — longer /
+# more-specific forms first. Standalone `[label](url)` is NOT
+# treated as a citation here; it's processed separately by
+# `_convert_md_links` as a true builder-emitted hyperlink (the
+# label IS the visible text, not a word-anchor).
 _CITATION_EXTRACTORS = (
-    # «([label](url))» — markdown link inside parens
+    # «([label](url))» — markdown link inside parens, LLM emits
+    # this as a parenthetical source citation.
     (
         re.compile(r"\(\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)\)"),
-        lambda m: m.group(2),
-    ),
-    # «[label](url)» — bare markdown link
-    (
-        re.compile(r"\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)"),
         lambda m: m.group(2),
     ),
     # «([host.tld])» — bracketed bare-host (Responses API native)
@@ -75,6 +73,12 @@ _CITATION_EXTRACTORS = (
         lambda m: f"https://{m.group(1)}",
     ),
 )
+
+# Standalone `[label](url)` — treated as a builder-emitted
+# hyperlink (e.g. leadership entry, news title). Run AFTER
+# citation linkifying so form-1 `([label](url))` was already
+# consumed.
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)")
 
 
 # Placeholder encoding: a sentinel control byte + a Private-Use-Area
@@ -252,11 +256,28 @@ def _slack_link(url: str, label: str) -> str:
     return f"<{url}|{label}>"
 
 
+def _convert_md_links(
+    text: str, placeholders: list[tuple[str, str]],
+) -> str:
+    """Convert standalone `[label](url)` markdown links into LINK
+    placeholders. Citations were already handled in the previous
+    pass; whatever `[label](url)` remains is a builder-emitted
+    link where the LABEL is the intended visible text. The
+    placeholder list is mutated in place."""
+    def _sub(m: "re.Match[str]") -> str:
+        label = m.group(1)
+        url = m.group(2).split("#", 1)[0]
+        placeholders.append((url, label))
+        return _make_link_marker(len(placeholders) - 1)
+    return _MD_LINK_RE.sub(_sub, text)
+
+
 def _render_gist(raw: str, *, max_chars: int) -> str:
-    """End-to-end gist pipeline: linkify citations → slack-safe →
-    soft-cut → expand link placeholders. Apply once per
-    free-text field (org overview, person profile)."""
+    """End-to-end gist pipeline: linkify citations → convert
+    builder-emitted markdown links → slack-safe → soft-cut →
+    expand link placeholders. Apply once per free-text field."""
     rewritten, placeholders = _linkify_citations(raw or "")
+    rewritten = _convert_md_links(rewritten, placeholders)
     safe = _slack_safe(rewritten)
     shortened = _shorten(safe, max_chars=max_chars)
     return _expand_links(shortened, placeholders)

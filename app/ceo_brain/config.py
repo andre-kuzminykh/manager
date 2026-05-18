@@ -29,14 +29,49 @@ def get_slack_tokens(
     settings: Settings | None = None,
 ) -> tuple[str, str]:
     """FR-CB2-5.5 — return ``(app_token, bot_token)`` for the CEO
-    Brain Slack app, distinct from any other bot tokens in the
-    project."""
+    Brain Slack app.
+
+    Resolution order:
+
+      1. ``CEO_BRAIN_SLACK_APP_TOKEN`` / ``CEO_BRAIN_SLACK_BOT_TOKEN``
+         — explicit override when you DO want a dedicated app.
+      2. Top-level ``SLACK_APP_TOKEN`` / ``SLACK_BOT_TOKEN`` —
+         operator-pinned 2026-05-18: reuse the existing
+         workspace bot rather than provisioning a new Slack app.
+
+    Empty strings are treated as unset at each level.
+    """
+    s = settings or get_settings()
+    app_token = (
+        os.environ.get("CEO_BRAIN_SLACK_APP_TOKEN")
+        or s.ceo_brain_slack_app_token
+        or os.environ.get("SLACK_APP_TOKEN")
+        or s.slack_app_token
+        or ""
+    )
+    bot_token = (
+        os.environ.get("CEO_BRAIN_SLACK_BOT_TOKEN")
+        or s.ceo_brain_slack_bot_token
+        or os.environ.get("SLACK_BOT_TOKEN")
+        or s.slack_bot_token
+        or ""
+    )
+    return app_token, bot_token
+
+
+def get_signing_secret(
+    settings: Settings | None = None,
+) -> str:
+    """HTTP Events HMAC secret. Same fallback ladder as
+    `get_slack_tokens` — CEO-Brain override → top-level
+    SLACK_SIGNING_SECRET → empty."""
     s = settings or get_settings()
     return (
-        os.environ.get("CEO_BRAIN_SLACK_APP_TOKEN")
-        or s.ceo_brain_slack_app_token,
-        os.environ.get("CEO_BRAIN_SLACK_BOT_TOKEN")
-        or s.ceo_brain_slack_bot_token,
+        os.environ.get("CEO_BRAIN_SIGNING_SECRET")
+        or s.ceo_brain_signing_secret
+        or os.environ.get("SLACK_SIGNING_SECRET")
+        or s.slack_signing_secret
+        or ""
     )
 
 
@@ -100,5 +135,6 @@ __all__ = [
     "get_archive_dir",
     "get_mcp_servers",
     "get_mcp_servers_raw",
+    "get_signing_secret",
     "get_slack_tokens",
 ]

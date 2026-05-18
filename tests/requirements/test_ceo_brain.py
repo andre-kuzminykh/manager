@@ -735,8 +735,9 @@ def test_brain_archive_dir_configurable(monkeypatch, tmp_path):
 
 
 def test_brain_uses_dedicated_tokens(monkeypatch):
-    """FR-CB2-5.5 — CEO Brain tokens are DISTINCT from existing
-    `SLACK_BOT_TOKEN`."""
+    """FR-CB2-5.5 — CEO Brain tokens prefer dedicated env vars
+    when set, so a separate Slack app can be wired up if the
+    operator chooses."""
     from app.config import get_settings
     from app.ceo_brain.config import get_slack_tokens
 
@@ -747,6 +748,25 @@ def test_brain_uses_dedicated_tokens(monkeypatch):
     app_t, bot_t = get_slack_tokens()
     assert app_t == "xapp-CB"
     assert bot_t == "xoxb-CB"
+
+
+def test_brain_falls_back_to_workspace_tokens(monkeypatch):
+    """FR-CB2-5.5b — operator-pinned 2026-05-18: «мне не надо
+    новый app создавать, мне в текущем надо». When CEO Brain
+    tokens are unset, fall back to the top-level
+    `SLACK_APP_TOKEN` / `SLACK_BOT_TOKEN` so the existing
+    workspace bot can serve as the responder identity."""
+    from app.config import get_settings
+    from app.ceo_brain.config import get_slack_tokens
+
+    monkeypatch.delenv("CEO_BRAIN_SLACK_APP_TOKEN", raising=False)
+    monkeypatch.delenv("CEO_BRAIN_SLACK_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("SLACK_APP_TOKEN", "xapp-WS")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-WS")
+    get_settings.cache_clear()
+    app_t, bot_t = get_slack_tokens()
+    assert app_t == "xapp-WS"
+    assert bot_t == "xoxb-WS"
 
 
 def test_brain_archive_whitelist(monkeypatch):

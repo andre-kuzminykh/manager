@@ -639,11 +639,11 @@ def test_brief_person_thread_reply_singular_payload():
 
 
 def test_brief_slack_linkifies_bare_host_citations():
-    """FR-CB-6.9 — operator-pinned 2026-05-18 revision: citation
-    markers `([host.tld])` become Slack hyperlinks WRAPPED IN
-    PARENS, matching how the Doc body renders the same citation:
-    `(<https://host.tld|host.tld>)`. Visible Slack text reads
-    `(host.tld)` with the host clickable."""
+    """FR-CB-6.9 — operator-pinned 2026-05-18 (final): citation
+    markers `([host.tld])` no longer render as `(host.tld)` text;
+    instead the PRECEDING WORD becomes a Slack hyperlink and the
+    citation marker is removed. Same word can only anchor ONE
+    URL — duplicate citations are silently dropped."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
@@ -657,24 +657,27 @@ def test_brief_slack_linkifies_bare_host_citations():
         ),
         "note": None,
     })
-    # Hyperlink wrapped in parens — same visual as the Doc.
-    assert "(<https://newsroom.web.de|newsroom.web.de>)" in reply
-    assert (
-        "(<https://www.mail-and-media.com|www.mail-and-media.com>)"
-        in reply
-    )
-    # No raw `([host])` markers left behind
-    assert "([newsroom" not in reply
-    assert "([www.mail" not in reply
-    # The prose itself is preserved verbatim
-    assert "Timo Bohl is Director of Sales at WEB.DE" in reply
+    # Both unique URLs are anchored on words from the prose
+    # (anchor word may vary; the URL hyperlink must be present).
+    assert "https://newsroom.web.de" in reply
+    assert "https://www.mail-and-media.com" in reply
+    # No bare-host text noise like `(host.tld)` or `[host.tld]`
+    for noise in (
+        "(newsroom.web.de)", "(www.mail-and-media.com)",
+        "[newsroom.web.de]", "[www.mail-and-media.com]",
+    ):
+        assert noise not in reply
+    # Prose words still visible (they're now inside <url|word>
+    # hyperlink markup, so check substrings that survive).
+    assert "Timo Bohl is Director of Sales" in reply
+    assert "WEB.DE" in reply
     assert "Based in Karlsruhe." in reply
 
 
 def test_brief_slack_linkifies_markdown_citations():
     """FR-CB-6.10 — `([label](https://url#:~:text=…))` becomes a
-    parens-wrapped Slack hyperlink to the cleaned URL with the
-    original label. The `#:~:text=…` anchor is dropped."""
+    Slack hyperlink on the preceding word. The `#:~:text=…`
+    anchor is dropped from the URL."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
@@ -687,16 +690,17 @@ def test_brief_slack_linkifies_markdown_citations():
         ),
         "note": None,
     })
-    assert "(<https://bloomberg.com/news/article-1|Bloomberg>)" in reply
+    # Anchored on word "things"
+    assert "<https://bloomberg.com/news/article-1|things>" in reply
     assert "#:~:text=" not in reply
+    assert "(Bloomberg)" not in reply
+    assert "[Bloomberg]" not in reply
 
 
 def test_brief_slack_linkifies_plain_paren_citations():
-    """FR-CB-6.11 — `(host.tld)` (plain parens, no brackets) is
-    also a Responses API citation idiom; convert to a Slack
-    hyperlink while KEEPING the surrounding parens so it visually
-    matches the Doc body. Skip pure-Chinese / numeric
-    parentheticals."""
+    """FR-CB-6.11 — `(host.tld)` plain-parens citation attaches a
+    hyperlink to the preceding word; Chinese / non-host
+    parentheticals stay intact."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
@@ -710,41 +714,92 @@ def test_brief_slack_linkifies_plain_paren_citations():
         ),
         "note": None,
     })
-    assert "(<https://tw.linkedin.com|tw.linkedin.com>)" in reply
-    assert "(<https://contactout.com|contactout.com>)" in reply
-    # Chinese characters parenthetical must stay intact
+    # Both unique URLs anchored on preceding words
+    assert "https://tw.linkedin.com" in reply
+    assert "https://contactout.com" in reply
+    # No visible `(host.tld)` text noise
+    assert "(tw.linkedin.com)" not in reply
+    assert "(contactout.com)" not in reply
+    # Chinese parens preserved
     assert "(陳衍均)" in reply
 
 
 def test_brief_doc_linkifies_plain_paren_citations():
-    """FR-CB-5.9 — `markdown_to_html` converts `(host.tld)` plain
-    paren citations into `<a>` tags."""
+    """FR-CB-5.9 — `markdown_to_html` strips `(host.tld)` plain
+    paren citations and attaches the hyperlink to the preceding
+    word. Chinese / non-host parens stay intact."""
     from app.counterparty_briefs.doc import markdown_to_html
 
     html = markdown_to_html(
         "Brendan Chen (陳衍均) is at CDIB Capital Group "
         "(tw.linkedin.com). Manages ~US$20B (contactout.com)."
     )
-    assert '<a href="https://tw.linkedin.com">tw.linkedin.com</a>' in html
-    assert '<a href="https://contactout.com">contactout.com</a>' in html
+    # Both URLs present as <a href=…>
+    assert 'href="https://tw.linkedin.com"' in html
+    assert 'href="https://contactout.com"' in html
+    # No `(host.tld)` text noise
+    assert "(tw.linkedin.com)" not in html
+    assert "(contactout.com)" not in html
+    # Chinese parens preserved
     assert "(陳衍均)" in html
 
 
 def test_brief_doc_linkifies_bare_host_citations():
-    """FR-CB-5.8 — `markdown_to_html` converts `([host.tld])`
-    markers into `<a href="https://host.tld">host.tld</a>` so the
-    Drive HTML import renders them as clickable hyperlinks inside
-    the generated Doc."""
+    """FR-CB-5.8 — `markdown_to_html` strips `([host.tld])`
+    markers and attaches the hyperlink to the preceding word so
+    Drive HTML import renders clickable words instead of bracketed
+    hostnames."""
     from app.counterparty_briefs.doc import markdown_to_html
 
     html = markdown_to_html(
         "Operates as the asset management arm "
         "([www.cdibcapitalgroup.com])."
     )
-    assert (
-        '<a href="https://www.cdibcapitalgroup.com">'
-        'www.cdibcapitalgroup.com</a>'
-    ) in html
+    # Hyperlink attached to last word before the citation
+    assert 'href="https://www.cdibcapitalgroup.com"' in html
+    assert ">arm</a>" in html
+    # No `[host.tld]` text noise
+    assert "[www.cdibcapitalgroup.com]" not in html
+
+
+def test_brief_doc_dedups_repeat_citation_urls():
+    """FR-CB-5.11 — same URL cited multiple times in prose keeps
+    only the first anchor; subsequent occurrences are silently
+    dropped to avoid double-linking the same source."""
+    from app.counterparty_briefs.doc import markdown_to_html
+
+    html = markdown_to_html(
+        "Firm (host1.com) operates broadly. Also seen at host1 again "
+        "(host1.com). The other source (host2.com) too."
+    )
+    # host1.com appears in href EXACTLY once (first anchor)
+    assert html.count('href="https://host1.com"') == 1
+    # host2.com is a separate URL, appears once too
+    assert html.count('href="https://host2.com"') == 1
+    # No raw `(host.tld)` text leftover
+    assert "(host1.com)" not in html
+    assert "(host2.com)" not in html
+
+
+def test_brief_slack_dedups_repeat_citation_urls():
+    """FR-CB-6.12 — same URL cited multiple times in Slack body
+    keeps only the first anchor; subsequent occurrences dropped."""
+    from app.counterparty_briefs.slack_format import render_person_thread_reply
+
+    reply = render_person_thread_reply(person={
+        "display_name": "X",
+        "role": None,
+        "doc_url": "https://docs/.../x",
+        "gist": (
+            "Firm (host1.com) operates broadly. Also seen at host1 "
+            "again (host1.com). The other source (host2.com) too."
+        ),
+        "note": None,
+    })
+    assert reply.count("https://host1.com") == 1
+    assert reply.count("https://host2.com") == 1
+    assert "(host1.com)" not in reply
+    assert "(host2.com)" not in reply
 
 
 def test_brief_slack_safe_brackets():

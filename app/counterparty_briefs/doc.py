@@ -33,38 +33,122 @@ def markdown_to_html(md: str) -> str:
     def _esc(s: str) -> str:
         return html.escape(s, quote=False)
 
+    # Citation extractors mirror app.counterparty_briefs.slack_format.
+    # ORDER MATTERS — longer / more-specific patterns first.
+    _CITATION_EXTRACTORS_DOC = (
+        (
+            re.compile(r"\(\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)\)"),
+            lambda m: (m.group(2), m.group(1)),
+        ),
+        (
+            re.compile(r"\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)"),
+            lambda m: (m.group(2), m.group(1)),
+        ),
+        (
+            re.compile(
+                r"\(\[([a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*)\]\)"
+            ),
+            lambda m: (f"https://{m.group(1).strip('/')}", m.group(1)),
+        ),
+        (
+            re.compile(r"\(([a-z][a-z0-9\-]*(?:\.[a-z][a-z0-9\-]*)+)\)"),
+            lambda m: (f"https://{m.group(1)}", m.group(1)),
+        ),
+    )
+    _DOC_CITE_SENTINEL = "\x01"
+    _DOC_LINK_SENTINEL = "\x02"
+    # PUA range encoded via chr() so this source file stays
+    # 7-bit-ASCII; otherwise editor round-trips can silently
+    # eat the PUA chars.
+    _DOC_CITE_RE = re.compile(
+        _DOC_CITE_SENTINEL + "([" + chr(0xE000) + "-" + chr(0xE0FF) + "])"
+    )
+    _DOC_LINK_RE = re.compile(
+        _DOC_LINK_SENTINEL + "([" + chr(0xE100) + "-" + chr(0xE1FF) + "])"
+    )
+    _DOC_WORD_TAIL_RE = re.compile(
+        r"(\w+(?:[’'\.\-]\w+)*)([^\w]*)$", flags=re.UNICODE,
+    )
+
+    def _linkify_doc_citations(
+        s: str,
+    ) -> tuple[str, list[tuple[str, str]]]:
+        """Same two-pass algorithm as slack_format._linkify_citations
+        — citation markers become hyperlinks attached to the
+        PRECEDING WORD, repeated URLs after the first anchor are
+        dropped."""
+        citation_urls: list[str] = []
+
+        def _replace_cite(m: "re.Match[str]", extractor) -> str:
+            url, _label = extractor(m)
+            citation_urls.append(url.split("#", 1)[0])
+            return _DOC_CITE_SENTINEL + chr(0xE000 + len(citation_urls) - 1)
+
+        for pattern, extractor in _CITATION_EXTRACTORS_DOC:
+            s = pattern.sub(
+                lambda m, _e=extractor: _replace_cite(m, _e), s,
+            )
+
+        link_placeholders: list[tuple[str, str]] = []
+        seen_urls: set[str] = set()
+
+        while True:
+            matches = list(_DOC_CITE_RE.finditer(s))
+            if not matches:
+                break
+            cm = matches[-1]
+            cite_start, cite_end = cm.start(), cm.end()
+            url = citation_urls[ord(cm.group(1)) - 0xE000]
+            before = s[:cite_start]
+            if url in seen_urls:
+                ws_start = cite_start
+                while ws_start > 0 and s[ws_start - 1] == " ":
+                    ws_start -= 1
+                s = s[:ws_start] + s[cite_end:]
+                continue
+            wm = _DOC_WORD_TAIL_RE.search(before)
+            if not wm:
+                ws_start = cite_start
+                while ws_start > 0 and s[ws_start - 1] == " ":
+                    ws_start -= 1
+                s = s[:ws_start] + s[cite_end:]
+                continue
+            word, tail = wm.group(1), wm.group(2)
+            word_start = wm.start(1)
+            seen_urls.add(url)
+            link_placeholders.append((url, word))
+            s = (
+                s[:word_start]
+                + _DOC_LINK_SENTINEL + chr(0xE100 + len(link_placeholders) - 1)
+                + tail
+                + s[cite_end:]
+            )
+
+        s = re.sub(r"\s+([.,;:!?])", r"\1", s)
+        s = re.sub(r"[ \t]{2,}", " ", s)
+        return s, link_placeholders
+
+    def _expand_doc_links(
+        s: str, placeholders: list[tuple[str, str]],
+    ) -> str:
+        if not placeholders:
+            return s
+
+        def _sub(m: "re.Match[str]") -> str:
+            idx = ord(m.group(1)) - 0xE100
+            if idx < 0 or idx >= len(placeholders):
+                return ""
+            url, label = placeholders[idx]
+            return f'<a href="{_esc(url)}">{_esc(label)}</a>'
+
+        return _DOC_LINK_RE.sub(_sub, s)
+
     def _inline(s: str) -> str:
-        # `[label](url)` — wrap in <a>. Run BEFORE the bare-host
-        # patterns so we don't accidentally treat a URL like
-        # `(https://...)` as a citation paren.
-        s = re.sub(
-            r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)",
-            lambda m: f'<a href="{_esc(m.group(2))}">{_esc(m.group(1))}</a>',
-            s,
-        )
-        # `([host.tld])` — bare bracketed citation marker
-        # (Responses API native). Convert to a clickable <a>
-        # pointing at `https://host.tld`.
-        s = re.sub(
-            r"\(\[([a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*)\]\)",
-            lambda m: (
-                f'(<a href="https://{_esc(m.group(1).lstrip("/").rstrip("/"))}">'
-                f'{_esc(m.group(1))}</a>)'
-            ),
-            s,
-        )
-        # `(host.tld)` — plain-parens citation (LLM often emits
-        # «...at CDIB (tw.linkedin.com).»). Lowercase host with
-        # ≥1 dot so we don't grab «(US$20 billion)» or «(陳衍均)».
-        s = re.sub(
-            r"\(([a-z][a-z0-9\-]*(?:\.[a-z][a-z0-9\-]*)+)\)",
-            lambda m: (
-                f'(<a href="https://{_esc(m.group(1))}">'
-                f'{_esc(m.group(1))}</a>)'
-            ),
-            s,
-        )
-        # Bare URLs → <a>
+        # Pass 1+2: turn citation markers into <a> tags attached
+        # to the preceding word (matches Slack rendering).
+        s, doc_links = _linkify_doc_citations(s)
+        # Bare URLs → <a> (catches anything that wasn't a citation
+        # marker but is still a plain URL in the prose).
         def _bare(m: "re.Match[str]") -> str:
             url = m.group(1)
             return f'<a href="{_esc(url)}">{_esc(url)}</a>'
@@ -81,6 +165,11 @@ def markdown_to_html(md: str) -> str:
             r"\1<em>\2</em>",
             s,
         )
+        # HTML-escape any remaining `<` / `>` / `&` so user prose
+        # doesn't accidentally produce broken markup. Skip text
+        # that already lives inside an <a href="…"> we built.
+        # Then expand link placeholders LAST.
+        s = _expand_doc_links(s, doc_links)
         return s
 
     out: list[str] = []

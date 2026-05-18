@@ -1,22 +1,24 @@
 """FR-CR-05-168 — Slack mrkdwn renderer (grouped per-event DM).
 
-Operator-pinned format (2026-05-18):
+Operator-pinned format (2026-05-18, final):
 
     *Новая встреча DD/MM HH:MM: <Event Title>*
 
     <doc-url|🏢 *<Org Name>*>
-    <long gist — up to 1500 chars>
+    <prose with citations attached as hyperlinks to preceding words>
 
     👇 Информация о N контактах — в треде ниже
 
     (thread replies, one per person)
     <doc-url|👤 *<Person Name>* — <Role>>
-    <long gist — up to 1200 chars>
+    <prose with citations as word-anchored hyperlinks>
 
-Slack-mrkdwn `<>` `|` characters in name/title/gist are swapped
-to `‹›` `/` so the link parser doesn't break (same rule as
-`slack_mirror._link_sub`). Only the OUTER `<url|label>` markup
-uses literal `<`, `|`, `>` — its inner label is pre-escaped.
+Citations: `(host.tld)` / `([host.tld])` / `[label](url)` markers
+are removed from prose; the PRECEDING WORD becomes a clickable
+Slack hyperlink to the cited source. Repeated citations for the
+same URL keep only the FIRST anchor and silently drop subsequent
+occurrences. This way the gist reads like clean prose with
+occasional clickable highlights rather than `(host.tld)` noise.
 """
 from __future__ import annotations
 
@@ -46,89 +48,168 @@ def _slack_safe(text: str) -> str:
     )
 
 
-_CITATION_PATTERNS = (
+# Citation patterns + URL extractors. Order matters: longer /
+# more-specific forms first so we don't consume a substring of a
+# bigger marker by accident.
+_CITATION_EXTRACTORS = (
     # «([label](url))» — markdown link inside parens
     (
         re.compile(r"\(\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)\)"),
-        "md_paren",
+        lambda m: m.group(2),
     ),
     # «[label](url)» — bare markdown link
     (
         re.compile(r"\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)"),
-        "md_inline",
+        lambda m: m.group(2),
     ),
     # «([host.tld])» — bracketed bare-host (Responses API native)
     (
         re.compile(
             r"\(\[([a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*)\]\)"
         ),
-        "bare_host",
+        lambda m: f"https://{m.group(1).strip('/')}",
     ),
-    # «(host.tld)» — plain-parens bare host (LLM often emits
-    # citations like «...professional at CDIB (tw.linkedin.com).»).
-    # Require lowercase letter at start so we don't grab
-    # parentheticals like `(US$20 billion)` or `(陳衍均)`.
+    # «(host.tld)» — plain-parens bare host.
     (
-        re.compile(
-            r"\(([a-z][a-z0-9\-]*(?:\.[a-z][a-z0-9\-]*)+)\)"
-        ),
-        "bare_host_no_brackets",
+        re.compile(r"\(([a-z][a-z0-9\-]*(?:\.[a-z][a-z0-9\-]*)+)\)"),
+        lambda m: f"https://{m.group(1)}",
     ),
 )
 
-# Two private-use chars wrap each placeholder token so neither
-# `_slack_safe` nor `_shorten` can break it mid-cut.
-_PH_OPEN = ""
-_PH_CLOSE = ""
+
+# Placeholder encoding: a sentinel control byte + a Private-Use-Area
+# char that carries the index. PUA chars are NOT word chars under
+# `re.UNICODE`, so the word-anchor regex skips placeholders when
+# looking for the word before a citation marker.
+#
+#   CITE_SENTINEL + chr(0xE000 + idx)   ← pass-1 citation marker
+#   LINK_SENTINEL + chr(0xE100 + idx)   ← pass-2 hyperlink marker
+
+_CITE_SENTINEL = "\x01"
+_LINK_SENTINEL = "\x02"
+
+_CITE_MARKER_RE = re.compile(_CITE_SENTINEL + r"([-])")
+_LINK_MARKER_RE = re.compile(_LINK_SENTINEL + r"([-])")
+
+
+def _make_cite_marker(idx: int) -> str:
+    return _CITE_SENTINEL + chr(0xE000 + idx)
+
+
+def _make_link_marker(idx: int) -> str:
+    return _LINK_SENTINEL + chr(0xE100 + idx)
 
 
 def _strip_anchor_fragment(url: str) -> str:
-    """Drop the `#:~:text=…` highlight anchor — those URLs are
-    correct but ugly; we want plain `https://host/path` in the
-    visible hyperlink."""
+    """Drop `#:~:text=…` — those URLs are correct but ugly when
+    shown as the visible hyperlink label."""
     return url.split("#", 1)[0]
 
 
-def _linkify_citations(text: str) -> tuple[str, list[tuple[str, str]]]:
-    """Replace citation markers with private-use placeholder tokens
-    and return both the rewritten text and a list of
-    ``(url, label)`` tuples. The caller must run `_slack_safe` on
-    the placeholder text and only then call `_expand_links` — that
-    way safer-string mangling doesn't touch the link markup itself.
+# Word-anchor: the LAST word in a string. Allows in-word
+# apostrophes (`don't`), hyphens (`Asia-Pacific`), and dots
+# between alphanumeric segments (`WEB.DE`, `Mr.Smith`,
+# `J.Y. Koo` — but only when the dot is IMMEDIATELY followed by
+# a word char, so it doesn't glue across sentence boundaries
+# like «experience. CDIB»). TAIL captures any non-word
+# punctuation/whitespace between the word and the citation
+# marker, so the rewrite preserves spacing.
+_WORD_TAIL_RE = re.compile(
+    r"(\w+(?:[’'\.\-]\w+)*)([^\w]*)$",
+    flags=re.UNICODE,
+)
 
-    Operator-pinned 2026-05-18: «ну ты же умеешь делать гиперссылки
-    как с задачами» — citations become clickable Slack hyperlinks
-    instead of being stripped silently.
+
+def _linkify_citations(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Operator-pinned 2026-05-18 (final revision): citation
+    markers attach as Slack hyperlinks to the PRECEDING WORD; the
+    visible URL/host text is removed. Repeated citations for the
+    same URL after the first anchor are silently dropped.
+
+    Two-pass algorithm:
+
+      1. Replace every citation marker (any of 4 forms) with a
+         CITE placeholder (sentinel + PUA char). URL stored in
+         a side list, indexed by the PUA codepoint.
+      2. Walk CITE placeholders in REVERSE order so position
+         rewrites don't shift earlier markers. For each:
+           * if URL already linked once in the prose → drop the
+             CITE marker (and the whitespace immediately before
+             it).
+           * else find the word IMMEDIATELY BEFORE the marker
+             (skipping punctuation / spaces / other CITE markers)
+             and replace it with a LINK placeholder. The
+             intermediate tail (punctuation + spaces) is kept.
+           * if no preceding word exists → drop CITE.
+
+    Returns ``(rewritten_text, [(url, anchor_word), …])``. Caller
+    runs ``_slack_safe`` on the rewritten text, then
+    ``_expand_links`` to turn LINK placeholders into Slack
+    mrkdwn ``<url|word>`` links.
     """
     if not text or not isinstance(text, str):
         return text, []
-    placeholders: list[tuple[str, str]] = []
 
-    for pattern, kind in _CITATION_PATTERNS:
-        def _sub(m: re.Match[str], _kind: str = kind) -> str:
-            if _kind in ("bare_host", "bare_host_no_brackets"):
-                host = m.group(1).rstrip("/").lstrip("/")
-                placeholders.append(
-                    (f"https://{host}", host)
-                )
-                # Keep the surrounding parens so the rendered DM
-                # matches the Doc body: «...focus (host.tld).».
-                return f"({_PH_OPEN}{len(placeholders) - 1}{_PH_CLOSE})"
-            label, url = m.group(1), m.group(2)
-            placeholders.append((_strip_anchor_fragment(url), label))
-            if _kind == "md_paren":
-                # Original markup wrapped the link in parens; keep
-                # them so the visible Slack text looks the same as
-                # the Doc: «...growth (label).».
-                return f"({_PH_OPEN}{len(placeholders) - 1}{_PH_CLOSE})"
-            # md_inline: no outer parens — link sits in prose.
-            return f"{_PH_OPEN}{len(placeholders) - 1}{_PH_CLOSE}"
+    citation_urls: list[str] = []
 
-        text = pattern.sub(_sub, text)
-    # Glue dangling punctuation that lived right after the marker.
+    def _replace_cite(m: "re.Match[str]", extractor) -> str:
+        citation_urls.append(_strip_anchor_fragment(extractor(m)))
+        return _make_cite_marker(len(citation_urls) - 1)
+
+    for pattern, extractor in _CITATION_EXTRACTORS:
+        text = pattern.sub(
+            lambda m, _e=extractor: _replace_cite(m, _e), text,
+        )
+
+    link_placeholders: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+
+    # Walk in reverse, re-scanning after each rewrite so positions
+    # stay current (earlier-position rewrites don't shift later
+    # markers' positions, but later-marker rewrites can extend the
+    # text and leave earlier markers AT MODIFIED INDICES — we
+    # avoid that complication by re-finding markers each step).
+    while True:
+        matches = list(_CITE_MARKER_RE.finditer(text))
+        if not matches:
+            break
+        m = matches[-1]
+        cite_start, cite_end = m.start(), m.end()
+        url = citation_urls[ord(m.group(1)) - 0xE000]
+        before = text[:cite_start]
+
+        if url in seen_urls:
+            ws_start = cite_start
+            while ws_start > 0 and text[ws_start - 1] == " ":
+                ws_start -= 1
+            text = text[:ws_start] + text[cite_end:]
+            continue
+
+        wm = _WORD_TAIL_RE.search(before)
+        if not wm:
+            ws_start = cite_start
+            while ws_start > 0 and text[ws_start - 1] == " ":
+                ws_start -= 1
+            text = text[:ws_start] + text[cite_end:]
+            continue
+
+        word, tail = wm.group(1), wm.group(2)
+        word_start = wm.start(1)
+        seen_urls.add(url)
+        link_placeholders.append((url, word))
+        link_idx = len(link_placeholders) - 1
+        text = (
+            text[:word_start]
+            + _make_link_marker(link_idx)
+            + tail
+            + text[cite_end:]
+        )
+
+    # Clean up double-spaces / dangling punctuation left after
+    # marker removal.
     text = re.sub(r"\s+([.,;:!?])", r"\1", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
-    return text, placeholders
+    return text, link_placeholders
 
 
 def _expand_links(
@@ -137,31 +218,17 @@ def _expand_links(
     if not placeholders:
         return text
 
-    def _sub(m: re.Match[str]) -> str:
-        idx = int(m.group(1))
-        if idx >= len(placeholders):
+    def _sub(m: "re.Match[str]") -> str:
+        idx = ord(m.group(1)) - 0xE100
+        if idx < 0 or idx >= len(placeholders):
             return ""
         url, label = placeholders[idx]
-        # Label must NOT contain literal `<` `>` `|`; reuse the
-        # same swap rules as `_slack_safe`.
         safe_label = (
             label.replace("<", "‹").replace(">", "›").replace("|", "/")
         )
         return f"<{url}|{safe_label}>"
 
-    return re.sub(
-        rf"{_PH_OPEN}(\d+){_PH_CLOSE}", _sub, text,
-    )
-
-
-def _render_gist(raw: str, *, max_chars: int) -> str:
-    """End-to-end gist pipeline: linkify citations → slack-safe →
-    soft-cut → expand link placeholders. Apply once per
-    free-text field (org overview, person profile)."""
-    rewritten, placeholders = _linkify_citations(raw or "")
-    safe = _slack_safe(rewritten)
-    shortened = _shorten(safe, max_chars=max_chars)
-    return _expand_links(shortened, placeholders)
+    return _LINK_MARKER_RE.sub(_sub, text)
 
 
 def _ddmm_hhmm(dt: datetime) -> str:
@@ -185,6 +252,16 @@ def _slack_link(url: str, label: str) -> str:
     return f"<{url}|{label}>"
 
 
+def _render_gist(raw: str, *, max_chars: int) -> str:
+    """End-to-end gist pipeline: linkify citations → slack-safe →
+    soft-cut → expand link placeholders. Apply once per
+    free-text field (org overview, person profile)."""
+    rewritten, placeholders = _linkify_citations(raw or "")
+    safe = _slack_safe(rewritten)
+    shortened = _shorten(safe, max_chars=max_chars)
+    return _expand_links(shortened, placeholders)
+
+
 def render_org_top_message(
     *,
     event_title: str,
@@ -193,10 +270,7 @@ def render_org_top_message(
     person_count: int,
 ) -> str:
     """Top-of-thread message: header + org info hyperlinked to the
-    Doc + pointer to person briefs in the thread below.
-
-    Operator-pinned 2026-05-18: «надо гиперссылки делать и больше
-    информации, а о физиках в треде и указание что там»."""
+    Doc + pointer to person briefs in the thread below."""
     safe_title = _slack_safe(event_title)
     lines: list[str] = [
         f"*Новая встреча {_ddmm_hhmm(scheduled_at)}: {safe_title}*",

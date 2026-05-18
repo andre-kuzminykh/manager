@@ -640,10 +640,10 @@ def test_brief_person_thread_reply_singular_payload():
 
 def test_brief_slack_linkifies_bare_host_citations():
     """FR-CB-6.9 — operator-pinned 2026-05-18 revision: citation
-    markers `([host.tld])` become Slack hyperlinks
-    `<https://host.tld|host.tld>` instead of being stripped, so
-    the operator can click through to the source. Applies at
-    render time so pre-existing cached briefs benefit too."""
+    markers `([host.tld])` become Slack hyperlinks WRAPPED IN
+    PARENS, matching how the Doc body renders the same citation:
+    `(<https://host.tld|host.tld>)`. Visible Slack text reads
+    `(host.tld)` with the host clickable."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
@@ -657,10 +657,12 @@ def test_brief_slack_linkifies_bare_host_citations():
         ),
         "note": None,
     })
-    # Bracket markers become Slack hyperlinks pointing to the
-    # constructed host URL — operator can click through.
-    assert "<https://newsroom.web.de|newsroom.web.de>" in reply
-    assert "<https://www.mail-and-media.com|www.mail-and-media.com>" in reply
+    # Hyperlink wrapped in parens — same visual as the Doc.
+    assert "(<https://newsroom.web.de|newsroom.web.de>)" in reply
+    assert (
+        "(<https://www.mail-and-media.com|www.mail-and-media.com>)"
+        in reply
+    )
     # No raw `([host])` markers left behind
     assert "([newsroom" not in reply
     assert "([www.mail" not in reply
@@ -670,9 +672,9 @@ def test_brief_slack_linkifies_bare_host_citations():
 
 
 def test_brief_slack_linkifies_markdown_citations():
-    """FR-CB-6.10 — `[label](https://url#:~:text=…)` becomes a
-    Slack hyperlink to the cleaned URL with the original label.
-    The `#:~:text=…` anchor is dropped from the visible URL."""
+    """FR-CB-6.10 — `([label](https://url#:~:text=…))` becomes a
+    parens-wrapped Slack hyperlink to the cleaned URL with the
+    original label. The `#:~:text=…` anchor is dropped."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
@@ -685,14 +687,16 @@ def test_brief_slack_linkifies_markdown_citations():
         ),
         "note": None,
     })
-    assert "<https://bloomberg.com/news/article-1|Bloomberg>" in reply
+    assert "(<https://bloomberg.com/news/article-1|Bloomberg>)" in reply
     assert "#:~:text=" not in reply
 
 
 def test_brief_slack_linkifies_plain_paren_citations():
     """FR-CB-6.11 — `(host.tld)` (plain parens, no brackets) is
     also a Responses API citation idiom; convert to a Slack
-    hyperlink. Skip pure-Chinese / numeric parentheticals."""
+    hyperlink while KEEPING the surrounding parens so it visually
+    matches the Doc body. Skip pure-Chinese / numeric
+    parentheticals."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
@@ -706,8 +710,8 @@ def test_brief_slack_linkifies_plain_paren_citations():
         ),
         "note": None,
     })
-    assert "<https://tw.linkedin.com|tw.linkedin.com>" in reply
-    assert "<https://contactout.com|contactout.com>" in reply
+    assert "(<https://tw.linkedin.com|tw.linkedin.com>)" in reply
+    assert "(<https://contactout.com|contactout.com>)" in reply
     # Chinese characters parenthetical must stay intact
     assert "(陳衍均)" in reply
 

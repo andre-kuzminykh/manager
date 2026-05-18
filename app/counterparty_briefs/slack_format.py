@@ -104,17 +104,25 @@ def _linkify_citations(text: str) -> tuple[str, list[tuple[str, str]]]:
         return text, []
     placeholders: list[tuple[str, str]] = []
 
-    def _emit(url: str, label: str) -> str:
-        placeholders.append((_strip_anchor_fragment(url), label))
-        return f"{_PH_OPEN}{len(placeholders) - 1}{_PH_CLOSE}"
-
     for pattern, kind in _CITATION_PATTERNS:
         def _sub(m: re.Match[str], _kind: str = kind) -> str:
             if _kind in ("bare_host", "bare_host_no_brackets"):
                 host = m.group(1).rstrip("/").lstrip("/")
-                return _emit(f"https://{host}", host)
+                placeholders.append(
+                    (f"https://{host}", host)
+                )
+                # Keep the surrounding parens so the rendered DM
+                # matches the Doc body: «...focus (host.tld).».
+                return f"({_PH_OPEN}{len(placeholders) - 1}{_PH_CLOSE})"
             label, url = m.group(1), m.group(2)
-            return _emit(url, label)
+            placeholders.append((_strip_anchor_fragment(url), label))
+            if _kind == "md_paren":
+                # Original markup wrapped the link in parens; keep
+                # them so the visible Slack text looks the same as
+                # the Doc: «...growth (label).».
+                return f"({_PH_OPEN}{len(placeholders) - 1}{_PH_CLOSE})"
+            # md_inline: no outer parens — link sits in prose.
+            return f"{_PH_OPEN}{len(placeholders) - 1}{_PH_CLOSE}"
 
         text = pattern.sub(_sub, text)
     # Glue dangling punctuation that lived right after the marker.

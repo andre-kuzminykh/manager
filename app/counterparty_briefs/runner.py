@@ -274,26 +274,49 @@ class CounterpartyBriefRunner:
         return [self._normalise_event(e) for e in raw if e]
 
     @staticmethod
+    def _parse_dt(value: Any) -> datetime | None:
+        """Accept datetime / ISO-8601 string / dict-with-`dateTime`
+        (Google Calendar API shape) and return a tz-aware UTC
+        datetime, or None when unparseable."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value
+        if isinstance(value, dict):
+            value = value.get("dateTime") or value.get("date") or ""
+        if isinstance(value, str) and value:
+            try:
+                # `Z` suffix is ISO-8601 but Python `fromisoformat`
+                # before 3.11 doesn't accept it.
+                d = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if d.tzinfo is None:
+                return d.replace(tzinfo=timezone.utc)
+            return d
+        return None
+
+    @staticmethod
     def _normalise_event(ev: dict[str, Any]) -> dict[str, Any] | None:
         title = (ev.get("title") or "").strip()
-        start = ev.get("start")
+        start = CounterpartyBriefRunner._parse_dt(ev.get("start"))
         if not title or start is None:
             return None
+        end = CounterpartyBriefRunner._parse_dt(ev.get("end"))
         ev_id = (
             ev.get("id") or ev.get("event_id") or ev.get("ical_uid") or ""
         ).strip()
         if not ev_id:
             from app.agenda.service import normalise_title
 
-            start_iso = (
-                start.isoformat() if hasattr(start, "isoformat") else str(start)
-            )
-            ev_id = f"brief_synth:{normalise_title(title)}:{start_iso}"
+            ev_id = f"brief_synth:{normalise_title(title)}:{start.isoformat()}"
         return {
             "id": ev_id,
             "title": title,
             "start": start,
-            "end": ev.get("end"),
+            "end": end,
             "description": ev.get("description") or "",
             "attendees": ev.get("attendees") or [],
             "organizer": ev.get("organizer") or {},

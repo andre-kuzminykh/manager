@@ -296,56 +296,30 @@ def _call_openai_responses_json(
 
 
 def _strip_citations(text: str) -> str:
-    """OpenAI Responses API embeds web-search citations as
-    `(domain.com#:~:text=…)`, `[label](url#:~:text=…)`, and bare
-    `([host.tld])` markers. They bloat the Slack message and look
-    noisy. Strip them out for free-text fields
-    (`overview_paragraph`, `profile_overview`, `evidence`). URLs
-    that already live in a list (e.g. `recent_news[].url`) stay
-    untouched.
+    """Operator-pinned 2026-05-18 (revision): keep citation markers
+    INTACT so the render layer (Slack `<url|label>`, Doc `<a href>`)
+    can turn them into clickable hyperlinks. Only drop the
+    `#:~:text=…` highlight anchor from URLs — those URLs work but
+    look ugly when shown as a hyperlink label.
+
+    Caching nuance: payloads researched BEFORE this revision had
+    citations stripped out at write time. Those briefs lose nothing
+    visible — they just render without inline source links. New
+    research persists the raw markdown citations so re-renders can
+    linkify them.
     """
     if not text or not isinstance(text, str):
         return text
     import re
 
-    # «(host.tld#:~:text=…)» — bare parenthetical citation
+    # «[label](url#:~:text=…)» → «[label](url)»  (drop only the
+    # anchor fragment; keep the markdown link intact)
     text = re.sub(
-        r"\s*\([^()]*#:~:text=[^()]*\)",
-        "",
+        r"(\[[^\]\n]+\]\()(https?://[^)\s]+)(#[^)\s]*)?(\))",
+        lambda m: f"{m.group(1)}{m.group(2)}{m.group(4)}",
         text,
     )
-    # «([label](url#:~:text=…))» — markdown link parenthetical
-    text = re.sub(
-        r"\s*\(\[[^\]]+\]\([^)]+#:~:text=[^)]+\)\)",
-        "",
-        text,
-    )
-    # «[label](url#:~:text=…)» — markdown link in body
-    text = re.sub(
-        r"\s*\[[^\]]+\]\([^)]+#:~:text=[^)]+\)",
-        "",
-        text,
-    )
-    # «([host.tld])» — bare bracketed citation (Responses API
-    # native style). Host shape: `[a-z0-9.-]+\.[a-z]{2,}` with
-    # optional path. Conservative — won't touch legitimate
-    # `[footnote]` markers because of the inner dot+TLD.
-    text = re.sub(
-        r"\s*\(\[[a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*\]\)",
-        "",
-        text,
-    )
-    # «([label](https://host.tld))» — markdown link inside parens
-    # without #:~:text= anchor (LLM still spits these as inline
-    # citations).
-    text = re.sub(
-        r"\s*\(\[[^\]\n]+\]\(https?://[^)\s]+\)\)",
-        "",
-        text,
-    )
-    # Collapse double spaces left behind, and stray « .» / « ,» /
-    # « ;» / « :» where the citation sat right before punctuation.
-    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    # Collapse double spaces left behind by the anchor strip
     text = re.sub(r"[ \t]{2,}", " ", text).strip()
     return text
 

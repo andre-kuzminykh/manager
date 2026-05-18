@@ -638,11 +638,12 @@ def test_brief_person_thread_reply_singular_payload():
     assert "Долгое время" in reply
 
 
-def test_brief_slack_strips_cached_citations():
-    """FR-CB-6.9 — render-time citation scrubber removes
-    `([host](url#:~:text=…))` AND bare `([host.tld])` markers
-    left over from pre-strip cached payloads, so old briefs don't
-    show citation noise after the new template ships."""
+def test_brief_slack_linkifies_bare_host_citations():
+    """FR-CB-6.9 — operator-pinned 2026-05-18 revision: citation
+    markers `([host.tld])` become Slack hyperlinks
+    `<https://host.tld|host.tld>` instead of being stripped, so
+    the operator can click through to the source. Applies at
+    render time so pre-existing cached briefs benefit too."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
@@ -652,18 +653,57 @@ def test_brief_slack_strips_cached_citations():
         "gist": (
             "Timo Bohl is Director of Sales at WEB.DE "
             "([newsroom.web.de]) ([www.mail-and-media.com]). "
-            "Based in Karlsruhe, Germany "
-            "([www.united-internet.de]), he heads sales."
+            "Based in Karlsruhe."
         ),
         "note": None,
     })
-    for noise in (
-        "newsroom.web.de", "mail-and-media", "united-internet",
-        "[", "]",
-    ):
-        assert noise not in reply, f"citation noise still present: {noise!r}"
-    assert "Timo Bohl is Director of Sales at WEB.DE." in reply
-    assert "Based in Karlsruhe, Germany, he heads sales." in reply
+    # Bracket markers become Slack hyperlinks pointing to the
+    # constructed host URL — operator can click through.
+    assert "<https://newsroom.web.de|newsroom.web.de>" in reply
+    assert "<https://www.mail-and-media.com|www.mail-and-media.com>" in reply
+    # No raw `([host])` markers left behind
+    assert "([newsroom" not in reply
+    assert "([www.mail" not in reply
+    # The prose itself is preserved verbatim
+    assert "Timo Bohl is Director of Sales at WEB.DE" in reply
+    assert "Based in Karlsruhe." in reply
+
+
+def test_brief_slack_linkifies_markdown_citations():
+    """FR-CB-6.10 — `[label](https://url#:~:text=…)` becomes a
+    Slack hyperlink to the cleaned URL with the original label.
+    The `#:~:text=…` anchor is dropped from the visible URL."""
+    from app.counterparty_briefs.slack_format import render_person_thread_reply
+
+    reply = render_person_thread_reply(person={
+        "display_name": "Sample",
+        "role": "CEO",
+        "doc_url": "https://docs/.../sample",
+        "gist": (
+            "Sample heads things "
+            "([Bloomberg](https://bloomberg.com/news/article-1#:~:text=Foo))."
+        ),
+        "note": None,
+    })
+    assert "<https://bloomberg.com/news/article-1|Bloomberg>" in reply
+    assert "#:~:text=" not in reply
+
+
+def test_brief_doc_linkifies_bare_host_citations():
+    """FR-CB-5.8 — `markdown_to_html` converts `([host.tld])`
+    markers into `<a href="https://host.tld">host.tld</a>` so the
+    Drive HTML import renders them as clickable hyperlinks inside
+    the generated Doc."""
+    from app.counterparty_briefs.doc import markdown_to_html
+
+    html = markdown_to_html(
+        "Operates as the asset management arm "
+        "([www.cdibcapitalgroup.com])."
+    )
+    assert (
+        '<a href="https://www.cdibcapitalgroup.com">'
+        'www.cdibcapitalgroup.com</a>'
+    ) in html
 
 
 def test_brief_slack_safe_brackets():

@@ -34,6 +34,18 @@ def markdown_to_html(md: str) -> str:
         return html.escape(s, quote=False)
 
     def _inline(s: str) -> str:
+        # `([host.tld])` — bare bracketed citation marker
+        # (Responses API native). Convert to a clickable <a>
+        # pointing at `https://host.tld`. Operator-pinned
+        # 2026-05-18: «ну ты же умеешь делать гиперссылки».
+        s = re.sub(
+            r"\(\[([a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*)\]\)",
+            lambda m: (
+                f'(<a href="https://{_esc(m.group(1).lstrip("/").rstrip("/"))}">'
+                f'{_esc(m.group(1))}</a>)'
+            ),
+            s,
+        )
         # `[label](url)` — wrap in <a>. Run BEFORE bare-url
         # autolinking so we don't double-wrap.
         s = re.sub(

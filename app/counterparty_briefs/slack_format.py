@@ -47,34 +47,103 @@ def _slack_safe(text: str) -> str:
 
 
 _CITATION_PATTERNS = (
-    # «([label](url#:~:text=…))» — markdown link inside parens
-    re.compile(r"\s*\(\[[^\]]+\]\([^)]*#:~:text=[^)]*\)\)"),
-    # «[label](url#:~:text=…)» — markdown link inline
-    re.compile(r"\s*\[[^\]]+\]\([^)]*#:~:text=[^)]*\)"),
-    # «(host.tld#:~:text=…)» — bare parenthetical
-    re.compile(r"\s*\([^()]*#:~:text=[^()]*\)"),
-    # «([host.tld](url))» — citation paren with markdown link, no
-    # #:~:text= anchor
-    re.compile(r"\s*\(\[[^\]\n]+\]\(https?://[^)\s]+\)\)"),
-    # «([host.tld])» — bare bracketed citation (Responses API native)
-    re.compile(r"\s*\(\[[a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*\]\)"),
+    # «([label](url))» — markdown link inside parens
+    (
+        re.compile(r"\(\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)\)"),
+        "md_paren",
+    ),
+    # «[label](url)» — bare markdown link
+    (
+        re.compile(r"\[([^\]\n]+)\]\(\s*(https?://[^)\s]+)\)"),
+        "md_inline",
+    ),
+    # «([host.tld])» — bracketed bare-host (Responses API native)
+    (
+        re.compile(
+            r"\(\[([a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*)\]\)"
+        ),
+        "bare_host",
+    ),
 )
 
+# Two private-use chars wrap each placeholder token so neither
+# `_slack_safe` nor `_shorten` can break it mid-cut.
+_PH_OPEN = ""
+_PH_CLOSE = ""
 
-def _strip_citations(text: str) -> str:
-    """Render-time scrubber so even pre-strip cached payloads come
-    out clean. Mirrors ``research._strip_citations`` exactly so a
-    text scrubbed here matches what fresh research would produce.
+
+def _strip_anchor_fragment(url: str) -> str:
+    """Drop the `#:~:text=…` highlight anchor — those URLs are
+    correct but ugly; we want plain `https://host/path` in the
+    visible hyperlink."""
+    return url.split("#", 1)[0]
+
+
+def _linkify_citations(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Replace citation markers with private-use placeholder tokens
+    and return both the rewritten text and a list of
+    ``(url, label)`` tuples. The caller must run `_slack_safe` on
+    the placeholder text and only then call `_expand_links` — that
+    way safer-string mangling doesn't touch the link markup itself.
+
+    Operator-pinned 2026-05-18: «ну ты же умеешь делать гиперссылки
+    как с задачами» — citations become clickable Slack hyperlinks
+    instead of being stripped silently.
     """
     if not text or not isinstance(text, str):
-        return text
-    for pat in _CITATION_PATTERNS:
-        text = pat.sub("", text)
-    # Glue punctuation back to the preceding word after citations
-    # were stripped from before them: «Foo .» → «Foo.».
+        return text, []
+    placeholders: list[tuple[str, str]] = []
+
+    def _emit(url: str, label: str) -> str:
+        placeholders.append((_strip_anchor_fragment(url), label))
+        return f"{_PH_OPEN}{len(placeholders) - 1}{_PH_CLOSE}"
+
+    for pattern, kind in _CITATION_PATTERNS:
+        def _sub(m: re.Match[str], _kind: str = kind) -> str:
+            if _kind == "bare_host":
+                host = m.group(1).rstrip("/").lstrip("/")
+                return _emit(f"https://{host}", host)
+            label, url = m.group(1), m.group(2)
+            return _emit(url, label)
+
+        text = pattern.sub(_sub, text)
+    # Glue dangling punctuation that lived right after the marker.
     text = re.sub(r"\s+([.,;:!?])", r"\1", text)
-    text = re.sub(r"[ \t]{2,}", " ", text).strip()
-    return text
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    return text, placeholders
+
+
+def _expand_links(
+    text: str, placeholders: list[tuple[str, str]],
+) -> str:
+    if not placeholders:
+        return text
+
+    def _sub(m: re.Match[str]) -> str:
+        idx = int(m.group(1))
+        if idx >= len(placeholders):
+            return ""
+        url, label = placeholders[idx]
+        # Label must NOT contain literal `<` `>` `|`; reuse the
+        # same swap rules as `_slack_safe`.
+        safe_label = (
+            label.replace("<", "‹").replace(">", "›").replace("|", "/")
+        )
+        return f"<{url}|{safe_label}>"
+
+    return re.sub(
+        rf"{_PH_OPEN}(\d+){_PH_CLOSE}", _sub, text,
+    )
+
+
+def _render_gist(raw: str, *, max_chars: int) -> str:
+    """End-to-end gist pipeline: linkify citations → slack-safe →
+    soft-cut → expand link placeholders. Apply once per
+    free-text field (org overview, person profile)."""
+    rewritten, placeholders = _linkify_citations(raw or "")
+    safe = _slack_safe(rewritten)
+    shortened = _shorten(safe, max_chars=max_chars)
+    return _expand_links(shortened, placeholders)
 
 
 def _ddmm_hhmm(dt: datetime) -> str:
@@ -116,8 +185,9 @@ def render_org_top_message(
     ]
     if org_brief:
         name = _slack_safe(org_brief.get("display_name") or "Org")
-        gist_raw = _strip_citations(org_brief.get("gist") or "")
-        gist = _slack_safe(_shorten(gist_raw, max_chars=_ORG_GIST_MAX))
+        gist = _render_gist(
+            org_brief.get("gist") or "", max_chars=_ORG_GIST_MAX,
+        )
         url = org_brief.get("doc_url") or ""
         lines.append("")
         header_label = f"🏢 *{name}*"
@@ -144,8 +214,9 @@ def render_person_thread_reply(*, person: dict[str, Any]) -> str:
     followed by the gist."""
     name = _slack_safe(person.get("display_name") or "—")
     role = (person.get("role") or "").strip()
-    gist_raw = _strip_citations(person.get("gist") or "")
-    gist = _slack_safe(_shorten(gist_raw, max_chars=_PERSON_GIST_MAX))
+    gist = _render_gist(
+        person.get("gist") or "", max_chars=_PERSON_GIST_MAX,
+    )
     url = person.get("doc_url")
     note = person.get("note") or ""
     header_label = f"👤 *{name}*"
@@ -179,8 +250,7 @@ def render_event_briefs_slack_text(
     ]
     if org_brief:
         name = _slack_safe(org_brief.get("display_name") or "Org")
-        gist_raw = _strip_citations(org_brief.get("gist") or "")
-        gist = _slack_safe(_shorten(gist_raw))
+        gist = _render_gist(org_brief.get("gist") or "", max_chars=600)
         url = org_brief.get("doc_url") or ""
         header_label = f"🏢 *{name}*"
         lines.append("")

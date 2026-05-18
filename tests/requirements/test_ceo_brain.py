@@ -369,10 +369,9 @@ def test_archive_file_permissions(tmp_path):
     assert mode == 0o640
 
 
-# -- Category 3: Claude responder (FR-CB2-3.x) — Sprint 2 ------------------
+# -- Category 3: Claude responder (FR-CB2-3.x) -----------------------------
 
 
-@_PENDING
 def test_responder_triggered_by_mention():
     """FR-CB2-3.1 / UC-6 — `app_mention` triggers the responder
     pipeline."""
@@ -386,7 +385,6 @@ def test_responder_triggered_by_mention():
     ) is True
 
 
-@_PENDING
 def test_responder_triggered_by_dm():
     """FR-CB2-3.2 / UC-10 — `message.im` triggers responder."""
     from app.ceo_brain.responder import should_respond
@@ -397,7 +395,6 @@ def test_responder_triggered_by_dm():
     ) is True
 
 
-@_PENDING
 def test_responder_silent_on_channel_message_without_mention():
     """FR-CB2-3.3 / UC-11 — silent in channels without @mention."""
     from app.ceo_brain.responder import should_respond
@@ -409,7 +406,6 @@ def test_responder_silent_on_channel_message_without_mention():
     ) is False
 
 
-@_PENDING
 def test_responder_placeholder_under_1s():
     """FR-CB2-3.4 — placeholder posted under 1 sec."""
     import time
@@ -424,7 +420,6 @@ def test_responder_placeholder_under_1s():
     assert time.time() - t0 < 1.0
 
 
-@_PENDING
 def test_responder_calls_anthropic_with_default_model():
     """FR-CB2-3.5 — uses `claude-sonnet-4-6`."""
     from app.ceo_brain.responder import build_anthropic_request
@@ -435,7 +430,6 @@ def test_responder_calls_anthropic_with_default_model():
     assert req["model"] == "claude-sonnet-4-6"
 
 
-@_PENDING
 def test_responder_passes_mcp_servers(monkeypatch):
     """FR-CB2-3.6 — `mcp_servers` propagated to Anthropic call."""
     from app.ceo_brain.responder import build_anthropic_request
@@ -448,7 +442,6 @@ def test_responder_passes_mcp_servers(monkeypatch):
     assert any(s["name"] == "slack" for s in req.get("mcp_servers") or [])
 
 
-@_PENDING
 def test_responder_uses_prompt_caching():
     """FR-CB2-3.7 — system prompt + thread history sent with
     cache_control breakpoint so we hit cache on repeat calls."""
@@ -488,7 +481,6 @@ def test_responder_streams_updates():
     assert slack.chat_update.call_count >= 2
 
 
-@_PENDING
 def test_responder_sources_block_includes_tool_uses():
     """FR-CB2-3.9 / UC-7 — final message contains `Sources:`."""
     from app.ceo_brain.responder import format_final_response
@@ -505,7 +497,6 @@ def test_responder_sources_block_includes_tool_uses():
     assert "calendar.list_events" in out
 
 
-@_PENDING
 def test_responder_supplies_thread_history():
     """FR-CB2-3.10 — last N (default 10) thread messages."""
     from app.ceo_brain.responder import build_thread_history
@@ -516,7 +507,6 @@ def test_responder_supplies_thread_history():
     assert hist[-1]["content"] == "m14"
 
 
-@_PENDING
 def test_responder_persists_run(session):
     """FR-CB2-3.11 — each responder attempt writes a row."""
     from app.ceo_brain.responder import persist_run
@@ -537,7 +527,6 @@ def test_responder_persists_run(session):
     assert float(row.cost_usd) == 0.0123
 
 
-@_PENDING
 def test_responder_5xx_marks_failed(session):
     """FR-CB2-3.12 / UC-8 — Anthropic 5xx → status=failed."""
     from app.ceo_brain.responder import run_responder
@@ -557,7 +546,6 @@ def test_responder_5xx_marks_failed(session):
     assert row.status == "failed"
 
 
-@_PENDING
 def test_responder_429_retries(session):
     """FR-CB2-3.13 / UC-9 — 429 retries up to 3 times."""
     from app.ceo_brain.responder import run_responder
@@ -581,7 +569,6 @@ def test_responder_429_retries(session):
     assert calls["n"] == 3
 
 
-@_PENDING
 def test_responder_system_prompt_includes_persona_and_date():
     """FR-CB2-3.14 — system prompt includes today's date."""
     from app.ceo_brain.responder import build_system_prompt
@@ -591,7 +578,6 @@ def test_responder_system_prompt_includes_persona_and_date():
     assert "CEO Brain" in sys_prompt or "Артем" in sys_prompt
 
 
-@_PENDING
 def test_responder_tool_use_events_streamed():
     """FR-CB2-3.15 — tool_use events surface in placeholder."""
     from app.ceo_brain.responder import describe_tool_use_for_slack
@@ -669,7 +655,6 @@ def test_mcp_partial_failure_degraded():
     assert {s["name"] for s in reachable} == {"gmail"}
 
 
-@_PENDING
 def test_mcp_calls_persisted(session):
     """FR-CB2-4.5 — tool_use events recorded in PG."""
     from app.ceo_brain.responder import persist_run
@@ -868,7 +853,6 @@ def test_brain_reconnect_no_event_loss():
     pytest.skip("Behaviour test — inject-disconnect harness needed")
 
 
-@_PENDING
 def test_responder_run_payload_scrubbed(session):
     """NFR-CB2-S.3 — `request_payload.mcp_servers[].auth` never
     written to DB."""
@@ -891,7 +875,6 @@ def test_responder_run_payload_scrubbed(session):
     assert "SECRET-TOKEN" not in blob
 
 
-@_PENDING
 def test_brain_per_run_cost_cap(monkeypatch):
     """NFR-CB2-C.2 — `CEO_BRAIN_MAX_RUN_COST_USD` enforces cap."""
     from app.ceo_brain.responder import build_anthropic_request

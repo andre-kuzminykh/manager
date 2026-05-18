@@ -82,6 +82,55 @@ class Settings(BaseSettings):
         default="", alias="COUNTERPARTY_BRIEFS_EXTRACT_MODEL"
     )
 
+    # FR-CB2-200 — CEO Brain Bot. Slack-app that (a) archives every
+    # message in channels where it's a member into
+    # `slack-archive/<channel>/YYYY-MM-DD.jsonl` + PG mirror, and
+    # (b) responds to @mention / DM via Anthropic Claude API with
+    # access to the operator's claude.ai MCP connectors.
+    #
+    # Default OFF. Turning on without `CEO_BRAIN_ANTHROPIC_API_KEY`
+    # starts archive only (responder refuses to start).
+    ceo_brain_enabled: bool = Field(
+        default=False, alias="CEO_BRAIN_ENABLED",
+    )
+    ceo_brain_archive_only: bool = Field(
+        default=False, alias="CEO_BRAIN_ARCHIVE_ONLY",
+    )
+    ceo_brain_anthropic_api_key: str = Field(
+        default="", alias="CEO_BRAIN_ANTHROPIC_API_KEY",
+    )
+    ceo_brain_model: str = Field(
+        default="claude-sonnet-4-6", alias="CEO_BRAIN_MODEL",
+    )
+    ceo_brain_slack_app_token: str = Field(
+        default="", alias="CEO_BRAIN_SLACK_APP_TOKEN",
+    )
+    ceo_brain_slack_bot_token: str = Field(
+        default="", alias="CEO_BRAIN_SLACK_BOT_TOKEN",
+    )
+    ceo_brain_signing_secret: str = Field(
+        default="", alias="CEO_BRAIN_SIGNING_SECRET",
+    )
+    ceo_brain_archive_dir: str = Field(
+        default="/var/lib/manager/slack-archive",
+        alias="CEO_BRAIN_ARCHIVE_DIR",
+    )
+    ceo_brain_archive_channels: str = Field(
+        default="", alias="CEO_BRAIN_ARCHIVE_CHANNELS",
+    )
+    ceo_brain_thread_context_msgs: int = Field(
+        default=10, alias="CEO_BRAIN_THREAD_CONTEXT_MSGS",
+    )
+    ceo_brain_max_run_cost_usd: float = Field(
+        default=1.0, alias="CEO_BRAIN_MAX_RUN_COST_USD",
+    )
+    ceo_brain_jsonl_retention_days: int = Field(
+        default=365, alias="CEO_BRAIN_JSONL_RETENTION_DAYS",
+    )
+    ceo_brain_mcp_servers: str = Field(
+        default="", alias="MCP_SERVERS",
+    )
+
     # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся
     # встречи в Google Calendar (определяется по совпадению title с
     # ≥1 прошлой записанной встречи из zoom_recordings) бот собирает

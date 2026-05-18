@@ -1854,6 +1854,42 @@ class FirefliesPipeline:
     def _step_send_short_summary(self, row: MeetingRecording) -> int:
         if row.short_summary_sent:
             return 0
+        # FR-CR-05-167 polish 2026-05-15: send-time host filter.
+        # `meeting_recordings` doesn't carry an explicit host column,
+        # so we infer host from `participants[0]` (Fireflies API
+        # returns participants ordered with the host first). When
+        # the strict-host env-flag is on and the operator email is
+        # NOT the first participant, skip the summary delivery —
+        # the recording was hosted by somebody else and shouldn't
+        # surface in the operator's DM.
+        strict = bool(
+            getattr(self._settings, "zoom_required_email_strict_host", False)
+        )
+        required = (
+            getattr(self._settings, "zoom_required_email", "") or ""
+        ).strip().lower()
+        if strict and required:
+            emails: list[str] = []
+            for p in row.participants or []:
+                if isinstance(p, str):
+                    emails.append(p.strip().lower())
+                elif isinstance(p, dict):
+                    e = (p.get("email") or "").strip().lower()
+                    if e:
+                        emails.append(e)
+            host_email = emails[0] if emails else ""
+            if host_email and host_email != required:
+                log.info(
+                    "fireflies_step_send_short_summary_skipped_other_host",
+                    fireflies_id=row.fireflies_id,
+                    host=host_email, required=required, title=row.title,
+                    hint=(
+                        "strict host filter (FR-CR-05-167) — first "
+                        "participant is not the operator"
+                    ),
+                )
+                row.short_summary_sent = True
+                return 0
         if not row.short_summary or self._sender is None or not getattr(self._sender, "enabled", False):
             return 0
         from app.telegram_bot.handlers import admin_user_ids

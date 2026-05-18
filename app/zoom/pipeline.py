@@ -502,6 +502,36 @@ class ZoomPipeline:
     ) -> bool:
         if row.short_summary_sent and row.short_summary:
             return True
+        # FR-CR-05-167 polish 2026-05-15: send-time host filter.
+        # `ZOOM_REQUIRED_EMAIL_STRICT_HOST=true` blocks new Zoom
+        # discovery, but older rows in `zoom_recordings` may still
+        # have `host_email=NULL` (FR-CR-05-143 era recordings) or
+        # belong to teammates — those slip through and the summary
+        # would post in the operator's DM. Strict default-deny:
+        #   - host_email == operator → allow
+        #   - host_email != operator → skip + mark sent
+        #   - host_email IS NULL → skip + mark sent (we can't
+        #       prove it's the operator; better to drop than spam)
+        required = (
+            self._settings.zoom_required_email or ""
+        ).strip().lower()
+        strict = bool(
+            getattr(self._settings, "zoom_required_email_strict_host", False)
+        )
+        if required and strict:
+            host = (row.host_email or "").strip().lower()
+            if host != required:
+                log.info(
+                    "zoom_step_short_summary_skipped_other_host",
+                    zoom_id=row.zoom_id, host=host or None,
+                    required=required, title=row.title,
+                    hint=("strict host filter — operator-pinned: "
+                          "«не присылай где не 1@thehumanoid.ai»"),
+                )
+                # Mark sent so the pipeline doesn't retry the step
+                # on every poll.
+                row.short_summary_sent = True
+                return True
         if not row.detailed_summary:
             row.last_error = "no detailed summary for short summary"
             return False

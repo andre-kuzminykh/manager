@@ -350,12 +350,17 @@ class CounterpartyBriefRunner:
                     ttl_days=self._settings.counterparty_briefs_cache_ttl_days,
                 )
                 if cached_row is not None:
-                    org_research = OrgResearch(
-                        name=cached_row.display_name,
-                        **{
-                            "leadership": (cached_row.research_payload or {}).get("leadership", []),
-                        },
-                    )
+                    # FR-CR-05-168 hotfix 2026-05-18: load the FULL
+                    # payload from cache — earlier we only kept
+                    # `leadership`, which left `overview_paragraph`
+                    # empty and produced a Slack DM with no org gist
+                    # under the hyperlink.
+                    from app.counterparty_briefs.research import _coerce_org
+                    payload = cached_row.research_payload or {}
+                    # Preserve display name from the row in case the
+                    # payload is missing it.
+                    payload = {**payload, "name": payload.get("name") or cached_row.display_name}
+                    org_research = _coerce_org(payload)
                     org_brief_row_id = cached_row.id
                     links.append(_BriefLink(
                         kind="org",

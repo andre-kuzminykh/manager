@@ -117,6 +117,80 @@ def _fetch_events_wide(
     ]
 
 
+def _re_render_docs(runner: CounterpartyBriefRunner, spec: str) -> int:
+    """Iterate matching CounterpartyBrief rows, rebuild the Doc
+    body from cached payload using current Markdown→HTML +
+    doc_body code, upload as a NEW Google Doc, and update the
+    row's `google_doc_url`/`google_doc_id`. Old Docs are NOT
+    deleted (they keep working but the brief now points at the
+    fresh version)."""
+    from app.counterparty_briefs.doc import (
+        build_doc_title,
+        build_org_doc_body,
+        build_person_doc_body,
+    )
+    from app.counterparty_briefs.extract import BeneficiaryCandidate
+    from app.counterparty_briefs.research import _coerce_org, _coerce_person
+
+    keys: list[str] = []
+    if spec == "all":
+        keys = ["all"]
+    else:
+        keys = [
+            normalise_counterparty_name(k)
+            for k in spec.split(",") if k.strip()
+        ]
+    with session_scope() as s:
+        q = s.query(CounterpartyBrief)
+        if keys and keys != ["all"]:
+            q = q.filter(CounterpartyBrief.counterparty_key.in_(keys))
+        rows = q.all()
+        if not rows:
+            log.warning("brief_run_once_re_render_no_rows", spec=spec)
+            return 1
+        log.info("brief_run_once_re_render_starting", row_count=len(rows))
+        for row in rows:
+            payload = row.research_payload or {}
+            if row.kind == "org":
+                research = _coerce_org(
+                    {**payload, "name": payload.get("name") or row.display_name}
+                )
+                body = build_org_doc_body(
+                    org_name=row.display_name, context=None, research=research,
+                )
+                title = build_doc_title(
+                    kind="org", display_name=row.display_name,
+                    scheduled_at=datetime.now(timezone.utc),
+                )
+            else:
+                research = _coerce_person(payload)
+                body = build_person_doc_body(
+                    beneficiary=BeneficiaryCandidate(
+                        person_name=row.display_name, person_role=None,
+                    ),
+                    context=None,
+                    research=research,
+                )
+                title = build_doc_title(
+                    kind="person", display_name=row.display_name,
+                    scheduled_at=datetime.now(timezone.utc),
+                )
+            doc_url, doc_id = runner._maybe_create_doc(title=title, body=body)
+            if doc_url:
+                row.google_doc_url = doc_url
+                row.google_doc_id = doc_id
+                log.info(
+                    "brief_run_once_re_rendered",
+                    key=row.counterparty_key, kind=row.kind, new_url=doc_url,
+                )
+            else:
+                log.warning(
+                    "brief_run_once_re_render_failed",
+                    key=row.counterparty_key, kind=row.kind,
+                )
+    return 0
+
+
 def main() -> int:
     setup_logging()
     parser = argparse.ArgumentParser(
@@ -148,11 +222,25 @@ def main() -> int:
              "and exit — useful for picking a --calendar-event-id "
              "to re-run.",
     )
+    parser.add_argument(
+        "--re-render-docs", default="",
+        help="comma-separated counterparty keys (or 'all'); "
+             "regenerates the Google Doc for each matching brief "
+             "row from the cached research payload — no LLM calls. "
+             "Use after Doc-body / Markdown-to-HTML changes to "
+             "refresh in-DB Doc URLs.",
+    )
     args = parser.parse_args()
 
     runner = _build_runner_for_oneshot()
     if runner is None:
         return 2
+
+    # --re-render-docs: regenerate Doc for matching briefs from
+    # cached payload (no LLM). Useful after markdown_to_html /
+    # doc-body changes.
+    if args.re_render_docs:
+        return _re_render_docs(runner, args.re_render_docs)
 
     # --force-event: delete the events idempotency row so the
     # event is reprocessed.

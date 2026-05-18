@@ -1,25 +1,33 @@
 """FR-CR-05-168 — Slack mrkdwn renderer (grouped per-event DM).
 
-Operator-pinned format:
+Operator-pinned format (2026-05-18):
 
     *Новая встреча DD/MM HH:MM: <Event Title>*
 
-    Справки готовы:
-    • <doc-url|🏢 <Org Name>>
-    • <doc-url|👤 <Person Name> — <Role>>
-    • <doc-url|👤 <Person Name> — <Role>>
+    <doc-url|🏢 *<Org Name>*>
+    <long gist — up to 1500 chars>
 
-Slack-mrkdwn `<>` `|` characters in name/title are swapped to
-`‹›` `/` so the link parser doesn't break (same rule as
-`slack_mirror._link_sub`).
+    👇 Информация о N контактах — в треде ниже
+
+    (thread replies, one per person)
+    <doc-url|👤 *<Person Name>* — <Role>>
+    <long gist — up to 1200 chars>
+
+Slack-mrkdwn `<>` `|` characters in name/title/gist are swapped
+to `‹›` `/` so the link parser doesn't break (same rule as
+`slack_mirror._link_sub`). Only the OUTER `<url|label>` markup
+uses literal `<`, `|`, `>` — its inner label is pre-escaped.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 
 _SLACK_TEXT_CAP = 2900
+_ORG_GIST_MAX = 1500
+_PERSON_GIST_MAX = 1200
 
 
 def _slack_safe(text: str) -> str:
@@ -38,6 +46,32 @@ def _slack_safe(text: str) -> str:
     )
 
 
+_CITATION_PATTERNS = (
+    # «([label](url#:~:text=…))» — markdown link inside parens
+    re.compile(r"\s*\(\[[^\]]+\]\([^)]*#:~:text=[^)]*\)\)"),
+    # «[label](url#:~:text=…)» — markdown link inline
+    re.compile(r"\s*\[[^\]]+\]\([^)]*#:~:text=[^)]*\)"),
+    # «(host.tld#:~:text=…)» — bare parenthetical
+    re.compile(r"\s*\([^()]*#:~:text=[^()]*\)"),
+    # «([host.tld](url))» — bare citation paren without anchor
+    re.compile(r"\s*\(\[[^\]]+\]\(https?://[^)]+\)\)"),
+)
+
+
+def _strip_citations(text: str) -> str:
+    """Render-time scrubber so even pre-strip cached payloads come
+    out clean. Matches the canonical strip in
+    ``research._strip_citations`` plus a paren-citation fallback
+    (LLM sometimes leaves bare `([host](url))` after a sentence
+    even without `#:~:text=` anchor)."""
+    if not text or not isinstance(text, str):
+        return text
+    for pat in _CITATION_PATTERNS:
+        text = pat.sub("", text)
+    text = re.sub(r"[ \t]{2,}", " ", text).strip()
+    return text
+
+
 def _ddmm_hhmm(dt: datetime) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -45,13 +79,18 @@ def _ddmm_hhmm(dt: datetime) -> str:
 
 
 def _shorten(text: str, max_chars: int = 220) -> str:
-    """One-line cut of an overview paragraph. Trim trailing
-    whitespace, collapse newlines, hard-cap at max_chars with an
-    ellipsis."""
+    """Soft-cut of a paragraph. Strips, collapses newlines to
+    single spaces, hard-caps at max_chars with an ellipsis."""
     s = (text or "").strip().replace("\n", " ")
     if len(s) <= max_chars:
         return s
     return s[: max_chars - 1].rstrip() + "…"
+
+
+def _slack_link(url: str, label: str) -> str:
+    """Build a Slack-mrkdwn `<url|label>` link. ``label`` MUST be
+    pre-escaped (no raw `<` `>` `|` chars)."""
+    return f"<{url}|{label}>"
 
 
 def render_org_top_message(
@@ -61,30 +100,28 @@ def render_org_top_message(
     org_brief: dict[str, Any] | None,
     person_count: int,
 ) -> str:
-    """Top-of-thread message: header + org info + Doc link +
-    pointer to person briefs in the thread below.
+    """Top-of-thread message: header + org info hyperlinked to the
+    Doc + pointer to person briefs in the thread below.
 
-    Operator-pinned 2026-05-18: «сделать так, что по сути без
-    лишней воды но подробно пишется информация о контрагенте
-    юрике детально, гиперссылка на док, ниже в самом треде
-    информация о физиках».
-    """
+    Operator-pinned 2026-05-18: «надо гиперссылки делать и больше
+    информации, а о физиках в треде и указание что там»."""
     safe_title = _slack_safe(event_title)
     lines: list[str] = [
         f"*Новая встреча {_ddmm_hhmm(scheduled_at)}: {safe_title}*",
     ]
     if org_brief:
         name = _slack_safe(org_brief.get("display_name") or "Org")
-        gist = _slack_safe(_shorten(
-            org_brief.get("gist") or "", max_chars=600
-        ))
+        gist_raw = _strip_citations(org_brief.get("gist") or "")
+        gist = _slack_safe(_shorten(gist_raw, max_chars=_ORG_GIST_MAX))
         url = org_brief.get("doc_url") or ""
         lines.append("")
-        lines.append(f"🏢 *{name}*")
+        header_label = f"🏢 *{name}*"
+        if url:
+            lines.append(_slack_link(url, header_label))
+        else:
+            lines.append(header_label)
         if gist:
             lines.append(gist)
-        if url:
-            lines.append(url)
     if person_count > 0:
         lines.append("")
         word = "контактах" if person_count > 1 else "контакте"
@@ -98,29 +135,22 @@ def render_org_top_message(
 
 
 def render_person_thread_reply(*, person: dict[str, Any]) -> str:
-    """One thread reply per person.
-
-    Shape:
-        👤 *<Name>* — <Role>
-        <one-line gist>
-        <Doc URL>
-    """
+    """One thread reply per person — hyperlinked emoji+name+role
+    followed by the gist."""
     name = _slack_safe(person.get("display_name") or "—")
     role = (person.get("role") or "").strip()
-    gist = _slack_safe(_shorten(person.get("gist") or "", max_chars=600))
+    gist_raw = _strip_citations(person.get("gist") or "")
+    gist = _slack_safe(_shorten(gist_raw, max_chars=_PERSON_GIST_MAX))
     url = person.get("doc_url")
     note = person.get("note") or ""
-    lines: list[str] = []
-    head = f"👤 *{name}*"
+    header_label = f"👤 *{name}*"
     if role:
-        head += f" — {_slack_safe(role)}"
+        header_label += f" — {_slack_safe(role)}"
     if not url:
-        head += f" — N/A ({note or 'research_failed'})"
-        return head
-    lines.append(head)
+        return f"{header_label} — N/A ({note or 'research_failed'})"
+    lines: list[str] = [_slack_link(url, header_label)]
     if gist:
         lines.append(gist)
-    lines.append(url)
     out = "\n".join(lines)
     if len(out) > _SLACK_TEXT_CAP:
         out = out[:_SLACK_TEXT_CAP - 3].rstrip() + "\n…"
@@ -144,15 +174,17 @@ def render_event_briefs_slack_text(
     ]
     if org_brief:
         name = _slack_safe(org_brief.get("display_name") or "Org")
-        gist = _slack_safe(_shorten(org_brief.get("gist") or ""))
+        gist_raw = _strip_citations(org_brief.get("gist") or "")
+        gist = _slack_safe(_shorten(gist_raw))
         url = org_brief.get("doc_url") or ""
-        head = f"🏢 *{name}*"
-        if gist:
-            head += f" — {gist}"
+        header_label = f"🏢 *{name}*"
         lines.append("")
-        lines.append(head)
         if url:
-            lines.append(url)
+            lines.append(_slack_link(url, header_label))
+        else:
+            lines.append(header_label)
+        if gist:
+            lines.append(gist)
     rendered_persons = (person_briefs or [])[:10]
     for pb in rendered_persons:
         lines.append("")

@@ -597,7 +597,8 @@ def test_brief_slack_links_have_kind_emoji():
 def test_brief_org_top_message_has_pointer_to_thread():
     """FR-CB-6.7 — operator-pinned 2026-05-18: top message about
     org carries a footer pointing operator to the thread with N
-    person briefs below."""
+    person briefs below; org name is rendered as a Slack hyperlink
+    `<doc-url|🏢 *Org*>` (not bare URL on its own line)."""
     from app.counterparty_briefs.slack_format import render_org_top_message
 
     text = render_org_top_message(
@@ -610,15 +611,18 @@ def test_brief_org_top_message_has_pointer_to_thread():
         },
         person_count=2,
     )
-    assert "🏢 *Strategic Development Fund*" in text
-    assert "https://docs/.../org-doc" in text
+    # Hyperlink markup
+    assert (
+        "<https://docs/.../org-doc|🏢 *Strategic Development Fund*>"
+        in text
+    )
     assert "Информация о 2 контактах" in text
     assert "треде ниже" in text
 
 
 def test_brief_person_thread_reply_singular_payload():
     """FR-CB-6.8 — render_person_thread_reply emits one Slack-mrkdwn
-    block per person with name + role + gist + Doc URL."""
+    `<doc-url|👤 *Name* — Role>` block followed by the gist."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
@@ -628,10 +632,32 @@ def test_brief_person_thread_reply_singular_payload():
         "gist": "Долгое время руководил инвестблоком SDF.",
         "note": None,
     })
-    assert reply.startswith("👤 *Samer Nawaf Zawaideh*")
-    assert "CIO" in reply
+    assert reply.startswith(
+        "<https://docs/.../samer|👤 *Samer Nawaf Zawaideh* — CIO>"
+    )
     assert "Долгое время" in reply
-    assert "https://docs/.../samer" in reply
+
+
+def test_brief_slack_strips_cached_citations():
+    """FR-CB-6.9 — render-time citation scrubber removes
+    `([host](url#:~:text=…))` left over from pre-strip cached
+    payloads, so old briefs don't show citation noise after the
+    new template ships."""
+    from app.counterparty_briefs.slack_format import render_person_thread_reply
+
+    reply = render_person_thread_reply(person={
+        "display_name": "David Reger",
+        "role": "CEO",
+        "doc_url": "https://docs/.../reger",
+        "gist": (
+            "David Reger is a German technology entrepreneur "
+            "([example.com](https://example.com/bio#:~:text=stuff))."
+        ),
+        "note": None,
+    })
+    assert "#:~:text=" not in reply
+    assert "example.com" not in reply
+    assert "David Reger is a German technology entrepreneur" in reply
 
 
 def test_brief_slack_safe_brackets():

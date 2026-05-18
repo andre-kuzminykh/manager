@@ -111,7 +111,7 @@ def test_brief_cli_lookahead_arg(monkeypatch):
     monkeypatch.setenv("COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID", "D0")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(
-        "ops.brief_run_once._fetch_events_wide", lambda r, d: []
+        "ops.brief_run_once._fetch_events_wide", lambda r, d, lookback_days=0: []
     )
     get_settings.cache_clear()
 
@@ -736,7 +736,7 @@ def test_brief_cli_force_event_flag(session, patched_session_scope):
         monkeypatch.setenv("COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID", "D0")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         monkeypatch.setattr(
-            "ops.brief_run_once._fetch_events_wide", lambda r, d: []
+            "ops.brief_run_once._fetch_events_wide", lambda r, d, lookback_days=0: []
         )
         get_settings.cache_clear()
         with patch.object(
@@ -771,7 +771,7 @@ def test_brief_cli_force_counterparty_flag(session, patched_session_scope):
         monkeypatch.setenv("COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID", "D0")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         monkeypatch.setattr(
-            "ops.brief_run_once._fetch_events_wide", lambda r, d: []
+            "ops.brief_run_once._fetch_events_wide", lambda r, d, lookback_days=0: []
         )
         get_settings.cache_clear()
         with patch.object(

@@ -7,6 +7,9 @@ Usage:
 
 Flags:
     --lookahead-days N            search events within now+N days
+    --lookback-days N             also scan past N days (default 0).
+                                  Use this to re-run a brief for a
+                                  meeting that already happened.
     --calendar-event-id X         process ONLY this event id
     --force-event ID              delete the events row first
     --force-counterparty NAME     delete the cached brief for this
@@ -80,13 +83,17 @@ def _build_runner_for_oneshot() -> CounterpartyBriefRunner | None:
     )
 
 
-def _fetch_events_wide(runner: CounterpartyBriefRunner, lookahead_days: int) -> list[dict]:
+def _fetch_events_wide(
+    runner: CounterpartyBriefRunner,
+    lookahead_days: int,
+    lookback_days: int = 0,
+) -> list[dict]:
     settings = runner._settings
     now = datetime.now(timezone.utc)
-    half_minutes = int(
-        timedelta(days=max(1, lookahead_days)).total_seconds() / 60 / 2
-    ) or 1
-    centre = now + timedelta(days=max(1, lookahead_days)) / 2
+    earliest = now - timedelta(days=max(0, lookback_days))
+    latest = now + timedelta(days=max(1, lookahead_days))
+    centre = earliest + (latest - earliest) / 2
+    half_minutes = int((latest - earliest).total_seconds() / 60 / 2) or 1
 
     if runner._calendar_factory is None:
         log.warning(
@@ -116,6 +123,11 @@ def main() -> int:
         description="One-shot Counterparty Briefs (FR-CR-05-168)",
     )
     parser.add_argument("--lookahead-days", type=int, default=7)
+    parser.add_argument(
+        "--lookback-days", type=int, default=0,
+        help="also scan past N days (default 0). Use to re-run a "
+             "brief for a meeting that already happened.",
+    )
     parser.add_argument("--calendar-event-id", default="")
     parser.add_argument("--force-event", default="")
     parser.add_argument("--force-counterparty", default="")
@@ -167,10 +179,14 @@ def main() -> int:
                 counterparty_key=key, deleted=deleted,
             )
 
-    events = _fetch_events_wide(runner, args.lookahead_days)
+    events = _fetch_events_wide(
+        runner, args.lookahead_days, lookback_days=args.lookback_days,
+    )
     log.info(
         "brief_run_once_events_fetched",
-        count=len(events), lookahead_days=args.lookahead_days,
+        count=len(events),
+        lookahead_days=args.lookahead_days,
+        lookback_days=args.lookback_days,
     )
     if args.calendar_event_id:
         events = [e for e in events if e.get("id") == args.calendar_event_id]

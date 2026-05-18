@@ -53,21 +53,26 @@ _CITATION_PATTERNS = (
     re.compile(r"\s*\[[^\]]+\]\([^)]*#:~:text=[^)]*\)"),
     # «(host.tld#:~:text=…)» — bare parenthetical
     re.compile(r"\s*\([^()]*#:~:text=[^()]*\)"),
-    # «([host.tld](url))» — bare citation paren without anchor
-    re.compile(r"\s*\(\[[^\]]+\]\(https?://[^)]+\)\)"),
+    # «([host.tld](url))» — citation paren with markdown link, no
+    # #:~:text= anchor
+    re.compile(r"\s*\(\[[^\]\n]+\]\(https?://[^)\s]+\)\)"),
+    # «([host.tld])» — bare bracketed citation (Responses API native)
+    re.compile(r"\s*\(\[[a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*\]\)"),
 )
 
 
 def _strip_citations(text: str) -> str:
     """Render-time scrubber so even pre-strip cached payloads come
-    out clean. Matches the canonical strip in
-    ``research._strip_citations`` plus a paren-citation fallback
-    (LLM sometimes leaves bare `([host](url))` after a sentence
-    even without `#:~:text=` anchor)."""
+    out clean. Mirrors ``research._strip_citations`` exactly so a
+    text scrubbed here matches what fresh research would produce.
+    """
     if not text or not isinstance(text, str):
         return text
     for pat in _CITATION_PATTERNS:
         text = pat.sub("", text)
+    # Glue punctuation back to the preceding word after citations
+    # were stripped from before them: «Foo .» → «Foo.».
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
     text = re.sub(r"[ \t]{2,}", " ", text).strip()
     return text
 

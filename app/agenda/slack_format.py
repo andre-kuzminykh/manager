@@ -212,13 +212,28 @@ def _render_header(candidate: AgendaCandidate, doc_url: str | None) -> str:
     return f"*{label}*"
 
 
+def _collect_discussion_items(output: AgendaOutput) -> list[dict[str, Any]]:
+    discussion_items: list[dict[str, Any]] = list(output.tasks_checklist or [])
+    for q in output.open_questions or []:
+        q = (q or "").strip()
+        if q:
+            discussion_items.append({"title": q, "status": "todo"})
+    return discussion_items
+
+
 def render_agenda_text(
     *,
     candidate: AgendaCandidate,
     output: AgendaOutput,
     doc_url: str | None,
 ) -> str:
-    """Build the Slack-mrkdwn body in the operator-pinned style."""
+    """Top-of-thread agenda message: header + participants + recap.
+
+    Operator-pinned 2026-05-18: «"…ещё N пунктов в Google Doc"
+    так не пиши к агендам, лучше их в треды пиши все задачи, а
+    суть пиши в сообщении». Task list moves to thread replies —
+    see ``render_agenda_task_thread_replies``.
+    """
     lines: list[str] = []
     lines.append(_render_header(candidate, doc_url))
 
@@ -229,10 +244,8 @@ def render_agenda_text(
 
     # Recap rendered as a single paragraph under
     # «На прошлой встрече: » — operator-pinned 2026-05-14 (2nd
-    # revision): labels distinguish AGENDA from a summary:
-    # summaries use «Суть:» / «To-Do:», agendas use
+    # revision): summaries use «Суть:» / «To-Do:»; agendas use
     # «На прошлой встрече:» / «Статус задач к обсуждению:».
-    # Strip any duplicate the LLM might have prepended.
     recap_blob = " ".join(
         item.strip().rstrip(".") + "." for item in output.previous_recap
         if item and item.strip()
@@ -242,30 +255,17 @@ def render_agenda_text(
         lines.append("")
         lines.append(f"На прошлой встрече: {recap_blob}")
 
-    # Task list + free-form open_questions under
-    # «Статус задач к обсуждению:», one numbered item per line.
-    # Cap at _SLACK_TASK_LIMIT — full list always available in
-    # the Doc.
-    discussion_items: list[dict[str, Any]] = list(output.tasks_checklist or [])
-    for q in output.open_questions or []:
-        q = (q or "").strip()
-        if not q:
-            continue
-        discussion_items.append({"title": q, "status": "todo"})
-
-    if discussion_items:
+    items = _collect_discussion_items(output)
+    if items:
         lines.append("")
-        lines.append("Статус задач к обсуждению:")
-        lines.append("")
-        rendered = discussion_items[:_SLACK_TASK_LIMIT]
-        for i, t in enumerate(rendered, 1):
-            lines.append(_fmt_task_line(i, t))
-        if len(discussion_items) > _SLACK_TASK_LIMIT and doc_url:
-            lines.append("")
-            lines.append(
-                f"…ещё {len(discussion_items) - _SLACK_TASK_LIMIT} "
-                "пунктов в Google Doc"
-            )
+        word = "пункт" if len(items) == 1 else (
+            "пункта" if 2 <= len(items) % 10 <= 4
+            and not (12 <= len(items) % 100 <= 14)
+            else "пунктов"
+        )
+        lines.append(
+            f"👇 {len(items)} {word} к обсуждению — в треде ниже"
+        )
 
     out = "\n".join(lines)
     if len(out) > _SLACK_TEXT_CAP:
@@ -275,4 +275,40 @@ def render_agenda_text(
     return out
 
 
-__all__ = ["render_agenda_text"]
+def render_agenda_task_thread_replies(
+    *,
+    output: AgendaOutput,
+) -> list[str]:
+    """Build one or more Slack-mrkdwn thread replies containing
+    the full numbered task list. Splits into chunks when a single
+    body would exceed ``_SLACK_TEXT_CAP`` — no truncation, no
+    «…ещё N в Google Doc» overflow.
+
+    Returns ``[]`` when there are no items to render.
+    """
+    items = _collect_discussion_items(output)
+    if not items:
+        return []
+
+    header = "Статус задач к обсуждению:"
+    chunks: list[str] = []
+    current: list[str] = [header, ""]
+    current_len = len(header) + 1
+    for i, t in enumerate(items, 1):
+        line = _fmt_task_line(i, t)
+        # +1 for the newline that joins this line
+        if current_len + len(line) + 1 > _SLACK_TEXT_CAP and current:
+            chunks.append("\n".join(current).rstrip())
+            current = [header + f" (продолжение, {i}–)", ""]
+            current_len = len(current[0]) + 1
+        current.append(line)
+        current_len += len(line) + 1
+    if current:
+        chunks.append("\n".join(current).rstrip())
+    return chunks
+
+
+__all__ = [
+    "render_agenda_task_thread_replies",
+    "render_agenda_text",
+]

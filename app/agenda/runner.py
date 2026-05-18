@@ -34,7 +34,10 @@ from slack_sdk.errors import SlackApiError
 
 from app.agenda.compose import compose_agenda
 from app.agenda.service import AgendaCandidate, AgendaService, build_candidates
-from app.agenda.slack_format import render_agenda_text
+from app.agenda.slack_format import (
+    render_agenda_task_thread_replies,
+    render_agenda_text,
+)
 from app.config import Settings
 from app.db import session_scope
 from app.logging_setup import get_logger
@@ -404,6 +407,17 @@ class AgendaRunner:
         if not slack_ts:
             return
 
+        # Operator-pinned 2026-05-18: discussion items move into
+        # thread replies (one Slack post per chunk, no overflow
+        # marker) so the top message stays the high-signal recap.
+        for reply_body in render_agenda_task_thread_replies(output=output):
+            reply_ts = self._send_slack_dm(reply_body, thread_ts=slack_ts)
+            if not reply_ts:
+                log.warning(
+                    "agenda_task_thread_reply_failed",
+                    calendar_event_id=candidate.calendar_event_id,
+                )
+
         # Persist idempotency row in a fresh session.
         with session_scope() as session:
             self._svc.record_post(
@@ -462,14 +476,19 @@ class AgendaRunner:
             )
             return None, None
 
-    def _send_slack_dm(self, text: str) -> str | None:
+    def _send_slack_dm(
+        self, text: str, *, thread_ts: str | None = None,
+    ) -> str | None:
+        kwargs: dict[str, Any] = {
+            "channel": self._settings.agenda_slack_target_channel_id,
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
         try:
-            resp = self._slack.chat_postMessage(
-                channel=self._settings.agenda_slack_target_channel_id,
-                text=text,
-                unfurl_links=False,
-                unfurl_media=False,
-            )
+            resp = self._slack.chat_postMessage(**kwargs)
             if resp.get("ok"):
                 return resp.get("ts")
             log.warning(

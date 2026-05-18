@@ -28,7 +28,10 @@ from app.agenda.service import (
     normalise_title,
     open_tasks_for_recordings,
 )
-from app.agenda.slack_format import render_agenda_text
+from app.agenda.slack_format import (
+    render_agenda_task_thread_replies,
+    render_agenda_text,
+)
 from app.models import MeetingAgenda, Task, TaskPriority, TaskStatus, ZoomRecording
 
 
@@ -828,31 +831,33 @@ def test_render_agenda_text_format_matches_operator_pin():
         "*<https://docs.google.com/document/d/g1/edit|"
         "14/05 - Агенда к Fundraising daily>*"
     )
-    # No emojis
+    # No emojis (except 👇 thread-pointer which IS allowed per
+    # FR-CR-05-167 polish 2026-05-18)
     for em in ("📋", "✅", "🎯", "📄", "☐", "☑", "▣", "⛔", "✕"):
         assert em not in text, f"emoji {em} must not appear in agenda"
     # Attendees section
     assert "Участники: Artem Sokolov, Irina Shipilova" in text
-    # Recap as prose paragraph — agenda label «На прошлой
-    # встрече:» (distinct from summary «Суть:»), appears once
+    # Recap as prose paragraph in the TOP message
     assert text.count("На прошлой встрече:") == 1
     assert "Разобрали список инвесторов" in text
-    # Section heading distinguishes agenda from summary's «To-Do:»
-    assert "Статус задач к обсуждению:" in text
-    assert "To-Do:" not in text
-    assert "К обсуждению:" not in text  # earlier short name retired
-    # Numbered task list with time
-    assert "1) Bracket Capital - отправить аутрич" in text
-    assert "— Irina Shipilova" in text
-    assert "13.05.2026 18:00" in text  # due_time present
-    assert "14.05.2026" in text  # due_time absent — date only
-    # FR-CR-05-167 2026-05-14: `[in_progress]` suffix removed
-    # from the operator's reference format
-    assert "[in_progress]" not in text
-    # Open question is appended as a continuation item
-    assert "Утром начать outreach" in text
-    # No trailing «Подробно:» (it's in the header link now)
-    assert "Подробно:" not in text
+    # FR-CR-05-167 polish 2026-05-18: task list moves to the
+    # thread reply; top message just points there.
+    assert "Статус задач к обсуждению:" not in text
+    assert "1) Bracket Capital" not in text
+    assert "ещё" not in text  # no «…ещё N в Google Doc» overflow
+    assert "к обсуждению — в треде ниже" in text
+
+    # Now check the THREAD reply carries the full list
+    replies = render_agenda_task_thread_replies(output=output)
+    assert len(replies) >= 1
+    reply = replies[0]
+    assert "Статус задач к обсуждению:" in reply
+    assert "1) Bracket Capital - отправить аутрич" in reply
+    assert "— Irina Shipilova" in reply
+    assert "13.05.2026 18:00" in reply
+    assert "14.05.2026" in reply
+    assert "[in_progress]" not in reply
+    assert "Утром начать outreach" in reply
 
 
 def test_render_agenda_text_escapes_angle_brackets_in_title():
@@ -890,15 +895,8 @@ def test_render_agenda_text_escapes_angle_brackets_in_title():
 
 def test_render_agenda_text_escapes_angle_brackets_in_task_body():
     """A task title or description containing `<` `>` is escaped
-    in the body too (defence-in-depth — `<text>` in plain mrkdwn
-    is also interpreted as a link / mention by Slack)."""
-    candidate = AgendaCandidate(
-        calendar_event_id="ev1",
-        recurring_event_id=None,
-        title="Weekly sync",
-        title_normalised="weekly sync",
-        scheduled_start_at=datetime(2026, 5, 14, 13, tzinfo=timezone.utc),
-    )
+    in the THREAD REPLY (where tasks live as of 2026-05-18) so
+    `<text>` doesn't get mis-parsed as link / mention markup."""
     output = AgendaOutput(
         previous_recap=[],
         tasks_checklist=[
@@ -912,13 +910,13 @@ def test_render_agenda_text_escapes_angle_brackets_in_task_body():
         open_questions=[],
         doc_body_md="",
     )
-    text = render_agenda_text(
-        candidate=candidate, output=output, doc_url=None,
-    )
-    assert "Acme ‹› NewCorp" in text
-    assert "‹demo›" in text
-    assert "<>" not in text
-    assert "<demo>" not in text
+    replies = render_agenda_task_thread_replies(output=output)
+    assert len(replies) == 1
+    reply = replies[0]
+    assert "Acme ‹› NewCorp" in reply
+    assert "‹demo›" in reply
+    assert "<>" not in reply
+    assert "<demo>" not in reply
 
 
 def test_render_agenda_text_strips_duplicate_recap_label():
@@ -969,17 +967,11 @@ def test_render_agenda_text_header_without_doc_url_is_plain():
     assert "<https" not in text
 
 
-def test_render_agenda_text_caps_task_count_in_slack_and_points_to_doc():
-    """FR-CR-05-167 follow-up: long task lists overflow Slack's
-    3000-char cap. Cap at 12 in Slack, mention the overflow with
-    a pointer to the Doc."""
-    candidate = AgendaCandidate(
-        calendar_event_id="ev1",
-        recurring_event_id=None,
-        title="Fundraising daily",
-        title_normalised="fundraising daily",
-        scheduled_start_at=datetime(2026, 5, 14, 11, tzinfo=timezone.utc),
-    )
+def test_render_agenda_thread_carries_all_tasks_no_overflow_marker():
+    """FR-CR-05-167 polish 2026-05-18: all tasks live in the
+    thread reply; long lists split across multiple replies but
+    NEVER emit «…ещё N пунктов в Google Doc» — operator-pinned
+    «лучше их в треды пиши все задачи»."""
     output = AgendaOutput(
         previous_recap=[],
         tasks_checklist=[
@@ -989,14 +981,12 @@ def test_render_agenda_text_caps_task_count_in_slack_and_points_to_doc():
         open_questions=[],
         doc_body_md="",
     )
-    text = render_agenda_text(
-        candidate=candidate, output=output,
-        doc_url="https://docs.google.com/document/d/g1/edit",
-    )
-    assert "1) T1" in text
-    assert "12) T12" in text
-    assert "13) T13" not in text  # capped
-    assert "ещё 8 пунктов в Google Doc" in text
+    replies = render_agenda_task_thread_replies(output=output)
+    joined = "\n".join(replies)
+    for i in range(1, 21):
+        assert f"{i}) T{i}" in joined
+    assert "ещё" not in joined
+    assert "Google Doc" not in joined
 
 
 def test_render_agenda_text_truncates_when_too_long():
@@ -1023,8 +1013,11 @@ def test_render_agenda_text_truncates_when_too_long():
     assert len(text) <= 2950
     # Header hyperlink survives the trim (Doc reachable from there)
     assert "<https://docs.google.com/d/x|" in text
-    # Trailing overflow marker is added
-    assert "Google Doc" in text
+    # Thread replies split when total tasks exceed Slack body cap
+    replies = render_agenda_task_thread_replies(output=output)
+    for reply in replies:
+        assert len(reply) <= 2950
+    assert len(replies) >= 2  # 30 long tasks → multiple chunks
 
 
 def test_render_agenda_text_omits_doc_section_when_no_url():
@@ -1094,20 +1087,19 @@ def test_render_agenda_text_done_tasks_show_status_label():
         open_questions=[],
         doc_body_md="",
     )
-    text = render_agenda_text(
-        candidate=candidate, output=output, doc_url=None,
-    )
+    replies = render_agenda_task_thread_replies(output=output)
+    reply = replies[0]
     # Closed states keep their [done]/[cancelled] suffix so the
     # operator can tell a previous-meeting task is already
     # finished.
-    assert "1) Sent deck — admin • [done]" in text
-    assert "2) Drop investor X — admin • [cancelled]" in text
+    assert "1) Sent deck — admin • [done]" in reply
+    assert "2) Drop investor X — admin • [cancelled]" in reply
     # Other states render WITHOUT a suffix per operator's
     # reference format (FR-CR-05-167 2026-05-14).
-    assert "3) Reach out Y — admin" in text
-    assert "[todo]" not in text
-    assert "[in_progress]" not in text
-    assert "[blocked]" not in text
+    assert "3) Reach out Y — admin" in reply
+    assert "[todo]" not in reply
+    assert "[in_progress]" not in reply
+    assert "[blocked]" not in reply
 
 
 # -- runner no-op safety -------------------------------------------------------

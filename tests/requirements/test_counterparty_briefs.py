@@ -640,24 +640,30 @@ def test_brief_person_thread_reply_singular_payload():
 
 def test_brief_slack_strips_cached_citations():
     """FR-CB-6.9 — render-time citation scrubber removes
-    `([host](url#:~:text=…))` left over from pre-strip cached
-    payloads, so old briefs don't show citation noise after the
-    new template ships."""
+    `([host](url#:~:text=…))` AND bare `([host.tld])` markers
+    left over from pre-strip cached payloads, so old briefs don't
+    show citation noise after the new template ships."""
     from app.counterparty_briefs.slack_format import render_person_thread_reply
 
     reply = render_person_thread_reply(person={
-        "display_name": "David Reger",
-        "role": "CEO",
-        "doc_url": "https://docs/.../reger",
+        "display_name": "Timo Bohl",
+        "role": "Director of Sales",
+        "doc_url": "https://docs/.../timo",
         "gist": (
-            "David Reger is a German technology entrepreneur "
-            "([example.com](https://example.com/bio#:~:text=stuff))."
+            "Timo Bohl is Director of Sales at WEB.DE "
+            "([newsroom.web.de]) ([www.mail-and-media.com]). "
+            "Based in Karlsruhe, Germany "
+            "([www.united-internet.de]), he heads sales."
         ),
         "note": None,
     })
-    assert "#:~:text=" not in reply
-    assert "example.com" not in reply
-    assert "David Reger is a German technology entrepreneur" in reply
+    for noise in (
+        "newsroom.web.de", "mail-and-media", "united-internet",
+        "[", "]",
+    ):
+        assert noise not in reply, f"citation noise still present: {noise!r}"
+    assert "Timo Bohl is Director of Sales at WEB.DE." in reply
+    assert "Based in Karlsruhe, Germany, he heads sales." in reply
 
 
 def test_brief_slack_safe_brackets():

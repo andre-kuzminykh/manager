@@ -297,11 +297,12 @@ def _call_openai_responses_json(
 
 def _strip_citations(text: str) -> str:
     """OpenAI Responses API embeds web-search citations as
-    `(domain.com#:~:text=…)` and `[label](url#:~:text=…)`. They
-    bloat the Slack message and look noisy. Strip them out for
-    free-text fields (`overview_paragraph`, `profile_overview`,
-    `evidence`). URLs that already live in a list (e.g.
-    `recent_news[].url`) stay untouched.
+    `(domain.com#:~:text=…)`, `[label](url#:~:text=…)`, and bare
+    `([host.tld])` markers. They bloat the Slack message and look
+    noisy. Strip them out for free-text fields
+    (`overview_paragraph`, `profile_overview`, `evidence`). URLs
+    that already live in a list (e.g. `recent_news[].url`) stay
+    untouched.
     """
     if not text or not isinstance(text, str):
         return text
@@ -325,7 +326,26 @@ def _strip_citations(text: str) -> str:
         "",
         text,
     )
-    # Collapse double spaces left behind
+    # «([host.tld])» — bare bracketed citation (Responses API
+    # native style). Host shape: `[a-z0-9.-]+\.[a-z]{2,}` with
+    # optional path. Conservative — won't touch legitimate
+    # `[footnote]` markers because of the inner dot+TLD.
+    text = re.sub(
+        r"\s*\(\[[a-zA-Z0-9._\-/]+\.[a-z]{2,}[a-zA-Z0-9._\-/]*\]\)",
+        "",
+        text,
+    )
+    # «([label](https://host.tld))» — markdown link inside parens
+    # without #:~:text= anchor (LLM still spits these as inline
+    # citations).
+    text = re.sub(
+        r"\s*\(\[[^\]\n]+\]\(https?://[^)\s]+\)\)",
+        "",
+        text,
+    )
+    # Collapse double spaces left behind, and stray « .» / « ,» /
+    # « ;» / « :» where the citation sat right before punctuation.
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
     text = re.sub(r"[ \t]{2,}", " ", text).strip()
     return text
 

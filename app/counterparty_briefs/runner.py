@@ -59,7 +59,10 @@ from app.counterparty_briefs.research import (
     research_org_with_cache,
     research_person,
 )
-from app.counterparty_briefs.slack_format import render_event_briefs_slack_text
+from app.counterparty_briefs.slack_format import (
+    render_org_top_message,
+    render_person_thread_reply,
+)
 from app.db import session_scope
 from app.logging_setup import get_logger
 from app.models import (
@@ -616,13 +619,17 @@ class CounterpartyBriefRunner:
                 "note": lk.note,
                 "gist": gist_text,
             })
-        text = render_event_briefs_slack_text(
-            event_title=ev.get("title") or "",
-            scheduled_at=ev["start"]
+
+        scheduled_at = (
+            ev["start"]
             if isinstance(ev["start"], datetime)
-            else datetime.now(timezone.utc),
+            else datetime.now(timezone.utc)
+        )
+        top_text = render_org_top_message(
+            event_title=ev.get("title") or "",
+            scheduled_at=scheduled_at,
             org_brief=org_payload,
-            person_briefs=person_payloads,
+            person_count=len(person_payloads),
         )
         ts: str | None = None
         if skip_slack:
@@ -632,9 +639,23 @@ class CounterpartyBriefRunner:
                 hint="--skip-slack — Docs created, no DM sent",
             )
         else:
-            ts = self._send_slack_dm(text=text)
+            ts = self._send_slack_dm(text=top_text)
             if not ts:
                 return
+            # Operator-pinned 2026-05-18: persons go as thread
+            # replies under the org top message so the DM
+            # surface stays clean.
+            for person in person_payloads:
+                reply_text = render_person_thread_reply(person=person)
+                reply_ts = self._send_slack_dm(
+                    text=reply_text, thread_ts=ts,
+                )
+                if not reply_ts:
+                    log.warning(
+                        "brief_person_thread_reply_failed",
+                        event_id=ev_id,
+                        person=person.get("display_name"),
+                    )
 
         with session_scope() as s:
             evrow = CounterpartyBriefsEvent(
@@ -728,14 +749,19 @@ class CounterpartyBriefRunner:
             log.warning("brief_doc_export_failed", title=title, error=str(e))
             return None, None
 
-    def _send_slack_dm(self, *, text: str) -> str | None:
+    def _send_slack_dm(
+        self, *, text: str, thread_ts: str | None = None,
+    ) -> str | None:
+        kwargs: dict[str, Any] = {
+            "channel": self._settings.counterparty_briefs_slack_target_channel_id,
+            "text": text,
+            "unfurl_links": False,
+            "unfurl_media": False,
+        }
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
         try:
-            resp = self._slack.chat_postMessage(
-                channel=self._settings.counterparty_briefs_slack_target_channel_id,
-                text=text,
-                unfurl_links=False,
-                unfurl_media=False,
-            )
+            resp = self._slack.chat_postMessage(**kwargs)
             if resp.get("ok"):
                 return resp.get("ts")
             log.warning(

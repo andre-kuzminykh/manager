@@ -91,9 +91,20 @@ Output JSON со схемой:
 
 _PERSON_SYSTEM_PROMPT = """Ты — research-аналитик. Собирай deep research брифинг про конкретного человека (физлицо) в роли при компании. Используй web search. Стиль operator: фактологически, без воды, без эмодзи.
 
+ВАЖНО про `photo_url` — оператор всегда хочет видеть лицо.
+Найди публичную фотографию человека ОБЯЗАТЕЛЬНО. Порядок поиска:
+  1) LinkedIn профиль (профильное фото).
+  2) Официальный сайт компании / биографическая страница.
+  3) Bloomberg / Reuters / WSJ / Forbes / профильные новости с фото.
+  4) Wikipedia / Wikimedia.
+  5) Любое публичное изображение из новостей (image search).
+Возвращай ПРЯМОЙ URL картинки (`.jpg`/`.png`/`.webp` или CDN с изображением),
+не страницу со ссылкой на картинку. Null только когда после всех 5 шагов
+картинка реально не найдена.
+
 Output JSON со схемой (operator-pinned §6.2):
 {
-  "photo_url": "https://... (public URL or null)",
+  "photo_url": "https://... (direct image URL — обязательно ищи)",
   "personal_information": {
     "name": "...", "role": "...", "location": "...",
     "linkedin_url": "...", "company_website": "...",
@@ -284,6 +295,41 @@ def _call_openai_responses_json(
     return json.loads(text)
 
 
+def _strip_citations(text: str) -> str:
+    """OpenAI Responses API embeds web-search citations as
+    `(domain.com#:~:text=…)` and `[label](url#:~:text=…)`. They
+    bloat the Slack message and look noisy. Strip them out for
+    free-text fields (`overview_paragraph`, `profile_overview`,
+    `evidence`). URLs that already live in a list (e.g.
+    `recent_news[].url`) stay untouched.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    import re
+
+    # «(host.tld#:~:text=…)» — bare parenthetical citation
+    text = re.sub(
+        r"\s*\([^()]*#:~:text=[^()]*\)",
+        "",
+        text,
+    )
+    # «([label](url#:~:text=…))» — markdown link parenthetical
+    text = re.sub(
+        r"\s*\(\[[^\]]+\]\([^)]+#:~:text=[^)]+\)\)",
+        "",
+        text,
+    )
+    # «[label](url#:~:text=…)» — markdown link in body
+    text = re.sub(
+        r"\s*\[[^\]]+\]\([^)]+#:~:text=[^)]+\)",
+        "",
+        text,
+    )
+    # Collapse double spaces left behind
+    text = re.sub(r"[ \t]{2,}", " ", text).strip()
+    return text
+
+
 def _coerce_org(payload: dict[str, Any]) -> OrgResearch:
     return OrgResearch(
         name=str(payload.get("name") or "").strip(),
@@ -295,7 +341,9 @@ def _coerce_org(payload: dict[str, Any]) -> OrgResearch:
         leadership=list(payload.get("leadership") or []),
         portfolio_highlights=list(payload.get("portfolio_highlights") or []),
         recent_news=list(payload.get("recent_news") or []),
-        overview_paragraph=str(payload.get("overview_paragraph") or "").strip(),
+        overview_paragraph=_strip_citations(
+            str(payload.get("overview_paragraph") or "").strip()
+        ),
     )
 
 
@@ -303,12 +351,14 @@ def _coerce_person(payload: dict[str, Any]) -> PersonResearch:
     return PersonResearch(
         photo_url=(payload.get("photo_url") or None) or None,
         personal_information=dict(payload.get("personal_information") or {}),
-        profile_overview=str(payload.get("profile_overview") or "").strip(),
+        profile_overview=_strip_citations(
+            str(payload.get("profile_overview") or "").strip()
+        ),
         current_positions=list(payload.get("current_positions") or []),
         previous_positions=list(payload.get("previous_positions") or []),
         investment_highlights=dict(payload.get("investment_highlights") or {}),
         investments=list(payload.get("investments") or []),
-        exits=str(payload.get("exits") or "").strip(),
+        exits=_strip_citations(str(payload.get("exits") or "").strip()),
         achievements=list(payload.get("achievements") or []),
         honors_awards=list(payload.get("honors_awards") or []),
         education=list(payload.get("education") or []),

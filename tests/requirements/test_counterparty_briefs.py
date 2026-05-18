@@ -594,6 +594,46 @@ def test_brief_slack_links_have_kind_emoji():
     assert "👤" in text
 
 
+def test_brief_org_top_message_has_pointer_to_thread():
+    """FR-CB-6.7 — operator-pinned 2026-05-18: top message about
+    org carries a footer pointing operator to the thread with N
+    person briefs below."""
+    from app.counterparty_briefs.slack_format import render_org_top_message
+
+    text = render_org_top_message(
+        event_title="SDF <> Humanoid",
+        scheduled_at=datetime(2026, 5, 14, 16, tzinfo=timezone.utc),
+        org_brief={
+            "display_name": "Strategic Development Fund",
+            "doc_url": "https://docs/.../org-doc",
+            "gist": "SWF из ОАЭ. Defence + dual-use.",
+        },
+        person_count=2,
+    )
+    assert "🏢 *Strategic Development Fund*" in text
+    assert "https://docs/.../org-doc" in text
+    assert "Информация о 2 контактах" in text
+    assert "треде ниже" in text
+
+
+def test_brief_person_thread_reply_singular_payload():
+    """FR-CB-6.8 — render_person_thread_reply emits one Slack-mrkdwn
+    block per person with name + role + gist + Doc URL."""
+    from app.counterparty_briefs.slack_format import render_person_thread_reply
+
+    reply = render_person_thread_reply(person={
+        "display_name": "Samer Nawaf Zawaideh",
+        "role": "CIO",
+        "doc_url": "https://docs/.../samer",
+        "gist": "Долгое время руководил инвестблоком SDF.",
+        "note": None,
+    })
+    assert reply.startswith("👤 *Samer Nawaf Zawaideh*")
+    assert "CIO" in reply
+    assert "Долгое время" in reply
+    assert "https://docs/.../samer" in reply
+
+
 def test_brief_slack_safe_brackets():
     """FR-CB-6.3 — `<>` and `|` in title / name / org swap to
     `‹›` / `/` so Slack link parser doesn't break."""

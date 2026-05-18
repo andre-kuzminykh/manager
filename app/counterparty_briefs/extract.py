@@ -25,6 +25,33 @@ log = get_logger(__name__)
 
 _INTERNAL_EMAIL_SUFFIX = "@thehumanoid.ai"
 
+# FR-CR-05-168 polish 2026-05-18: операторские внутренние юрики,
+# которых LLM иногда вытаскивает из attendees / title как
+# «external counterparty». Sample: «SKL Robotics» (наша служебная
+# entity для UK operations) попалась когда attendee имел email
+# `@skl.vc`. Hard-code list of «we / our subsidiaries» so the
+# extract step never marks one of these as the counterparty.
+_INTERNAL_ORG_NAMES: set[str] = {
+    "humanoid",
+    "humanoid hq",
+    "humanoid headquarters",
+    "humanoid.ai",
+    "thehumanoid.ai",
+    "humanoidheadquarters",
+    "skl robotics",
+    "skl robotics ltd",
+    "skl",
+    "skl.vc",
+}
+
+
+def _is_internal_org(name: str | None) -> bool:
+    if not name:
+        return False
+    key = name.strip().lower()
+    key = key.replace("«", "").replace("»", "").replace('"', "")
+    return key in _INTERNAL_ORG_NAMES
+
 
 @dataclass
 class PersonCandidate:
@@ -149,6 +176,15 @@ def extract_event_counterparties(
         persons.append(PersonCandidate(person_name=name, person_role=role))
     if isinstance(org_name, str):
         org_name = org_name.strip() or None
+    # FR-CR-05-168 polish 2026-05-18: drop the org name when LLM
+    # surfaced one of OUR own entities (Humanoid / SKL Robotics
+    # / @skl.vc) — those are us, not external counterparties.
+    if _is_internal_org(org_name):
+        log.info(
+            "brief_extract_dropped_internal_org",
+            org_name=org_name,
+        )
+        org_name = None
     return EventExtraction(
         org_name=org_name,
         initial_persons=persons,

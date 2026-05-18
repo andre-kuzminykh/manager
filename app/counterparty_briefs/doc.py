@@ -196,7 +196,7 @@ def build_org_doc_body(
     if research and research.type:
         lines.append(f"_Type: {research.type}_")
     if research and research.website:
-        lines.append(f"Website: {research.website}")
+        lines.append(f"Website: [{research.website}]({research.website})")
 
     lines.append("")
     lines.append("## Overview")
@@ -209,8 +209,16 @@ def build_org_doc_body(
             name_ = (ld.get("name") or "").strip()
             role = (ld.get("role") or "").strip()
             url = (ld.get("linkedin_url") or ld.get("evidence_url") or "").strip()
-            tail = f" — {url}" if url else ""
-            lines.append(f"- {name_}{(' — ' + role) if role else ''}{tail}")
+            label = name_ or "—"
+            if url:
+                lines.append(
+                    f"- [{label}]({url})"
+                    f"{(' — ' + role) if role else ''}"
+                )
+            else:
+                lines.append(
+                    f"- {label}{(' — ' + role) if role else ''}"
+                )
     else:
         lines.append("N/A")
 
@@ -230,10 +238,12 @@ def build_org_doc_body(
     if research and research.recent_news:
         for n in research.recent_news[:10]:
             date = n.get("date") or ""
-            title = (n.get("title") or "").strip()
+            title = (n.get("title") or "").strip() or "—"
             url = (n.get("url") or "").strip()
-            tail = f" — {url}" if url else ""
-            lines.append(f"- {date} — {title}{tail}")
+            if url:
+                lines.append(f"- {date} — [{title}]({url})")
+            else:
+                lines.append(f"- {date} — {title}")
     else:
         lines.append("N/A")
 
@@ -243,10 +253,12 @@ def build_org_doc_body(
     if past:
         for r in past[:10]:
             dd_mm = _ddmm_from_iso(r.get("meeting_date"))
-            title = (r.get("title") or "").strip()
+            title = (r.get("title") or "").strip() or "—"
             doc_url = (r.get("google_doc_url") or "").strip()
-            tail = f" — {doc_url}" if doc_url else ""
-            lines.append(f"- {dd_mm} — {title}{tail}")
+            if doc_url:
+                lines.append(f"- {dd_mm} — [{title}]({doc_url})")
+            else:
+                lines.append(f"- {dd_mm} — {title}")
     else:
         lines.append("N/A")
 
@@ -306,9 +318,11 @@ def build_person_doc_body(
     if pi.get("location"):
         lines.append(f"Location: {pi.get('location')}")
     if pi.get("linkedin_url"):
-        lines.append(f"LinkedIn: {pi['linkedin_url']}")
+        lines.append(f"LinkedIn: [{pi['linkedin_url']}]({pi['linkedin_url']})")
     if pi.get("company_website"):
-        lines.append(f"Company Website: {pi['company_website']}")
+        lines.append(
+            f"Company Website: [{pi['company_website']}]({pi['company_website']})"
+        )
     emails = pi.get("emails") or []
     phone = pi.get("phone") or ""
     if emails or phone:
@@ -446,9 +460,12 @@ def build_person_doc_body(
     if pubs:
         for p in pubs:
             if isinstance(p, dict):
-                lines.append(
-                    f"- {p.get('title','?')} — {p.get('url','')}".rstrip(" —")
-                )
+                title_ = (p.get("title") or "—").strip() or "—"
+                url_ = (p.get("url") or "").strip()
+                if url_:
+                    lines.append(f"- [{title_}]({url_})")
+                else:
+                    lines.append(f"- {title_}")
             else:
                 lines.append(f"- {p}")
     else:

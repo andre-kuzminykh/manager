@@ -604,8 +604,6 @@ class CounterpartyBriefRunner:
         for lk in links:
             if lk.kind != "person":
                 continue
-            from app.counterparty_briefs.lookup import normalise_counterparty_name
-
             key = normalise_counterparty_name(lk.display_name)
             gist_text = ""
             pr = person_research_by_key.get(key)

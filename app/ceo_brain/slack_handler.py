@@ -210,6 +210,29 @@ def _attach_handlers(app: Any, settings: Settings) -> None:
         team=bot_team,
     )
 
+    # FR-CB2-1.7 — polling backstop. Slack Socket-Mode drops
+    # events when a message is edited/deleted within ~1 sec of
+    # posting (Slack collapses the wire), and during silent
+    # WebSocket disconnects. The poller pulls
+    # `conversations.history` for the operator DM every 30 sec
+    # and replays any unseen message through `_handle`, so the
+    # responder fires reliably even when push fails.
+    from app.ceo_brain.history_poller import (
+        SlackHistoryPoller,
+        discover_operator_dm_channels,
+    )
+
+    channels = discover_operator_dm_channels(settings)
+    if channels:
+        SlackHistoryPoller(
+            slack_client=slack_client,
+            bot_user_id=bot_user_id,
+            channels=channels,
+            responder=responder,
+            archive_dir=archive_dir,
+            settings=settings,
+        ).start()
+
 
 def _needs_standalone(settings: Settings) -> bool:
     """Decide whether to spawn a dedicated Bolt App. True when

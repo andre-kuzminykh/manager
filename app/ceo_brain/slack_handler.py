@@ -176,7 +176,12 @@ def _build_responder_callback(
     api_key = settings.ceo_brain_anthropic_api_key
     if not api_key:
         return None
-    anthropic_client = Anthropic(api_key=api_key)
+    # FR-CB2-3.27 — hard SDK timeout. Anthropic's internal MCP
+    # handshake timeout is ~2 min, which makes our retries slow.
+    # Capping at 90 sec kills failed handshakes faster (saves ~30
+    # sec per failed retry) while still covering legitimately slow
+    # successful calls (typical 30-60 sec, hard ceiling 90 sec).
+    anthropic_client = Anthropic(api_key=api_key, timeout=90.0)
 
     # FR-CB2-3.16 — local Slack tools need a `xoxp-` user client for
     # `search.messages` (Slack rejects bot tokens on that endpoint).

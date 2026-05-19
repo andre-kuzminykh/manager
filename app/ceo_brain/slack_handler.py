@@ -252,6 +252,25 @@ def _build_responder_callback(
                 history = [
                     {"role": "user", "content": payload.get("text") or "(?)"},
                 ]
+            # FR-CB2-3.27 — ensure history ends with a user message.
+            # `conversations.replies` race conditions can leave the
+            # current operator question missing from the fetched
+            # thread (placeholder posted before reply lands), leaving
+            # an earlier bot answer as the last `role=assistant`
+            # block. Anthropic rejects that («conversation must end
+            # with a user message»). Append payload text if needed.
+            payload_text = (payload.get("text") or "").strip()
+            if payload_text:
+                needs_append = (
+                    not history
+                    or history[-1].get("role") != "user"
+                    or (history[-1].get("content") or "").strip()
+                        != payload_text
+                )
+                if needs_append:
+                    history.append(
+                        {"role": "user", "content": payload_text}
+                    )
 
             with session_scope() as db:
                 run_responder(

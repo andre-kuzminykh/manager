@@ -37,7 +37,7 @@ from app.models import SlackMessageArchive
 log = get_logger(__name__)
 
 
-_DEFAULT_INTERVAL_SEC = 30
+_DEFAULT_INTERVAL_SEC = 5
 _DEFAULT_LOOKBACK_SEC = 600  # 10 min — covers reconnect gaps
 _DEFAULT_PAGE_LIMIT = 30
 
@@ -91,7 +91,17 @@ def _to_event_payload(
 class SlackHistoryPoller:
     """Pulls `conversations.history` for the operator DM channel
     every ``interval_sec`` seconds and dispatches unseen messages
-    through the existing event handler."""
+    through the existing event handler. Also polls
+    `conversations.replies` for any thread root seen recently —
+    Slack's push of thread-reply `message.im` events is
+    unreliable, history endpoint does not include thread replies,
+    so the two together backstop both top-level and threaded
+    user input."""
+
+    # Maximum age of a thread root after which we stop polling
+    # its replies. Threads older than this are unlikely to receive
+    # new messages so dropping them keeps the active-set bounded.
+    _THREAD_TTL_SEC = 60 * 60  # 1 hour
 
     def __init__(
         self,
@@ -111,7 +121,7 @@ class SlackHistoryPoller:
         self._channels = [c for c in channels if c]
         self._responder = responder
         self._archive_dir = archive_dir
-        self._interval_sec = max(5, int(interval_sec))
+        self._interval_sec = max(2, int(interval_sec))
         self._lookback_sec = max(60, int(lookback_sec))
         self._page_limit = max(5, int(page_limit))
         self._settings = settings or get_settings()
@@ -121,6 +131,10 @@ class SlackHistoryPoller:
         # newer than the most recent ts we've already processed.
         # Initialised from the archive on first poll.
         self._high_water: dict[str, str] = {}
+        # Per-(channel, thread_root_ts) high-watermark for thread
+        # replies. Keyed `f"{channel}:{thread_ts}"`. The set of
+        # active threads is rebuilt each tick from archive activity.
+        self._thread_high_water: dict[str, str] = {}
 
     def start(self) -> threading.Thread | None:
         if not self._channels:
@@ -241,9 +255,112 @@ class SlackHistoryPoller:
             )
         return dispatched
 
+    def _active_thread_roots(self, channel: str) -> list[str]:
+        """Threads we've seen activity in within
+        ``_THREAD_TTL_SEC``. Looking at the archive: any row with
+        a thread_ts whose newest descendant is recent counts."""
+        cutoff = time.time() - self._THREAD_TTL_SEC
+        try:
+            with session_scope() as s:
+                rows = (
+                    s.query(SlackMessageArchive)
+                    .filter(SlackMessageArchive.channel_id == channel)
+                    .filter(SlackMessageArchive.thread_ts.isnot(None))
+                    .order_by(SlackMessageArchive.ts.desc())
+                    .limit(50)
+                    .all()
+                )
+                seen: set[str] = set()
+                for row in rows:
+                    try:
+                        if float(row.ts) < cutoff:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    if row.thread_ts:
+                        seen.add(row.thread_ts)
+                return sorted(seen)
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "ceo_brain_active_threads_lookup_failed",
+                channel=channel, error=str(e),
+            )
+            return []
+
+    def _poll_thread_once(
+        self, channel: str, thread_ts: str,
+    ) -> int:
+        key = f"{channel}:{thread_ts}"
+        oldest = self._thread_high_water.get(key, thread_ts)
+        try:
+            resp = self._slack.conversations_replies(
+                channel=channel,
+                ts=thread_ts,
+                oldest=oldest,
+                inclusive=False,
+                limit=self._page_limit,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "ceo_brain_thread_poll_failed",
+                channel=channel, thread_ts=thread_ts, error=str(e),
+            )
+            return 0
+        if not resp.get("ok"):
+            return 0
+        messages = list(reversed(resp.get("messages") or []))
+        dispatched = 0
+        new_high = oldest
+        for msg in messages:
+            # Skip the parent of the thread itself (Slack includes
+            # it in replies output).
+            if (msg or {}).get("ts") == thread_ts:
+                new_high = max(new_high, thread_ts)
+                continue
+            payload = _to_event_payload(
+                channel=channel,
+                channel_type=self._channel_type(channel),
+                bot_user_id=self._bot_user_id,
+                message=msg,
+            )
+            if payload is None:
+                if (msg or {}).get("ts"):
+                    new_high = max(new_high, msg["ts"])
+                continue
+            # Make sure thread_ts is set so dispatcher knows it's
+            # a thread reply (conversations.replies items may or
+            # may not include it).
+            payload.setdefault("thread_ts", thread_ts)
+            try:
+                with session_scope() as db:
+                    handle_event(
+                        db, payload,
+                        bot_user_id=self._bot_user_id,
+                        responder=self._responder,
+                        archive_dir=self._archive_dir or get_archive_dir(),
+                    )
+                dispatched += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "ceo_brain_thread_poll_dispatch_failed",
+                    channel=channel, ts=payload.get("ts"),
+                    error=str(e),
+                )
+            ts = payload.get("ts")
+            if ts:
+                new_high = max(new_high, ts)
+        self._thread_high_water[key] = new_high
+        if dispatched:
+            log.info(
+                "ceo_brain_thread_poll_dispatched",
+                channel=channel, thread_ts=thread_ts,
+                count=dispatched,
+            )
+        return dispatched
+
     def _loop(self) -> None:
         # Brief stagger so we don't race the Socket-Mode startup.
-        self._stop.wait(timeout=10)
+        self._stop.wait(timeout=5)
         while not self._stop.is_set():
             for channel in list(self._channels):
                 if self._stop.is_set():
@@ -255,6 +372,19 @@ class SlackHistoryPoller:
                         "ceo_brain_history_poller_tick_failed",
                         channel=channel, error=str(e),
                     )
+                # Thread-replies sub-poll.
+                for thread_ts in self._active_thread_roots(channel):
+                    if self._stop.is_set():
+                        break
+                    try:
+                        self._poll_thread_once(channel, thread_ts)
+                    except Exception as e:  # noqa: BLE001
+                        log.warning(
+                            "ceo_brain_thread_poll_tick_failed",
+                            channel=channel,
+                            thread_ts=thread_ts,
+                            error=str(e),
+                        )
             self._stop.wait(timeout=self._interval_sec)
 
 

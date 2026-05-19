@@ -567,7 +567,7 @@ def run_responder(
     db_session: Session | None = None,
     slack_event_ts: str | None = None,
     today: datetime | None = None,
-    max_retries: int = 3,
+    max_retries: int = 5,
     sleep: Callable[[float], None] = time.sleep,
     slack_bot_client: Any | None = None,
     slack_user_client: Any | None = None,
@@ -685,21 +685,27 @@ def run_responder(
                 # FR-CB2-3.23 — transient MCP handshake error retries
                 # alongside 429.
                 if (_is_429(exc) or _is_transient_mcp_handshake(exc)) and attempt + 1 < max_retries:
-                    wait = _retry_after_seconds(exc, default=2.0)
-                    reason = (
-                        "MCP-сервер не отвечает на handshake"
-                        if _is_transient_mcp_handshake(exc)
-                        else "rate-limit Anthropic"
-                    )
+                    # Exponential backoff: 2/4/8/16/32 sec for MCP
+                    # handshake (n8n cloud workers sometimes cold-
+                    # start slowly). 429 still honours Retry-After.
+                    if _is_429(exc):
+                        wait = _retry_after_seconds(exc, default=2.0)
+                        reason = "rate-limit Anthropic"
+                    else:
+                        wait = min(2 ** (attempt + 1), 32)
+                        reason = "MCP-сервер не отвечает на handshake"
                     log.info(
                         "ceo_brain_responder_transient_retry",
                         attempt=attempt + 1, wait_seconds=wait,
-                        reason=reason,
+                        reason=reason, max_retries=max_retries,
                     )
                     try:
                         slack.chat_update(
                             channel=channel, ts=placeholder_ts,
-                            text=f"⏳ {reason}, повторяю…",
+                            text=(
+                                f"⏳ {reason}, попытка "
+                                f"{attempt + 2}/{max_retries}…"
+                            ),
                         )
                     except Exception:  # noqa: BLE001
                         pass

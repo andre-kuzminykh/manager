@@ -399,6 +399,16 @@ def run_responder(
     )
     started_at = datetime.now(timezone.utc)
 
+    # Hosted MCP connector lives in the beta namespace and needs
+    # the `mcp-client-2025-04-04` beta header when `mcp_servers`
+    # is passed to `messages.stream`. Without MCP servers, the
+    # regular `messages.stream` is fine.
+    if request.get("mcp_servers"):
+        stream_factory = anthropic_client.beta.messages.stream
+        request = {**request, "betas": ["mcp-client-2025-04-04"]}
+    else:
+        stream_factory = anthropic_client.messages.stream
+
     text_buffer: list[str] = []
     tool_uses: list[dict[str, Any]] = []
     last_update = [0.0]
@@ -407,7 +417,7 @@ def run_responder(
 
     for attempt in range(max(1, max_retries)):
         try:
-            with anthropic_client.messages.stream(**request) as stream:
+            with stream_factory(**request) as stream:
                 for event in stream:
                     etype = getattr(event, "type", None) or (
                         isinstance(event, dict) and event.get("type")

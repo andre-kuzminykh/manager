@@ -752,6 +752,80 @@ def test_slack_handler_filters_bot_messages_from_thread_history():
     assert all(m["role"] == "user" for m in out)
 
 
+def test_responder_progressive_mcp_degradation_on_retry(session):
+    """FR-CB2-3.24 — when MCP handshake keeps failing, each retry
+    attempt (starting from the 3rd) drops one MCP server from the
+    tail of the list. Smaller subset → fewer parallel handshakes →
+    higher chance the request succeeds. The last 2 MCPs always
+    stay (minimum viable set)."""
+    from app.ceo_brain.responder import run_responder
+    from app.models import ClaudeResponderRun
+
+    calls: list = []
+
+    def _fail_n_times(*a, **kw):
+        # Capture mcp_servers count per attempt for assertion.
+        n = len(kw.get("mcp_servers") or [])
+        calls.append(n)
+        if len(calls) < 4:  # first 3 attempts fail
+            raise RuntimeError(
+                "Error code: 400 - Connection error while "
+                "communicating with MCP server."
+            )
+        # 4th attempt succeeds.
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="OK")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(
+                input_tokens=100, output_tokens=10,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+            ),
+        )
+
+    anthropic = MagicMock()
+    anthropic.beta.messages.create.side_effect = _fail_n_times
+    slack = MagicMock()
+    slack.chat_update.return_value = {"ok": True}
+
+    import os
+    prev = os.environ.get("MCP_SERVERS")
+    os.environ["MCP_SERVERS"] = (
+        '['
+        '{"name":"a","url":"https://x.invalid/a"},'
+        '{"name":"b","url":"https://x.invalid/b"},'
+        '{"name":"c","url":"https://x.invalid/c"},'
+        '{"name":"d","url":"https://x.invalid/d"},'
+        '{"name":"e","url":"https://x.invalid/e"},'
+        '{"name":"f","url":"https://x.invalid/f"}'
+        ']'
+    )
+    try:
+        run_responder(
+            slack=slack, anthropic_client=anthropic, db_session=session,
+            channel="D1", placeholder_ts="1.2",
+            thread_history=[{"role": "user", "content": "вопрос"}],
+            sleep=lambda s: None,
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("MCP_SERVERS", None)
+        else:
+            os.environ["MCP_SERVERS"] = prev
+
+    # 4 attempts total. Expected MCP counts:
+    #  attempt 1: 6 (full set)
+    #  attempt 2: 6 (first retry, same set)
+    #  attempt 3: 5 (drop one)
+    #  attempt 4: 4 (drop another) — succeeds
+    assert calls == [6, 6, 5, 4], (
+        f"expected progressive degradation, got {calls}"
+    )
+    row = session.query(ClaudeResponderRun).one()
+    assert row.status == "done"
+
+
 def test_responder_retries_on_mcp_handshake_connection_error(session):
     """FR-CB2-3.23 — Anthropic's parallel MCP handshake periodically
     fails with `BadRequestError: Connection error while communicating

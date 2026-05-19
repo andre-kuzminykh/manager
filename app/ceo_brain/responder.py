@@ -395,6 +395,29 @@ def _is_transient_mcp_handshake(exc: BaseException) -> bool:
     return bool(_RETRYABLE_MCP_RE.search(str(exc) or ""))
 
 
+def _degrade_mcp_servers(servers: list[dict] | None, attempt: int) -> list[dict] | None:
+    """FR-CB2-3.24 — progressive MCP degradation on handshake retry.
+
+    `attempt` is 1-indexed. On attempts 1-2 we keep the full set;
+    starting attempt 3, drop one MCP per attempt from the END of
+    the list (operator-controlled order). Always keep at least 2.
+
+    Examples (with 6 servers in env):
+      attempt 1 → 6
+      attempt 2 → 6
+      attempt 3 → 5
+      attempt 4 → 4
+      attempt 5 → 3
+    """
+    if not servers:
+        return servers
+    if attempt <= 2:
+        return list(servers)
+    drop = attempt - 2
+    keep = max(2, len(servers) - drop)
+    return list(servers[:keep])
+
+
 def _retry_after_seconds(exc: BaseException, default: float = 5.0) -> float:
     headers = getattr(exc, "headers", None) or {}
     if isinstance(headers, dict):
@@ -632,6 +655,10 @@ def run_responder(
     # re-issue. MCP tool_uses are resolved by Anthropic server-side
     # so they don't trigger another iteration.
     final_response_failed = False
+    # FR-CB2-3.24 — capture the original mcp_servers so progressive
+    # degradation always degrades from the FULL set, not from an
+    # already-degraded list.
+    original_mcp_servers = list(request.get("mcp_servers") or [])
     for loop_idx in range(max(1, max_tool_loops)):
         main_ok = False
         for attempt in range(max(1, max_retries)):
@@ -694,6 +721,25 @@ def run_responder(
                     else:
                         wait = min(2 ** (attempt + 1), 32)
                         reason = "MCP-сервер не отвечает на handshake"
+                        # FR-CB2-3.24 — progressive degradation.
+                        # `attempt` is 0-indexed inside this loop;
+                        # _degrade uses 1-indexed for readability.
+                        # Always degrade from the ORIGINAL set —
+                        # otherwise we'd shrink from already-degraded.
+                        next_attempt = attempt + 2
+                        if original_mcp_servers:
+                            new_servers = _degrade_mcp_servers(
+                                original_mcp_servers, next_attempt,
+                            )
+                            if len(new_servers) != len(request.get("mcp_servers") or []):
+                                log.info(
+                                    "ceo_brain_responder_mcp_degraded",
+                                    next_attempt=next_attempt,
+                                    keeping=[
+                                        s.get("name") for s in new_servers
+                                    ],
+                                )
+                            request = {**request, "mcp_servers": new_servers}
                     log.info(
                         "ceo_brain_responder_transient_retry",
                         attempt=attempt + 1, wait_seconds=wait,

@@ -715,41 +715,67 @@ def test_responder_system_prompt_includes_persona_and_date():
     assert "CEO Brain" in sys_prompt or "Артем" in sys_prompt
 
 
-def test_slack_handler_filters_bot_messages_from_thread_history():
-    """FR-CB2-3.20 — operator-observed 2026-05-19: after
-    `post_placeholder("🤔 думаю...")`, the responder fetched the
-    whole thread and added EVERY message (including its own
-    placeholder) to history as `role=user`. The last "user
-    message" became "🤔 думаю..." and the model honestly replied
-    «получил только эмодзи». Fix: skip messages authored by the
-    bot when assembling thread context."""
+def test_thread_history_skips_bot_status_placeholders():
+    """FR-CB2-3.20 + FR-CB2-3.26 — status/placeholder bot messages
+    (`🤔 думаю...`, `⏳ retry`, `⚠️ ошибка`, `🔍 проверил...`,
+    `🔄 ищу...`) must NOT enter the conversation history. They're
+    progress markers, not answers — including them as assistant
+    content pollutes context and confuses the model."""
     from app.ceo_brain.slack_handler import (
         _build_thread_history_from_replies,
     )
 
     bot_user_id = "UBOTSELF"
     replies = [
-        {"user": "U_OP", "text": "что сегодня обсудили с Йоханом?"},
-        # Bot placeholder — must be filtered out.
+        {"user": "U_OP", "text": "вопрос"},
         {"user": bot_user_id, "text": "🤔 думаю…"},
-        # Earlier bot answer — must be filtered out.
-        {"user": bot_user_id, "text": "ранее: фандрайзинг идёт ок"},
-        # Another operator message — must be kept.
-        {"user": "U_OP", "text": "уточни про Jochen"},
-        # Generic bot-authored entry (no `user`, just `bot_id`).
-        {"bot_id": "B1", "text": "bot relayed reply"},
+        {"user": bot_user_id, "text": "⏳ MCP-сервер не отвечает на handshake, попытка 2/5…"},
+        {"user": bot_user_id, "text": "🔍 проверил: search_meetings\n\n_формулирую ответ…_"},
+        {"user": bot_user_id, "text": "🔄 ищу…"},
+        {"user": bot_user_id, "text": "⚠️ временная ошибка, попробуй через минуту"},
+        {"user": "U_OP", "text": "ещё вопрос"},
         # Empty text — also skipped.
         {"user": "U_OP", "text": ""},
     ]
     out = _build_thread_history_from_replies(
         replies, bot_user_id=bot_user_id,
     )
+    # Only the two real operator messages survive.
     contents = [m["content"] for m in out]
-    assert contents == [
-        "что сегодня обсудили с Йоханом?",
-        "уточни про Jochen",
-    ]
+    assert contents == ["вопрос", "ещё вопрос"]
     assert all(m["role"] == "user" for m in out)
+
+
+def test_thread_history_includes_bot_real_answers_as_assistant():
+    """FR-CB2-3.26 — real bot answers (not placeholders) belong in
+    history as `role=assistant`. Lets the operator follow-up
+    («а ещё?», «расскажи подробнее про X из того что выше»)."""
+    from app.ceo_brain.slack_handler import (
+        _build_thread_history_from_replies,
+    )
+
+    bot_user_id = "UBOTSELF"
+    replies = [
+        {"user": "U_OP", "text": "что обсудили с Йоханом?"},
+        # Status placeholder — skipped.
+        {"user": bot_user_id, "text": "🤔 думаю…"},
+        # Real bot answer — included as assistant.
+        {"user": bot_user_id,
+         "text": "Обсудили raunde Series A: $120M закрыто, ..."},
+        # Operator follow-up.
+        {"user": "U_OP", "text": "а что должен напомнить?"},
+        # Real bot answer again.
+        {"user": bot_user_id,
+         "text": "Йохан должен напомнить про Tether и Foxconn."},
+    ]
+    out = _build_thread_history_from_replies(
+        replies, bot_user_id=bot_user_id,
+    )
+    # 4 messages: user, assistant, user, assistant.
+    roles = [m["role"] for m in out]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    assert "Series A" in out[1]["content"]
+    assert "Tether" in out[3]["content"]
 
 
 def test_smart_mcp_routing_picks_calendar_for_meeting_questions():

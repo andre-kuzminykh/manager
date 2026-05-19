@@ -37,23 +37,44 @@ from app.logging_setup import get_logger
 log = get_logger(__name__)
 
 
+# FR-CB2-3.26 — emoji prefixes that mark status/placeholder bot
+# messages. These get DROPPED from the conversation history because
+# they're progress markers, not real answers.
+_BOT_STATUS_PREFIXES: tuple[str, ...] = (
+    "🤔",   # «думаю…»
+    "⏳",   # «retry…»
+    "⚠️",  # «ошибка»
+    "🔍",   # «проверил / ищу…»
+    "🔄",   # «обрабатываю…»
+)
+
+
+def _is_bot_status_placeholder(text: str) -> bool:
+    """True if the message text is a status/progress placeholder
+    (not a real answer). Detected by emoji prefix."""
+    stripped = (text or "").lstrip()
+    return any(stripped.startswith(p) for p in _BOT_STATUS_PREFIXES)
+
+
 def _build_thread_history_from_replies(
     replies: list[dict[str, Any]],
     *,
     bot_user_id: str | None,
 ) -> list[dict[str, Any]]:
-    """FR-CB2-3.20 — assemble responder thread context from a Slack
-    `conversations.replies` payload, **skipping bot-authored
-    messages**. Operator-observed bug 2026-05-19: the bot's own
-    `🤔 думаю…` placeholder was fetched back as part of the thread
-    and added to history as `role=user`, so the model saw "🤔" as
-    the latest user message and replied «получил только эмодзи».
+    """FR-CB2-3.20 + FR-CB2-3.26 — assemble responder thread
+    context from a Slack `conversations.replies` payload.
 
-    A message is bot-authored when EITHER:
-      * `user == bot_user_id` (regular bot message), OR
-      * `bot_id` is present (relay / app-posted message without a
-        user ID).
-    Empty-text messages are also skipped.
+    Rules:
+      * Operator messages → `role=user`
+      * Bot's REAL answers → `role=assistant` (conversational
+        continuity for follow-up questions)
+      * Bot's status placeholders (`🤔 думаю`, `⏳ retry`, `⚠️
+        ошибка`, `🔍 проверил…`, `🔄 ищу…`) → SKIPPED (progress
+        markers, not answers; would pollute context)
+      * Empty-text messages → SKIPPED
+
+    A message is bot-authored when `user == bot_user_id` OR
+    `bot_id` is set (relay / app-posted messages).
     """
     out: list[dict[str, Any]] = []
     for m in (replies or []):
@@ -62,11 +83,16 @@ def _build_thread_history_from_replies(
         text = (m.get("text") or "").strip()
         if not text:
             continue
-        if bot_user_id and m.get("user") == bot_user_id:
-            continue
-        if m.get("bot_id"):
-            continue
-        out.append({"role": "user", "content": text})
+        is_bot = (
+            (bot_user_id and m.get("user") == bot_user_id)
+            or bool(m.get("bot_id"))
+        )
+        if is_bot:
+            if _is_bot_status_placeholder(text):
+                continue
+            out.append({"role": "assistant", "content": text})
+        else:
+            out.append({"role": "user", "content": text})
     return out
 
 

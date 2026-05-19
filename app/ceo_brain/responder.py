@@ -908,6 +908,19 @@ def run_responder(
             # quirk: the model gets a clean, structured text prompt
             # with the harvested tool data + the original question.
             harvested = _harvest_tool_result_text(final_message)
+            # Diagnostic — counts both the raw block count of the
+            # main turn and what survived into the harvested DATA
+            # block. Empty harvest with non-empty block count means
+            # we missed something (e.g. unrecognised block type).
+            main_block_count = len(
+                getattr(final_message, "content", None) or []
+            )
+            log.info(
+                "ceo_brain_responder_recovery_harvest",
+                main_blocks=main_block_count,
+                harvested_chars=len(harvested),
+                harvested_preview=harvested[:300],
+            )
             original_question = ""
             for m in reversed(request.get("messages") or []):
                 if m.get("role") == "user":

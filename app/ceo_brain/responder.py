@@ -396,6 +396,13 @@ _RETRYABLE_MCP_RE = re.compile(
     r"connection error while communicating with mcp server",
     re.IGNORECASE,
 )
+# FR-CB2-3.23 v2 — Anthropic API timeout / network drop is also
+# transient (the model spent too long resolving an MCP tool, or
+# the HTTP connection dropped). Retry.
+_RETRYABLE_TIMEOUT_RE = re.compile(
+    r"request timed out|api.?timeout|connection.?(drop|reset|aborted)",
+    re.IGNORECASE,
+)
 
 
 def _is_429(exc: BaseException) -> bool:
@@ -403,8 +410,14 @@ def _is_429(exc: BaseException) -> bool:
 
 
 def _is_transient_mcp_handshake(exc: BaseException) -> bool:
-    """FR-CB2-3.23 — Anthropic 400 with the MCP-handshake message."""
-    return bool(_RETRYABLE_MCP_RE.search(str(exc) or ""))
+    """FR-CB2-3.23 — Anthropic 400 with the MCP-handshake message,
+    OR API timeout, OR connection drop — all considered transient."""
+    msg = str(exc) or ""
+    return bool(
+        _RETRYABLE_MCP_RE.search(msg)
+        or _RETRYABLE_TIMEOUT_RE.search(msg)
+        or type(exc).__name__ == "APITimeoutError"
+    )
 
 
 # FR-CB2-3.25 — MCP catalog for smart routing. Operator-pinned set.

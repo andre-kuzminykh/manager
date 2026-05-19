@@ -61,19 +61,15 @@ def _build_responder_callback(
     def _responder(payload: dict[str, Any]) -> None:
         channel = payload.get("channel") or ""
         ts = payload.get("ts") or payload.get("event_ts") or ""
-        # Operator-pinned 2026-05-19: «не видел ответ» — bot was
-        # posting placeholder INSIDE a synthetic thread on top-
-        # level DM messages, so the reply landed in the side-pane
-        # thread view instead of inline in the DM. For top-level
-        # DMs we reply top-level (no thread_ts). Only when the
-        # operator's own message lives in an existing thread do
-        # we stay in that thread.
+        # Operator-pinned 2026-05-19 (revision): «мне надо в треде
+        # чтоб отвечал как было». Always reply in a thread —
+        # operator's parent thread when they reply inside one,
+        # otherwise a synthetic thread anchored on the operator's
+        # message ts. Keeps Slack-DM clean (no answer-blob between
+        # questions) and lets the operator review previous answers
+        # by clicking each thread.
+        thread_ts = payload.get("thread_ts") or ts
         parent_thread_ts = payload.get("thread_ts")
-        thread_ts = parent_thread_ts if parent_thread_ts else None
-        # For @mention in a channel, we DO want to thread under
-        # the mention so the channel stays readable.
-        if payload.get("type") == "app_mention" and not thread_ts:
-            thread_ts = ts
         if not channel:
             return
 

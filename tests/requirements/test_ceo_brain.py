@@ -713,6 +713,33 @@ def test_responder_system_prompt_includes_persona_and_date():
     assert "CEO Brain" in sys_prompt or "Артем" in sys_prompt
 
 
+def test_responder_system_prompt_includes_search_strategy_rules():
+    """FR-CB2-3.19 — system prompt must teach the model two
+    operator-observed search strategies (2026-05-19):
+
+      1. Search queries derive from the TOPIC of the question
+         (e.g. «fundraising», «due diligence»), not just the
+         counterparty name — picking only the name surfaces all
+         meetings with that person and risks landing on the wrong
+         one.
+      2. A transcript shorter than 2000 chars is effectively empty
+         (just participant list, no dialogue). On encountering one,
+         the model must try the next candidate or re-search rather
+         than giving up.
+    """
+    from app.ceo_brain.responder import build_system_prompt
+
+    sys_prompt = build_system_prompt()
+    # Topic-keyword rule.
+    assert "тем" in sys_prompt.lower(), (
+        "system prompt should instruct using topic keywords"
+    )
+    # Short-transcript-retry rule.
+    assert "2000" in sys_prompt or "пуст" in sys_prompt.lower(), (
+        "system prompt should mention short/empty transcript retry"
+    )
+
+
 def test_responder_tool_use_events_streamed():
     """FR-CB2-3.15 — tool_use events surface in placeholder."""
     from app.ceo_brain.responder import describe_tool_use_for_slack

@@ -97,7 +97,8 @@ def post_placeholder(
 
 
 def build_system_prompt(*, today: datetime | None = None) -> str:
-    """FR-CB2-3.14 — system prompt with persona + today's date."""
+    """FR-CB2-3.14 + FR-CB2-3.19 — system prompt with persona,
+    today's date, and operator-pinned search-strategy rules."""
     today = today or datetime.now(timezone.utc)
     today_iso = today.strftime("%Y-%m-%d")
     return (
@@ -110,6 +111,21 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
         f"данных. Не отвечай по памяти, не предполагай, не описывай "
         f"свои возможности — сразу ищи. Только если данных правда нет "
         f"и tool вернул empty — честно скажи «не нашёл».\n\n"
+        f"СТРАТЕГИЯ ПОИСКА (FR-CB2-3.19, operator-pinned 2026-05-19):\n"
+        f"1. Search-query должен брать ТЕМУ из вопроса оператора "
+        f"(fundraising, due diligence, raise, EQT, term sheet и т.п.), "
+        f"а не только имя контрагента. Поиск только по имени даёт "
+        f"все встречи с этим человеком — велик шанс попасть в "
+        f"нерелевантную. Пример: вопрос «что обсудили с Йоханом по "
+        f"фандрайзингу» → query «fundraising» / «Fundraising daily», "
+        f"а не «Jochen» или «Strategic Investors».\n"
+        f"2. Если `get_zoom_transcript` / `get_meeting` вернул "
+        f"transcript короче 2000 символов — это пустой transcript "
+        f"(содержит только список участников, без диалога). НЕ "
+        f"сдавайся — попробуй следующий кандидат из выдачи поиска "
+        f"или сделай новый search с другим query (другая тема, "
+        f"другая дата). Только если все кандидаты пустые — отвечай "
+        f"что данных нет.\n\n"
         f"Стиль ответов:\n"
         f"- Кратко, по делу, без воды и без эмодзи.\n"
         f"- На русском, если оператор пишет на русском; иначе на "

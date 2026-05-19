@@ -1193,6 +1193,112 @@ def test_responder_synthesis_recovery_when_last_block_is_tool_use(session):
     assert "term sheet" in (row.response_text or "")
 
 
+def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
+    """FR-CB2-3.17 — recovery request MUST drop `mcp_servers`,
+    `tools`, and `betas` so the model can't loop back into another
+    round of tool calls instead of writing the answer. Without this,
+    Sonnet re-uses the available MCP toolbox and the recovery
+    returns yet more planning text (operator-observed 2026-05-19)."""
+    from types import SimpleNamespace
+
+    from app.ceo_brain.responder import run_responder
+
+    mcp_tool_use_block = SimpleNamespace(
+        type="mcp_tool_use",
+        name="search_zoom_meetings",
+        server_name="n8n_calendar",
+        input={"query": "Jochen"},
+        id="mcptoolu_1",
+    )
+    final_msg_1 = SimpleNamespace(
+        content=[mcp_tool_use_block],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(
+            input_tokens=80, output_tokens=20,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+    events_1 = [
+        SimpleNamespace(
+            type="content_block_start",
+            content_block=mcp_tool_use_block,
+        ),
+    ]
+    stream_1 = MagicMock()
+    stream_1.__iter__ = lambda self: iter(events_1)
+    stream_1.get_final_message.return_value = final_msg_1
+    cm_1 = MagicMock()
+    cm_1.__enter__.return_value = stream_1
+    cm_1.__exit__.return_value = False
+
+    text_block = SimpleNamespace(type="text", text="Готово.")
+    final_msg_2 = SimpleNamespace(
+        content=[text_block],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(
+            input_tokens=100, output_tokens=5,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+    stream_2 = MagicMock()
+    stream_2.__iter__ = lambda self: iter([
+        SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="text_delta", text="Готово."),
+        ),
+    ])
+    stream_2.get_final_message.return_value = final_msg_2
+    cm_2 = MagicMock()
+    cm_2.__enter__.return_value = stream_2
+    cm_2.__exit__.return_value = False
+
+    anthropic = MagicMock()
+    anthropic.messages.stream.side_effect = [cm_1, cm_2]
+    slack = MagicMock()
+    slack.chat_update.return_value = {"ok": True}
+
+    # Construct a request that DOES carry tools+mcp_servers — we
+    # need to assert recovery strips them. Simplest path: configure
+    # MCP_SERVERS env and provide a bot_client so `tools` is set.
+    import os
+    prev = os.environ.get("MCP_SERVERS")
+    os.environ["MCP_SERVERS"] = (
+        '[{"name":"n8n_calendar","url":"https://example.invalid/x"}]'
+    )
+    # NOTE: with MCP_SERVERS set, the responder routes through
+    # `beta.messages.stream` for the FIRST stream. We mock that too.
+    beta_stream_path = anthropic.beta.messages.stream
+    beta_stream_path.side_effect = [cm_1]
+    # Recovery stream goes through regular `messages.stream` after
+    # the fix because mcp_servers / betas are stripped.
+    try:
+        run_responder(
+            slack=slack, anthropic_client=anthropic, db_session=session,
+            channel="D1", placeholder_ts="1.2",
+            thread_history=[{"role": "user", "content": "вопрос"}],
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("MCP_SERVERS", None)
+        else:
+            os.environ["MCP_SERVERS"] = prev
+
+    # Main call went through the beta namespace (mcp_servers path).
+    assert beta_stream_path.call_count == 1
+    main_kwargs = beta_stream_path.call_args.kwargs
+    assert "mcp_servers" in main_kwargs
+    assert "betas" in main_kwargs
+
+    # Recovery call went through regular messages.stream (NO beta).
+    assert anthropic.messages.stream.call_count == 1
+    recovery_kwargs = anthropic.messages.stream.call_args.kwargs
+    assert "mcp_servers" not in recovery_kwargs
+    assert "tools" not in recovery_kwargs
+    assert "betas" not in recovery_kwargs
+
+
 # -- Category 4: MCP integration (FR-CB2-4.x) ------------------------------
 
 

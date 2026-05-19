@@ -854,14 +854,25 @@ def run_responder(
                 {
                     "role": "user",
                     "content": (
-                        "Сформулируй краткий ответ на основе результатов "
-                        "tool-вызовов выше. Если данных недостаточно — "
-                        "честно скажи об этом."
+                        "Не вызывай больше tools. Напиши финальный ответ "
+                        "оператору на основе данных из tool-вызовов выше. "
+                        "Если данных недостаточно — честно скажи об этом."
                     ),
                 },
             ]
-            recovery_request = {**request, "messages": recovery_messages}
-            with stream_factory(**recovery_request) as rec_stream:
+            # Strip tool-routing fields so the model is FORCED into a
+            # text-only response — otherwise Sonnet keeps re-using
+            # the toolbox instead of synthesising (operator-observed
+            # 2026-05-19 second-iteration bug).
+            recovery_request = {
+                k: v for k, v in request.items()
+                if k not in {"mcp_servers", "tools", "betas"}
+            }
+            recovery_request["messages"] = recovery_messages
+            # Without `mcp_servers`/`betas`, the regular
+            # `messages.stream` is the right path.
+            recovery_stream_factory = anthropic_client.messages.stream
+            with recovery_stream_factory(**recovery_request) as rec_stream:
                 for event in rec_stream:
                     etype = getattr(event, "type", None) or (
                         isinstance(event, dict) and event.get("type")

@@ -657,6 +657,28 @@ def run_responder(
                         tool_uses.append(
                             {"name": tool_name, "input": tool_input}
                         )
+                # FR-CB2-3.22 v2 — surface tool-usage progress now
+                # that we no longer stream. Operator gets a brief
+                # «🔍 проверил: X, Y» between placeholder and final
+                # answer instead of a static «🤔 думаю...» for the
+                # entire 30-60 sec the model spends on MCP calls.
+                if tool_uses:
+                    uniq = []
+                    for tu in tool_uses:
+                        n = tu.get("name") or ""
+                        if n and n not in uniq:
+                            uniq.append(n)
+                    progress = (
+                        "🔍 проверил: " + ", ".join(uniq[:6])
+                        + "\n\n_формулирую ответ…_"
+                    )
+                    try:
+                        slack.chat_update(
+                            channel=channel, ts=placeholder_ts,
+                            text=progress,
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
                 main_ok = True
                 break
             except BaseException as exc:  # noqa: BLE001
@@ -664,14 +686,20 @@ def run_responder(
                 # alongside 429.
                 if (_is_429(exc) or _is_transient_mcp_handshake(exc)) and attempt + 1 < max_retries:
                     wait = _retry_after_seconds(exc, default=2.0)
+                    reason = (
+                        "MCP-сервер не отвечает на handshake"
+                        if _is_transient_mcp_handshake(exc)
+                        else "rate-limit Anthropic"
+                    )
                     log.info(
-                        "ceo_brain_responder_rate_limited_retry",
+                        "ceo_brain_responder_transient_retry",
                         attempt=attempt + 1, wait_seconds=wait,
+                        reason=reason,
                     )
                     try:
                         slack.chat_update(
                             channel=channel, ts=placeholder_ts,
-                            text=f"⏳ rate-limit, повторю через ~{int(wait or 1)} сек",
+                            text=f"⏳ {reason}, повторяю…",
                         )
                     except Exception:  # noqa: BLE001
                         pass

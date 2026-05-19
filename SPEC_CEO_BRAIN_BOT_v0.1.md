@@ -472,7 +472,7 @@ manual refresh через connector UI; v0.1 не делает auto-refresh.
 | ID | Требование | Тест |
 |---|---|---|
 | FR-CB2-3.1 | `app_mention` event → trigger responder pipeline (UC-6) | `test_responder_triggered_by_mention` |
-| FR-CB2-3.2 | `message.im` event → trigger responder pipeline (UC-10) | `test_responder_triggered_by_dm` |
+| FR-CB2-3.2 | `message.im` event → trigger responder pipeline, top-level OR thread-reply (UC-10) | `test_responder_triggered_by_dm` + `test_responder_triggered_by_dm_thread_reply` |
 | FR-CB2-3.3 | Message без @mention в публичном канале → responder НЕ запускается (UC-11) | `test_responder_silent_on_channel_message_without_mention` |
 | FR-CB2-3.4 | Placeholder сообщение ":thinking_face: думаю…" появляется в thread в <1 сек от event-receive | `test_responder_placeholder_under_1s` |
 | FR-CB2-3.5 | `messages.create` к Anthropic с model=`claude-sonnet-4-6` (env-override `CEO_BRAIN_MODEL`) | `test_responder_calls_anthropic_with_default_model` |

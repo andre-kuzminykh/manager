@@ -395,6 +395,45 @@ def test_responder_triggered_by_dm():
     ) is True
 
 
+def test_responder_triggered_by_dm_thread_reply(session, tmp_path, monkeypatch):
+    """FR-CB2-3.2 — thread-reply внутри DM ОБЯЗАН триггерить
+    responder. Slack отправляет `message.im` event с
+    `thread_ts` set; channel_type остаётся "im". Operator
+    наблюдал баг 2026-05-19 — top-level DM отвечал, а
+    thread-reply молчал."""
+    from app.ceo_brain.dispatcher import handle_event
+
+    monkeypatch.setenv("CEO_BRAIN_ARCHIVE_DIR", str(tmp_path))
+    captured: dict = {}
+
+    def _responder(payload):
+        captured["called"] = True
+        captured["payload"] = payload
+
+    payload = {
+        "type": "message",
+        "channel": "D0ASY5QF6UX",
+        "channel_type": "im",
+        "user": "U_OP",
+        "text": "тест 20",
+        "ts": "1779170900.000100",
+        "thread_ts": "1779170756.546959",
+        "event_id": "EvDM_threadreply",
+    }
+
+    r = handle_event(
+        session, payload,
+        bot_user_id="UBOT",
+        responder=_responder,
+        archive_dir=tmp_path,
+    )
+    assert r.responder_triggered is True
+    assert captured.get("called") is True, (
+        "Thread-reply в DM должен запускать responder pipeline "
+        "(FR-CB2-3.2)"
+    )
+
+
 def test_responder_silent_on_channel_message_without_mention():
     """FR-CB2-3.3 / UC-11 — silent in channels without @mention."""
     from app.ceo_brain.responder import should_respond

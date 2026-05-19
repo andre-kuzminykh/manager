@@ -158,6 +158,7 @@ def build_anthropic_request(
     *,
     thread_history: list[dict[str, Any]] | None = None,
     today: datetime | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """FR-CB2-3.5/3.6/3.7 + NFR-CB2-C.2 — build the Messages API
     request payload with:
@@ -201,6 +202,8 @@ def build_anthropic_request(
     }
     if mcp_servers:
         request["mcp_servers"] = mcp_servers
+    if tools:
+        request["tools"] = list(tools)
     return request
 
 
@@ -367,6 +370,54 @@ def _retry_after_seconds(exc: BaseException, default: float = 5.0) -> float:
     return default
 
 
+def _serialise_content_blocks(blocks: Any) -> list[dict[str, Any]]:
+    """Convert SDK content blocks back to the wire-shape required for
+    the next ``messages`` turn. SDK blocks expose ``.model_dump()``;
+    if not, fall back to a manual best-effort copy."""
+    out: list[dict[str, Any]] = []
+    for b in (blocks or []):
+        if isinstance(b, dict):
+            out.append(b)
+            continue
+        if hasattr(b, "model_dump"):
+            try:
+                out.append(b.model_dump(exclude_none=True))
+                continue
+            except Exception:  # noqa: BLE001
+                pass
+        d: dict[str, Any] = {"type": getattr(b, "type", "text")}
+        for attr in ("text", "name", "input", "id"):
+            v = getattr(b, attr, None)
+            if v is not None:
+                d[attr] = v
+        out.append(d)
+    return out
+
+
+def _collect_local_tool_uses(
+    final_message: Any,
+    tool_executors: dict[str, Callable[[dict[str, Any]], str]],
+) -> list[Any]:
+    """Pick out tool_use blocks whose name matches a local executor.
+    MCP tool_use blocks (``mcp_tool_use``) are handled server-side
+    by Anthropic and don't need a follow-up turn from us."""
+    if not tool_executors:
+        return []
+    pending: list[Any] = []
+    for b in (getattr(final_message, "content", None) or []):
+        btype = getattr(b, "type", None) or (
+            isinstance(b, dict) and b.get("type")
+        )
+        if btype != "tool_use":
+            continue
+        name = getattr(b, "name", None) or (
+            isinstance(b, dict) and b.get("name")
+        ) or ""
+        if name in tool_executors:
+            pending.append(b)
+    return pending
+
+
 def run_responder(
     *,
     slack: Any,
@@ -379,6 +430,9 @@ def run_responder(
     today: datetime | None = None,
     max_retries: int = 3,
     sleep: Callable[[float], None] = time.sleep,
+    slack_bot_client: Any | None = None,
+    slack_user_client: Any | None = None,
+    max_tool_loops: int = 10,
 ) -> ClaudeResponderRun | None:
     """End-to-end Claude responder.
 
@@ -393,8 +447,25 @@ def run_responder(
          ``chat_update`` (FR-CB2-3.9).
       5. Persist the run row with usage / cost.
     """
+    # FR-CB2-3.16 — local Slack tools. When the dispatcher supplies a
+    # Slack ``WebClient``, we expose Slack capabilities as regular
+    # Anthropic ``tools`` and execute them locally (no external MCP).
+    tool_executors: dict[str, Callable[[dict[str, Any]], str]] = {}
+    local_tool_schemas: list[dict[str, Any]] = []
+    if slack_bot_client is not None:
+        from app.ceo_brain.slack_tools import (
+            SLACK_TOOL_SCHEMAS,
+            build_executors,
+        )
+        tool_executors = build_executors(
+            bot_client=slack_bot_client,
+            user_client=slack_user_client,
+        )
+        local_tool_schemas = list(SLACK_TOOL_SCHEMAS)
+
     request = build_anthropic_request(
         thread_history=thread_history, today=today,
+        tools=local_tool_schemas,
     )
     started_at = datetime.now(timezone.utc)
 
@@ -412,126 +483,190 @@ def run_responder(
     tool_uses: list[dict[str, Any]] = []
     last_update = [0.0]
     final_message: Any = None
-    last_exc: BaseException | None = None
 
-    for attempt in range(max(1, max_retries)):
-        try:
-            with stream_factory(**request) as stream:
-                for event in stream:
-                    etype = getattr(event, "type", None) or (
-                        isinstance(event, dict) and event.get("type")
-                    )
-                    if etype == "content_block_start":
-                        block = (
-                            getattr(event, "content_block", None)
-                            if not isinstance(event, dict)
-                            else event.get("content_block")
+    # FR-CB2-3.16 — outer tool-use loop. Each iteration runs one
+    # streamed Claude turn; if the turn ends with a `tool_use` block
+    # for a *local* tool, execute it, append assistant+user turns,
+    # and re-stream. MCP tool_uses are resolved by Anthropic
+    # server-side so they don't trigger another iteration.
+    final_response_failed = False
+    for loop_idx in range(max(1, max_tool_loops)):
+        stream_ok = False
+        for attempt in range(max(1, max_retries)):
+            try:
+                with stream_factory(**request) as stream:
+                    for event in stream:
+                        etype = getattr(event, "type", None) or (
+                            isinstance(event, dict) and event.get("type")
                         )
-                        btype = (
-                            getattr(block, "type", None)
-                            if not isinstance(block, dict)
-                            else (block or {}).get("type")
-                        )
-                        if btype in {"tool_use", "server_tool_use", "mcp_tool_use"}:
-                            tool_name = (
-                                getattr(block, "name", None)
+                        if etype == "content_block_start":
+                            block = (
+                                getattr(event, "content_block", None)
+                                if not isinstance(event, dict)
+                                else event.get("content_block")
+                            )
+                            btype = (
+                                getattr(block, "type", None)
                                 if not isinstance(block, dict)
-                                else (block or {}).get("name")
-                            ) or ""
-                            tool_input = (
-                                getattr(block, "input", None)
-                                if not isinstance(block, dict)
-                                else (block or {}).get("input")
-                            ) or {}
-                            tool_uses.append(
-                                {"name": tool_name, "input": tool_input}
+                                else (block or {}).get("type")
                             )
-                            note = describe_tool_use_for_slack(
-                                tool_name=tool_name,
-                                input_arg=tool_input,
-                            )
-                            text_buffer.append("\n" + note)
-                            _stream_text_to_slack(
-                                slack=slack, channel=channel,
-                                placeholder_ts=placeholder_ts,
-                                text_buffer=text_buffer,
-                                last_update=last_update,
-                                force=True,
-                            )
-                        continue
-                    if etype == "content_block_delta":
-                        delta = (
-                            getattr(event, "delta", None)
-                            if not isinstance(event, dict)
-                            else event.get("delta")
-                        )
-                        dtype = (
-                            getattr(delta, "type", None)
-                            if not isinstance(delta, dict)
-                            else (delta or {}).get("type")
-                        )
-                        if dtype in {"text_delta", "text"}:
-                            chunk = (
-                                getattr(delta, "text", None)
-                                if not isinstance(delta, dict)
-                                else (delta or {}).get("text")
-                            ) or ""
-                            if chunk:
-                                text_buffer.append(chunk)
+                            if btype in {"tool_use", "server_tool_use", "mcp_tool_use"}:
+                                tool_name = (
+                                    getattr(block, "name", None)
+                                    if not isinstance(block, dict)
+                                    else (block or {}).get("name")
+                                ) or ""
+                                tool_input = (
+                                    getattr(block, "input", None)
+                                    if not isinstance(block, dict)
+                                    else (block or {}).get("input")
+                                ) or {}
+                                tool_uses.append(
+                                    {"name": tool_name, "input": tool_input}
+                                )
+                                note = describe_tool_use_for_slack(
+                                    tool_name=tool_name,
+                                    input_arg=tool_input,
+                                )
+                                text_buffer.append("\n" + note)
                                 _stream_text_to_slack(
                                     slack=slack, channel=channel,
                                     placeholder_ts=placeholder_ts,
                                     text_buffer=text_buffer,
                                     last_update=last_update,
+                                    force=True,
                                 )
-                final_message = stream.get_final_message()
-            break
-        except BaseException as exc:  # noqa: BLE001
-            last_exc = exc
-            if _is_429(exc) and attempt + 1 < max_retries:
-                wait = _retry_after_seconds(exc, default=2.0)
-                log.info(
-                    "ceo_brain_responder_rate_limited_retry",
-                    attempt=attempt + 1, wait_seconds=wait,
+                            continue
+                        if etype == "content_block_delta":
+                            delta = (
+                                getattr(event, "delta", None)
+                                if not isinstance(event, dict)
+                                else event.get("delta")
+                            )
+                            dtype = (
+                                getattr(delta, "type", None)
+                                if not isinstance(delta, dict)
+                                else (delta or {}).get("type")
+                            )
+                            if dtype in {"text_delta", "text"}:
+                                chunk = (
+                                    getattr(delta, "text", None)
+                                    if not isinstance(delta, dict)
+                                    else (delta or {}).get("text")
+                                ) or ""
+                                if chunk:
+                                    text_buffer.append(chunk)
+                                    _stream_text_to_slack(
+                                        slack=slack, channel=channel,
+                                        placeholder_ts=placeholder_ts,
+                                        text_buffer=text_buffer,
+                                        last_update=last_update,
+                                    )
+                    final_message = stream.get_final_message()
+                stream_ok = True
+                break
+            except BaseException as exc:  # noqa: BLE001
+                if _is_429(exc) and attempt + 1 < max_retries:
+                    wait = _retry_after_seconds(exc, default=2.0)
+                    log.info(
+                        "ceo_brain_responder_rate_limited_retry",
+                        attempt=attempt + 1, wait_seconds=wait,
+                    )
+                    try:
+                        slack.chat_update(
+                            channel=channel, ts=placeholder_ts,
+                            text=f"⏳ rate-limit, повторю через ~{int(wait or 1)} сек",
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
+                    sleep(wait)
+                    continue
+                log.warning(
+                    "ceo_brain_responder_failed",
+                    error=str(exc), error_type=type(exc).__name__,
                 )
                 try:
                     slack.chat_update(
                         channel=channel, ts=placeholder_ts,
-                        text=f"⏳ rate-limit, повторю через ~{int(wait or 1)} сек",
+                        text="⚠️ временная ошибка, попробуй через минуту",
                     )
                 except Exception:  # noqa: BLE001
                     pass
-                sleep(wait)
-                continue
-            log.warning(
-                "ceo_brain_responder_failed",
-                error=str(exc), error_type=type(exc).__name__,
-            )
-            try:
-                slack.chat_update(
-                    channel=channel, ts=placeholder_ts,
-                    text="⚠️ временная ошибка, попробуй через минуту",
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            if db_session is not None:
-                persist_run(
-                    db_session,
-                    slack_channel_id=channel,
-                    slack_event_ts=slack_event_ts or placeholder_ts,
-                    slack_placeholder_ts=placeholder_ts,
-                    request_payload=request,
-                    response_text="",
-                    tool_uses=tool_uses,
-                    status=(
-                        "rate_limited" if _is_429(exc) else "failed"
-                    ),
-                    error=str(exc),
-                    started_at=started_at,
-                    completed_at=datetime.now(timezone.utc),
-                )
+                if db_session is not None:
+                    persist_run(
+                        db_session,
+                        slack_channel_id=channel,
+                        slack_event_ts=slack_event_ts or placeholder_ts,
+                        slack_placeholder_ts=placeholder_ts,
+                        request_payload=request,
+                        response_text="",
+                        tool_uses=tool_uses,
+                        status=(
+                            "rate_limited" if _is_429(exc) else "failed"
+                        ),
+                        error=str(exc),
+                        started_at=started_at,
+                        completed_at=datetime.now(timezone.utc),
+                    )
+                final_response_failed = True
+                break
+        if not stream_ok:
             return None
-    else:  # pragma: no cover - the for/else fires when retries exhaust
+
+        # If the turn produced local tool_use blocks, execute them
+        # and extend the conversation with assistant + user turns.
+        pending_local = _collect_local_tool_uses(
+            final_message, tool_executors,
+        )
+        if not pending_local:
+            break
+
+        tool_result_blocks: list[dict[str, Any]] = []
+        for tu in pending_local:
+            name = getattr(tu, "name", None) or (
+                isinstance(tu, dict) and tu.get("name")
+            ) or ""
+            tid = getattr(tu, "id", None) or (
+                isinstance(tu, dict) and tu.get("id")
+            ) or ""
+            inp = getattr(tu, "input", None) or (
+                isinstance(tu, dict) and tu.get("input")
+            ) or {}
+            try:
+                result = tool_executors[name](inp)
+                is_error = False
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "ceo_brain_local_tool_crashed",
+                    tool=name, error=str(e),
+                )
+                result = json.dumps(
+                    {"error": f"executor crashed: {e}"},
+                    ensure_ascii=False,
+                )
+                is_error = True
+            tool_result_blocks.append({
+                "type": "tool_result",
+                "tool_use_id": tid,
+                "content": result,
+                **({"is_error": True} if is_error else {}),
+            })
+
+        assistant_content = _serialise_content_blocks(
+            getattr(final_message, "content", None) or []
+        )
+        new_messages = list(request["messages"]) + [
+            {"role": "assistant", "content": assistant_content},
+            {"role": "user", "content": tool_result_blocks},
+        ]
+        request = {**request, "messages": new_messages}
+    else:
+        log.warning(
+            "ceo_brain_responder_tool_loop_exhausted",
+            max_tool_loops=max_tool_loops,
+        )
+
+    if final_response_failed:
         return None
 
     # Build the final response with Sources block and update Slack.

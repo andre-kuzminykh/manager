@@ -629,6 +629,186 @@ def test_responder_tool_use_events_streamed():
     assert "Calendar" in out or "calendar" in out
 
 
+# -- FR-CB2-3.16 — Local Slack tools ----------------------------------------
+
+
+def test_slack_tools_schemas_shape():
+    """FR-CB2-3.16 — local Slack tool schemas are exposed in the
+    Anthropic-`tools` wire shape (name + description + input_schema
+    with `type: "object"`)."""
+    from app.ceo_brain.slack_tools import SLACK_TOOL_SCHEMAS
+
+    assert isinstance(SLACK_TOOL_SCHEMAS, list)
+    assert SLACK_TOOL_SCHEMAS, "must expose at least one Slack tool"
+    names = {t["name"] for t in SLACK_TOOL_SCHEMAS}
+    # Essentials the operator asked for: read history, post, search.
+    assert "slack_search" in names
+    assert "slack_post_message" in names
+    assert "slack_get_channel_history" in names
+    for t in SLACK_TOOL_SCHEMAS:
+        assert isinstance(t.get("name"), str) and t["name"]
+        assert isinstance(t.get("description"), str)
+        schema = t.get("input_schema") or {}
+        assert schema.get("type") == "object"
+        assert isinstance(schema.get("properties"), dict)
+
+
+def test_slack_tool_search_disabled_without_user_token():
+    """FR-CB2-3.16 — `slack_search` needs a `xoxp-` user token.
+    Without one, the executor returns a clear error JSON instead of
+    crashing (so Claude can fall back to other tools)."""
+    from app.ceo_brain.slack_tools import build_executors
+
+    bot = MagicMock(name="bot-client")
+    execs = build_executors(bot_client=bot, user_client=None)
+    out = execs["slack_search"]({"query": "anything"})
+    payload = json.loads(out)
+    assert "error" in payload
+    assert "search" in payload["error"].lower()
+
+
+def test_slack_tool_post_message_uses_bot_client():
+    """FR-CB2-3.16 — `slack_post_message` routes through bot client
+    (bot token can post; user token isn't required)."""
+    from app.ceo_brain.slack_tools import build_executors
+
+    bot = MagicMock()
+    bot.chat_postMessage.return_value = {
+        "ok": True, "ts": "1.1", "channel": "C1",
+    }
+    execs = build_executors(bot_client=bot, user_client=None)
+    out = execs["slack_post_message"](
+        {"channel": "C1", "text": "hi", "thread_ts": "0.0"}
+    )
+    assert bot.chat_postMessage.called
+    kwargs = bot.chat_postMessage.call_args.kwargs
+    assert kwargs["channel"] == "C1"
+    assert kwargs["text"] == "hi"
+    assert kwargs["thread_ts"] == "0.0"
+    payload = json.loads(out)
+    assert payload.get("ok") is True
+
+
+def test_responder_includes_local_slack_tools():
+    """FR-CB2-3.16 — when `slack_bot_client` is supplied,
+    `build_anthropic_request` carries the local Slack tool schemas
+    alongside any MCP servers."""
+    from app.ceo_brain.responder import build_anthropic_request
+    from app.ceo_brain.slack_tools import SLACK_TOOL_SCHEMAS
+
+    req = build_anthropic_request(
+        thread_history=[{"role": "user", "content": "hi"}],
+        tools=list(SLACK_TOOL_SCHEMAS),
+    )
+    assert isinstance(req.get("tools"), list)
+    tool_names = {t["name"] for t in req["tools"]}
+    assert "slack_search" in tool_names
+    assert "slack_post_message" in tool_names
+
+
+def test_responder_local_tool_use_loop(session):
+    """FR-CB2-3.16 — responder runs the multi-turn tool-use loop:
+    1) first stream emits a `tool_use` block for `slack_search`,
+    2) executor fires against `slack_bot_client`,
+    3) responder feeds the result back and re-streams to `end_turn`.
+    """
+    from types import SimpleNamespace
+
+    from app.ceo_brain.responder import run_responder
+    from app.models import ClaudeResponderRun
+
+    # Stream 1 — tool_use for slack_search, then end-of-stream.
+    tool_use_block = SimpleNamespace(
+        type="tool_use",
+        name="slack_search",
+        input={"query": "EQT"},
+        id="toolu_xyz",
+    )
+    final_msg_1 = SimpleNamespace(
+        content=[tool_use_block],
+        usage=SimpleNamespace(
+            input_tokens=10, output_tokens=5,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+    events_1 = [
+        SimpleNamespace(
+            type="content_block_start",
+            content_block=tool_use_block,
+        ),
+    ]
+    stream_1 = MagicMock()
+    stream_1.__iter__ = lambda self: iter(events_1)
+    stream_1.get_final_message.return_value = final_msg_1
+    cm_1 = MagicMock()
+    cm_1.__enter__.return_value = stream_1
+    cm_1.__exit__.return_value = False
+
+    # Stream 2 — plain text deltas, end_turn.
+    text_block = SimpleNamespace(type="text", text="Ничего не нашёл.")
+    final_msg_2 = SimpleNamespace(
+        content=[text_block],
+        usage=SimpleNamespace(
+            input_tokens=20, output_tokens=15,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+    events_2 = [
+        SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="text_delta", text="Ничего "),
+        ),
+        SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(type="text_delta", text="не нашёл."),
+        ),
+    ]
+    stream_2 = MagicMock()
+    stream_2.__iter__ = lambda self: iter(events_2)
+    stream_2.get_final_message.return_value = final_msg_2
+    cm_2 = MagicMock()
+    cm_2.__enter__.return_value = stream_2
+    cm_2.__exit__.return_value = False
+
+    anthropic = MagicMock()
+    anthropic.messages.stream.side_effect = [cm_1, cm_2]
+    slack = MagicMock()
+    slack.chat_update.return_value = {"ok": True}
+
+    # Bot client gets the slack_search call (we route it through
+    # user_client when set; here it's None so an error JSON comes
+    # back — that's fine, we still verify the loop turns).
+    bot_client = MagicMock()
+    user_client = MagicMock()
+    user_client.search_messages.return_value = {
+        "ok": True,
+        "messages": {"matches": []},
+    }
+
+    run_responder(
+        slack=slack, anthropic_client=anthropic, db_session=session,
+        channel="C1", placeholder_ts="1.2", thread_history=[
+            {"role": "user", "content": "Что про EQT?"}
+        ],
+        slack_bot_client=bot_client,
+        slack_user_client=user_client,
+    )
+
+    # The stream was invoked twice (one per turn).
+    assert anthropic.messages.stream.call_count == 2
+    # The executor ran against the user client (search.messages).
+    assert user_client.search_messages.called
+    # Persisted run carries the tool_use trace.
+    row = session.query(ClaudeResponderRun).one()
+    assert row.status == "done"
+    assert any(
+        (tu or {}).get("name") == "slack_search"
+        for tu in (row.tool_uses or [])
+    )
+
+
 # -- Category 4: MCP integration (FR-CB2-4.x) ------------------------------
 
 

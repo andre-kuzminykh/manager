@@ -486,6 +486,7 @@ manual refresh через connector UI; v0.1 не делает auto-refresh.
 | FR-CB2-3.13 | Anthropic 429 → retry с retry-after header, до 3 попыток (UC-9) | `test_responder_429_retries` |
 | FR-CB2-3.14 | System prompt включает CEO Brain persona + текущую дату + operator-name | `test_responder_system_prompt_includes_persona_and_date` |
 | FR-CB2-3.15 | Tool-use events отображаются в Slack как промежуточные «🔍 ищу в Calendar…» (optional, env-flag) | `test_responder_tool_use_events_streamed` |
+| FR-CB2-3.16 | Local Slack tools — responder регистрирует набор Anthropic-`tools` для Slack-операций (search / history / replies / post / users / channels / permalink), исполняет их локально через `slack_sdk` с операторскими токенами. Поверх `mcp.slack.com` использовать нельзя (требует Anthropic-managed OAuth); локальные tools работают параллельно с `mcp_servers` без конфликта. Multi-turn loop: после tool_use stream продолжается до `end_turn` (max `max_tool_loops=10` итераций). `search.messages` использует `CEO_BRAIN_SLACK_USER_TOKEN` (xoxp), остальные — bot token. | `test_responder_includes_local_slack_tools` + `test_responder_local_tool_use_loop` + `test_slack_tools_schemas_shape` + `test_slack_tool_search_disabled_without_user_token` |
 
 ### Категория 4 — MCP integration (FR-CB2-4.x)
 
@@ -642,6 +643,7 @@ Event subscriptions:
 | FR-CB2-3.13 | `…::test_responder_429_retries` |
 | FR-CB2-3.14 | `…::test_responder_system_prompt_includes_persona_and_date` |
 | FR-CB2-3.15 | `…::test_responder_tool_use_events_streamed` |
+| FR-CB2-3.16 | `…::test_responder_includes_local_slack_tools` + `…::test_responder_local_tool_use_loop` + `…::test_slack_tools_schemas_shape` + `…::test_slack_tool_search_disabled_without_user_token` |
 | FR-CB2-4.1 | `…::test_mcp_config_loaded_and_validated` |
 | FR-CB2-4.2 | `…::test_mcp_supports_sse_and_http` |
 | FR-CB2-4.3 | `…::test_mcp_oauth_token_resolution` |

@@ -130,6 +130,13 @@ class Settings(BaseSettings):
     ceo_brain_mcp_servers: str = Field(
         default="", alias="MCP_SERVERS",
     )
+    # User OAuth token (xoxp-…) — required for `search.messages`
+    # since bot tokens cannot search. Optional; if absent the
+    # `slack_search` local tool returns a "search disabled" error
+    # but other Slack tools still work via the bot token.
+    ceo_brain_slack_user_token: str = Field(
+        default="", alias="CEO_BRAIN_SLACK_USER_TOKEN",
+    )
 
     # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся
     # встречи в Google Calendar (определяется по совпадению title с

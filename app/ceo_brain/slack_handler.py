@@ -58,6 +58,20 @@ def _build_responder_callback(
         return None
     anthropic_client = Anthropic(api_key=api_key)
 
+    # FR-CB2-3.16 — local Slack tools need a `xoxp-` user client for
+    # `search.messages` (Slack rejects bot tokens on that endpoint).
+    # Bot-only ops (history/replies/post/lookup) use `slack_client`.
+    slack_user_client: Any | None = None
+    user_token = (settings.ceo_brain_slack_user_token or "").strip()
+    if user_token:
+        try:
+            from slack_sdk import WebClient as _WebClient
+            slack_user_client = _WebClient(token=user_token)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ceo_brain_slack_user_client_init_failed", error=str(e),
+            )
+
     def _responder(payload: dict[str, Any]) -> None:
         channel = payload.get("channel") or ""
         ts = payload.get("ts") or payload.get("event_ts") or ""
@@ -120,6 +134,8 @@ def _build_responder_callback(
                     thread_history=history,
                     db_session=db,
                     slack_event_ts=ts,
+                    slack_bot_client=slack_client,
+                    slack_user_client=slack_user_client,
                 )
 
         threading.Thread(

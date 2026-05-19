@@ -495,6 +495,7 @@ manual refresh через connector UI; v0.1 не делает auto-refresh.
 | FR-CB2-3.20 | Filter bot messages from thread context — operator-observed 2026-05-19: бот ответил «Вопрос не распознан — получил только эмодзи 🤔» на нормальный вопрос. Причина: после `post_placeholder("🤔 думаю...")` бот делает `conversations_replies` и кладёт ВСЕ сообщения треда (включая собственный placeholder) в history как `role=user`. Последнее «user-сообщение» оказывается «🤔» — модель честно отвечает что это эмодзи. Фикс: при сборке thread-context пропускать сообщения от bot (по `user == bot_user_id` или `bot_id is not None`). | `test_slack_handler_filters_bot_messages_from_thread_history` |
 | FR-CB2-3.21 | Search → transcript-fetch mandate в system prompt — operator-observed 2026-05-19: модель вызвала `search_meetings` / `search_zoom_meetings` / `search_messages` и СДАЛАСЬ, не дёрнув `get_zoom_transcript` ни для одного кандидата. В итоге recovery получил пустой DATA-блок. Фикс: явная инструкция «после любого `search_*` всегда зови `get_zoom_transcript` / `get_meeting` для топ-1-3 кандидатов из выдачи. Только тогда можно отвечать. Сами по себе search-результаты — это только списки заголовков, без содержимого встречи». | `test_responder_system_prompt_mandates_transcript_fetch_after_search` |
 | FR-CB2-3.22 | Non-streaming main turn (operator-pinned 2026-05-19): `beta.messages.stream` с MCP + parallel tool_use квирково обрывает поток после блоков `mcp_tool_use`, до того как Anthropic подтянет `mcp_tool_result` (наблюдалось: `main_blocks=4` где 1 text + 3 mcp_tool_use + 0 tool_result; recovery получал DATA с одним planning-текстом). Direct `beta.messages.create` (non-stream) на тех же входах возвращает ПОЛНЫЙ ответ с tool_use + tool_result + final synthesis. Фикс: main turn переключён на `create()`, теряем прогресс-индикаторы 🔍 но получаем стабильный полный ответ. Recovery по-прежнему `stream`-based. | `test_run_responder_uses_create_for_main_turn` |
+| FR-CB2-3.23 | MCP transient handshake retry (operator-pinned 2026-05-19): Anthropic делает parallel handshake ко всем `mcp_servers` в начале вызова. Если хотя бы один не отвечает за таймаут — весь запрос валится с `BadRequestError: Connection error while communicating with MCP server`. Каждый отдельный сервер работает (проверено индивидуально), но один из 6+ периодически тормозит на handshake. Фикс: responder детектит этот error pattern и ретраит до 3 раз с backoff 2/4/8 сек. | `test_responder_retries_on_mcp_handshake_connection_error` |
 
 ### Категория 4 — MCP integration (FR-CB2-4.x)
 
@@ -660,6 +661,7 @@ Event subscriptions:
 | FR-CB2-3.20 | `…::test_slack_handler_filters_bot_messages_from_thread_history` |
 | FR-CB2-3.21 | `…::test_responder_system_prompt_mandates_transcript_fetch_after_search` |
 | FR-CB2-3.22 | `…::test_run_responder_uses_create_for_main_turn` |
+| FR-CB2-3.23 | `…::test_responder_retries_on_mcp_handshake_connection_error` |
 | FR-CB2-4.1 | `…::test_mcp_config_loaded_and_validated` |
 | FR-CB2-4.2 | `…::test_mcp_supports_sse_and_http` |
 | FR-CB2-4.3 | `…::test_mcp_oauth_token_resolution` |

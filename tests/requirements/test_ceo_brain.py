@@ -752,6 +752,60 @@ def test_slack_handler_filters_bot_messages_from_thread_history():
     assert all(m["role"] == "user" for m in out)
 
 
+def test_responder_retries_on_mcp_handshake_connection_error(session):
+    """FR-CB2-3.23 — Anthropic's parallel MCP handshake periodically
+    fails with `BadRequestError: Connection error while communicating
+    with MCP server`. Each individual server works (verified
+    one-by-one), but one in 6+ stalls on a given handshake. The
+    error is transient — responder must retry up to 3 times with
+    backoff before giving up."""
+    from app.ceo_brain.responder import run_responder
+    from app.models import ClaudeResponderRun
+
+    calls = {"n": 0}
+
+    def _maybe_mcp_handshake_fail(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError(
+                "Error code: 400 - {'type':'error','error':{"
+                "'type':'invalid_request_error','message':"
+                "'Connection error while communicating with MCP "
+                "server. The server may be unavailable or "
+                "unresponsive.'}}"
+            )
+        # Third call succeeds with a clean text response.
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="OK")],
+            stop_reason="end_turn",
+            usage=SimpleNamespace(
+                input_tokens=100, output_tokens=10,
+                cache_read_input_tokens=0,
+                cache_creation_input_tokens=0,
+            ),
+        )
+
+    anthropic = MagicMock()
+    anthropic.messages.create.side_effect = _maybe_mcp_handshake_fail
+    slack = MagicMock()
+    slack.chat_update.return_value = {"ok": True}
+
+    run_responder(
+        slack=slack, anthropic_client=anthropic, db_session=session,
+        channel="D1", placeholder_ts="1.2",
+        thread_history=[{"role": "user", "content": "вопрос"}],
+        sleep=lambda s: None,  # speed up retries in test
+    )
+
+    assert calls["n"] == 3, (
+        "expected 2 transient failures + 1 success = 3 attempts"
+    )
+    row = session.query(ClaudeResponderRun).one()
+    assert row.status == "done"
+    assert "OK" in (row.response_text or "")
+
+
 def test_run_responder_uses_create_for_main_turn(session):
     """FR-CB2-3.22 — main turn goes through
     `beta.messages.create` (non-stream) when MCP servers are

@@ -374,10 +374,25 @@ def persist_run(
 
 
 _RETRYABLE_429_RE = re.compile(r"429|too many requests|rate.?limit", re.IGNORECASE)
+# FR-CB2-3.23 — transient MCP handshake error. Anthropic returns
+# `BadRequestError: Connection error while communicating with MCP
+# server` when ONE of the configured MCP endpoints stalls on the
+# initial parallel handshake. Individual endpoints are healthy
+# (verified one-by-one) — this is a parallel-startup race, not a
+# persistent fault. Retry like 429.
+_RETRYABLE_MCP_RE = re.compile(
+    r"connection error while communicating with mcp server",
+    re.IGNORECASE,
+)
 
 
 def _is_429(exc: BaseException) -> bool:
     return bool(_RETRYABLE_429_RE.search(str(exc) or ""))
+
+
+def _is_transient_mcp_handshake(exc: BaseException) -> bool:
+    """FR-CB2-3.23 — Anthropic 400 with the MCP-handshake message."""
+    return bool(_RETRYABLE_MCP_RE.search(str(exc) or ""))
 
 
 def _retry_after_seconds(exc: BaseException, default: float = 5.0) -> float:
@@ -645,7 +660,9 @@ def run_responder(
                 main_ok = True
                 break
             except BaseException as exc:  # noqa: BLE001
-                if _is_429(exc) and attempt + 1 < max_retries:
+                # FR-CB2-3.23 — transient MCP handshake error retries
+                # alongside 429.
+                if (_is_429(exc) or _is_transient_mcp_handshake(exc)) and attempt + 1 < max_retries:
                     wait = _retry_after_seconds(exc, default=2.0)
                     log.info(
                         "ceo_brain_responder_rate_limited_retry",

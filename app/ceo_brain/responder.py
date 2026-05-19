@@ -775,8 +775,8 @@ def run_responder(
     # with claude-haiku (fast, cheap) to pick only the MCP servers
     # actually needed — drops parallel handshake load, reliability
     # ↑, latency ↓. On classifier failure, fall back to full list.
+    last_user_q = ""
     if request.get("mcp_servers"):
-        last_user_q = ""
         for m in reversed(thread_history or []):
             if isinstance(m, dict) and m.get("role") == "user":
                 content = m.get("content")
@@ -790,6 +790,96 @@ def run_responder(
                 anthropic_client=anthropic_client,
             )
             request = {**request, "mcp_servers": picked}
+
+    # FR-CB2-3.30 — per-MCP parallel gather. When MCP servers are
+    # configured, instead of ONE create() with all servers (subject
+    # to parallel-handshake hangs), fire N parallel create() calls
+    # each with a SINGLE server, then synthesize a final answer
+    # from the gathered data via a no-MCP messages.create.
+    # Local Slack tools (FR-CB2-3.16) bypass this entirely — they
+    # only fire when the operator's question routes through the
+    # synthesis turn explicitly. (Operator's primary use case is
+    # MCP data; local tools are rare.)
+    if request.get("mcp_servers") and last_user_q:
+        from app.ceo_brain.parallel_gather import (
+            gather_from_mcps,
+            synthesize_final_answer,
+        )
+
+        log.info(
+            "ceo_brain_parallel_gather_start",
+            mcp_count=len(request["mcp_servers"]),
+            mcps=[s.get("name") for s in request["mcp_servers"]],
+        )
+        # Briefly update placeholder so operator sees activity.
+        try:
+            slack.chat_update(
+                channel=channel, ts=placeholder_ts,
+                text="🔄 параллельно дёргаю "
+                + ", ".join(
+                    (s.get("name") or "?")
+                    for s in request["mcp_servers"]
+                )
+                + "…",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        gathered = gather_from_mcps(
+            question=last_user_q,
+            picked_mcps=request["mcp_servers"],
+            anthropic_client=anthropic_client,
+        )
+        # Pull system prompt out of `request["system"]` for synth.
+        sys_blocks = request.get("system") or []
+        sys_text = ""
+        if isinstance(sys_blocks, list):
+            for sb in sys_blocks:
+                if isinstance(sb, dict) and sb.get("text"):
+                    sys_text = sb["text"]
+                    break
+        final_text = synthesize_final_answer(
+            question=last_user_q,
+            gathered=gathered,
+            anthropic_client=anthropic_client,
+            system_prompt_text=sys_text,
+        )
+        # Record tool_uses metadata from gather participants.
+        tool_uses: list[dict[str, Any]] = [
+            {"name": name, "input": {}}
+            for name, txt in gathered.items() if txt
+        ]
+        rendered = format_final_response(
+            text=final_text or
+                "_(модель не сформулировала ответ — см. источники)_",
+            tool_uses=tool_uses,
+        )
+        _final_render_to_slack(
+            slack=slack, channel=channel,
+            placeholder_ts=placeholder_ts,
+            thread_ts=placeholder_thread_ts,
+            text=rendered,
+            sleep=sleep,
+        )
+        if db_session is not None:
+            return persist_run(
+                db_session,
+                slack_channel_id=channel,
+                slack_event_ts=slack_event_ts or placeholder_ts,
+                slack_placeholder_ts=placeholder_ts,
+                request_payload={
+                    **request,
+                    "_parallel_gather": True,
+                    "gathered_mcps": list(gathered.keys()),
+                },
+                response_text=final_text or "",
+                tool_uses=tool_uses,
+                status="done" if (final_text or "").strip() else "failed",
+                cost_usd=0,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+        return None
 
     # FR-CB2-3.22 — main turn goes through `messages.create` (non-
     # stream) because `messages.stream` + MCP + parallel tool_use

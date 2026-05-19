@@ -890,78 +890,102 @@ def test_smart_mcp_routing_fallback_on_classifier_failure():
     assert out_bad == all_servers
 
 
-def test_responder_progressive_mcp_degradation_on_retry(session):
-    """FR-CB2-3.24 — when MCP handshake keeps failing, each retry
-    attempt (starting from the 3rd) drops one MCP server from the
-    tail of the list. Smaller subset → fewer parallel handshakes →
-    higher chance the request succeeds. The last 2 MCPs always
-    stay (minimum viable set)."""
-    from app.ceo_brain.responder import run_responder
-    from app.models import ClaudeResponderRun
+def test_per_mcp_parallel_gather_aggregates_in_threads():
+    """FR-CB2-3.30 — `gather_from_mcps` fires one Anthropic call
+    per MCP server in parallel and aggregates `{name: text}`."""
+    from types import SimpleNamespace
 
-    calls: list = []
+    from app.ceo_brain.parallel_gather import gather_from_mcps
 
-    def _fail_n_times(*a, **kw):
-        # Capture mcp_servers count per attempt for assertion.
-        n = len(kw.get("mcp_servers") or [])
-        calls.append(n)
-        if len(calls) < 4:  # first 3 attempts fail
-            raise RuntimeError(
-                "Error code: 400 - Connection error while "
-                "communicating with MCP server."
-            )
-        # 4th attempt succeeds.
-        from types import SimpleNamespace
+    def _resp_for(name: str):
         return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text="OK")],
-            stop_reason="end_turn",
-            usage=SimpleNamespace(
-                input_tokens=100, output_tokens=10,
-                cache_read_input_tokens=0,
-                cache_creation_input_tokens=0,
-            ),
+            content=[SimpleNamespace(
+                type="mcp_tool_result",
+                content=[SimpleNamespace(
+                    type="text",
+                    text=f"data from {name}",
+                )],
+            )],
         )
 
     anthropic = MagicMock()
-    anthropic.beta.messages.create.side_effect = _fail_n_times
-    slack = MagicMock()
-    slack.chat_update.return_value = {"ok": True}
-
-    import os
-    prev = os.environ.get("MCP_SERVERS")
-    os.environ["MCP_SERVERS"] = (
-        '['
-        '{"name":"a","url":"https://x.invalid/a"},'
-        '{"name":"b","url":"https://x.invalid/b"},'
-        '{"name":"c","url":"https://x.invalid/c"},'
-        '{"name":"d","url":"https://x.invalid/d"},'
-        '{"name":"e","url":"https://x.invalid/e"},'
-        '{"name":"f","url":"https://x.invalid/f"}'
-        ']'
+    anthropic.beta.messages.create.side_effect = lambda **kw: _resp_for(
+        kw["mcp_servers"][0]["name"]
     )
-    try:
-        run_responder(
-            slack=slack, anthropic_client=anthropic, db_session=session,
-            channel="D1", placeholder_ts="1.2",
-            thread_history=[{"role": "user", "content": "вопрос"}],
-            sleep=lambda s: None,
+
+    out = gather_from_mcps(
+        question="x",
+        picked_mcps=[
+            {"name": "a", "url": "u1", "type": "url"},
+            {"name": "b", "url": "u2", "type": "url"},
+            {"name": "c", "url": "u3", "type": "url"},
+        ],
+        anthropic_client=anthropic,
+    )
+    assert set(out.keys()) == {"a", "b", "c"}
+    assert "data from a" in out["a"]
+    assert "data from b" in out["b"]
+    # Each call had EXACTLY one MCP server (no parallel-handshake).
+    for call in anthropic.beta.messages.create.call_args_list:
+        srvs = call.kwargs.get("mcp_servers")
+        assert isinstance(srvs, list) and len(srvs) == 1
+
+
+def test_per_mcp_synthesis_skips_failed_mcp():
+    """FR-CB2-3.30 — one MCP failure (exception) doesn't take down
+    the gather; other MCPs still contribute. Synthesis runs on
+    whatever data was collected."""
+    from types import SimpleNamespace
+
+    from app.ceo_brain.parallel_gather import (
+        gather_from_mcps,
+        synthesize_final_answer,
+    )
+
+    anthropic = MagicMock()
+
+    def _side(**kw):
+        name = kw["mcp_servers"][0]["name"]
+        if name == "broken":
+            raise RuntimeError("simulated mcp handshake failure")
+        return SimpleNamespace(
+            content=[SimpleNamespace(
+                type="text", text=f"info from {name}",
+            )],
         )
-    finally:
-        if prev is None:
-            os.environ.pop("MCP_SERVERS", None)
-        else:
-            os.environ["MCP_SERVERS"] = prev
 
-    # 4 attempts total. Expected MCP counts:
-    #  attempt 1: 6 (full set)
-    #  attempt 2: 6 (first retry, same set)
-    #  attempt 3: 5 (drop one)
-    #  attempt 4: 4 (drop another) — succeeds
-    assert calls == [6, 6, 5, 4], (
-        f"expected progressive degradation, got {calls}"
+    anthropic.beta.messages.create.side_effect = _side
+
+    gathered = gather_from_mcps(
+        question="?",
+        picked_mcps=[
+            {"name": "ok", "url": "u1", "type": "url"},
+            {"name": "broken", "url": "u2", "type": "url"},
+        ],
+        anthropic_client=anthropic,
     )
-    row = session.query(ClaudeResponderRun).one()
-    assert row.status == "done"
+    assert "info from ok" in gathered["ok"]
+    assert gathered["broken"] == ""
+
+    # Synthesis call uses messages.create (no MCP/beta), inlines DATA.
+    anthropic.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="Ответ.")],
+    )
+    final = synthesize_final_answer(
+        question="оригинальный вопрос",
+        gathered=gathered,
+        anthropic_client=anthropic,
+        system_prompt_text="syscfg",
+    )
+    assert final == "Ответ."
+    # The synthesis call carried the harvested data + question.
+    synth_kwargs = anthropic.messages.create.call_args.kwargs
+    msg_text = (synth_kwargs.get("messages") or [{}])[0].get("content", "")
+    assert "info from ok" in msg_text
+    assert "оригинальный вопрос" in msg_text
+    # No MCP / no beta in the synthesis call.
+    assert "mcp_servers" not in synth_kwargs
+    assert "betas" not in synth_kwargs
 
 
 def test_responder_retries_on_mcp_handshake_connection_error(session):
@@ -1016,71 +1040,6 @@ def test_responder_retries_on_mcp_handshake_connection_error(session):
     row = session.query(ClaudeResponderRun).one()
     assert row.status == "done"
     assert "OK" in (row.response_text or "")
-
-
-def test_run_responder_uses_create_for_main_turn(session):
-    """FR-CB2-3.22 — main turn goes through
-    `beta.messages.create` (non-stream) when MCP servers are
-    configured. Streaming + MCP + parallel tool_use truncates the
-    response before tool_results arrive (operator-observed
-    2026-05-19), so non-streaming is the reliable path."""
-    from types import SimpleNamespace
-
-    from app.ceo_brain.responder import run_responder
-    from app.models import ClaudeResponderRun
-
-    # Full main turn — model called a tool, got result, wrote
-    # synthesis. With create() we get all blocks in one shot.
-    answer_text = SimpleNamespace(
-        type="text", text="Сегодня обсудили Series A: $120M собрано.",
-    )
-    final_msg = SimpleNamespace(
-        content=[answer_text],
-        stop_reason="end_turn",
-        usage=SimpleNamespace(
-            input_tokens=500, output_tokens=200,
-            cache_read_input_tokens=0,
-            cache_creation_input_tokens=0,
-        ),
-    )
-
-    anthropic = MagicMock()
-    anthropic.beta.messages.create.return_value = final_msg
-    slack = MagicMock()
-    slack.chat_update.return_value = {"ok": True}
-
-    import os
-    prev = os.environ.get("MCP_SERVERS")
-    os.environ["MCP_SERVERS"] = (
-        '[{"name":"n8n_calendar","url":"https://example.invalid/x"}]'
-    )
-    try:
-        run_responder(
-            slack=slack, anthropic_client=anthropic, db_session=session,
-            channel="D1", placeholder_ts="1.2",
-            thread_history=[
-                {"role": "user", "content": "вопрос про фандрайзинг"},
-            ],
-        )
-    finally:
-        if prev is None:
-            os.environ.pop("MCP_SERVERS", None)
-        else:
-            os.environ["MCP_SERVERS"] = prev
-
-    # Main turn used beta.messages.create (non-stream).
-    assert anthropic.beta.messages.create.called
-    call_kwargs = anthropic.beta.messages.create.call_args.kwargs
-    assert "mcp_servers" in call_kwargs
-    assert "betas" in call_kwargs
-
-    # Stream NOT used for main turn.
-    assert anthropic.beta.messages.stream.call_count == 0
-
-    # Result persisted with the answer text.
-    row = session.query(ClaudeResponderRun).one()
-    assert row.status == "done"
-    assert "Series A" in (row.response_text or "")
 
 
 def test_responder_system_prompt_mandates_transcript_fetch_after_search():
@@ -1587,119 +1546,6 @@ def test_responder_synthesis_recovery_when_last_block_is_tool_use(session):
     # Final stored text is the recovery synthesis, not the
     # intermediate planning text.
     assert "term sheet" in (row.response_text or "")
-
-
-def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
-    """FR-CB2-3.17 — recovery request MUST drop `mcp_servers`,
-    `tools`, and `betas` so the model can't loop back into another
-    round of tool calls instead of writing the answer. Without this,
-    Sonnet re-uses the available MCP toolbox and the recovery
-    returns yet more planning text (operator-observed 2026-05-19)."""
-    from types import SimpleNamespace
-
-    from app.ceo_brain.responder import run_responder
-
-    mcp_tool_use_block = SimpleNamespace(
-        type="mcp_tool_use",
-        name="search_zoom_meetings",
-        server_name="n8n_calendar",
-        input={"query": "Jochen"},
-        id="mcptoolu_1",
-    )
-    final_msg_1 = SimpleNamespace(
-        content=[mcp_tool_use_block],
-        stop_reason="end_turn",
-        usage=SimpleNamespace(
-            input_tokens=80, output_tokens=20,
-            cache_read_input_tokens=0,
-            cache_creation_input_tokens=0,
-        ),
-    )
-    events_1 = [
-        SimpleNamespace(
-            type="content_block_start",
-            content_block=mcp_tool_use_block,
-        ),
-    ]
-    stream_1 = MagicMock()
-    stream_1.__iter__ = lambda self: iter(events_1)
-    stream_1.get_final_message.return_value = final_msg_1
-    cm_1 = MagicMock()
-    cm_1.__enter__.return_value = stream_1
-    cm_1.__exit__.return_value = False
-
-    text_block = SimpleNamespace(type="text", text="Готово.")
-    final_msg_2 = SimpleNamespace(
-        content=[text_block],
-        stop_reason="end_turn",
-        usage=SimpleNamespace(
-            input_tokens=100, output_tokens=5,
-            cache_read_input_tokens=0,
-            cache_creation_input_tokens=0,
-        ),
-    )
-    stream_2 = MagicMock()
-    stream_2.__iter__ = lambda self: iter([
-        SimpleNamespace(
-            type="content_block_delta",
-            delta=SimpleNamespace(type="text_delta", text="Готово."),
-        ),
-    ])
-    stream_2.get_final_message.return_value = final_msg_2
-    cm_2 = MagicMock()
-    cm_2.__enter__.return_value = stream_2
-    cm_2.__exit__.return_value = False
-
-    anthropic = MagicMock()
-    slack = MagicMock()
-    slack.chat_update.return_value = {"ok": True}
-
-    # Configure MCP_SERVERS env so the main turn routes through
-    # the beta namespace, recovery falls back to plain
-    # `messages.stream` (no beta needed since we flatten the
-    # conversation into a single user message).
-    import os
-    prev = os.environ.get("MCP_SERVERS")
-    os.environ["MCP_SERVERS"] = (
-        '[{"name":"n8n_calendar","url":"https://example.invalid/x"}]'
-    )
-    # FR-CB2-3.22 — main turn now via beta.messages.create.
-    anthropic.beta.messages.create.return_value = final_msg_1
-    anthropic.messages.stream.return_value = cm_2
-    try:
-        run_responder(
-            slack=slack, anthropic_client=anthropic, db_session=session,
-            channel="D1", placeholder_ts="1.2",
-            thread_history=[{"role": "user", "content": "вопрос"}],
-        )
-    finally:
-        if prev is None:
-            os.environ.pop("MCP_SERVERS", None)
-        else:
-            os.environ["MCP_SERVERS"] = prev
-
-    # Main call went through beta.messages.CREATE (mcp_servers path).
-    assert anthropic.beta.messages.create.call_count == 1
-    main_kwargs = anthropic.beta.messages.create.call_args.kwargs
-    assert "mcp_servers" in main_kwargs
-    assert "betas" in main_kwargs
-
-    # Recovery flattens the tool conversation into a single plain
-    # user message and goes through plain `messages.stream` — NO MCP,
-    # NO tools, NO beta header.
-    assert anthropic.messages.stream.call_count == 1
-    recovery_kwargs = anthropic.messages.stream.call_args.kwargs
-    assert "mcp_servers" not in recovery_kwargs
-    assert "tools" not in recovery_kwargs
-    assert "betas" not in recovery_kwargs
-    # The recovery user message contains the harvested DATA block.
-    msgs = recovery_kwargs.get("messages") or []
-    assert any(
-        "<DATA>" in str(m.get("content") or "") for m in msgs
-    ), "recovery prompt should embed harvested tool data"
-
-
-# -- Category 4: MCP integration (FR-CB2-4.x) ------------------------------
 
 
 def test_mcp_config_loaded_and_validated(monkeypatch):

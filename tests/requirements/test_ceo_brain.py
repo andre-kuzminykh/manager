@@ -1258,20 +1258,18 @@ def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
     slack = MagicMock()
     slack.chat_update.return_value = {"ok": True}
 
-    # Construct a request that DOES carry tools+mcp_servers — we
-    # need to assert recovery strips them. Simplest path: configure
-    # MCP_SERVERS env and provide a bot_client so `tools` is set.
+    # Configure MCP_SERVERS env so the main turn routes through
+    # the beta namespace, recovery falls back to plain
+    # `messages.stream` (no beta needed since we flatten the
+    # conversation into a single user message).
     import os
     prev = os.environ.get("MCP_SERVERS")
     os.environ["MCP_SERVERS"] = (
         '[{"name":"n8n_calendar","url":"https://example.invalid/x"}]'
     )
-    # With MCP_SERVERS set, both the main turn AND the recovery
-    # turn route through `beta.messages.stream` — recovery keeps
-    # the beta header so historical `mcp_tool_use` blocks remain
-    # parseable, even though `mcp_servers` and `tools` are gone.
     beta_stream_path = anthropic.beta.messages.stream
-    beta_stream_path.side_effect = [cm_1, cm_2]
+    beta_stream_path.side_effect = [cm_1]
+    anthropic.messages.stream.side_effect = [cm_2]
     try:
         run_responder(
             slack=slack, anthropic_client=anthropic, db_session=session,
@@ -1285,22 +1283,25 @@ def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
             os.environ["MCP_SERVERS"] = prev
 
     # Main call went through the beta namespace (mcp_servers path).
-    assert beta_stream_path.call_count == 2  # main + recovery
+    assert beta_stream_path.call_count == 1
     main_kwargs = beta_stream_path.call_args_list[0].kwargs
     assert "mcp_servers" in main_kwargs
     assert "betas" in main_kwargs
 
-    # Recovery call ALSO goes through beta namespace (we keep
-    # betas so historical mcp_tool_use / mcp_tool_result blocks
-    # remain valid), but mcp_servers + tools are stripped so the
-    # model can't initiate new tool calls.
-    recovery_kwargs = beta_stream_path.call_args_list[1].kwargs
+    # Recovery flattens the tool conversation into a single plain
+    # user message and goes through `messages.stream` — NO MCP,
+    # NO tools, NO beta header (avoids Anthropic silently
+    # rejecting historical mcp_tool_use blocks).
+    assert anthropic.messages.stream.call_count == 1
+    recovery_kwargs = anthropic.messages.stream.call_args.kwargs
     assert "mcp_servers" not in recovery_kwargs
     assert "tools" not in recovery_kwargs
-    assert "betas" in recovery_kwargs
-
-    # Regular messages.stream is NOT used (because betas is set).
-    assert anthropic.messages.stream.call_count == 0
+    assert "betas" not in recovery_kwargs
+    # The recovery user message contains the harvested DATA block.
+    msgs = recovery_kwargs.get("messages") or []
+    assert any(
+        "<DATA>" in str(m.get("content") or "") for m in msgs
+    ), "recovery prompt should embed harvested tool data"
 
 
 # -- Category 4: MCP integration (FR-CB2-4.x) ------------------------------

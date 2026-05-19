@@ -795,6 +795,40 @@ def run_responder(
     if sdk_text.strip():
         final_text = sdk_text
 
+    def _harvest_tool_result_text(msg: Any) -> str:
+        """Pull every piece of text the tools produced into one flat
+        string. Used to build the recovery prompt as a plain text
+        dump — sidesteps any conversation-format issues with replaying
+        `mcp_tool_use` / `mcp_tool_result` blocks back to the API."""
+        if msg is None or not getattr(msg, "content", None):
+            return ""
+        parts: list[str] = []
+        for block in msg.content:
+            btype = getattr(block, "type", None) or (
+                isinstance(block, dict) and block.get("type")
+            )
+            if btype == "text":
+                txt = getattr(block, "text", None) or (
+                    isinstance(block, dict) and block.get("text") or ""
+                )
+                if txt:
+                    parts.append(str(txt))
+            elif btype in {"mcp_tool_result", "tool_result"}:
+                # content is a list of text-like sub-blocks for MCP;
+                # plain string for non-MCP tool_result.
+                cont = getattr(block, "content", None)
+                if isinstance(cont, str):
+                    parts.append(cont)
+                elif cont is not None:
+                    for sub in cont:
+                        sub_txt = getattr(sub, "text", None) or (
+                            isinstance(sub, dict)
+                            and sub.get("text") or ""
+                        )
+                        if sub_txt:
+                            parts.append(str(sub_txt))
+        return "\n\n".join(parts).strip()
+
     def _needs_synthesis_recovery(msg: Any) -> bool:
         """True when the turn does NOT end with a synthesising text
         block. Two failure modes covered:
@@ -844,41 +878,41 @@ def run_responder(
     ):
         log.info("ceo_brain_responder_empty_text_recovery_attempt")
         try:
-            recovery_messages = list(request["messages"]) + [
-                {
-                    "role": "assistant",
-                    "content": _serialise_content_blocks(
-                        getattr(final_message, "content", None) or []
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        "Не вызывай больше tools. Напиши финальный ответ "
-                        "оператору на основе данных из tool-вызовов выше. "
-                        "Если данных недостаточно — честно скажи об этом."
-                    ),
-                },
-            ]
-            # Strip MCP servers + tool catalogues so the model can't
-            # initiate NEW tool calls in recovery — but KEEP `betas`
-            # so the API still understands the historical
-            # `mcp_tool_use` / `mcp_tool_result` blocks we send back
-            # in the assistant turn. Without the beta header the
-            # API silently returns empty content for those block
-            # types (operator-observed 2026-05-19, third iteration).
+            # FR-CB2-3.17 v3 — flatten the tool conversation into a
+            # single plain user message instead of replaying
+            # mcp_tool_use / mcp_tool_result blocks (which Anthropic
+            # silently rejects in some recovery scenarios, returning
+            # empty content). This bypasses any conversation-format
+            # quirk: the model gets a clean, structured text prompt
+            # with the harvested tool data + the original question.
+            harvested = _harvest_tool_result_text(final_message)
+            original_question = ""
+            for m in reversed(request.get("messages") or []):
+                if m.get("role") == "user":
+                    original_question = str(m.get("content") or "")
+                    break
+            recovery_user_msg = (
+                "Ниже — собранные ранее данные из tool-вызовов "
+                "(транскрипты встреч, задачи, сообщения, и т.п.):\n\n"
+                "<DATA>\n"
+                f"{harvested or '(нет данных)'}\n"
+                "</DATA>\n\n"
+                f"ИСХОДНЫЙ ВОПРОС ОПЕРАТОРА: {original_question}\n\n"
+                "Напиши ПРЯМОЙ ответ на исходный вопрос на основе "
+                "данных выше. Не вызывай tools. Если данных "
+                "недостаточно — честно скажи об этом и укажи что "
+                "конкретно отсутствует."
+            )
             recovery_request = {
                 k: v for k, v in request.items()
-                if k not in {"mcp_servers", "tools"}
+                if k not in {"mcp_servers", "tools", "betas"}
             }
-            recovery_request["messages"] = recovery_messages
-            # Pick stream namespace based on whether the beta header
-            # survived (it does whenever the main turn used MCP).
-            recovery_stream_factory = (
-                anthropic_client.beta.messages.stream
-                if recovery_request.get("betas")
-                else anthropic_client.messages.stream
-            )
+            recovery_request["messages"] = [
+                {"role": "user", "content": recovery_user_msg},
+            ]
+            # No MCP / beta blocks in the conversation → plain
+            # `messages.stream` is the right path.
+            recovery_stream_factory = anthropic_client.messages.stream
             with recovery_stream_factory(**recovery_request) as rec_stream:
                 for event in rec_stream:
                     etype = getattr(event, "type", None) or (
@@ -921,17 +955,33 @@ def run_responder(
                     chars=len(recovery_text),
                 )
             else:
-                # Recovery attempted but model still produced no text.
-                # Drop the misleading planning preamble — it's worse
-                # UX than a clear «не получилось» message.
-                final_text = ""
+                # Recovery attempted but model still produced no
+                # text. Keep the intermediate planning text (if any)
+                # so the operator at least sees what the bot was
+                # doing, append an explicit note. Better UX than
+                # discarding the planning entirely.
+                planning = sdk_text.strip()
+                if planning:
+                    final_text = (
+                        planning + "\n\n_(финальный синтез не "
+                        "получился — см. результаты в Sources ниже)_"
+                    )
+                else:
+                    final_text = ""
                 log.warning(
                     "ceo_brain_responder_empty_text_recovery_no_text",
                 )
         except Exception as e:  # noqa: BLE001
-            # Recovery itself crashed. Same logic — better to show
-            # a clean fallback than leave the planning preamble.
-            final_text = ""
+            # Recovery itself crashed. Same logic — preserve
+            # planning if present so the operator sees something.
+            planning = sdk_text.strip()
+            if planning:
+                final_text = (
+                    planning + "\n\n_(финальный синтез не получился "
+                    f"— recovery crashed: {type(e).__name__})_"
+                )
+            else:
+                final_text = ""
             log.warning(
                 "ceo_brain_responder_empty_text_recovery_failed",
                 error=str(e), error_type=type(e).__name__,

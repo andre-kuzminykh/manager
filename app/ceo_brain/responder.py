@@ -795,16 +795,52 @@ def run_responder(
     if sdk_text.strip():
         final_text = sdk_text
 
-    # FR-CB2-3.17 — synthesis recovery. Observed Sonnet quirk:
-    # sometimes the model fires tool_use blocks then ends the turn
-    # without writing a summary, leaving the placeholder full of
-    # 🔍 progress lines and no actual answer. When that happens,
-    # ask the model explicitly to summarise — feeding back its own
-    # tool calls and results as the conversation context.
+    def _needs_synthesis_recovery(msg: Any) -> bool:
+        """True when the turn does NOT end with a synthesising text
+        block. Two failure modes covered:
+
+          1. No text blocks at all — sdk_text empty.
+          2. Interleaved planning text + tool_uses, but the LAST
+             content block is a tool_use (no summary written after
+             the final tool call). Observed Sonnet quirk
+             2026-05-19: bot replied with "Проверю транскрипт…"
+             then ended on `mcp_tool_use` without ever writing the
+             answer.
+        """
+        if msg is None or not getattr(msg, "content", None):
+            return False
+        last_text_idx = -1
+        last_tool_idx = -1
+        for i, block in enumerate(msg.content):
+            btype = getattr(block, "type", None) or (
+                isinstance(block, dict) and block.get("type")
+            )
+            if btype == "text":
+                txt = (
+                    getattr(block, "text", None)
+                    if not isinstance(block, dict)
+                    else (block or {}).get("text") or ""
+                ) or ""
+                if txt.strip():
+                    last_text_idx = i
+            elif btype in {
+                "tool_use", "mcp_tool_use", "server_tool_use",
+                "mcp_tool_result",
+            }:
+                last_tool_idx = i
+        return last_text_idx <= last_tool_idx
+
+    # FR-CB2-3.17 — synthesis recovery. Observed Sonnet quirks
+    # (both covered by `_needs_synthesis_recovery`):
+    #   * model fires tool_use blocks then ends without summary;
+    #   * model writes interleaved planning text + tool_uses but
+    #     the LAST block is a tool_use (no synthesis after it).
+    # When detected, ask the model explicitly to summarise —
+    # feeding back its own tool calls and results as context.
     if (
-        not sdk_text.strip()
-        and tool_uses
+        tool_uses
         and final_message is not None
+        and _needs_synthesis_recovery(final_message)
     ):
         log.info("ceo_brain_responder_empty_text_recovery_attempt")
         try:

@@ -1049,6 +1049,150 @@ def test_responder_synthesis_recovery_when_text_empty(session):
     assert "Йохан" in (row.response_text or "")
 
 
+def test_responder_synthesis_recovery_when_last_block_is_tool_use(session):
+    """FR-CB2-3.17 — observed Sonnet quirk 2026-05-19: model writes
+    interleaved planning text + tool_uses, but the LAST block of
+    the turn is a tool_use (no synthesizing text after it). The
+    `sdk_text` is non-empty (intermediate "I'll check..." planning)
+    so the original empty-text recovery never fired and the operator
+    saw mid-reasoning text + Sources with no actual answer.
+
+    Fix: recovery must also fire when the last block of the turn
+    is a tool_use / mcp_tool_use — i.e. no text block came after
+    the last tool call.
+    """
+    from types import SimpleNamespace
+
+    from app.ceo_brain.responder import run_responder
+    from app.models import ClaudeResponderRun
+
+    # Stream 1 — interleaved: intermediate text + tool_use, then
+    # another text + tool_use. ENDS on a tool_use block, no final
+    # synthesis text after it.
+    text_block_1 = SimpleNamespace(
+        type="text",
+        text="Проверю транскрипт Fundraising daily параллельно.",
+    )
+    mcp_tool_use_1 = SimpleNamespace(
+        type="mcp_tool_use",
+        name="search_zoom_meetings",
+        server_name="n8n_calendar",
+        input={"query": "Jochen"},
+        id="mcptoolu_1",
+    )
+    text_block_2 = SimpleNamespace(
+        type="text",
+        text="Теперь возьму транскрипт Fundraising daily.",
+    )
+    mcp_tool_use_2 = SimpleNamespace(
+        type="mcp_tool_use",
+        name="get_zoom_transcript",
+        server_name="n8n_calendar",
+        input={"id": "abc"},
+        id="mcptoolu_2",
+    )
+    final_msg_1 = SimpleNamespace(
+        content=[
+            text_block_1, mcp_tool_use_1,
+            text_block_2, mcp_tool_use_2,  # last block is tool_use
+        ],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(
+            input_tokens=120, output_tokens=80,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+    events_1 = [
+        SimpleNamespace(
+            type="content_block_start", content_block=text_block_1,
+        ),
+        SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(
+                type="text_delta",
+                text=text_block_1.text,
+            ),
+        ),
+        SimpleNamespace(
+            type="content_block_start", content_block=mcp_tool_use_1,
+        ),
+        SimpleNamespace(
+            type="content_block_start", content_block=text_block_2,
+        ),
+        SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(
+                type="text_delta",
+                text=text_block_2.text,
+            ),
+        ),
+        SimpleNamespace(
+            type="content_block_start", content_block=mcp_tool_use_2,
+        ),
+    ]
+    stream_1 = MagicMock()
+    stream_1.__iter__ = lambda self: iter(events_1)
+    stream_1.get_final_message.return_value = final_msg_1
+    cm_1 = MagicMock()
+    cm_1.__enter__.return_value = stream_1
+    cm_1.__exit__.return_value = False
+
+    # Recovery stream — produces the final synthesis.
+    answer_block = SimpleNamespace(
+        type="text",
+        text=(
+            "Сегодня на Fundraising daily обсудили: 1) statusы по EQT — "
+            "Йохан должен напомнить Сергею про term sheet."
+        ),
+    )
+    final_msg_2 = SimpleNamespace(
+        content=[answer_block],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(
+            input_tokens=200, output_tokens=60,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+    events_2 = [
+        SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(
+                type="text_delta", text=answer_block.text,
+            ),
+        ),
+    ]
+    stream_2 = MagicMock()
+    stream_2.__iter__ = lambda self: iter(events_2)
+    stream_2.get_final_message.return_value = final_msg_2
+    cm_2 = MagicMock()
+    cm_2.__enter__.return_value = stream_2
+    cm_2.__exit__.return_value = False
+
+    anthropic = MagicMock()
+    anthropic.messages.stream.side_effect = [cm_1, cm_2]
+    slack = MagicMock()
+    slack.chat_update.return_value = {"ok": True}
+
+    run_responder(
+        slack=slack, anthropic_client=anthropic, db_session=session,
+        channel="D1", placeholder_ts="1.2",
+        thread_history=[
+            {"role": "user",
+             "content": "Что обсудили с Йоханом на встрече?"},
+        ],
+    )
+
+    # Recovery stream fired even though sdk_text was non-empty.
+    assert anthropic.messages.stream.call_count == 2
+    row = session.query(ClaudeResponderRun).one()
+    assert row.status == "done"
+    # Final stored text is the recovery synthesis, not the
+    # intermediate planning text.
+    assert "term sheet" in (row.response_text or "")
+
+
 # -- Category 4: MCP integration (FR-CB2-4.x) ------------------------------
 
 

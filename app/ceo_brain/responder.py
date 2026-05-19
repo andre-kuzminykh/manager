@@ -132,14 +132,13 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
         f"или сделай новый search с другим query (другая тема, "
         f"другая дата). Только если все кандидаты пустые — отвечай "
         f"что данных нет.\n\n"
-        f"СТИЛЬ ОТВЕТА (FR-CB2-3.28, operator-pinned 2026-05-19, "
+        f"СТИЛЬ ОТВЕТА (FR-CB2-3.28+3.29, operator-pinned 2026-05-19, "
         f"строгий):\n"
         f"- ПРЯМОЙ ответ на вопрос. БЕЗ ПРЕАМБУЛ типа «Ищу…», "
         f"«Хорошо, нашёл…», «Читаю транскрипт…», «Вот что удалось "
         f"восстановить…» — оператор это не читает.\n"
         f"- БЕЗ описания процесса (что ты искал, какие tools "
-        f"дёргал). Если хочешь показать источники — компактно в "
-        f"конце.\n"
+        f"дёргал).\n"
         f"- БЕЗ markdown-таблиц с колонками «Приоритет/Срок» если "
         f"оператор явно не просил таблицу. Просто текст или "
         f"короткий bullet-список.\n"
@@ -147,10 +146,19 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
         f"вопрос. Длиннее — только если оператор просит «подробно».\n"
         f"- БЕЗ эмодзи. БЕЗ заголовков «1. … 2. … 3. …» когда это "
         f"просто 3 факта подряд.\n"
+        f"- ЗАПРЕЩЕНЫ technical IDs в тексте: `Zoom ID: Es0xx…`, "
+        f"`meeting_id=…`, `60 мин`, длинные hash-строки. Это metadata "
+        f"мусор. Оператор хочет суть факта + ссылку на источник.\n"
+        f"- ИСТОЧНИКИ КАК INLINE-ГИПЕРССЫЛКИ В ТЕКСТЕ. НЕ выводи "
+        f"финальный блок `_Источники: tool_a, tool_b_`. Вместо этого "
+        f"вшивай ссылку прямо во фразу в Slack-нативном формате "
+        f"`<URL|короткий якорь>`. Пример: «На <https://docs.google.com/"
+        f"document/d/.../edit|Fundraising daily> обсудили статус "
+        f"раунда». Если URL источника недоступен (нет ссылки) — "
+        f"просто упомяни источник коротко словами без отдельной "
+        f"строки в конце.\n"
         f"- На русском, если оператор пишет на русском; иначе на "
-        f"языке вопроса.\n"
-        f"- В конце ОДНА строка `_Источники:_ <tool1>, <tool2>` — "
-        f"без описаний что каждый tool делает.\n\n"
+        f"языке вопроса.\n\n"
         f"Когда оператор пишет короткое приветствие («привет», "
         f"«hi», «hey») без конкретного запроса — отвечай коротко "
         f"приветствием без описания capabilities."
@@ -298,29 +306,13 @@ def format_final_response(
     text: str,
     tool_uses: list[dict[str, Any]] | None = None,
 ) -> str:
-    """FR-CB2-3.9 — final assistant text + ``Sources:`` block
-    listing the tool_uses that fired during the run."""
+    """FR-CB2-3.29 — return body only. Operator-pinned 2026-05-19:
+    no auto-appended `_Sources:_` footer. The system prompt now
+    instructs the model to embed source hyperlinks inline.
+    `tool_uses` is still accepted for API stability but ignored
+    in the rendered output."""
     body = (text or "").rstrip()
-    if not tool_uses:
-        return body or "_(пустой ответ от Claude)_"
-    lines = [body, "", "_Sources:_"]
-    seen: set[str] = set()
-    for tu in tool_uses:
-        name = (tu or {}).get("name") or ""
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        inp = (tu or {}).get("input") or {}
-        # Show the most informative single field if present.
-        hint = ""
-        if isinstance(inp, dict):
-            for k in ("query", "q", "channel", "thread_ts", "subject"):
-                v = inp.get(k)
-                if v:
-                    hint = f" `{v}`"
-                    break
-        lines.append(f"• `{name}`{hint}")
-    return "\n".join(lines)
+    return body or "_(пустой ответ от Claude)_"
 
 
 def _scrub_request_payload(payload: dict[str, Any]) -> dict[str, Any]:

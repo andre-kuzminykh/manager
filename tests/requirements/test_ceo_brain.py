@@ -616,8 +616,14 @@ def test_responder_streams_updates():
     assert slack.chat_update.call_count >= 2
 
 
-def test_responder_sources_block_includes_tool_uses():
-    """FR-CB2-3.9 / UC-7 — final message contains `Sources:`."""
+def test_responder_no_auto_sources_block_in_output():
+    """FR-CB2-3.9 superseded by FR-CB2-3.29 (operator-pinned
+    2026-05-19): «вот эти ссылки не надо, можешь только
+    гиперссылкой источник указать, в самом ответе вставить».
+    `format_final_response` no longer appends an automatic
+    `_Sources:_` footer — the system prompt now instructs the
+    model to embed source links inline. The body must pass through
+    unchanged."""
     from app.ceo_brain.responder import format_final_response
 
     out = format_final_response(
@@ -627,9 +633,10 @@ def test_responder_sources_block_includes_tool_uses():
             {"name": "calendar.list_events", "input": {"q": "EQT"}},
         ],
     )
-    assert "Sources:" in out
-    assert "slack.search_messages" in out
-    assert "calendar.list_events" in out
+    assert "Главное про EQT" in out
+    assert "Sources:" not in out
+    assert "slack.search_messages" not in out
+    assert "calendar.list_events" not in out
 
 
 def test_responder_supplies_thread_history():
@@ -704,6 +711,23 @@ def test_responder_429_retries(session):
         channel="C1", placeholder_ts="1.2", thread_history=[],
     )
     assert calls["n"] == 3
+
+
+def test_system_prompt_enforces_inline_source_links_no_ids():
+    """FR-CB2-3.29 — operator-pinned 2026-05-19: «вот эти ссылки
+    не надо, можешь только гиперссылкой источник указать, в самом
+    ответе вставить». System prompt must (a) forbid technical IDs,
+    (b) require inline Slack-native hyperlinks `<URL|anchor>`,
+    (c) forbid the trailing «_Источники:_» footer."""
+    from app.ceo_brain.responder import build_system_prompt
+
+    p = build_system_prompt().lower()
+    # Forbid technical IDs.
+    assert "id:" in p or "zoom_id" in p or "metadata" in p
+    # Inline links required — Slack native format mentioned.
+    assert "<url" in p or "<https" in p or "гиперссыл" in p
+    # No more standalone «Источники» footer.
+    assert "источник" in p  # mentioned (forbid OR replace)
 
 
 def test_system_prompt_enforces_laconic_output():

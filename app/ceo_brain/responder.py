@@ -671,22 +671,114 @@ def run_responder(
 
     # Build the final response with Sources block and update Slack.
     final_text = "".join(text_buffer)
-    if final_message is not None and getattr(final_message, "content", None):
-        # Prefer the SDK's accumulated text — more reliable than our
-        # buffer if streaming was interrupted partway.
-        sdk_text = ""
-        for block in final_message.content:
+
+    def _extract_sdk_text(msg: Any) -> str:
+        if msg is None or not getattr(msg, "content", None):
+            return ""
+        out = ""
+        for block in msg.content:
             btype = getattr(block, "type", None) or (
                 isinstance(block, dict) and block.get("type")
             )
             if btype == "text":
-                sdk_text += (
+                out += (
                     getattr(block, "text", None)
                     if not isinstance(block, dict)
                     else (block or {}).get("text") or ""
                 ) or ""
-        if sdk_text.strip():
-            final_text = sdk_text
+        return out
+
+    sdk_text = _extract_sdk_text(final_message)
+    if sdk_text.strip():
+        final_text = sdk_text
+
+    # FR-CB2-3.17 — synthesis recovery. Observed Sonnet quirk:
+    # sometimes the model fires tool_use blocks then ends the turn
+    # without writing a summary, leaving the placeholder full of
+    # 🔍 progress lines and no actual answer. When that happens,
+    # ask the model explicitly to summarise — feeding back its own
+    # tool calls and results as the conversation context.
+    if (
+        not sdk_text.strip()
+        and tool_uses
+        and final_message is not None
+    ):
+        log.info("ceo_brain_responder_empty_text_recovery_attempt")
+        try:
+            recovery_messages = list(request["messages"]) + [
+                {
+                    "role": "assistant",
+                    "content": _serialise_content_blocks(
+                        getattr(final_message, "content", None) or []
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "Сформулируй краткий ответ на основе результатов "
+                        "tool-вызовов выше. Если данных недостаточно — "
+                        "честно скажи об этом."
+                    ),
+                },
+            ]
+            recovery_request = {**request, "messages": recovery_messages}
+            with stream_factory(**recovery_request) as rec_stream:
+                for event in rec_stream:
+                    etype = getattr(event, "type", None) or (
+                        isinstance(event, dict) and event.get("type")
+                    )
+                    if etype != "content_block_delta":
+                        continue
+                    delta = (
+                        getattr(event, "delta", None)
+                        if not isinstance(event, dict)
+                        else event.get("delta")
+                    )
+                    dtype = (
+                        getattr(delta, "type", None)
+                        if not isinstance(delta, dict)
+                        else (delta or {}).get("type")
+                    )
+                    if dtype not in {"text_delta", "text"}:
+                        continue
+                    chunk = (
+                        getattr(delta, "text", None)
+                        if not isinstance(delta, dict)
+                        else (delta or {}).get("text")
+                    ) or ""
+                    if chunk:
+                        text_buffer.append(chunk)
+                        _stream_text_to_slack(
+                            slack=slack, channel=channel,
+                            placeholder_ts=placeholder_ts,
+                            text_buffer=text_buffer,
+                            last_update=last_update,
+                        )
+                recovery_final = rec_stream.get_final_message()
+            recovery_text = _extract_sdk_text(recovery_final)
+            if recovery_text.strip():
+                final_text = recovery_text
+                final_message = recovery_final
+                log.info(
+                    "ceo_brain_responder_empty_text_recovered",
+                    chars=len(recovery_text),
+                )
+            else:
+                log.warning(
+                    "ceo_brain_responder_empty_text_recovery_no_text",
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ceo_brain_responder_empty_text_recovery_failed",
+                error=str(e), error_type=type(e).__name__,
+            )
+
+    # Last-resort fallback: still empty after recovery → explicit
+    # message so the operator doesn't see a blank reply.
+    if not final_text.strip():
+        final_text = (
+            "_(модель не сформулировала ответ — см. Sources ниже)_"
+        )
 
     rendered = format_final_response(text=final_text, tool_uses=tool_uses)
     try:

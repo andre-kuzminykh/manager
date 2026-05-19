@@ -905,6 +905,105 @@ def test_responder_local_tool_use_loop(session):
     )
 
 
+def test_responder_synthesis_recovery_when_text_empty(session):
+    """FR-CB2-3.17 — when first stream ends with tool_uses but NO
+    synthesizing text (observed Sonnet quirk), responder fires a
+    follow-up stream asking for a summary, and uses THAT as the
+    final answer."""
+    from types import SimpleNamespace
+
+    from app.ceo_brain.responder import run_responder
+    from app.models import ClaudeResponderRun
+
+    # Stream 1 — fires an MCP tool_use, then ends without any text.
+    mcp_tool_use_block = SimpleNamespace(
+        type="mcp_tool_use",
+        name="search_meetings",
+        server_name="n8n_calendar",
+        input={"query": "today"},
+        id="mcptoolu_1",
+    )
+    final_msg_1 = SimpleNamespace(
+        content=[mcp_tool_use_block],  # no text block!
+        stop_reason="end_turn",
+        usage=SimpleNamespace(
+            input_tokens=100, output_tokens=20,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+    events_1 = [
+        SimpleNamespace(
+            type="content_block_start",
+            content_block=mcp_tool_use_block,
+        ),
+    ]
+    stream_1 = MagicMock()
+    stream_1.__iter__ = lambda self: iter(events_1)
+    stream_1.get_final_message.return_value = final_msg_1
+    cm_1 = MagicMock()
+    cm_1.__enter__.return_value = stream_1
+    cm_1.__exit__.return_value = False
+
+    # Stream 2 (recovery) — produces a clean text answer.
+    text_block = SimpleNamespace(
+        type="text", text="Сегодня одна встреча: Йохан в 14:00."
+    )
+    final_msg_2 = SimpleNamespace(
+        content=[text_block],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(
+            input_tokens=200, output_tokens=30,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+    events_2 = [
+        SimpleNamespace(
+            type="content_block_delta",
+            delta=SimpleNamespace(
+                type="text_delta",
+                text="Сегодня одна встреча: Йохан в 14:00.",
+            ),
+        ),
+    ]
+    stream_2 = MagicMock()
+    stream_2.__iter__ = lambda self: iter(events_2)
+    stream_2.get_final_message.return_value = final_msg_2
+    cm_2 = MagicMock()
+    cm_2.__enter__.return_value = stream_2
+    cm_2.__exit__.return_value = False
+
+    anthropic = MagicMock()
+    # Note: MCP path uses beta.messages.stream when mcp_servers set,
+    # otherwise messages.stream. This test doesn't set mcp_servers
+    # (we mock everything at SDK level), so messages.stream is used.
+    anthropic.messages.stream.side_effect = [cm_1, cm_2]
+    slack = MagicMock()
+    slack.chat_update.return_value = {"ok": True}
+
+    run_responder(
+        slack=slack, anthropic_client=anthropic, db_session=session,
+        channel="D1", placeholder_ts="1.2",
+        thread_history=[
+            {"role": "user", "content": "какие встречи сегодня?"}
+        ],
+    )
+
+    # Both streams ran: main + synthesis recovery.
+    assert anthropic.messages.stream.call_count == 2
+    # The placeholder got a final chat_update with the recovery text.
+    final_calls = [
+        c for c in slack.chat_update.call_args_list
+        if "Йохан" in (c.kwargs.get("text") or "")
+    ]
+    assert final_calls, "expected recovery text to reach Slack"
+    # Persisted as done with the recovery text.
+    row = session.query(ClaudeResponderRun).one()
+    assert row.status == "done"
+    assert "Йохан" in (row.response_text or "")
+
+
 # -- Category 4: MCP integration (FR-CB2-4.x) ------------------------------
 
 

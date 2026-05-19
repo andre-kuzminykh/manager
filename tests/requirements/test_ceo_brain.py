@@ -1255,7 +1255,6 @@ def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
     cm_2.__exit__.return_value = False
 
     anthropic = MagicMock()
-    anthropic.messages.stream.side_effect = [cm_1, cm_2]
     slack = MagicMock()
     slack.chat_update.return_value = {"ok": True}
 
@@ -1267,12 +1266,12 @@ def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
     os.environ["MCP_SERVERS"] = (
         '[{"name":"n8n_calendar","url":"https://example.invalid/x"}]'
     )
-    # NOTE: with MCP_SERVERS set, the responder routes through
-    # `beta.messages.stream` for the FIRST stream. We mock that too.
+    # With MCP_SERVERS set, both the main turn AND the recovery
+    # turn route through `beta.messages.stream` — recovery keeps
+    # the beta header so historical `mcp_tool_use` blocks remain
+    # parseable, even though `mcp_servers` and `tools` are gone.
     beta_stream_path = anthropic.beta.messages.stream
-    beta_stream_path.side_effect = [cm_1]
-    # Recovery stream goes through regular `messages.stream` after
-    # the fix because mcp_servers / betas are stripped.
+    beta_stream_path.side_effect = [cm_1, cm_2]
     try:
         run_responder(
             slack=slack, anthropic_client=anthropic, db_session=session,
@@ -1286,17 +1285,22 @@ def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
             os.environ["MCP_SERVERS"] = prev
 
     # Main call went through the beta namespace (mcp_servers path).
-    assert beta_stream_path.call_count == 1
-    main_kwargs = beta_stream_path.call_args.kwargs
+    assert beta_stream_path.call_count == 2  # main + recovery
+    main_kwargs = beta_stream_path.call_args_list[0].kwargs
     assert "mcp_servers" in main_kwargs
     assert "betas" in main_kwargs
 
-    # Recovery call went through regular messages.stream (NO beta).
-    assert anthropic.messages.stream.call_count == 1
-    recovery_kwargs = anthropic.messages.stream.call_args.kwargs
+    # Recovery call ALSO goes through beta namespace (we keep
+    # betas so historical mcp_tool_use / mcp_tool_result blocks
+    # remain valid), but mcp_servers + tools are stripped so the
+    # model can't initiate new tool calls.
+    recovery_kwargs = beta_stream_path.call_args_list[1].kwargs
     assert "mcp_servers" not in recovery_kwargs
     assert "tools" not in recovery_kwargs
-    assert "betas" not in recovery_kwargs
+    assert "betas" in recovery_kwargs
+
+    # Regular messages.stream is NOT used (because betas is set).
+    assert anthropic.messages.stream.call_count == 0
 
 
 # -- Category 4: MCP integration (FR-CB2-4.x) ------------------------------

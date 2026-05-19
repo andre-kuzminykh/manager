@@ -860,18 +860,25 @@ def run_responder(
                     ),
                 },
             ]
-            # Strip tool-routing fields so the model is FORCED into a
-            # text-only response — otherwise Sonnet keeps re-using
-            # the toolbox instead of synthesising (operator-observed
-            # 2026-05-19 second-iteration bug).
+            # Strip MCP servers + tool catalogues so the model can't
+            # initiate NEW tool calls in recovery — but KEEP `betas`
+            # so the API still understands the historical
+            # `mcp_tool_use` / `mcp_tool_result` blocks we send back
+            # in the assistant turn. Without the beta header the
+            # API silently returns empty content for those block
+            # types (operator-observed 2026-05-19, third iteration).
             recovery_request = {
                 k: v for k, v in request.items()
-                if k not in {"mcp_servers", "tools", "betas"}
+                if k not in {"mcp_servers", "tools"}
             }
             recovery_request["messages"] = recovery_messages
-            # Without `mcp_servers`/`betas`, the regular
-            # `messages.stream` is the right path.
-            recovery_stream_factory = anthropic_client.messages.stream
+            # Pick stream namespace based on whether the beta header
+            # survived (it does whenever the main turn used MCP).
+            recovery_stream_factory = (
+                anthropic_client.beta.messages.stream
+                if recovery_request.get("betas")
+                else anthropic_client.messages.stream
+            )
             with recovery_stream_factory(**recovery_request) as rec_stream:
                 for event in rec_stream:
                     etype = getattr(event, "type", None) or (

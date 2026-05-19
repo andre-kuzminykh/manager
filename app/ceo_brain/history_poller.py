@@ -37,7 +37,7 @@ from app.models import SlackMessageArchive
 log = get_logger(__name__)
 
 
-_DEFAULT_INTERVAL_SEC = 5
+_DEFAULT_INTERVAL_SEC = 1
 _DEFAULT_LOOKBACK_SEC = 600  # 10 min — covers reconnect gaps
 _DEFAULT_PAGE_LIMIT = 30
 
@@ -121,7 +121,7 @@ class SlackHistoryPoller:
         self._channels = [c for c in channels if c]
         self._responder = responder
         self._archive_dir = archive_dir
-        self._interval_sec = max(2, int(interval_sec))
+        self._interval_sec = max(1, int(interval_sec))
         self._lookback_sec = max(60, int(lookback_sec))
         self._page_limit = max(5, int(page_limit))
         self._settings = settings or get_settings()

@@ -264,19 +264,52 @@ def start_standalone_ceo_brain_bot(*, settings: Settings) -> threading.Thread | 
         return None
 
     def _loop() -> None:
-        try:
-            app = App(
-                token=cb_bot_token,
-                # signing_secret only needed for HTTP variant
-                signing_secret=settings.ceo_brain_signing_secret or None,
-            )
-            _attach_handlers(app, settings)
-            log.info("ceo_brain_standalone_socket_mode_starting")
-            SocketModeHandler(app, cb_app_token).start()
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "ceo_brain_standalone_socket_failed", error=str(e),
-            )
+        """Supervisor — Slack closes idle WebSockets after a few
+        hours and the inner client's auto-reconnect can fail
+        silently. Wrap `SocketModeHandler.start()` in an infinite
+        retry loop so the daemon recovers without needing a full
+        container restart.
+
+        Each attempt builds a FRESH Bolt App and a fresh handler;
+        re-using a half-dead client is what causes the silent
+        failure in the first place."""
+        import time
+
+        attempt = 0
+        backoff_seconds = (2, 5, 10, 30, 60)
+        while True:
+            attempt += 1
+            try:
+                app = App(
+                    token=cb_bot_token,
+                    signing_secret=settings.ceo_brain_signing_secret or None,
+                )
+                _attach_handlers(app, settings)
+                log.info(
+                    "ceo_brain_standalone_socket_mode_starting",
+                    attempt=attempt,
+                )
+                # `.start()` blocks forever under normal operation.
+                # If it returns or raises we treat it as a dropped
+                # connection and reconnect.
+                SocketModeHandler(app, cb_app_token).start()
+                log.warning(
+                    "ceo_brain_standalone_socket_returned",
+                    hint="SocketModeHandler.start() returned; reconnecting",
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "ceo_brain_standalone_socket_crashed",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    attempt=attempt,
+                )
+            # Backoff before reconnect — slow ramp so we don't
+            # hammer Slack if there's a service outage.
+            delay = backoff_seconds[
+                min(attempt - 1, len(backoff_seconds) - 1)
+            ]
+            time.sleep(delay)
 
     t = threading.Thread(
         target=_loop, name="ceo-brain-socket", daemon=True,

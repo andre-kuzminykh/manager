@@ -257,9 +257,20 @@ class SlackHistoryPoller:
 
     def _active_thread_roots(self, channel: str) -> list[str]:
         """Threads we've seen activity in within
-        ``_THREAD_TTL_SEC``. Looking at the archive: any row with
-        a thread_ts whose newest descendant is recent counts."""
+        ``_THREAD_TTL_SEC``. Two sources:
+
+          1. Archive rows with `thread_ts` set — covers replies
+             from the operator and other humans.
+          2. Recent top-level user messages in this channel —
+             Slack does NOT push the bot's own DM messages back
+             to the bot, so the bot's `chat_postMessage` reply
+             never lands in archive. But we know the bot replies
+             in a thread under every operator top-level message,
+             so every recent top-level operator ts is also an
+             active thread root.
+        """
         cutoff = time.time() - self._THREAD_TTL_SEC
+        seen: set[str] = set()
         try:
             with session_scope() as s:
                 rows = (
@@ -270,7 +281,6 @@ class SlackHistoryPoller:
                     .limit(50)
                     .all()
                 )
-                seen: set[str] = set()
                 for row in rows:
                     try:
                         if float(row.ts) < cutoff:
@@ -279,13 +289,31 @@ class SlackHistoryPoller:
                         continue
                     if row.thread_ts:
                         seen.add(row.thread_ts)
+                # Top-level user messages in DM — bot replies in
+                # a synthetic thread under each of these.
+                tops = (
+                    s.query(SlackMessageArchive)
+                    .filter(SlackMessageArchive.channel_id == channel)
+                    .filter(SlackMessageArchive.thread_ts.is_(None))
+                    .filter(SlackMessageArchive.subtype.is_(None))
+                    .order_by(SlackMessageArchive.ts.desc())
+                    .limit(50)
+                    .all()
+                )
+                for row in tops:
+                    try:
+                        if float(row.ts) < cutoff:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                    seen.add(row.ts)
                 return sorted(seen)
         except Exception as e:  # noqa: BLE001
             log.info(
                 "ceo_brain_active_threads_lookup_failed",
                 channel=channel, error=str(e),
             )
-            return []
+            return sorted(seen)
 
     def _poll_thread_once(
         self, channel: str, thread_ts: str,

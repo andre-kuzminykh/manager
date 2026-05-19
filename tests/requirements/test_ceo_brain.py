@@ -670,7 +670,8 @@ def test_responder_5xx_marks_failed(session):
     anthropic = MagicMock()
     def _explode(*a, **kw):
         raise RuntimeError("500 Internal Server Error")
-    anthropic.messages.stream.side_effect = _explode
+    # FR-CB2-3.22 — main turn uses messages.create (no MCP path).
+    anthropic.messages.create.side_effect = _explode
     slack = MagicMock()
 
     run_responder(
@@ -695,7 +696,8 @@ def test_responder_429_retries(session):
         return MagicMock()
 
     anthropic = MagicMock()
-    anthropic.messages.stream.side_effect = _maybe_429
+    # FR-CB2-3.22 — main turn uses messages.create (no MCP path).
+    anthropic.messages.create.side_effect = _maybe_429
     slack = MagicMock()
     run_responder(
         slack=slack, anthropic_client=anthropic, db_session=session,
@@ -748,6 +750,71 @@ def test_slack_handler_filters_bot_messages_from_thread_history():
         "уточни про Jochen",
     ]
     assert all(m["role"] == "user" for m in out)
+
+
+def test_run_responder_uses_create_for_main_turn(session):
+    """FR-CB2-3.22 — main turn goes through
+    `beta.messages.create` (non-stream) when MCP servers are
+    configured. Streaming + MCP + parallel tool_use truncates the
+    response before tool_results arrive (operator-observed
+    2026-05-19), so non-streaming is the reliable path."""
+    from types import SimpleNamespace
+
+    from app.ceo_brain.responder import run_responder
+    from app.models import ClaudeResponderRun
+
+    # Full main turn — model called a tool, got result, wrote
+    # synthesis. With create() we get all blocks in one shot.
+    answer_text = SimpleNamespace(
+        type="text", text="Сегодня обсудили Series A: $120M собрано.",
+    )
+    final_msg = SimpleNamespace(
+        content=[answer_text],
+        stop_reason="end_turn",
+        usage=SimpleNamespace(
+            input_tokens=500, output_tokens=200,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+        ),
+    )
+
+    anthropic = MagicMock()
+    anthropic.beta.messages.create.return_value = final_msg
+    slack = MagicMock()
+    slack.chat_update.return_value = {"ok": True}
+
+    import os
+    prev = os.environ.get("MCP_SERVERS")
+    os.environ["MCP_SERVERS"] = (
+        '[{"name":"n8n_calendar","url":"https://example.invalid/x"}]'
+    )
+    try:
+        run_responder(
+            slack=slack, anthropic_client=anthropic, db_session=session,
+            channel="D1", placeholder_ts="1.2",
+            thread_history=[
+                {"role": "user", "content": "вопрос про фандрайзинг"},
+            ],
+        )
+    finally:
+        if prev is None:
+            os.environ.pop("MCP_SERVERS", None)
+        else:
+            os.environ["MCP_SERVERS"] = prev
+
+    # Main turn used beta.messages.create (non-stream).
+    assert anthropic.beta.messages.create.called
+    call_kwargs = anthropic.beta.messages.create.call_args.kwargs
+    assert "mcp_servers" in call_kwargs
+    assert "betas" in call_kwargs
+
+    # Stream NOT used for main turn.
+    assert anthropic.beta.messages.stream.call_count == 0
+
+    # Result persisted with the answer text.
+    row = session.query(ClaudeResponderRun).one()
+    assert row.status == "done"
+    assert "Series A" in (row.response_text or "")
 
 
 def test_responder_system_prompt_mandates_transcript_fetch_after_search():
@@ -900,7 +967,7 @@ def test_responder_local_tool_use_loop(session):
     from app.ceo_brain.responder import run_responder
     from app.models import ClaudeResponderRun
 
-    # Stream 1 — tool_use for slack_search, then end-of-stream.
+    # Turn 1 (main, via create()) — tool_use for slack_search.
     tool_use_block = SimpleNamespace(
         type="tool_use",
         name="slack_search",
@@ -915,20 +982,9 @@ def test_responder_local_tool_use_loop(session):
             cache_creation_input_tokens=0,
         ),
     )
-    events_1 = [
-        SimpleNamespace(
-            type="content_block_start",
-            content_block=tool_use_block,
-        ),
-    ]
-    stream_1 = MagicMock()
-    stream_1.__iter__ = lambda self: iter(events_1)
-    stream_1.get_final_message.return_value = final_msg_1
-    cm_1 = MagicMock()
-    cm_1.__enter__.return_value = stream_1
-    cm_1.__exit__.return_value = False
 
-    # Stream 2 — plain text deltas, end_turn.
+    # Turn 2 (recovery loop iteration after local tool execution,
+    # via create()) — plain text, end_turn.
     text_block = SimpleNamespace(type="text", text="Ничего не нашёл.")
     final_msg_2 = SimpleNamespace(
         content=[text_block],
@@ -938,31 +994,15 @@ def test_responder_local_tool_use_loop(session):
             cache_creation_input_tokens=0,
         ),
     )
-    events_2 = [
-        SimpleNamespace(
-            type="content_block_delta",
-            delta=SimpleNamespace(type="text_delta", text="Ничего "),
-        ),
-        SimpleNamespace(
-            type="content_block_delta",
-            delta=SimpleNamespace(type="text_delta", text="не нашёл."),
-        ),
-    ]
-    stream_2 = MagicMock()
-    stream_2.__iter__ = lambda self: iter(events_2)
-    stream_2.get_final_message.return_value = final_msg_2
-    cm_2 = MagicMock()
-    cm_2.__enter__.return_value = stream_2
-    cm_2.__exit__.return_value = False
 
     anthropic = MagicMock()
-    anthropic.messages.stream.side_effect = [cm_1, cm_2]
+    # FR-CB2-3.22 — main turns now use messages.create (no MCP).
+    anthropic.messages.create.side_effect = [final_msg_1, final_msg_2]
     slack = MagicMock()
     slack.chat_update.return_value = {"ok": True}
 
     # Bot client gets the slack_search call (we route it through
-    # user_client when set; here it's None so an error JSON comes
-    # back — that's fine, we still verify the loop turns).
+    # user_client when set).
     bot_client = MagicMock()
     user_client = MagicMock()
     user_client.search_messages.return_value = {
@@ -979,8 +1019,8 @@ def test_responder_local_tool_use_loop(session):
         slack_user_client=user_client,
     )
 
-    # The stream was invoked twice (one per turn).
-    assert anthropic.messages.stream.call_count == 2
+    # create() invoked twice (main turn + post-tool-execution turn).
+    assert anthropic.messages.create.call_count == 2
     # The executor ran against the user client (search.messages).
     assert user_client.search_messages.called
     # Persisted run carries the tool_use trace.
@@ -1107,10 +1147,9 @@ def test_responder_synthesis_recovery_when_text_empty(session):
     cm_2.__exit__.return_value = False
 
     anthropic = MagicMock()
-    # Note: MCP path uses beta.messages.stream when mcp_servers set,
-    # otherwise messages.stream. This test doesn't set mcp_servers
-    # (we mock everything at SDK level), so messages.stream is used.
-    anthropic.messages.stream.side_effect = [cm_1, cm_2]
+    # FR-CB2-3.22 — main via create() (no MCP env), recovery via stream().
+    anthropic.messages.create.return_value = final_msg_1
+    anthropic.messages.stream.return_value = cm_2
     slack = MagicMock()
     slack.chat_update.return_value = {"ok": True}
 
@@ -1122,8 +1161,9 @@ def test_responder_synthesis_recovery_when_text_empty(session):
         ],
     )
 
-    # Both streams ran: main + synthesis recovery.
-    assert anthropic.messages.stream.call_count == 2
+    # Main via create(), recovery via stream() — one each.
+    assert anthropic.messages.create.call_count == 1
+    assert anthropic.messages.stream.call_count == 1
     # The placeholder got a final chat_update with the recovery text.
     final_calls = [
         c for c in slack.chat_update.call_args_list
@@ -1258,7 +1298,9 @@ def test_responder_synthesis_recovery_when_last_block_is_tool_use(session):
     cm_2.__exit__.return_value = False
 
     anthropic = MagicMock()
-    anthropic.messages.stream.side_effect = [cm_1, cm_2]
+    # FR-CB2-3.22 — main via create() (no MCP env), recovery via stream().
+    anthropic.messages.create.return_value = final_msg_1
+    anthropic.messages.stream.return_value = cm_2
     slack = MagicMock()
     slack.chat_update.return_value = {"ok": True}
 
@@ -1271,8 +1313,9 @@ def test_responder_synthesis_recovery_when_last_block_is_tool_use(session):
         ],
     )
 
-    # Recovery stream fired even though sdk_text was non-empty.
-    assert anthropic.messages.stream.call_count == 2
+    # Main via create(), recovery via stream() — one each.
+    assert anthropic.messages.create.call_count == 1
+    assert anthropic.messages.stream.call_count == 1
     row = session.query(ClaudeResponderRun).one()
     assert row.status == "done"
     # Final stored text is the recovery synthesis, not the
@@ -1354,9 +1397,9 @@ def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
     os.environ["MCP_SERVERS"] = (
         '[{"name":"n8n_calendar","url":"https://example.invalid/x"}]'
     )
-    beta_stream_path = anthropic.beta.messages.stream
-    beta_stream_path.side_effect = [cm_1]
-    anthropic.messages.stream.side_effect = [cm_2]
+    # FR-CB2-3.22 — main turn now via beta.messages.create.
+    anthropic.beta.messages.create.return_value = final_msg_1
+    anthropic.messages.stream.return_value = cm_2
     try:
         run_responder(
             slack=slack, anthropic_client=anthropic, db_session=session,
@@ -1369,16 +1412,15 @@ def test_responder_synthesis_recovery_strips_tools_to_force_text(session):
         else:
             os.environ["MCP_SERVERS"] = prev
 
-    # Main call went through the beta namespace (mcp_servers path).
-    assert beta_stream_path.call_count == 1
-    main_kwargs = beta_stream_path.call_args_list[0].kwargs
+    # Main call went through beta.messages.CREATE (mcp_servers path).
+    assert anthropic.beta.messages.create.call_count == 1
+    main_kwargs = anthropic.beta.messages.create.call_args.kwargs
     assert "mcp_servers" in main_kwargs
     assert "betas" in main_kwargs
 
     # Recovery flattens the tool conversation into a single plain
-    # user message and goes through `messages.stream` — NO MCP,
-    # NO tools, NO beta header (avoids Anthropic silently
-    # rejecting historical mcp_tool_use blocks).
+    # user message and goes through plain `messages.stream` — NO MCP,
+    # NO tools, NO beta header.
     assert anthropic.messages.stream.call_count == 1
     recovery_kwargs = anthropic.messages.stream.call_args.kwargs
     assert "mcp_servers" not in recovery_kwargs

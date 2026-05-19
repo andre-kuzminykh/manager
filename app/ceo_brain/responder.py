@@ -594,14 +594,16 @@ def run_responder(
     )
     started_at = datetime.now(timezone.utc)
 
-    # Hosted MCP connector lives in the beta namespace and needs
-    # the `mcp-client-2025-04-04` beta header when `mcp_servers`
-    # is passed to `messages.stream`. Without MCP servers, the
-    # regular `messages.stream` is fine.
+    # FR-CB2-3.22 — main turn goes through `messages.create` (non-
+    # stream) because `messages.stream` + MCP + parallel tool_use
+    # truncates the response before tool_results arrive. Recovery
+    # (below) still uses `messages.stream`.
     if request.get("mcp_servers"):
+        main_caller = anthropic_client.beta.messages.create
         stream_factory = anthropic_client.beta.messages.stream
         request = {**request, "betas": ["mcp-client-2025-04-04"]}
     else:
+        main_caller = anthropic_client.messages.create
         stream_factory = anthropic_client.messages.stream
 
     text_buffer: list[str] = []
@@ -610,85 +612,37 @@ def run_responder(
     final_message: Any = None
 
     # FR-CB2-3.16 — outer tool-use loop. Each iteration runs one
-    # streamed Claude turn; if the turn ends with a `tool_use` block
-    # for a *local* tool, execute it, append assistant+user turns,
-    # and re-stream. MCP tool_uses are resolved by Anthropic
-    # server-side so they don't trigger another iteration.
+    # Claude turn; if the turn ends with a `tool_use` block for a
+    # *local* tool, execute it, append assistant+user turns, and
+    # re-issue. MCP tool_uses are resolved by Anthropic server-side
+    # so they don't trigger another iteration.
     final_response_failed = False
     for loop_idx in range(max(1, max_tool_loops)):
-        stream_ok = False
+        main_ok = False
         for attempt in range(max(1, max_retries)):
             try:
-                with stream_factory(**request) as stream:
-                    for event in stream:
-                        etype = getattr(event, "type", None) or (
-                            isinstance(event, dict) and event.get("type")
+                final_message = main_caller(**request)
+                # Populate `tool_uses` from the returned content so
+                # the Sources block + diagnostics still work.
+                for block in (getattr(final_message, "content", None) or []):
+                    btype = getattr(block, "type", None) or (
+                        isinstance(block, dict) and block.get("type")
+                    )
+                    if btype in {"tool_use", "server_tool_use", "mcp_tool_use"}:
+                        tool_name = (
+                            getattr(block, "name", None)
+                            if not isinstance(block, dict)
+                            else (block or {}).get("name")
+                        ) or ""
+                        tool_input = (
+                            getattr(block, "input", None)
+                            if not isinstance(block, dict)
+                            else (block or {}).get("input")
+                        ) or {}
+                        tool_uses.append(
+                            {"name": tool_name, "input": tool_input}
                         )
-                        if etype == "content_block_start":
-                            block = (
-                                getattr(event, "content_block", None)
-                                if not isinstance(event, dict)
-                                else event.get("content_block")
-                            )
-                            btype = (
-                                getattr(block, "type", None)
-                                if not isinstance(block, dict)
-                                else (block or {}).get("type")
-                            )
-                            if btype in {"tool_use", "server_tool_use", "mcp_tool_use"}:
-                                tool_name = (
-                                    getattr(block, "name", None)
-                                    if not isinstance(block, dict)
-                                    else (block or {}).get("name")
-                                ) or ""
-                                tool_input = (
-                                    getattr(block, "input", None)
-                                    if not isinstance(block, dict)
-                                    else (block or {}).get("input")
-                                ) or {}
-                                tool_uses.append(
-                                    {"name": tool_name, "input": tool_input}
-                                )
-                                note = describe_tool_use_for_slack(
-                                    tool_name=tool_name,
-                                    input_arg=tool_input,
-                                )
-                                text_buffer.append("\n" + note)
-                                _stream_text_to_slack(
-                                    slack=slack, channel=channel,
-                                    placeholder_ts=placeholder_ts,
-                                    text_buffer=text_buffer,
-                                    last_update=last_update,
-                                    force=True,
-                                )
-                            continue
-                        if etype == "content_block_delta":
-                            delta = (
-                                getattr(event, "delta", None)
-                                if not isinstance(event, dict)
-                                else event.get("delta")
-                            )
-                            dtype = (
-                                getattr(delta, "type", None)
-                                if not isinstance(delta, dict)
-                                else (delta or {}).get("type")
-                            )
-                            if dtype in {"text_delta", "text"}:
-                                chunk = (
-                                    getattr(delta, "text", None)
-                                    if not isinstance(delta, dict)
-                                    else (delta or {}).get("text")
-                                ) or ""
-                                if chunk:
-                                    text_buffer.append(chunk)
-                                    _stream_text_to_slack(
-                                        slack=slack, channel=channel,
-                                        placeholder_ts=placeholder_ts,
-                                        text_buffer=text_buffer,
-                                        last_update=last_update,
-                                    )
-                    final_message = stream.get_final_message()
-                stream_ok = True
+                main_ok = True
                 break
             except BaseException as exc:  # noqa: BLE001
                 if _is_429(exc) and attempt + 1 < max_retries:
@@ -735,7 +689,7 @@ def run_responder(
                     )
                 final_response_failed = True
                 break
-        if not stream_ok:
+        if not main_ok:
             return None
 
         # If the turn produced local tool_use blocks, execute them

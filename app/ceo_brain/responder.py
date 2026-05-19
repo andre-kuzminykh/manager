@@ -914,10 +914,17 @@ def run_responder(
                     chars=len(recovery_text),
                 )
             else:
+                # Recovery attempted but model still produced no text.
+                # Drop the misleading planning preamble — it's worse
+                # UX than a clear «не получилось» message.
+                final_text = ""
                 log.warning(
                     "ceo_brain_responder_empty_text_recovery_no_text",
                 )
         except Exception as e:  # noqa: BLE001
+            # Recovery itself crashed. Same logic — better to show
+            # a clean fallback than leave the planning preamble.
+            final_text = ""
             log.warning(
                 "ceo_brain_responder_empty_text_recovery_failed",
                 error=str(e), error_type=type(e).__name__,

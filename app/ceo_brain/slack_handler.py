@@ -37,6 +37,39 @@ from app.logging_setup import get_logger
 log = get_logger(__name__)
 
 
+def _build_thread_history_from_replies(
+    replies: list[dict[str, Any]],
+    *,
+    bot_user_id: str | None,
+) -> list[dict[str, Any]]:
+    """FR-CB2-3.20 — assemble responder thread context from a Slack
+    `conversations.replies` payload, **skipping bot-authored
+    messages**. Operator-observed bug 2026-05-19: the bot's own
+    `🤔 думаю…` placeholder was fetched back as part of the thread
+    and added to history as `role=user`, so the model saw "🤔" as
+    the latest user message and replied «получил только эмодзи».
+
+    A message is bot-authored when EITHER:
+      * `user == bot_user_id` (regular bot message), OR
+      * `bot_id` is present (relay / app-posted message without a
+        user ID).
+    Empty-text messages are also skipped.
+    """
+    out: list[dict[str, Any]] = []
+    for m in (replies or []):
+        if not isinstance(m, dict):
+            continue
+        text = (m.get("text") or "").strip()
+        if not text:
+            continue
+        if bot_user_id and m.get("user") == bot_user_id:
+            continue
+        if m.get("bot_id"):
+            continue
+        out.append({"role": "user", "content": text})
+    return out
+
+
 # FR-CB2-1.7 — module-level singleton tracking for the history
 # poller. The Socket-Mode supervisor loop in
 # `start_standalone_ceo_brain_bot` re-calls `_attach_handlers` on
@@ -170,12 +203,15 @@ def _build_responder_callback(
                         limit=settings.ceo_brain_thread_context_msgs,
                     )
                     if resp.get("ok"):
-                        for m in resp.get("messages") or []:
-                            text = (m or {}).get("text") or ""
-                            if text:
-                                history.append({
-                                    "role": "user", "content": text,
-                                })
+                        # FR-CB2-3.20 — strip bot-authored messages
+                        # (incl. our own `🤔 думаю…` placeholder we
+                        # just posted above) so the operator's
+                        # actual question stays the last user
+                        # message in context.
+                        history = _build_thread_history_from_replies(
+                            resp.get("messages") or [],
+                            bot_user_id=bot_user_id,
+                        )
                 except Exception as e:  # noqa: BLE001
                     log.info(
                         "ceo_brain_thread_fetch_failed",

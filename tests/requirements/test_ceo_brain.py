@@ -713,6 +713,43 @@ def test_responder_system_prompt_includes_persona_and_date():
     assert "CEO Brain" in sys_prompt or "Артем" in sys_prompt
 
 
+def test_slack_handler_filters_bot_messages_from_thread_history():
+    """FR-CB2-3.20 — operator-observed 2026-05-19: after
+    `post_placeholder("🤔 думаю...")`, the responder fetched the
+    whole thread and added EVERY message (including its own
+    placeholder) to history as `role=user`. The last "user
+    message" became "🤔 думаю..." and the model honestly replied
+    «получил только эмодзи». Fix: skip messages authored by the
+    bot when assembling thread context."""
+    from app.ceo_brain.slack_handler import (
+        _build_thread_history_from_replies,
+    )
+
+    bot_user_id = "UBOTSELF"
+    replies = [
+        {"user": "U_OP", "text": "что сегодня обсудили с Йоханом?"},
+        # Bot placeholder — must be filtered out.
+        {"user": bot_user_id, "text": "🤔 думаю…"},
+        # Earlier bot answer — must be filtered out.
+        {"user": bot_user_id, "text": "ранее: фандрайзинг идёт ок"},
+        # Another operator message — must be kept.
+        {"user": "U_OP", "text": "уточни про Jochen"},
+        # Generic bot-authored entry (no `user`, just `bot_id`).
+        {"bot_id": "B1", "text": "bot relayed reply"},
+        # Empty text — also skipped.
+        {"user": "U_OP", "text": ""},
+    ]
+    out = _build_thread_history_from_replies(
+        replies, bot_user_id=bot_user_id,
+    )
+    contents = [m["content"] for m in out]
+    assert contents == [
+        "что сегодня обсудили с Йоханом?",
+        "уточни про Jochen",
+    ]
+    assert all(m["role"] == "user" for m in out)
+
+
 def test_responder_system_prompt_includes_search_strategy_rules():
     """FR-CB2-3.19 — system prompt must teach the model two
     operator-observed search strategies (2026-05-19):

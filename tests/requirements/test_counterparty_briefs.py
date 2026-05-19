@@ -192,6 +192,38 @@ def test_brief_extract_skips_event_with_no_counterparty():
     assert out.initial_persons == []
 
 
+def test_brief_skips_event_when_only_person_no_org():
+    """FR-CB-2.6 — operator-pinned 2026-05-19 («надо искать только
+    компании»): when extraction yields a person but NO company,
+    runner must short-circuit. Previously these events shipped a
+    useless «Валентина — N/A (research_failed)» Slack DM."""
+    from app.counterparty_briefs.extract import (
+        EventExtraction,
+        PersonCandidate,
+    )
+    from app.counterparty_briefs.runner import _has_company_to_brief
+
+    # The bug scenario the operator reported.
+    person_only = EventExtraction(
+        org_name="",
+        initial_persons=[
+            PersonCandidate(
+                person_name="Валентина", person_role="Ассистент",
+            )
+        ],
+    )
+    assert _has_company_to_brief(person_only) is False
+
+    # Null org also skipped.
+    null_org = EventExtraction(org_name=None, initial_persons=[])
+    assert _has_company_to_brief(null_org) is False
+
+    # Company present → proceed even without initial persons (the
+    # beneficiary extractor will fill them from leadership).
+    company_only = EventExtraction(org_name="Acme Corp")
+    assert _has_company_to_brief(company_only) is True
+
+
 def test_brief_extract_output_schema():
     """FR-CB-2.5 — bad-shape output is rejected, returns empty
     extraction (runner skips event)."""

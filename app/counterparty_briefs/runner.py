@@ -85,6 +85,16 @@ def compute_lookahead_window(
     )
 
 
+def _has_company_to_brief(extraction: Any) -> bool:
+    """FR-CB-2.6 — operator-pinned 2026-05-19 («надо искать только
+    компании»): briefs only fire when a company is present. A lone
+    person without organisational affiliation is skipped — previous
+    behaviour shipped a useless «<имя> — N/A (research_failed)» DM
+    when person-research failed and there was no org to fall back to.
+    """
+    return bool(getattr(extraction, "org_name", None))
+
+
 def event_passes_host_gate(event: dict[str, Any], operator_email: str) -> bool:
     """Inherit the FR-CR-05-167 organizer + creator gate."""
     op = (operator_email or "").strip().lower()
@@ -354,6 +364,14 @@ class CounterpartyBriefRunner:
         )
         if not ex.org_name and not ex.initial_persons:
             log.info("brief_no_external_counterparty", event_id=ev_id)
+            return
+        # FR-CB-2.6 — company-required gate.
+        if not _has_company_to_brief(ex):
+            log.info(
+                "brief_org_required_skip",
+                event_id=ev_id,
+                has_persons=bool(ex.initial_persons),
+            )
             return
 
         budget = float(self._settings.counterparty_briefs_llm_budget_usd)

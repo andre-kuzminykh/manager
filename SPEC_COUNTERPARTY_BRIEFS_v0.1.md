@@ -543,6 +543,7 @@ Scenario: deep-research budget exceeded
 | FR-CB-2.3 | Если ни person ни org не выделены → skip event | `test_brief_extract_skips_event_with_no_counterparty` |
 | FR-CB-2.4 | Multi-counterparty per event: вернуть list of counterparties | `test_brief_extract_supports_multi_counterparty` |
 | FR-CB-2.5 | Output JSON-schema валидирован | `test_brief_extract_output_schema` |
+| FR-CB-2.6 | **Company-required gate (operator-pinned 2026-05-19): «надо искать только компании»** — если `org_name` пустое (только одинокий персон без аффилиации), event пропускается даже если `initial_persons` непуст. Раньше бриф проходил с person-only research и отправлял «Валентина — N/A (research_failed)» в Slack, что бесполезно. Skip-причина логируется как `brief_org_required_skip`. | `test_brief_skips_event_when_only_person_no_org` |
 
 ### Категория 3 — DB lookup
 

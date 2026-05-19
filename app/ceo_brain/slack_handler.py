@@ -61,7 +61,19 @@ def _build_responder_callback(
     def _responder(payload: dict[str, Any]) -> None:
         channel = payload.get("channel") or ""
         ts = payload.get("ts") or payload.get("event_ts") or ""
-        thread_ts = payload.get("thread_ts") or ts
+        # Operator-pinned 2026-05-19: «не видел ответ» — bot was
+        # posting placeholder INSIDE a synthetic thread on top-
+        # level DM messages, so the reply landed in the side-pane
+        # thread view instead of inline in the DM. For top-level
+        # DMs we reply top-level (no thread_ts). Only when the
+        # operator's own message lives in an existing thread do
+        # we stay in that thread.
+        parent_thread_ts = payload.get("thread_ts")
+        thread_ts = parent_thread_ts if parent_thread_ts else None
+        # For @mention in a channel, we DO want to thread under
+        # the mention so the channel stays readable.
+        if payload.get("type") == "app_mention" and not thread_ts:
+            thread_ts = ts
         if not channel:
             return
 
@@ -74,24 +86,30 @@ def _build_responder_callback(
             if not placeholder_ts:
                 return
             history: list[dict[str, Any]] = []
-            try:
-                resp = slack_client.conversations_replies(
-                    channel=channel,
-                    ts=thread_ts,
-                    limit=settings.ceo_brain_thread_context_msgs,
-                )
-                if resp.get("ok"):
-                    for m in resp.get("messages") or []:
-                        text = (m or {}).get("text") or ""
-                        if text:
-                            history.append({
-                                "role": "user", "content": text,
-                            })
-            except Exception as e:  # noqa: BLE001
-                log.info(
-                    "ceo_brain_thread_fetch_failed",
-                    error=str(e), channel=channel,
-                )
+            # Only pull thread context when this message lives in
+            # an actual thread; for a top-level DM message there's
+            # no thread to fetch (would 404). The history then
+            # falls back to just the message body, which is
+            # plenty for a single-turn exchange.
+            if parent_thread_ts:
+                try:
+                    resp = slack_client.conversations_replies(
+                        channel=channel,
+                        ts=parent_thread_ts,
+                        limit=settings.ceo_brain_thread_context_msgs,
+                    )
+                    if resp.get("ok"):
+                        for m in resp.get("messages") or []:
+                            text = (m or {}).get("text") or ""
+                            if text:
+                                history.append({
+                                    "role": "user", "content": text,
+                                })
+                except Exception as e:  # noqa: BLE001
+                    log.info(
+                        "ceo_brain_thread_fetch_failed",
+                        error=str(e), channel=channel,
+                    )
             if not history:
                 history = [
                     {"role": "user", "content": payload.get("text") or "(?)"},

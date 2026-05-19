@@ -750,6 +750,29 @@ def test_slack_handler_filters_bot_messages_from_thread_history():
     assert all(m["role"] == "user" for m in out)
 
 
+def test_responder_system_prompt_mandates_transcript_fetch_after_search():
+    """FR-CB2-3.21 — model must always call get_zoom_transcript /
+    get_meeting after a search_* tool. Operator-observed 2026-05-19:
+    bot called 3 search-tools, never followed up with a transcript
+    pull, recovery got an empty DATA block, response was «нет
+    данных». Search results alone are titles, not content."""
+    from app.ceo_brain.responder import build_system_prompt
+
+    sys_prompt = build_system_prompt()
+    # The prompt must contain a chain-rule: «после search_* всегда
+    # зови get_zoom_transcript/get_meeting». Check for the strongest
+    # form: explicit "после ... search ... get_zoom_transcript" or
+    # equivalent English wording.
+    lower = sys_prompt.lower()
+    assert "search" in lower
+    assert "get_zoom_transcript" in lower or "get_meeting" in lower
+    # The mandate phrasing must explicitly connect search →
+    # transcript, not just mention them separately.
+    assert ("после search" in lower) or ("after search" in lower), (
+        "prompt must explicitly chain search → transcript_fetch"
+    )
+
+
 def test_responder_system_prompt_includes_search_strategy_rules():
     """FR-CB2-3.19 — system prompt must teach the model two
     operator-observed search strategies (2026-05-19):

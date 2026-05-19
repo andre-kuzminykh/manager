@@ -394,6 +394,108 @@ def _serialise_content_blocks(blocks: Any) -> list[dict[str, Any]]:
     return out
 
 
+_FINAL_RENDER_MAX_ATTEMPTS = 3
+_FINAL_RENDER_BACKOFF_SEC = (1.0, 2.0, 4.0)
+
+
+def _is_slack_rate_limited(resp_or_exc: Any) -> tuple[bool, float]:
+    """Inspect a Slack response dict OR a slack_sdk exception and
+    return ``(is_rate_limited, retry_after_seconds)``."""
+    # Dict-like response (ok=False, error="ratelimited")
+    if isinstance(resp_or_exc, dict):
+        err = (resp_or_exc.get("error") or "").lower()
+        if err in {"ratelimited", "rate_limited"} or "rate" in err:
+            ra = resp_or_exc.get("retry_after") or resp_or_exc.get(
+                "Retry-After"
+            ) or 1.0
+            try:
+                return True, max(0.0, float(ra))
+            except (TypeError, ValueError):
+                return True, 1.0
+        return False, 0.0
+    # slack_sdk SlackApiError exposes `.response` (dict-like).
+    inner = getattr(resp_or_exc, "response", None)
+    if isinstance(inner, dict) or hasattr(inner, "get"):
+        try:
+            return _is_slack_rate_limited(dict(inner))
+        except Exception:  # noqa: BLE001
+            pass
+    # Generic exception — fall back to the message regex.
+    if _is_429(resp_or_exc):
+        return True, _retry_after_seconds(resp_or_exc, default=1.0)
+    return False, 0.0
+
+
+def _final_render_to_slack(
+    *,
+    slack: Any,
+    channel: str,
+    placeholder_ts: str,
+    thread_ts: str | None,
+    text: str,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """FR-CB2-3.18 — robust final placeholder update.
+
+    On Slack `ratelimited`, retry with exponential backoff up to 3
+    attempts. After exhaustion, post a NEW message in the same
+    thread via ``chat_postMessage`` so the synthesized answer
+    reaches the operator even when ``chat.update`` is exhausted
+    (Tier-1 limit ≈ 50/min — easy to hit with multi-tool flows
+    streaming many progressive edits).
+    """
+    last_failure_reason: str = ""
+    for attempt in range(1, _FINAL_RENDER_MAX_ATTEMPTS + 1):
+        backoff = _FINAL_RENDER_BACKOFF_SEC[
+            min(attempt - 1, len(_FINAL_RENDER_BACKOFF_SEC) - 1)
+        ]
+        try:
+            resp = slack.chat_update(
+                channel=channel, ts=placeholder_ts, text=text,
+            )
+        except Exception as exc:  # noqa: BLE001
+            is_rl, ra = _is_slack_rate_limited(exc)
+            last_failure_reason = (
+                f"exc:{type(exc).__name__}:{exc}"
+            )
+            if is_rl and attempt < _FINAL_RENDER_MAX_ATTEMPTS:
+                sleep(max(ra, backoff))
+                continue
+            break
+        # Slack returns dict-like; .get('ok')
+        ok = bool(resp.get("ok") if hasattr(resp, "get") else False)
+        if ok:
+            return
+        is_rl, ra = _is_slack_rate_limited(
+            dict(resp) if hasattr(resp, "get") else {}
+        )
+        last_failure_reason = f"resp_not_ok:{resp.get('error') if hasattr(resp,'get') else resp}"
+        if is_rl and attempt < _FINAL_RENDER_MAX_ATTEMPTS:
+            sleep(max(ra, backoff))
+            continue
+        break
+
+    # All retries exhausted — fall back to a fresh thread message.
+    log.warning(
+        "ceo_brain_final_render_chat_update_exhausted",
+        reason=last_failure_reason,
+    )
+    try:
+        slack.chat_postMessage(
+            channel=channel,
+            text=text,
+            thread_ts=thread_ts or placeholder_ts,
+            unfurl_links=False,
+            unfurl_media=False,
+        )
+        log.info("ceo_brain_final_render_fallback_new_message_posted")
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "ceo_brain_final_render_fallback_failed",
+            error=str(e), error_type=type(e).__name__,
+        )
+
+
 def _collect_local_tool_uses(
     final_message: Any,
     tool_executors: dict[str, Callable[[dict[str, Any]], str]],
@@ -433,6 +535,7 @@ def run_responder(
     slack_bot_client: Any | None = None,
     slack_user_client: Any | None = None,
     max_tool_loops: int = 10,
+    placeholder_thread_ts: str | None = None,
 ) -> ClaudeResponderRun | None:
     """End-to-end Claude responder.
 
@@ -781,10 +884,16 @@ def run_responder(
         )
 
     rendered = format_final_response(text=final_text, tool_uses=tool_uses)
-    try:
-        slack.chat_update(channel=channel, ts=placeholder_ts, text=rendered)
-    except Exception as e:  # noqa: BLE001
-        log.warning("ceo_brain_chat_update_final_failed", error=str(e))
+    # FR-CB2-3.18 — robust final render. Retries rate-limited updates
+    # and falls back to a new threaded message if all retries fail.
+    _final_render_to_slack(
+        slack=slack,
+        channel=channel,
+        placeholder_ts=placeholder_ts,
+        thread_ts=placeholder_thread_ts,
+        text=rendered,
+        sleep=sleep,
+    )
 
     # Extract usage / cost from the final_message. Coerce defensively
     # so a MagicMock or unexpected SDK shape doesn't poison the

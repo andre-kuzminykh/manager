@@ -197,6 +197,7 @@ def _build_responder_callback(
                     slack_event_ts=ts,
                     slack_bot_client=slack_client,
                     slack_user_client=slack_user_client,
+                    placeholder_thread_ts=thread_ts,
                 )
 
         threading.Thread(

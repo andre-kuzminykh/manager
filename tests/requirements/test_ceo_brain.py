@@ -905,6 +905,51 @@ def test_responder_local_tool_use_loop(session):
     )
 
 
+def test_final_render_retries_on_rate_limit():
+    """FR-CB2-3.18 — when the final chat_update returns
+    `ratelimited`, retry with Retry-After backoff up to 3 times."""
+    from app.ceo_brain.responder import _final_render_to_slack
+
+    slack = MagicMock()
+    slack.chat_update.side_effect = [
+        {"ok": False, "error": "ratelimited"},
+        {"ok": True, "ts": "1.1"},
+    ]
+    sleeps: list = []
+    _final_render_to_slack(
+        slack=slack, channel="D1", placeholder_ts="1.0",
+        thread_ts="0.9", text="hello", sleep=sleeps.append,
+    )
+    # Two attempts; second succeeded → no fallback message posted.
+    assert slack.chat_update.call_count == 2
+    assert not slack.chat_postMessage.called
+    assert sleeps, "expected at least one backoff sleep"
+
+
+def test_final_render_falls_back_to_new_message():
+    """FR-CB2-3.18 — when all 3 chat_update retries fail with
+    ratelimited, post a NEW message in the same thread via
+    chat_postMessage instead of leaving the user with a stale
+    placeholder."""
+    from app.ceo_brain.responder import _final_render_to_slack
+
+    slack = MagicMock()
+    slack.chat_update.return_value = {"ok": False, "error": "ratelimited"}
+    slack.chat_postMessage.return_value = {"ok": True, "ts": "9.9"}
+
+    _final_render_to_slack(
+        slack=slack, channel="D1", placeholder_ts="1.0",
+        thread_ts="0.9", text="the real answer",
+        sleep=lambda s: None,
+    )
+    assert slack.chat_update.call_count == 3
+    assert slack.chat_postMessage.called
+    kwargs = slack.chat_postMessage.call_args.kwargs
+    assert kwargs["channel"] == "D1"
+    assert kwargs["text"] == "the real answer"
+    assert kwargs["thread_ts"] == "0.9"
+
+
 def test_responder_synthesis_recovery_when_text_empty(session):
     """FR-CB2-3.17 — when first stream ends with tool_uses but NO
     synthesizing text (observed Sonnet quirk), responder fires a

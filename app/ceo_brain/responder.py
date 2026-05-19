@@ -395,6 +395,120 @@ def _is_transient_mcp_handshake(exc: BaseException) -> bool:
     return bool(_RETRYABLE_MCP_RE.search(str(exc) or ""))
 
 
+# FR-CB2-3.25 — MCP catalog for smart routing. Operator-pinned set.
+_MCP_DESCRIPTIONS: dict[str, str] = {
+    "n8n_main": (
+        "Google Drive / Sheets — поиск файлов, чтение spreadsheet'ов "
+        "по названию или содержимому."
+    ),
+    "n8n_calendar": (
+        "Zoom встречи + транскрипты + задачи: search_zoom_meetings, "
+        "search_meetings, get_zoom_transcript, get_meeting, "
+        "search_zoom_tasks. Используй ЛЮБОЙ раз когда вопрос про "
+        "встречи, звонки, обсуждения, transcripts, action items."
+    ),
+    "n8n_gmail": (
+        "LinkedIn search — поиск людей в LinkedIn по имени, компании, "
+        "ключевым словам. (Несмотря на имя, это НЕ Gmail.)"
+    ),
+    "n8n_drive": (
+        "Telegram чаты и сообщения — get_chats, search_messages. "
+        "Используй когда вопрос про переписку в Telegram, "
+        "сообщения с командой, апдейты от коллег."
+    ),
+    "n8n_rocketreach": (
+        "RocketReach — контакты людей: email, телефон, LinkedIn по "
+        "имени/компании. Используй для cold-outreach задач."
+    ),
+    "n8n_hubspot": (
+        "HubSpot CRM — компании и контакты в CRM, search_companies, "
+        "search_contacts. Используй для look-up по инвесторам / "
+        "клиентам / counterparty info."
+    ),
+}
+
+
+def select_mcps_for_question(
+    *,
+    question: str,
+    all_servers: list[dict],
+    anthropic_client: Any,
+) -> list[dict]:
+    """FR-CB2-3.25 — pick the subset of MCP servers actually needed
+    to answer this question. Reduces parallel handshake load and
+    overall latency.
+
+    Uses a fast `claude-haiku-4-5` call with a tiny prompt — adds
+    ~1 sec but saves 30-300 sec on handshake retries downstream.
+    On ANY failure (network, malformed JSON, unknown names) falls
+    back to the full server list (no degradation).
+    """
+    if not all_servers or not question:
+        return list(all_servers)
+    catalog_lines = []
+    name_to_server = {s.get("name"): s for s in all_servers if s.get("name")}
+    for name in name_to_server:
+        desc = _MCP_DESCRIPTIONS.get(name, "(no description)")
+        catalog_lines.append(f"- {name}: {desc}")
+    catalog = "\n".join(catalog_lines)
+    prompt = (
+        f"Вопрос оператора: {question}\n\n"
+        "Доступные источники данных (MCP servers):\n"
+        f"{catalog}\n\n"
+        "Какие источники реально нужны, чтобы ответить на этот "
+        "вопрос? Включай только те, что СКОРЕЕ ВСЕГО содержат "
+        "релевантные данные. Когда сомневаешься — включай. "
+        "Минимум 1 источник.\n\n"
+        "Output: только JSON формата {\"mcps\": [\"name1\", ...]}, "
+        "без markdown, без комментариев."
+    )
+    try:
+        resp = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "ceo_brain_mcp_router_classifier_failed",
+            error=str(e), error_type=type(e).__name__,
+        )
+        return list(all_servers)
+    raw_text = ""
+    for b in (getattr(resp, "content", None) or []):
+        if getattr(b, "type", None) == "text":
+            raw_text += getattr(b, "text", None) or ""
+    raw_text = raw_text.strip()
+    # Strip ```json fences if model added them despite the prompt.
+    if raw_text.startswith("```"):
+        raw_text = raw_text.strip("`")
+        if raw_text.lower().startswith("json"):
+            raw_text = raw_text[4:].strip()
+    try:
+        parsed = json.loads(raw_text)
+    except Exception:  # noqa: BLE001
+        log.info(
+            "ceo_brain_mcp_router_bad_json", raw=raw_text[:200],
+        )
+        return list(all_servers)
+    picked = parsed.get("mcps") if isinstance(parsed, dict) else None
+    if not isinstance(picked, list) or not picked:
+        return list(all_servers)
+    out: list[dict] = []
+    for name in picked:
+        srv = name_to_server.get(name)
+        if srv is not None:
+            out.append(srv)
+    if not out:
+        return list(all_servers)
+    log.info(
+        "ceo_brain_mcp_router_picked",
+        from_=len(all_servers), to=len(out),
+        names=[s.get("name") for s in out],
+    )
+    return out
+
+
 def _degrade_mcp_servers(servers: list[dict] | None, attempt: int) -> list[dict] | None:
     """FR-CB2-3.24 — progressive MCP degradation on handshake retry.
 
@@ -631,6 +745,26 @@ def run_responder(
         tools=local_tool_schemas,
     )
     started_at = datetime.now(timezone.utc)
+
+    # FR-CB2-3.25 — smart MCP routing. Pre-classify the question
+    # with claude-haiku (fast, cheap) to pick only the MCP servers
+    # actually needed — drops parallel handshake load, reliability
+    # ↑, latency ↓. On classifier failure, fall back to full list.
+    if request.get("mcp_servers"):
+        last_user_q = ""
+        for m in reversed(thread_history or []):
+            if isinstance(m, dict) and m.get("role") == "user":
+                content = m.get("content")
+                if isinstance(content, str) and content.strip():
+                    last_user_q = content
+                    break
+        if last_user_q:
+            picked = select_mcps_for_question(
+                question=last_user_q,
+                all_servers=request["mcp_servers"],
+                anthropic_client=anthropic_client,
+            )
+            request = {**request, "mcp_servers": picked}
 
     # FR-CB2-3.22 — main turn goes through `messages.create` (non-
     # stream) because `messages.stream` + MCP + parallel tool_use

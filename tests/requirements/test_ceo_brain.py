@@ -752,6 +752,78 @@ def test_slack_handler_filters_bot_messages_from_thread_history():
     assert all(m["role"] == "user" for m in out)
 
 
+def test_smart_mcp_routing_picks_calendar_for_meeting_questions():
+    """FR-CB2-3.25 — for a question about meetings/transcripts the
+    classifier should pick `n8n_calendar` (and maybe `n8n_drive` for
+    Telegram context). Other MCPs are not needed → handshake faster
+    & more reliable."""
+    from types import SimpleNamespace
+
+    from app.ceo_brain.responder import select_mcps_for_question
+
+    anthropic = MagicMock()
+    anthropic.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(
+            type="text",
+            text='{"mcps": ["n8n_calendar", "n8n_drive"]}',
+        )],
+    )
+
+    selected = select_mcps_for_question(
+        question="что обсудили с Йоханом на встрече сегодня?",
+        all_servers=[
+            {"name": "n8n_main", "url": "u1"},
+            {"name": "n8n_calendar", "url": "u2"},
+            {"name": "n8n_gmail", "url": "u3"},
+            {"name": "n8n_drive", "url": "u4"},
+            {"name": "n8n_rocketreach", "url": "u5"},
+            {"name": "n8n_hubspot", "url": "u6"},
+        ],
+        anthropic_client=anthropic,
+    )
+    names = [s["name"] for s in selected]
+    assert "n8n_calendar" in names
+    assert "n8n_drive" in names
+    # Irrelevant MCPs filtered out.
+    assert "n8n_hubspot" not in names
+    assert "n8n_rocketreach" not in names
+    # Used haiku (cheaper / faster) for classification.
+    call_kwargs = anthropic.messages.create.call_args.kwargs
+    assert "haiku" in call_kwargs.get("model", "").lower()
+
+
+def test_smart_mcp_routing_fallback_on_classifier_failure():
+    """FR-CB2-3.25 — if the classifier raises OR returns malformed
+    JSON, fall back to the FULL list (no degradation)."""
+    from app.ceo_brain.responder import select_mcps_for_question
+
+    all_servers = [
+        {"name": "n8n_calendar", "url": "u1"},
+        {"name": "n8n_main", "url": "u2"},
+    ]
+
+    # Case 1 — classifier raises.
+    anthropic_err = MagicMock()
+    anthropic_err.messages.create.side_effect = RuntimeError("boom")
+    out_err = select_mcps_for_question(
+        question="?", all_servers=all_servers,
+        anthropic_client=anthropic_err,
+    )
+    assert out_err == all_servers
+
+    # Case 2 — classifier returns nonsense.
+    from types import SimpleNamespace
+    anthropic_bad = MagicMock()
+    anthropic_bad.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="not json")],
+    )
+    out_bad = select_mcps_for_question(
+        question="?", all_servers=all_servers,
+        anthropic_client=anthropic_bad,
+    )
+    assert out_bad == all_servers
+
+
 def test_responder_progressive_mcp_degradation_on_retry(session):
     """FR-CB2-3.24 — when MCP handshake keeps failing, each retry
     attempt (starting from the 3rd) drops one MCP server from the

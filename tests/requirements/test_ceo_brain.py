@@ -706,6 +706,22 @@ def test_responder_429_retries(session):
     assert calls["n"] == 3
 
 
+def test_system_prompt_enforces_laconic_output():
+    """FR-CB2-3.28 — operator-pinned 2026-05-19: «мне лаконично
+    надо без всего мусора, чисто по сути». System prompt must
+    explicitly forbid (a) process-narration preambles, (b)
+    markdown tables when not asked, and require terse output."""
+    from app.ceo_brain.responder import build_system_prompt
+
+    p = build_system_prompt().lower()
+    # No process narration.
+    assert "без преамбул" in p or "без вступлений" in p
+    # No tables unless asked.
+    assert "таблиц" in p or "markdown" in p
+    # Brevity ceiling.
+    assert "строк" in p or "коротко" in p
+
+
 def test_responder_system_prompt_includes_persona_and_date():
     """FR-CB2-3.14 — system prompt includes today's date."""
     from app.ceo_brain.responder import build_system_prompt

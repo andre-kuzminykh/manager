@@ -122,9 +122,15 @@ def handle_event(
         )
         result.archived = True
 
-    # Responder dispatch — only on @mention / DM, and only if a
-    # responder callable was passed in (Sprint 1 starts archive-only).
+    # Responder dispatch — only on @mention or plain DM. Skip
+    # `message.changed`/`message.deleted` (no `subtype` shape
+    # means user-typed message; any `subtype` set means it's an
+    # edit, deletion, channel-join, bot-relay, etc. — never a
+    # responder trigger).
     if responder is not None:
+        is_user_authored_message = (
+            event_type == "message" and not subtype
+        )
         if event_type == "app_mention":
             result.responder_triggered = True
             try:
@@ -135,7 +141,7 @@ def handle_event(
                     "brain_responder_invocation_failed",
                     error=str(e),
                 )
-        elif event_type == "message" and _channel_type(payload) == "im":
+        elif is_user_authored_message and _channel_type(payload) == "im":
             result.responder_triggered = True
             try:
                 responder(payload)

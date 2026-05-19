@@ -153,6 +153,102 @@ def test_brain_skips_self_messages(session, tmp_path, monkeypatch):
     assert r.archived is False
 
 
+def test_history_poller_singleton_no_duplicates_on_reconnect(
+    monkeypatch, tmp_path,
+):
+    """FR-CB2-1.7 — repeated calls to the poller's singleton starter
+    must NOT spawn additional daemon threads. Socket-Mode reconnect
+    loop calls `_attach_handlers` on every reconnect; if the poller
+    weren't singleton, pollers would accumulate and dispatch the
+    same Slack event N times → duplicate bot replies (operator-
+    confirmed bug, 2026-05-19)."""
+    from app.ceo_brain import slack_handler
+
+    # Reset any singleton state from earlier tests.
+    slack_handler._reset_history_poller_singleton()
+
+    spawned: list = []
+
+    class _FakePoller:
+        def __init__(self, **kwargs):
+            spawned.append(kwargs)
+        def start(self):
+            return MagicMock()
+
+    monkeypatch.setattr(slack_handler, "SlackHistoryPoller", _FakePoller)
+    monkeypatch.setattr(
+        slack_handler, "discover_operator_dm_channels",
+        lambda s: ["D123"],
+    )
+
+    fake_settings = MagicMock()
+    fake_settings.ceo_brain_archive_dir = str(tmp_path)
+
+    for _ in range(5):  # simulate 5 reconnects
+        slack_handler.start_history_poller_singleton(
+            slack_client=MagicMock(),
+            bot_user_id="UBOT",
+            responder=lambda p: None,
+            archive_dir=tmp_path,
+            settings=fake_settings,
+        )
+    assert len(spawned) == 1, (
+        f"expected exactly one poller, got {len(spawned)}"
+    )
+
+
+def test_dispatcher_responder_in_process_dedup(session, tmp_path, monkeypatch):
+    """FR-CB2-1.8 — even when two paths (Socket-Mode push +
+    history-poller) race past the archive UNIQUE dedup, the
+    responder must fire exactly ONCE per (channel, ts) within the
+    dedup TTL window."""
+    from app.ceo_brain.dispatcher import (
+        _reset_responder_dedup_for_tests,
+        handle_event,
+    )
+
+    monkeypatch.setenv("CEO_BRAIN_ARCHIVE_DIR", str(tmp_path))
+    _reset_responder_dedup_for_tests()
+
+    fired: list = []
+
+    def _responder(p):
+        fired.append(p.get("ts"))
+
+    payload = {
+        "type": "message",
+        "channel": "D1",
+        "channel_type": "im",
+        "user": "U1",
+        "text": "hi",
+        "ts": "1779100100.000111",
+    }
+
+    # First call — should write archive AND fire responder.
+    r1 = handle_event(session, payload, responder=_responder)
+    assert r1.responder_triggered is True
+    assert fired == ["1779100100.000111"]
+
+    # Second call (same payload) — archive dedup kicks in, no
+    # responder fire.
+    r2 = handle_event(session, payload, responder=_responder)
+    assert r2.duplicate is True
+    assert fired == ["1779100100.000111"]
+
+    # Now simulate the race: a SEPARATE archive row didn't get
+    # written (e.g. transient error) so archive dedup misses, but
+    # in-process dedup should still block the second responder.
+    payload2 = dict(payload, ts="1779100200.000222")
+    # Pre-record the ts in the in-process dedup set as if a parallel
+    # path already fired it; archive write hasn't happened yet.
+    from app.ceo_brain.dispatcher import _mark_responder_dispatched
+    _mark_responder_dispatched("D1", "1779100200.000222")
+    r3 = handle_event(session, payload2, responder=_responder)
+    # archive write still happens — it's the responder that must
+    # NOT fire twice.
+    assert "1779100200.000222" not in fired
+
+
 # -- Category 2: Slack archive (FR-CB2-2.x) --------------------------------
 
 

@@ -449,6 +449,8 @@ manual refresh через connector UI; v0.1 не делает auto-refresh.
 | FR-CB2-1.4 | Bot signature verification (HMAC-SHA256 с signing secret) ДЛЯ HTTP Events varianта | `test_brain_signature_verification_rejects_invalid` |
 | FR-CB2-1.5 | Дедупликация Slack retry — `(event_id, ts)` идемпотентны (UC-3) | `test_brain_dedup_repeat_event` |
 | FR-CB2-1.6 | Bot НЕ обрабатывает свои собственные сообщения (UC-13) | `test_brain_skips_self_messages` |
+| FR-CB2-1.7 | History-poller backstop: при WebSocket reconnect (Socket Mode supervisor пере-вызывает `_attach_handlers`) НЕ накапливаются дубликаты поллера — singleton per channel-set, повторный `start_history_poller_singleton()` no-op. | `test_history_poller_singleton_no_duplicates_on_reconnect` |
+| FR-CB2-1.8 | In-process responder dedup: даже при гонке между Socket-Mode push и history-poller (оба passes archive UNIQUE до commit'а), responder вызывается строго один раз на `(channel, ts)`. TTL дедупа — 60 секунд (хватает на запоздалые retry). | `test_dispatcher_responder_in_process_dedup` |
 
 ### Категория 2 — Slack archive (FR-CB2-2.x)
 
@@ -616,6 +618,8 @@ Event subscriptions:
 | FR-CB2-1.4 | `…::test_brain_signature_verification_rejects_invalid` |
 | FR-CB2-1.5 | `…::test_brain_dedup_repeat_event` |
 | FR-CB2-1.6 | `…::test_brain_skips_self_messages` |
+| FR-CB2-1.7 | `…::test_history_poller_singleton_no_duplicates_on_reconnect` |
+| FR-CB2-1.8 | `…::test_dispatcher_responder_in_process_dedup` |
 | FR-CB2-2.1 | `…::test_archive_jsonl_append` |
 | FR-CB2-2.2 | `…::test_archive_pg_insert` |
 | FR-CB2-2.3 | `…::test_archive_unique_channel_ts` |

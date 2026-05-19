@@ -37,6 +37,67 @@ from app.logging_setup import get_logger
 log = get_logger(__name__)
 
 
+# FR-CB2-1.7 — module-level singleton tracking for the history
+# poller. The Socket-Mode supervisor loop in
+# `start_standalone_ceo_brain_bot` re-calls `_attach_handlers` on
+# every reconnect; without this guard the poller daemon thread
+# would accumulate (one extra per reconnect) and dispatch each
+# Slack event N times → operator sees duplicate bot replies.
+_history_poller_lock = threading.Lock()
+_history_poller_started_for: set[tuple[str, ...]] = set()
+# Late-bound for tests so they can swap the implementation.
+try:  # pragma: no cover - import-time fallback
+    from app.ceo_brain.history_poller import (
+        SlackHistoryPoller,
+        discover_operator_dm_channels,
+    )
+except ImportError:  # pragma: no cover
+    SlackHistoryPoller = None  # type: ignore[assignment]
+    discover_operator_dm_channels = None  # type: ignore[assignment]
+
+
+def _reset_history_poller_singleton() -> None:
+    """Test hook — wipe singleton state between tests."""
+    with _history_poller_lock:
+        _history_poller_started_for.clear()
+
+
+def start_history_poller_singleton(
+    *,
+    slack_client: Any,
+    bot_user_id: str | None,
+    responder: Any,
+    archive_dir: Any,
+    settings: Settings,
+) -> None:
+    """Spawn the history poller exactly once per process per
+    channel-set. Repeated calls (e.g. from the Socket-Mode reconnect
+    supervisor) are no-ops once a poller for that channel-set is
+    already running."""
+    if SlackHistoryPoller is None or discover_operator_dm_channels is None:
+        return
+    channels = discover_operator_dm_channels(settings)
+    if not channels:
+        return
+    key = tuple(sorted(channels))
+    with _history_poller_lock:
+        if key in _history_poller_started_for:
+            log.info(
+                "ceo_brain_history_poller_already_running",
+                channels=list(key),
+            )
+            return
+        _history_poller_started_for.add(key)
+    SlackHistoryPoller(
+        slack_client=slack_client,
+        bot_user_id=bot_user_id,
+        channels=list(key),
+        responder=responder,
+        archive_dir=archive_dir,
+        settings=settings,
+    ).start()
+
+
 def _build_responder_callback(
     *,
     settings: Settings,
@@ -226,28 +287,25 @@ def _attach_handlers(app: Any, settings: Settings) -> None:
         team=bot_team,
     )
 
-    # FR-CB2-1.7 — polling backstop. Slack Socket-Mode drops
-    # events when a message is edited/deleted within ~1 sec of
-    # posting (Slack collapses the wire), and during silent
-    # WebSocket disconnects. The poller pulls
-    # `conversations.history` for the operator DM every 30 sec
-    # and replays any unseen message through `_handle`, so the
-    # responder fires reliably even when push fails.
-    from app.ceo_brain.history_poller import (
-        SlackHistoryPoller,
-        discover_operator_dm_channels,
+    # FR-CB2-1.7 — polling backstop. Slack Socket-Mode drops events
+    # when a message is edited/deleted within ~1 sec of posting
+    # (Slack collapses the wire), and during silent WebSocket
+    # disconnects. The poller pulls `conversations.history` every
+    # 1 sec and replays any unseen message through `_handle`, so
+    # the responder fires reliably even when push fails.
+    #
+    # `start_history_poller_singleton` is idempotent: the supervisor
+    # in `start_standalone_ceo_brain_bot` re-runs `_attach_handlers`
+    # on every Socket-Mode reconnect, but only the first call here
+    # actually spawns a poller (operator-confirmed dup-reply bug
+    # 2026-05-19 fix).
+    start_history_poller_singleton(
+        slack_client=slack_client,
+        bot_user_id=bot_user_id,
+        responder=responder,
+        archive_dir=archive_dir,
+        settings=settings,
     )
-
-    channels = discover_operator_dm_channels(settings)
-    if channels:
-        SlackHistoryPoller(
-            slack_client=slack_client,
-            bot_user_id=bot_user_id,
-            channels=channels,
-            responder=responder,
-            archive_dir=archive_dir,
-            settings=settings,
-        ).start()
 
 
 def _needs_standalone(settings: Settings) -> bool:

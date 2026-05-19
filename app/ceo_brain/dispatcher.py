@@ -6,6 +6,8 @@ archive sink and (optionally) the responder pipeline.
 """
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -25,6 +27,43 @@ log = get_logger(__name__)
 
 # Events that trigger the responder; everything else is archive-only.
 _RESPONDER_EVENT_TYPES = {"app_mention"}
+
+
+# FR-CB2-1.8 — in-process responder dedup. Even when archive's
+# UNIQUE(channel, ts) misses due to a race (Socket-Mode push +
+# history-poller hitting the same message before either commits),
+# this set keeps the responder strictly single-shot per (channel, ts)
+# within the TTL window.
+_RESPONDER_DEDUP_TTL_SEC = 60.0
+_responder_dedup_lock = threading.Lock()
+_responder_dedup: dict[tuple[str, str], float] = {}
+
+
+def _prune_responder_dedup_locked() -> None:
+    cutoff = time.monotonic() - _RESPONDER_DEDUP_TTL_SEC
+    stale = [k for k, t in _responder_dedup.items() if t < cutoff]
+    for k in stale:
+        _responder_dedup.pop(k, None)
+
+
+def _mark_responder_dispatched(channel_id: str, ts: str) -> bool:
+    """Record that the responder fired for ``(channel_id, ts)``.
+    Returns True if this is the first time (caller should fire),
+    False if it's a duplicate (caller should skip)."""
+    if not channel_id or not ts:
+        return True
+    key = (channel_id, ts)
+    with _responder_dedup_lock:
+        _prune_responder_dedup_locked()
+        if key in _responder_dedup:
+            return False
+        _responder_dedup[key] = time.monotonic()
+        return True
+
+
+def _reset_responder_dedup_for_tests() -> None:
+    with _responder_dedup_lock:
+        _responder_dedup.clear()
 
 
 @dataclass
@@ -131,28 +170,34 @@ def handle_event(
         is_user_authored_message = (
             event_type == "message" and not subtype
         )
-        if event_type == "app_mention":
-            result.responder_triggered = True
-            try:
-                responder(payload)
-            except Exception as e:  # noqa: BLE001
-                result.responder_error = str(e)
-                log.warning(
-                    "brain_responder_invocation_failed",
-                    error=str(e),
+        should_fire = (
+            event_type == "app_mention"
+            or (is_user_authored_message and _channel_type(payload) == "im")
+        )
+        if should_fire:
+            # FR-CB2-1.8 — in-process dedup, races past archive UNIQUE.
+            if not _mark_responder_dispatched(channel_id, ts):
+                log.info(
+                    "ceo_brain_responder_in_process_dedup_skipped",
+                    channel=channel_id, ts=ts,
                 )
-        elif is_user_authored_message and _channel_type(payload) == "im":
-            result.responder_triggered = True
-            try:
-                responder(payload)
-            except Exception as e:  # noqa: BLE001
-                result.responder_error = str(e)
-                log.warning(
-                    "brain_responder_invocation_failed",
-                    error=str(e),
-                )
+            else:
+                result.responder_triggered = True
+                try:
+                    responder(payload)
+                except Exception as e:  # noqa: BLE001
+                    result.responder_error = str(e)
+                    log.warning(
+                        "brain_responder_invocation_failed",
+                        error=str(e),
+                    )
 
     return result
 
 
-__all__ = ["DispatchResult", "handle_event"]
+__all__ = [
+    "DispatchResult",
+    "handle_event",
+    "_mark_responder_dispatched",
+    "_reset_responder_dedup_for_tests",
+]

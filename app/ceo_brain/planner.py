@@ -266,7 +266,13 @@ def plan_tool_calls(
         "    {\"mcp\":\"<name>\",\"tool\":\"<tool_name>\",\"args\":{...}},\n"
         "    ...\n  ]\n}\n\n"
         "Правила:\n"
-        "- Минимум tool-вызовов чтобы ответить. Обычно 2-5.\n"
+        "- ОБЯЗАТЕЛЬНО задействуй КАЖДЫЙ MCP из списка выше — "
+        "минимум 1 tool-call в каждый. Если classifier подключил "
+        "и n8n_calendar и n8n_drive — план ДОЛЖЕН содержать "
+        "calls в оба, не только в один. Иначе тратим работу "
+        "classifier'а впустую.\n"
+        "- Минимум tool-вызовов чтобы ответить — но не меньше "
+        "числа подключённых MCP. Обычно 2-5.\n"
         "- ВСЕ args ОБЯЗАТЕЛЬНО как STRINGS — даже числовые. "
         "`limit: \"5\"` а НЕ `limit: 5`. Иначе schema error.\n"
         "- ВСЕ required-args в каталоге помечены `*` или [required: ...]. "
@@ -368,6 +374,38 @@ def plan_tool_calls(
             "tool": tool_name,
             "args": args,
         })
+    # FR-CB2-3.38 — defensive coverage. Operator-observed 2026-05-20:
+    # classifier picked both n8n_drive AND n8n_calendar, but planner
+    # only emitted a single n8n_drive call → today's Zoom meeting
+    # was skipped. Backfill: for each MCP the classifier picked but
+    # planner ignored, inject a sensible default search call.
+    used_mcps = {c["mcp"] for c in out}
+    expected_mcps = {s.get("name") for s in mcp_servers if s.get("name")}
+    missing_mcps = expected_mcps - used_mcps
+    for mcp_name in missing_mcps:
+        # Pick the first "search_*" tool in this MCP as the default
+        # fallback call. Args are empty / question-derived.
+        tools = tools_by_mcp.get(mcp_name) or []
+        search_tool = next(
+            (t for t in tools if (t.get("name") or "").startswith("search")),
+            None,
+        )
+        if not search_tool:
+            continue
+        tname = search_tool.get("name")
+        # Build minimal args: just include `query=question[:60]`
+        # if there's a `query` property. Required args get filled
+        # by mcp_client._coerce_args_to_schema.
+        schema = search_tool.get("inputSchema") or {}
+        props = schema.get("properties") or {}
+        args: dict[str, Any] = {}
+        if "query" in props:
+            args["query"] = question[:60]
+        out.append({"mcp": mcp_name, "tool": tname, "args": args})
+        log.info(
+            "ceo_brain_planner_backfill",
+            mcp=mcp_name, tool=tname,
+        )
     log.info(
         "ceo_brain_planner_plan",
         question_chars=len(question), calls=len(out),

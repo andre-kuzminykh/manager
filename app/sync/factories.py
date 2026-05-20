@@ -56,22 +56,27 @@ def _load_oauth_credentials():
     store = GoogleCredentialStore(cipher)
     with session_scope() as session:
         record = store.load(session, user_key=_SERVICE_ACCOUNT_USER_KEY)
-        if record is None:
-            # FR-CR-05-175 — fall back to the Calendar OAuth key.
-            record = store.load(
-                session, user_key=_CALENDAR_FALLBACK_USER_KEY,
-            )
-            if record is not None:
-                log.info(
-                    "google_sync_using_calendar_oauth_fallback",
-                    hint=("FR-CR-05-175 — no `_service_account` OAuth "
-                          "row; using `_calendar` row instead. Works "
-                          "when the operator authorised Drive/Docs "
-                          "scopes during Calendar consent."),
-                )
+        if record is not None:
+            return build_google_credentials(record, store)
+        # FR-CR-05-175 — fall back to the Calendar OAuth row.
+        # CRITICAL: build via `build_google_calendar_credentials`
+        # (not `build_google_credentials`) so the refresh uses the
+        # SAME client_id/secret the row was issued with. Mismatch
+        # produces «invalid_request: Could not determine client ID
+        # from request» from Google's token endpoint.
+        record = store.load(
+            session, user_key=_CALENDAR_FALLBACK_USER_KEY,
+        )
         if record is None:
             return None
-        return build_google_credentials(record, store)
+        log.info(
+            "google_sync_using_calendar_oauth_fallback",
+            hint=("FR-CR-05-175 — no `_service_account` OAuth row; "
+                  "using `_calendar` row + Calendar OAuth client_id. "
+                  "Works when the operator authorised Drive/Docs "
+                  "scopes during Calendar consent."),
+        )
+        return build_google_calendar_credentials(record, store)
 
 
 def _resolve_credentials(scopes: list[str]):

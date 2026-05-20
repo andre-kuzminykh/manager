@@ -35,13 +35,18 @@ from app.ceo_brain.bilingual_restorer import (
     should_re_stt_english,
 )
 from app.ceo_brain.config import get_mcp_servers
-from app.ceo_brain.mcp_client import call_tool
+from app.ceo_brain.mcp_client import call_tool, list_tools
 from app.config import get_settings
 
 
 def _fetch_transcript(zoom_id: str) -> str:
     """Find the n8n_calendar MCP and pull the transcript directly via
-    HTTP — same path the responder uses, no Anthropic involved."""
+    HTTP — same path the responder uses, no Anthropic involved.
+
+    Lists the tool catalog first so we can fill in every required
+    field of `get_zoom_transcript` (n8n's schema requires more than
+    just `zoom_id` — `search_fragment` is mandatory too, and we
+    default it to empty to get the full transcript)."""
     servers = get_mcp_servers()
     cal = next(
         (s for s in servers if s.get("name") == "n8n_calendar"), None,
@@ -53,11 +58,26 @@ def _fetch_transcript(zoom_id: str) -> str:
     if not url:
         print("ERROR: n8n_calendar has no url", file=sys.stderr)
         sys.exit(2)
+    tools = list_tools(url) or []
+    schema = next(
+        (
+            (t.get("inputSchema") or {}) for t in tools
+            if (t.get("name") or "") == "get_zoom_transcript"
+        ),
+        {},
+    )
+    args: dict = {"zoom_id": zoom_id}
+    for req in (schema.get("required") or []):
+        if req not in args:
+            # Default required strings to "" (matches the in-pipeline
+            # coercion behaviour in mcp_client._coerce_args_to_schema).
+            args[req] = ""
     ok, body = call_tool(
         url=url,
         tool_name="get_zoom_transcript",
-        arguments={"zoom_id": zoom_id},
+        arguments=args,
         timeout=120.0,
+        input_schema=schema,
     )
     if not ok:
         print(f"ERROR: get_zoom_transcript failed: {body[:200]}",

@@ -24,6 +24,155 @@ from app.logging_setup import get_logger
 log = get_logger(__name__)
 
 
+# FR-CB2-3.33 — operator-pinned 2026-05-20: explicit per-tool
+# descriptions that override n8n's default `description` field
+# (often too short / vague). Keys are (mcp_name, tool_name).
+# When a tool is not in this map, the planner falls back to n8n's
+# own description.
+_OPERATOR_TOOL_DESCRIPTIONS: dict[tuple[str, str], str] = {
+    # n8n_calendar — Zoom встречи + Fireflies транскрипты
+    ("n8n_calendar", "search_zoom_meetings"): (
+        "ВНУТРЕННИЕ Zoom-встречи Humanoid (синки команды, дейли, "
+        "Fundraising daily, Strategic Investors, planning sessions "
+        "и т.п. — всё что записывалось в Humanoid Zoom). Ищет по "
+        "query (тема или имя участника), фильтр по date_from / "
+        "date_after. Возвращает список с Zoom ID, Title, "
+        "участниками. БЕРИ ОТСЮДА Zoom ID для последующего "
+        "get_zoom_transcript."
+    ),
+    ("n8n_calendar", "search_meetings"): (
+        "ВНЕШНИЕ встречи (звонки с инвесторами, партнёрами, "
+        "клиентами — кто-то не из @thehumanoid.ai). Транскрипты в "
+        "Fireflies. Ищет по query (тема, компания, имя контрпарти) "
+        "за период. Возвращает meeting_id для последующего "
+        "get_meeting."
+    ),
+    ("n8n_calendar", "get_zoom_transcript"): (
+        "ПОЛНЫЙ транскрипт внутренней Zoom-встречи по `zoom_id`. "
+        "Зови ОБЯЗАТЕЛЬНО после search_zoom_meetings — без "
+        "транскрипта нельзя ответить на вопросы «что сказал», "
+        "«что обсудили». Можешь оставить zoom_id пустым — engine "
+        "сам подставит первый из search-результата."
+    ),
+    ("n8n_calendar", "get_meeting"): (
+        "ПОЛНЫЙ транскрипт + summary + action items внешней "
+        "встречи по `meeting_id`. Зови после search_meetings. "
+        "Используй для разборов звонков с инвесторами / "
+        "контрагентами."
+    ),
+    ("n8n_calendar", "search_zoom_tasks"): (
+        "Задачи (action items) извлечённые из транскриптов "
+        "внутренних встреч. Фильтр по owner, priority, query, "
+        "zoom_id. Используй для вопросов «что я должен сделать», "
+        "«какие задачи у X», «что осталось по митингу Y»."
+    ),
+    # n8n_drive — Telegram переписка (несмотря на имя)
+    ("n8n_drive", "get_chats"): (
+        "Список Telegram-чатов оператора с метаданными "
+        "(chat_name, message_count). Используй чтобы УЗНАТЬ "
+        "точное chat_name для последующего search_messages."
+    ),
+    ("n8n_drive", "search_messages"): (
+        "Поиск сообщений в Telegram. Можно фильтр по chat_name "
+        "(используй get_chats чтобы узнать имя), sender_name "
+        "(кто писал), query (текст). Если интересуют ВСЕ "
+        "сообщения от человека за период — оставь query пустым, "
+        "поставь sender_name. Если интересны сообщения по теме в "
+        "конкретном чате — chat_name + query."
+    ),
+    # n8n_main — Google Drive / Sheets
+    ("n8n_main", "gdrive_search"): (
+        "Поиск файлов в Google Drive по названию или содержимому. "
+        "Возвращает webViewLink + id. Используй чтобы найти Doc, "
+        "Sheet, файлы по теме."
+    ),
+    ("n8n_main", "gdrive_list_sheets"): (
+        "Список листов внутри Google Sheets файла."
+    ),
+    ("n8n_main", "gdrive_read_sheet"): (
+        "Чтение содержимого конкретного листа Google Sheets."
+    ),
+    ("n8n_main", "gdrive_read"): (
+        "Чтение содержимого Google Doc по id."
+    ),
+    # n8n_gmail — LinkedIn search (NOT Gmail!)
+    ("n8n_gmail", "humanoid_mcp_linkedin"): (
+        "Поиск людей в LinkedIn по имени / компании / ключевым "
+        "словам. Возвращает должность, компанию, LinkedIn URL, "
+        "preview сообщения. Несмотря на имя tool, это LinkedIn, "
+        "НЕ Gmail."
+    ),
+    # n8n_rocketreach — контакты
+    ("n8n_rocketreach", "rocketreach_person_search"): (
+        "Поиск людей в RocketReach по имени / компании. "
+        "Возвращает email, телефон, LinkedIn, текущая роль. Для "
+        "cold-outreach."
+    ),
+    ("n8n_rocketreach", "rocketreach_get_profile"): (
+        "Полный профиль RocketReach по id."
+    ),
+    ("n8n_rocketreach", "rocketreach_lookup_by_linkedin"): (
+        "Найти RocketReach-профиль по LinkedIn URL."
+    ),
+    ("n8n_rocketreach", "rocketreach_lookup_by_email"): (
+        "Найти RocketReach-профиль по email."
+    ),
+    ("n8n_rocketreach", "rocketreach_lookup_by_id"): (
+        "RocketReach-профиль по внутреннему id."
+    ),
+    # n8n_hubspot — CRM
+    ("n8n_hubspot", "hubspot_search_companies"): (
+        "Поиск компаний в HubSpot CRM. Возвращает домен, "
+        "описание, ARR и т.п. Используй для вопросов про "
+        "инвесторов / клиентов / партнёров в CRM."
+    ),
+    ("n8n_hubspot", "hubspot_search_contacts"): (
+        "Поиск контактов в HubSpot CRM. Возвращает email, роль, "
+        "компанию, owner."
+    ),
+    # slack_self — local Slack tools
+    ("slack_self", "slack_list_channels"): (
+        "Список каналов в Slack куда добавлен бот. Возвращает id, "
+        "name, is_private, is_im. Используй для «в каких каналах "
+        "ты», «список каналов»."
+    ),
+    ("slack_self", "slack_search"): (
+        "Полнотекстовый поиск сообщений в Slack по query. "
+        "Требует user-токен (xoxp). Возвращает permalink, ts, "
+        "channel, превью."
+    ),
+    ("slack_self", "slack_get_channel_history"): (
+        "История канала/DM — N последних сообщений. Channel = "
+        "ID `Cxxxx` или `Dxxxx`."
+    ),
+    ("slack_self", "slack_get_thread_replies"): (
+        "Все сообщения в треде по channel + thread_ts."
+    ),
+    ("slack_self", "slack_post_message"): (
+        "Отправить сообщение в канал / DM / тред от имени бота. "
+        "Используй когда оператор просит «напиши в чат X»."
+    ),
+    ("slack_self", "slack_users_info"): (
+        "Профиль Slack-юзера по ID `Uxxxx` — name, email, tz."
+    ),
+    ("slack_self", "slack_users_lookup_by_email"): (
+        "Найти Slack-юзера по email."
+    ),
+    ("slack_self", "slack_get_permalink"): (
+        "Получить permalink на сообщение по channel + ts."
+    ),
+}
+
+
+def _describe_tool(mcp_name: str, tool: dict) -> str:
+    """Operator-provided override > tool's native description."""
+    tname = tool.get("name") or "?"
+    override = _OPERATOR_TOOL_DESCRIPTIONS.get((mcp_name, tname))
+    if override:
+        return override
+    return (tool.get("description") or "").strip()
+
+
 def _tool_catalog_lines(
     mcp_servers: list[dict],
     tools_by_mcp: dict[str, list[dict]],
@@ -40,7 +189,10 @@ def _tool_catalog_lines(
             continue
         for t in tools:
             tname = t.get("name") or "?"
-            desc = (t.get("description") or "").strip().split("\n")[0][:200]
+            # FR-CB2-3.33 — operator-curated descriptions override
+            # whatever n8n returns; falls back to n8n's text.
+            desc_raw = _describe_tool(name, t)
+            desc = desc_raw.strip().replace("\n", " ")[:400]
             schema = t.get("inputSchema") or {}
             if isinstance(schema, dict):
                 props = schema.get("properties") or {}

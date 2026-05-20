@@ -2219,7 +2219,7 @@ def test_bilingual_restorer_disabled_by_default(monkeypatch):
         out,
         bilingual_enabled=False,
         openai_client=sentinel_client,
-        stt_url="https://example.invalid/stt",
+        openai_api_key="sk-test",
         detector_model="gpt-4o-mini",
         reconciler_model="gpt-4o",
     )
@@ -2253,10 +2253,10 @@ def test_bilingual_detector_decides_yes_for_mixed():
 
 
 def test_bilingual_reconcile_merges_via_llm(monkeypatch):
-    """FR-CB2-3.39 — full happy path: detector says YES, second-STT
-    endpoint returns an English pass, reconciler emits the merged
-    text. ``out`` bucket is replaced in place and the trace sink
-    receives a ``stage=restored`` entry."""
+    """FR-CB2-3.39 — full happy path: detector says YES, Whisper
+    re-pass returns an English transcript, reconciler emits the
+    merged text. ``out`` bucket is replaced in place and the trace
+    sink receives a ``stage=restored`` entry."""
     from app.ceo_brain.parallel_gather import (
         _maybe_restore_bilingual_in_place,
     )
@@ -2266,17 +2266,16 @@ def test_bilingual_reconcile_merges_via_llm(monkeypatch):
         reconciler_reply="MERGED: Ира + Mohammed Al Fardan...",
     )
 
-    # Mock httpx.post inside bilingual_restorer to return our
-    # synthetic English transcript without touching the network.
-    def _fake_post(url, json=None, timeout=None):
-        assert json["lang"] == "en"
-        resp = MagicMock()
-        resp.raise_for_status = lambda: None
-        resp.json = lambda: {"text": "Mohammed Al Fardan said..."}
-        return resp
+    # Stub the Whisper re-pass to return a synthetic English
+    # transcript without touching disk / OpenAI.
+    def _fake_re_stt(*, zoom_id, audio_path, openai_api_key,
+                    model, whisper_prompt=None):
+        assert zoom_id == "abcdef12345678"
+        return "Mohammed Al Fardan said..."
 
     monkeypatch.setattr(
-        "app.ceo_brain.bilingual_restorer.httpx.post", _fake_post,
+        "app.ceo_brain.bilingual_restorer.re_stt_english_via_whisper",
+        _fake_re_stt,
     )
 
     out = {
@@ -2290,7 +2289,7 @@ def test_bilingual_reconcile_merges_via_llm(monkeypatch):
         out,
         bilingual_enabled=True,
         openai_client=client,
-        stt_url="https://example.invalid/stt",
+        openai_api_key="sk-test",
         detector_model="gpt-4o-mini",
         reconciler_model="gpt-4o",
         trace_sink=trace_sink,
@@ -2307,11 +2306,11 @@ def test_bilingual_reconcile_merges_via_llm(monkeypatch):
     assert trace_sink[0]["secondary_chars"] > 0
 
 
-def test_bilingual_restorer_falls_back_when_no_stt_url(monkeypatch):
-    """FR-CB2-3.39 — when the detector says YES but no STT URL is
-    configured, the orchestrator must return the primary transcript
-    unchanged with ``stage='re_stt_no_url'`` and MUST NOT invoke the
-    reconciler call."""
+def test_bilingual_restorer_falls_back_when_audio_missing(monkeypatch):
+    """FR-CB2-3.39 — when the detector says YES but the audio file
+    can't be resolved (no DB row for the zoom_id), the orchestrator
+    must return the primary transcript unchanged with
+    ``stage='re_stt_no_audio'`` and MUST NOT invoke the reconciler."""
     from app.ceo_brain.bilingual_restorer import (
         restore_transcript_bilingual,
     )
@@ -2321,13 +2320,20 @@ def test_bilingual_restorer_falls_back_when_no_stt_url(monkeypatch):
         choices=[MagicMock(message=MagicMock(content="YES"))],
     )
 
+    # Force the audio-path lookup to return None (no DB row).
+    monkeypatch.setattr(
+        "app.ceo_brain.bilingual_restorer._load_audio_path_for_zoom_id",
+        lambda zoom_id: None,
+    )
+
     final, trace = restore_transcript_bilingual(
         transcript="primary text",
+        zoom_id="missing-zoom-id",
         openai_client=client,
-        stt_url="",
+        openai_api_key="sk-test",
     )
 
     assert final == "primary text"
-    assert trace["stage"] == "re_stt_no_url"
+    assert trace["stage"] == "re_stt_failed"
     # Only the detector call happened — reconciler never invoked.
     assert client.chat.completions.create.call_count == 1

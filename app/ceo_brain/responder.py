@@ -986,12 +986,17 @@ def run_responder(
                 local_tool_executors=tool_executors or None,
                 bilingual_enabled=_s.ceo_brain_bilingual_restoration_enabled,
                 openai_client=_openai_client,
-                bilingual_stt_url=_s.ceo_brain_stt_english_url,
+                bilingual_openai_api_key=(
+                    _s.ceo_brain_openai_api_key or _s.openai_api_key
+                ),
                 bilingual_detector_model=(
                     _s.ceo_brain_bilingual_detector_model
                 ),
                 bilingual_reconciler_model=(
                     _s.ceo_brain_bilingual_reconciler_model
+                ),
+                bilingual_whisper_model=(
+                    _s.ceo_brain_bilingual_whisper_model
                 ),
                 bilingual_trace_sink=_bi_traces,
             )

@@ -355,9 +355,10 @@ def _maybe_restore_bilingual_in_place(
     *,
     bilingual_enabled: bool,
     openai_client: Any | None,
-    stt_url: str,
+    openai_api_key: str,
     detector_model: str,
     reconciler_model: str,
+    whisper_model: str = "whisper-1",
     trace_sink: list[dict[str, Any]] | None = None,
 ) -> None:
     """FR-CB2-3.39 — post-process get_zoom_transcript buckets.
@@ -366,7 +367,7 @@ def _maybe_restore_bilingual_in_place(
     iterate over every label that looks like a Zoom transcript fetch
     and run the bilingual restoration pipeline on its body. The
     bucket text is replaced in place; the original short-circuits
-    are still respected (detector_said_no, re_stt_no_url, etc.).
+    are still respected (detector_said_no, re_stt_no_audio, etc.).
 
     ``trace_sink`` (optional) — caller-supplied list that receives
     per-label trace dicts for diagnostics persistence.
@@ -380,22 +381,23 @@ def _maybe_restore_bilingual_in_place(
     for label, body in list(out.items()):
         if not body or "::get_zoom_transcript" not in label:
             continue
-        # Pull Zoom ID out of the transcript header so the operator's
-        # STT endpoint can re-fetch the right recording. Format from
+        # Pull Zoom ID out of the transcript header so we can resolve
+        # the audio path for the second Whisper pass. Format from
         # n8n: "Zoom ID: fs/KyHH5RL2x2oEeFjNC3Q==".
-        meeting_id: str | None = None
+        zoom_id: str | None = None
         for regex, kind in _ID_REGEXES:
             m = regex.search(body[:500])
             if m and kind == "zoom_id":
-                meeting_id = m.group(1).strip()
+                zoom_id = m.group(1).strip()
                 break
         final_text, trace = restore_transcript_bilingual(
             transcript=body,
-            meeting_id=meeting_id,
+            zoom_id=zoom_id,
             openai_client=openai_client,
-            stt_url=stt_url,
+            openai_api_key=openai_api_key,
             detector_model=detector_model,
             reconciler_model=reconciler_model,
+            whisper_model=whisper_model,
         )
         trace["label"] = label
         log.info(
@@ -422,9 +424,10 @@ def gather_via_direct_http(
     local_tool_executors: dict[str, Any] | None = None,
     bilingual_enabled: bool = False,
     openai_client: Any | None = None,
-    bilingual_stt_url: str = "",
+    bilingual_openai_api_key: str = "",
     bilingual_detector_model: str = "gpt-4o-mini",
     bilingual_reconciler_model: str = "gpt-4o",
+    bilingual_whisper_model: str = "whisper-1",
     bilingual_trace_sink: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     """FR-CB2-3.31 — execute planned tool calls in parallel via
@@ -623,9 +626,10 @@ def gather_via_direct_http(
         out,
         bilingual_enabled=bilingual_enabled,
         openai_client=openai_client,
-        stt_url=bilingual_stt_url,
+        openai_api_key=bilingual_openai_api_key,
         detector_model=bilingual_detector_model,
         reconciler_model=bilingual_reconciler_model,
+        whisper_model=bilingual_whisper_model,
         trace_sink=bilingual_trace_sink,
     )
 

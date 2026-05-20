@@ -174,13 +174,13 @@ class Settings(BaseSettings):
         default="gpt-4o",
         alias="CEO_BRAIN_BILINGUAL_RECONCILER_MODEL",
     )
-    # Operator-side second-STT endpoint that takes
-    #   POST {meeting_id|audio_url, lang} -> {text: "..."}.
-    # When empty, second-STT step is skipped; reconciliation still
-    # runs if detector said yes and a secondary transcript is supplied
-    # some other way (unlikely in v0.1, but the wiring stays open).
-    ceo_brain_stt_english_url: str = Field(
-        default="", alias="CEO_BRAIN_STT_ENGLISH_URL",
+    # Whisper model id for the second STT pass (operator-pinned:
+    # «тот же STT что и брал, но язык англ» — reuses
+    # `app.services.transcription.transcribe_bytes` with
+    # `language="en"`, same OpenAI key as the primary Whisper pass).
+    ceo_brain_bilingual_whisper_model: str = Field(
+        default="whisper-1",
+        alias="CEO_BRAIN_BILINGUAL_WHISPER_MODEL",
     )
 
     # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся

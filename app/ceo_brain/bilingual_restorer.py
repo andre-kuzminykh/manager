@@ -8,15 +8,18 @@ some lines turn into Russian-sounding nonsense. Operator-pinned:
     «отдельный вызов ллм скажет нужно ли сделать ещё транскрипт на
     английском, если нужно — отдельный вызов STT делает на английском,
     а далее берём оба текста и прогоняем через LLM чтобы восстановить
-    окончательный смысл // в нужных местах нужный язык».
+    окончательный смысл // в нужных местах нужный язык // тот же STT
+    что брал, но язык англ».
 
 This module isolates that three-step flow:
 
   1. ``should_re_stt_english(transcript, openai_client, model)`` — a
      fast yes/no call to a small OpenAI model.
-  2. ``re_stt_english(...)`` — POST to the operator-configured STT
-     endpoint with ``lang=en``. Returns the raw text or ``None`` on
-     failure / when no URL is configured.
+  2. ``re_stt_english_via_whisper(...)`` — re-transcribe the SAME
+     `audio_path` that produced the primary transcript, but pass
+     `language="en"` to the same Whisper endpoint we already use
+     (`app.services.transcription.transcribe_bytes`). Returns the
+     raw text or ``None`` on failure / when audio is missing.
   3. ``merge_transcripts(primary, secondary, openai_client, model)`` —
      larger OpenAI call that emits the reconciled transcript.
 
@@ -28,9 +31,8 @@ main pipeline (FR-CB2-3.39).
 """
 from __future__ import annotations
 
+import os
 from typing import Any
-
-import httpx
 
 from app.logging_setup import get_logger
 
@@ -117,50 +119,106 @@ def should_re_stt_english(
     return decision
 
 
-def re_stt_english(
-    *,
-    stt_url: str,
-    meeting_id: str | None = None,
-    audio_url: str | None = None,
-    timeout: float = 90.0,
-) -> str | None:
-    """Second-STT step. POSTs to the operator-configured endpoint
-    with payload ``{meeting_id, audio_url, lang}`` and reads
-    ``text`` from the JSON response. Returns ``None`` on any error
-    or when neither identifier is set.
+def _load_audio_path_for_zoom_id(zoom_id: str) -> str | None:
+    """Look up the on-disk audio path for a Zoom recording. Returns
+    ``None`` when the recording row is missing, the audio file
+    isn't on disk, or any DB-side error happens."""
+    if not zoom_id:
+        return None
+    try:
+        from app.db import session_scope  # type: ignore
+        from app.models import ZoomRecording  # type: ignore
 
-    The endpoint contract is intentionally minimal — operator can
-    wire it to any STT provider (re-call Whisper with a different
-    `language=en` hint, OpenAI gpt-4o-transcribe, Deepgram, etc.).
+        with session_scope() as session:
+            row = (
+                session.query(ZoomRecording)
+                .filter(ZoomRecording.zoom_id == zoom_id)
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            path = (row.audio_path or "").strip()
+            if not path:
+                return None
+            if not os.path.exists(path):
+                log.info(
+                    "ceo_brain_bilingual_audio_missing_on_disk",
+                    zoom_id=zoom_id, audio_path=path,
+                )
+                return None
+            return path
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "ceo_brain_bilingual_audio_lookup_failed",
+            zoom_id=zoom_id, error=str(e),
+        )
+        return None
+
+
+def re_stt_english_via_whisper(
+    *,
+    zoom_id: str | None = None,
+    audio_path: str | None = None,
+    openai_api_key: str,
+    model: str = "whisper-1",
+    whisper_prompt: str | None = None,
+) -> str | None:
+    """Second-STT pass. Re-transcribes the SAME audio file used for
+    the primary transcript, but passes ``language="en"`` to Whisper
+    so it stops auto-detecting Russian on English-language segments.
+
+    Resolves the audio path via:
+      1. explicit ``audio_path`` arg (used by the CLI smoke-test); or
+      2. ``ZoomRecording.audio_path`` lookup by ``zoom_id``.
+
+    Returns ``None`` on any failure — caller falls back to the
+    primary transcript. Honours Whisper's 24 MB per-request cap; for
+    larger files we'd need chunked-parallel (FR-CR-05-146a path)
+    but for v0.1 the existing single-shot covers the operator's
+    typical 30-60 min meeting audio after compression.
     """
-    if not stt_url:
+    if not openai_api_key:
         return None
-    if not meeting_id and not audio_url:
-        log.info("ceo_brain_bilingual_re_stt_skipped_no_id")
+    path = (audio_path or "").strip()
+    if not path and zoom_id:
+        path = _load_audio_path_for_zoom_id(zoom_id) or ""
+    if not path:
+        log.info("ceo_brain_bilingual_re_stt_skipped_no_audio")
         return None
-    payload: dict[str, Any] = {"lang": "en"}
-    if meeting_id:
-        payload["meeting_id"] = meeting_id
-    if audio_url:
-        payload["audio_url"] = audio_url
-    try:
-        resp = httpx.post(stt_url, json=payload, timeout=timeout)
-        resp.raise_for_status()
-    except Exception as e:  # noqa: BLE001
-        log.warning(
-            "ceo_brain_bilingual_re_stt_failed",
-            error=str(e), error_type=type(e).__name__,
+    if not os.path.exists(path):
+        log.info(
+            "ceo_brain_bilingual_re_stt_skipped_missing",
+            audio_path=path,
         )
         return None
     try:
-        body = resp.json()
-    except Exception as e:  # noqa: BLE001
+        with open(path, "rb") as f:
+            audio_bytes = f.read()
+    except OSError as e:
         log.warning(
-            "ceo_brain_bilingual_re_stt_parse_failed", error=str(e),
+            "ceo_brain_bilingual_re_stt_read_failed",
+            audio_path=path, error=str(e),
         )
         return None
-    text = body.get("text") if isinstance(body, dict) else None
-    if not isinstance(text, str) or not text.strip():
+    from app.services.transcription import transcribe_bytes
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".m4a":
+        mimetype = "audio/mp4"
+    elif ext == ".mp4":
+        mimetype = "video/mp4"
+    else:
+        mimetype = "audio/mpeg"
+    text = transcribe_bytes(
+        audio_bytes=audio_bytes,
+        mimetype=mimetype,
+        filename=os.path.basename(path),
+        openai_api_key=openai_api_key,
+        model=model,
+        prompt=whisper_prompt,
+        language="en",
+    )
+    if not text or not text.strip():
         return None
     return text.strip()
 
@@ -222,12 +280,13 @@ def merge_transcripts(
 def restore_transcript_bilingual(
     *,
     transcript: str,
-    meeting_id: str | None = None,
-    audio_url: str | None = None,
+    zoom_id: str | None = None,
+    audio_path: str | None = None,
     openai_client: Any | None = None,
-    stt_url: str = "",
+    openai_api_key: str = "",
     detector_model: str = "gpt-4o-mini",
     reconciler_model: str = "gpt-4o",
+    whisper_model: str = "whisper-1",
 ) -> tuple[str, dict[str, Any]]:
     """End-to-end orchestrator. Returns ``(final_text, trace)``.
 
@@ -238,9 +297,10 @@ def restore_transcript_bilingual(
       * ``detector_skipped_empty`` — no transcript content.
       * ``detector_no_client`` — OpenAI client not provided.
       * ``detector_said_no`` — LLM voted to skip.
-      * ``re_stt_no_url`` — flag on, detector said yes, but no STT
-        endpoint configured — falls back to original.
-      * ``re_stt_failed`` — STT endpoint returned nothing.
+      * ``re_stt_no_audio`` — flag on, detector said yes, but the
+        audio path could not be resolved (no zoom_id row or file
+        missing on disk).
+      * ``re_stt_failed`` — Whisper returned nothing.
       * ``reconciler_failed`` — merge call errored.
       * ``restored`` — happy path; ``final_text`` differs from
         ``transcript``.
@@ -271,16 +331,24 @@ def restore_transcript_bilingual(
         if not decision:
             trace["stage"] = "detector_said_no"
             return transcript, trace
-        if not stt_url:
-            trace["stage"] = "re_stt_no_url"
+        if not openai_api_key:
+            trace["stage"] = "re_stt_no_audio"
             return transcript, trace
-        secondary = re_stt_english(
-            stt_url=stt_url,
-            meeting_id=meeting_id,
-            audio_url=audio_url,
+        secondary = re_stt_english_via_whisper(
+            zoom_id=zoom_id,
+            audio_path=audio_path,
+            openai_api_key=openai_api_key,
+            model=whisper_model,
         )
         if not secondary:
-            trace["stage"] = "re_stt_failed"
+            # Distinguish «no audio path» from «whisper returned
+            # nothing» — both end up in ``re_stt_failed`` here for
+            # simplicity; structured-log lines in
+            # ``re_stt_english_via_whisper`` cover the why.
+            trace["stage"] = (
+                "re_stt_no_audio" if not (zoom_id or audio_path)
+                else "re_stt_failed"
+            )
             return transcript, trace
         trace["secondary_chars"] = len(secondary)
         merged = merge_transcripts(
@@ -306,7 +374,7 @@ def restore_transcript_bilingual(
 
 __all__ = [
     "should_re_stt_english",
-    "re_stt_english",
+    "re_stt_english_via_whisper",
     "merge_transcripts",
     "restore_transcript_bilingual",
 ]

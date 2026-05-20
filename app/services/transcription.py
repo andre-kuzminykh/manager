@@ -79,6 +79,7 @@ def transcribe_bytes(
     openai_api_key: str,
     model: str = "whisper-1",
     prompt: str | None = None,
+    language: str | None = None,
 ) -> str | None:
     """Send audio to OpenAI Whisper; returns the transcript or None.
 
@@ -89,6 +90,12 @@ def transcribe_bytes(
     «Schaeffler» → «шафлера», team member real names. Empty /
     None skips the parameter entirely so the Slack voice-message
     path stays unchanged.
+
+    `language` — optional ISO-639-1 code (`"en"`, `"ru"`, …). When
+    set, Whisper biases decoding toward that language instead of
+    auto-detecting per segment. Used by FR-CB2-3.39 bilingual
+    restoration to force an English-language pass over a recording
+    that auto-detect rendered as garbled Russian.
     """
     if not openai_api_key or not audio_bytes:
         return None
@@ -102,6 +109,8 @@ def transcribe_bytes(
         }
         if prompt:
             kwargs["prompt"] = prompt
+        if language:
+            kwargs["language"] = language
         resp = client.audio.transcriptions.create(**kwargs)
     except Exception as e:  # noqa: BLE001
         log.warning("whisper_call_failed", error=str(e), filename=filename)

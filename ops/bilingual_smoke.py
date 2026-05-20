@@ -107,7 +107,35 @@ def main() -> int:
         "--max-head", type=int, default=800,
         help="Chars to show per transcript head (default 800).",
     )
+    ap.add_argument(
+        "--out-dir", default=None,
+        help=(
+            "Directory to write three full-text artifacts into: "
+            "<zoom_id>_primary.txt, <zoom_id>_secondary_en.txt, "
+            "<zoom_id>_final.txt. Created if missing."
+        ),
+    )
     args = ap.parse_args()
+
+    out_dir = None
+    if args.out_dir:
+        import os
+        out_dir = args.out_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+    def _safe_zoom_id(z: str) -> str:
+        return z.replace("/", "_").replace("=", "")
+
+    def _dump(name: str, content: str) -> None:
+        if not out_dir or not content:
+            return
+        import os
+        path = os.path.join(
+            out_dir, f"{_safe_zoom_id(args.zoom_id)}_{name}.txt",
+        )
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"  wrote {len(content)} chars → {path}")
 
     s = get_settings()
     oai_key = (s.ceo_brain_openai_api_key or s.openai_api_key).strip()
@@ -133,6 +161,7 @@ def main() -> int:
     print(f"  → {len(primary)} chars")
     print("\n--- PRIMARY HEAD ---")
     print(_head(primary, args.max_head))
+    _dump("primary", primary)
 
     from openai import OpenAI
     openai_client = OpenAI(api_key=oai_key)
@@ -165,6 +194,7 @@ def main() -> int:
     print(f"  → {len(secondary)} chars")
     print("\n--- SECONDARY (EN) HEAD ---")
     print(_head(secondary, args.max_head))
+    _dump("secondary_en", secondary)
 
     print("\n[4/4] Reconciler — merging PRIMARY + SECONDARY…")
     merged = merge_transcripts(
@@ -179,6 +209,7 @@ def main() -> int:
     print(f"  → {len(merged)} chars")
     print("\n--- FINAL (RECONCILED) HEAD ---")
     print(_head(merged, args.max_head))
+    _dump("final", merged)
 
     print("\n" + "=" * 70)
     print(f"Summary: primary={len(primary)} secondary={len(secondary)} "

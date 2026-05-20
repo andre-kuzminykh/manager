@@ -1014,13 +1014,20 @@ def test_planner_returns_tool_calls_per_mcp():
 
 def test_direct_http_gather_aggregates(monkeypatch):
     """FR-CB2-3.31 — `gather_via_direct_http` fires N calls in
-    parallel via mcp_client and aggregates by `mcp::tool` label."""
+    parallel via mcp_client and aggregates by uniquified
+    `mcp::tool#idx` label so duplicates don't collide."""
     from app.ceo_brain import parallel_gather, mcp_client
 
     calls_made: list = []
 
-    def _fake_call_tool(*, url, tool_name, arguments, timeout=30.0, retries=1):
-        calls_made.append({"url": url, "tool": tool_name, "args": arguments})
+    def _fake_call_tool(
+        *, url, tool_name, arguments, timeout=30.0,
+        retries=1, input_schema=None,
+    ):
+        calls_made.append({
+            "url": url, "tool": tool_name, "args": arguments,
+            "schema": input_schema,
+        })
         return True, f"data from {tool_name}"
 
     monkeypatch.setattr(mcp_client, "call_tool", _fake_call_tool)
@@ -1036,12 +1043,14 @@ def test_direct_http_gather_aggregates(monkeypatch):
             {"name": "n8n_drive", "url": "u2"},
         ],
     )
+    # Labels are uniquified with #idx so duplicate tools still
+    # have distinct buckets.
     assert set(out.keys()) == {
-        "n8n_calendar::search_meetings",
-        "n8n_calendar::get_zoom_transcript",
-        "n8n_drive::search_messages",
+        "n8n_calendar::search_meetings#0",
+        "n8n_calendar::get_zoom_transcript#1",
+        "n8n_drive::search_messages#2",
     }
-    assert "data from search_meetings" in out["n8n_calendar::search_meetings"]
+    assert "data from search_meetings" in out["n8n_calendar::search_meetings#0"]
     assert len(calls_made) == 3
 
 

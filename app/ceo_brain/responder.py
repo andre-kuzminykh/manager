@@ -484,6 +484,12 @@ def select_mcps_for_question(
         "вопрос? Включай только те, что СКОРЕЕ ВСЕГО содержат "
         "релевантные данные. Когда сомневаешься — включай. "
         "Минимум 1 источник.\n\n"
+        "ВАЖНО: если в вопросе упоминаются имена коллег "
+        "(Артем, Алина, Ира, Дима, Йохан и т.п.) В КОНТЕКСТЕ "
+        "СООБЩЕНИЙ или 'сказал/ответил/написал' — почти всегда "
+        "нужен `n8n_drive` (Telegram-переписка), даже если есть и "
+        "`n8n_calendar`. Multi-part вопрос («что X сказала на встрече "
+        "и Y ответила в чате») = ОБА источника.\n\n"
         "Output: только JSON формата {\"mcps\": [\"name1\", ...]}, "
         "без markdown, без комментариев."
     )
@@ -858,10 +864,11 @@ def run_responder(
                 anthropic_client=anthropic_client,
             )
         else:
-            # 3. parallel direct HTTP
+            # 3. parallel direct HTTP — pass schemas for arg coercion
             gathered_raw = gather_via_direct_http(
                 planned_calls=planned,
                 mcp_servers=request["mcp_servers"],
+                tools_by_mcp=tools_by_mcp,
             )
 
         # 4. synthesize

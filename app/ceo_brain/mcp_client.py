@@ -161,6 +161,40 @@ def list_tools(url: str, *, timeout: float = 15.0) -> list[dict]:
         return []
 
 
+def _coerce_args_to_schema(
+    arguments: dict[str, Any],
+    input_schema: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """FR-CB2-3.31 hotfix — n8n MCP tools often declare every arg as
+    JSON Schema `type:"string"`, but planner returns ints/bools.
+    n8n then 400s with schema-validation error. Coerce types based
+    on the declared schema; if schema is missing, default to string.
+    """
+    if not isinstance(arguments, dict):
+        return {}
+    if not isinstance(input_schema, dict):
+        return {k: v for k, v in arguments.items()}
+    props = input_schema.get("properties") or {}
+    out: dict[str, Any] = {}
+    for k, v in arguments.items():
+        if v is None:
+            continue
+        prop = props.get(k) or {}
+        expected = (prop.get("type") if isinstance(prop, dict) else None) or "string"
+        if expected == "string" and not isinstance(v, str):
+            out[k] = str(v)
+        elif expected == "integer" and not isinstance(v, int):
+            try:
+                out[k] = int(str(v))
+            except (TypeError, ValueError):
+                out[k] = v
+        elif expected == "boolean" and not isinstance(v, bool):
+            out[k] = bool(v) if not isinstance(v, str) else v.lower() in {"true", "1", "yes"}
+        else:
+            out[k] = v
+    return out
+
+
 def call_tool(
     *,
     url: str,
@@ -168,6 +202,7 @@ def call_tool(
     arguments: dict[str, Any],
     timeout: float = 30.0,
     retries: int = 1,
+    input_schema: dict[str, Any] | None = None,
 ) -> tuple[bool, str]:
     """Call ``tools/call`` on an MCP endpoint. Returns
     ``(ok, content_text)``. Content is the concatenated text of
@@ -178,6 +213,7 @@ def call_tool(
     network glitch. Default 1 → at most 2 attempts total.
     """
     last_error: str = ""
+    coerced_args = _coerce_args_to_schema(arguments or {}, input_schema)
     for attempt in range(retries + 1):
         try:
             sess = _init_session(url, timeout=timeout)
@@ -189,7 +225,7 @@ def call_tool(
                     "method": "tools/call",
                     "params": {
                         "name": tool_name,
-                        "arguments": arguments or {},
+                        "arguments": coerced_args,
                     },
                 },
                 headers={

@@ -257,45 +257,61 @@ def gather_via_direct_http(
     *,
     planned_calls: list[dict[str, Any]],
     mcp_servers: list[dict[str, Any]],
+    tools_by_mcp: dict[str, list[dict]] | None = None,
     per_call_timeout: float = 30.0,
 ) -> dict[str, str]:
     """FR-CB2-3.31 — execute planned tool calls in parallel via
     direct HTTP to n8n MCP endpoints, completely bypassing
     Anthropic-MCP.
 
-    Returns ``{label: harvested_text}`` where label is
-    ``"<mcp_name>::<tool_name>"`` so multiple calls to the same MCP
-    don't collide.
+    Returns ``{label: harvested_text}``. Labels are uniquified with
+    a counter (``mcp_name::tool_name#N``) so multiple calls of the
+    same tool don't collide and lose data.
 
     Each individual call goes through `mcp_client.call_tool`,
-    which has its own session caching + retry. Threads + futures
-    add a hard wall-timeout so a single misbehaving call can't
-    block the entire gather.
+    which has its own session caching + retry + schema-based args
+    coercion (FR-CB2-3.31 hotfix: n8n needs `limit:"5"`, planner
+    often produces `limit:5` int → schema validation 400). Threads
+    + futures add a hard wall-timeout so a single misbehaving call
+    can't block the entire gather.
     """
     from app.ceo_brain.mcp_client import call_tool
 
     name_to_url = {s.get("name"): s.get("url") for s in (mcp_servers or [])}
+    schemas_by_name: dict[tuple[str, str], dict] = {}
+    if tools_by_mcp:
+        for mcp_name, tools in tools_by_mcp.items():
+            for t in tools or []:
+                schemas_by_name[(mcp_name, t.get("name") or "")] = (
+                    t.get("inputSchema") or {}
+                )
     out: dict[str, str] = {}
     if not planned_calls:
         return out
 
-    def _runner(call: dict[str, Any]) -> tuple[str, str]:
+    def _runner(call: dict[str, Any], idx: int) -> tuple[str, str]:
         mcp_name = call.get("mcp") or "?"
         tool_name = call.get("tool") or "?"
         args = call.get("args") or {}
         url = name_to_url.get(mcp_name)
-        label = f"{mcp_name}::{tool_name}"
+        # Unique label per planned call to avoid bucket collision.
+        label = f"{mcp_name}::{tool_name}#{idx}"
         if not url:
             return label, ""
+        schema = schemas_by_name.get((mcp_name, tool_name))
         ok, body = call_tool(
             url=url, tool_name=tool_name, arguments=args,
             timeout=per_call_timeout,
+            input_schema=schema,
         )
         return label, body if ok else ""
 
     workers = min(len(planned_calls), 8)
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [ex.submit(_runner, c) for c in planned_calls]
+        futures = [
+            ex.submit(_runner, c, i)
+            for i, c in enumerate(planned_calls)
+        ]
         for fut in as_completed(futures, timeout=None):
             try:
                 label, text = fut.result(

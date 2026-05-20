@@ -2178,3 +2178,156 @@ def test_brain_jsonl_retention_rotate(tmp_path, monkeypatch):
     prune_old_jsonl_files(archive_dir=tmp_path, days=365)
     assert not old.exists()
     assert recent.exists()
+
+
+# ---------------------------------------------------------------------------
+# FR-CB2-3.39 — bilingual transcript restoration (OpenAI-based).
+# ---------------------------------------------------------------------------
+
+
+def _make_openai_stub(detector_reply: str, reconciler_reply: str) -> MagicMock:
+    """Build a stub that mimics ``OpenAI().chat.completions.create``.
+
+    First call returns ``detector_reply``, second returns
+    ``reconciler_reply``. ``side_effect`` lets us script multiple
+    responses without juggling state ourselves.
+    """
+    def _msg(text):
+        m = MagicMock()
+        m.choices = [MagicMock(message=MagicMock(content=text))]
+        return m
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = [
+        _msg(detector_reply), _msg(reconciler_reply),
+    ]
+    return client
+
+
+def test_bilingual_restorer_disabled_by_default(monkeypatch):
+    """FR-CB2-3.39 — when the flag is off, ``gather_via_direct_http``
+    must NOT touch transcript buckets even if an OpenAI client is
+    supplied. Verified by passing a sentinel and asserting it was
+    never invoked."""
+    from app.ceo_brain.parallel_gather import (
+        _maybe_restore_bilingual_in_place,
+    )
+
+    sentinel_client = MagicMock()
+    out = {"n8n_calendar::get_zoom_transcript#42": "Ира сказала..."}
+    _maybe_restore_bilingual_in_place(
+        out,
+        bilingual_enabled=False,
+        openai_client=sentinel_client,
+        stt_url="https://example.invalid/stt",
+        detector_model="gpt-4o-mini",
+        reconciler_model="gpt-4o",
+    )
+    assert out["n8n_calendar::get_zoom_transcript#42"] == "Ира сказала..."
+    sentinel_client.chat.completions.create.assert_not_called()
+
+
+def test_bilingual_detector_decides_yes_for_mixed():
+    """FR-CB2-3.39 — detector returns True when the OpenAI model
+    answers YES, False otherwise. Exercises the parsing logic
+    around leading/trailing whitespace and case."""
+    from app.ceo_brain.bilingual_restorer import should_re_stt_english
+
+    yes_client = MagicMock()
+    yes_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content=" yes\n"))],
+    )
+    assert should_re_stt_english(
+        transcript="Ира... Mohammed Al... shafler...",
+        openai_client=yes_client,
+    ) is True
+
+    no_client = MagicMock()
+    no_client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="NO"))],
+    )
+    assert should_re_stt_english(
+        transcript="Это полностью русский текст без англоязычных вставок.",
+        openai_client=no_client,
+    ) is False
+
+
+def test_bilingual_reconcile_merges_via_llm(monkeypatch):
+    """FR-CB2-3.39 — full happy path: detector says YES, second-STT
+    endpoint returns an English pass, reconciler emits the merged
+    text. ``out`` bucket is replaced in place and the trace sink
+    receives a ``stage=restored`` entry."""
+    from app.ceo_brain.parallel_gather import (
+        _maybe_restore_bilingual_in_place,
+    )
+
+    client = _make_openai_stub(
+        detector_reply="YES",
+        reconciler_reply="MERGED: Ира + Mohammed Al Fardan...",
+    )
+
+    # Mock httpx.post inside bilingual_restorer to return our
+    # synthetic English transcript without touching the network.
+    def _fake_post(url, json=None, timeout=None):
+        assert json["lang"] == "en"
+        resp = MagicMock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: {"text": "Mohammed Al Fardan said..."}
+        return resp
+
+    monkeypatch.setattr(
+        "app.ceo_brain.bilingual_restorer.httpx.post", _fake_post,
+    )
+
+    out = {
+        "n8n_calendar::get_zoom_transcript#7": (
+            "Zoom ID: abcdef12345678\n\nИра... shafler..."
+        ),
+        "n8n_calendar::search_zoom_meetings#1": "ID: abc...",
+    }
+    trace_sink: list[dict] = []
+    _maybe_restore_bilingual_in_place(
+        out,
+        bilingual_enabled=True,
+        openai_client=client,
+        stt_url="https://example.invalid/stt",
+        detector_model="gpt-4o-mini",
+        reconciler_model="gpt-4o",
+        trace_sink=trace_sink,
+    )
+
+    assert out["n8n_calendar::get_zoom_transcript#7"].startswith(
+        "MERGED: "
+    )
+    # search bucket must be untouched.
+    assert out["n8n_calendar::search_zoom_meetings#1"] == "ID: abc..."
+    assert len(trace_sink) == 1
+    assert trace_sink[0]["stage"] == "restored"
+    assert trace_sink[0]["decision"] is True
+    assert trace_sink[0]["secondary_chars"] > 0
+
+
+def test_bilingual_restorer_falls_back_when_no_stt_url(monkeypatch):
+    """FR-CB2-3.39 — when the detector says YES but no STT URL is
+    configured, the orchestrator must return the primary transcript
+    unchanged with ``stage='re_stt_no_url'`` and MUST NOT invoke the
+    reconciler call."""
+    from app.ceo_brain.bilingual_restorer import (
+        restore_transcript_bilingual,
+    )
+
+    client = MagicMock()
+    client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content="YES"))],
+    )
+
+    final, trace = restore_transcript_bilingual(
+        transcript="primary text",
+        openai_client=client,
+        stt_url="",
+    )
+
+    assert final == "primary text"
+    assert trace["stage"] == "re_stt_no_url"
+    # Only the detector call happened — reconciler never invoked.
+    assert client.chat.completions.create.call_count == 1

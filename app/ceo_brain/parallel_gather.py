@@ -350,6 +350,69 @@ def _needs_id_fill(call: dict) -> str | None:
     return None
 
 
+def _maybe_restore_bilingual_in_place(
+    out: dict[str, str],
+    *,
+    bilingual_enabled: bool,
+    openai_client: Any | None,
+    stt_url: str,
+    detector_model: str,
+    reconciler_model: str,
+    trace_sink: list[dict[str, Any]] | None = None,
+) -> None:
+    """FR-CB2-3.39 — post-process get_zoom_transcript buckets.
+
+    When the feature flag is on and an OpenAI client is available,
+    iterate over every label that looks like a Zoom transcript fetch
+    and run the bilingual restoration pipeline on its body. The
+    bucket text is replaced in place; the original short-circuits
+    are still respected (detector_said_no, re_stt_no_url, etc.).
+
+    ``trace_sink`` (optional) — caller-supplied list that receives
+    per-label trace dicts for diagnostics persistence.
+    """
+    if not bilingual_enabled:
+        return
+    if openai_client is None:
+        return
+    from app.ceo_brain.bilingual_restorer import restore_transcript_bilingual
+
+    for label, body in list(out.items()):
+        if not body or "::get_zoom_transcript" not in label:
+            continue
+        # Pull Zoom ID out of the transcript header so the operator's
+        # STT endpoint can re-fetch the right recording. Format from
+        # n8n: "Zoom ID: fs/KyHH5RL2x2oEeFjNC3Q==".
+        meeting_id: str | None = None
+        for regex, kind in _ID_REGEXES:
+            m = regex.search(body[:500])
+            if m and kind == "zoom_id":
+                meeting_id = m.group(1).strip()
+                break
+        final_text, trace = restore_transcript_bilingual(
+            transcript=body,
+            meeting_id=meeting_id,
+            openai_client=openai_client,
+            stt_url=stt_url,
+            detector_model=detector_model,
+            reconciler_model=reconciler_model,
+        )
+        trace["label"] = label
+        log.info(
+            "ceo_brain_bilingual_restore_result",
+            label=label,
+            stage=trace.get("stage"),
+            decision=trace.get("decision"),
+            primary_chars=trace.get("primary_chars"),
+            secondary_chars=trace.get("secondary_chars"),
+            final_chars=trace.get("final_chars"),
+        )
+        if trace_sink is not None:
+            trace_sink.append(trace)
+        if final_text != body:
+            out[label] = final_text
+
+
 def gather_via_direct_http(
     *,
     planned_calls: list[dict[str, Any]],
@@ -357,6 +420,12 @@ def gather_via_direct_http(
     tools_by_mcp: dict[str, list[dict]] | None = None,
     per_call_timeout: float = 30.0,
     local_tool_executors: dict[str, Any] | None = None,
+    bilingual_enabled: bool = False,
+    openai_client: Any | None = None,
+    bilingual_stt_url: str = "",
+    bilingual_detector_model: str = "gpt-4o-mini",
+    bilingual_reconciler_model: str = "gpt-4o",
+    bilingual_trace_sink: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     """FR-CB2-3.31 — execute planned tool calls in parallel via
     direct HTTP to n8n MCP endpoints, completely bypassing
@@ -549,6 +618,16 @@ def gather_via_direct_http(
                     zoom_ids=zoom_ids[:3],
                 )
                 out.update(_run_calls_parallel(injected))
+
+    _maybe_restore_bilingual_in_place(
+        out,
+        bilingual_enabled=bilingual_enabled,
+        openai_client=openai_client,
+        stt_url=bilingual_stt_url,
+        detector_model=bilingual_detector_model,
+        reconciler_model=bilingual_reconciler_model,
+        trace_sink=bilingual_trace_sink,
+    )
 
     return out
 

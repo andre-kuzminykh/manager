@@ -145,6 +145,43 @@ class Settings(BaseSettings):
     ceo_brain_allowed_users: str = Field(
         default="", alias="CEO_BRAIN_ALLOWED_USERS",
     )
+    # FR-CB2-3.39 — bilingual transcript restoration. After a Zoom
+    # transcript is fetched, optionally (a) ask an LLM if the text
+    # contains garbled English / mixed-language segments, (b) trigger
+    # a second STT pass with `lang=en` against an operator-configured
+    # endpoint, (c) merge the two transcripts via LLM so each segment
+    # ends up in the right language. All three steps are wrapped in
+    # try/except — pipeline degrades to the original transcript on any
+    # failure. Default OFF (operator tests on traces first).
+    ceo_brain_bilingual_restoration_enabled: bool = Field(
+        default=False,
+        alias="CEO_BRAIN_BILINGUAL_RESTORATION_ENABLED",
+    )
+    # OpenAI key for the bilingual detector + reconciler calls (kept
+    # separate from `OPENAI_API_KEY` so the operator can use a
+    # different account / budget for CEO Brain LLM work). Falls back
+    # to `OPENAI_API_KEY` when empty.
+    ceo_brain_openai_api_key: str = Field(
+        default="", alias="CEO_BRAIN_OPENAI_API_KEY",
+    )
+    # Model id for the bilingual detector (fast/cheap binary call).
+    ceo_brain_bilingual_detector_model: str = Field(
+        default="gpt-4o-mini",
+        alias="CEO_BRAIN_BILINGUAL_DETECTOR_MODEL",
+    )
+    # Model id for the bilingual reconciler (merges two transcripts).
+    ceo_brain_bilingual_reconciler_model: str = Field(
+        default="gpt-4o",
+        alias="CEO_BRAIN_BILINGUAL_RECONCILER_MODEL",
+    )
+    # Operator-side second-STT endpoint that takes
+    #   POST {meeting_id|audio_url, lang} -> {text: "..."}.
+    # When empty, second-STT step is skipped; reconciliation still
+    # runs if detector said yes and a secondary transcript is supplied
+    # some other way (unlikely in v0.1, but the wiring stays open).
+    ceo_brain_stt_english_url: str = Field(
+        default="", alias="CEO_BRAIN_STT_ENGLISH_URL",
+    )
 
     # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся
     # встречи в Google Calendar (определяется по совпадению title с

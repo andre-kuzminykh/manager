@@ -958,12 +958,45 @@ def run_responder(
         else:
             # 3. parallel direct HTTP — pass schemas for arg coercion
             #    plus local executors for `slack_self` virtual MCP.
+            #    FR-CB2-3.39 — optional bilingual restoration of any
+            #    Zoom transcript fetched in this gather; controlled by
+            #    `CEO_BRAIN_BILINGUAL_RESTORATION_ENABLED`.
+            from app.config import get_settings as _gs
+            _s = _gs()
+            _bi_traces: list[dict] = []
+            _openai_client = None
+            if _s.ceo_brain_bilingual_restoration_enabled:
+                _oai_key = (
+                    _s.ceo_brain_openai_api_key
+                    or _s.openai_api_key
+                )
+                if _oai_key:
+                    try:
+                        from openai import OpenAI as _OpenAI
+                        _openai_client = _OpenAI(api_key=_oai_key)
+                    except Exception as _e:  # noqa: BLE001
+                        log.warning(
+                            "ceo_brain_bilingual_openai_init_failed",
+                            error=str(_e),
+                        )
             gathered_raw = gather_via_direct_http(
                 planned_calls=planned,
                 mcp_servers=request["mcp_servers"],
                 tools_by_mcp=tools_by_mcp,
                 local_tool_executors=tool_executors or None,
+                bilingual_enabled=_s.ceo_brain_bilingual_restoration_enabled,
+                openai_client=_openai_client,
+                bilingual_stt_url=_s.ceo_brain_stt_english_url,
+                bilingual_detector_model=(
+                    _s.ceo_brain_bilingual_detector_model
+                ),
+                bilingual_reconciler_model=(
+                    _s.ceo_brain_bilingual_reconciler_model
+                ),
+                bilingual_trace_sink=_bi_traces,
             )
+            if _bi_traces:
+                request["_bilingual"] = _bi_traces
 
         # 4. synthesize
         sys_blocks = request.get("system") or []

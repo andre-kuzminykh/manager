@@ -39,6 +39,12 @@ from app.sync.team_sheet import TeamSheetSync
 log = get_logger(__name__)
 
 _SERVICE_ACCOUNT_USER_KEY = "_service_account"
+# FR-CR-05-175 — fallback OAuth key when the operator never ran the
+# `_service_account` OAuth flow but has authorised Calendar (the
+# Calendar runner stores its OAuth under `_calendar`, same Google
+# account; Calendar grants tend to come with Drive/Docs scopes when
+# the operator picked «all the boxes» during consent).
+_CALENDAR_FALLBACK_USER_KEY = "_calendar"
 
 
 def _load_oauth_credentials():
@@ -50,6 +56,19 @@ def _load_oauth_credentials():
     store = GoogleCredentialStore(cipher)
     with session_scope() as session:
         record = store.load(session, user_key=_SERVICE_ACCOUNT_USER_KEY)
+        if record is None:
+            # FR-CR-05-175 — fall back to the Calendar OAuth key.
+            record = store.load(
+                session, user_key=_CALENDAR_FALLBACK_USER_KEY,
+            )
+            if record is not None:
+                log.info(
+                    "google_sync_using_calendar_oauth_fallback",
+                    hint=("FR-CR-05-175 — no `_service_account` OAuth "
+                          "row; using `_calendar` row instead. Works "
+                          "when the operator authorised Drive/Docs "
+                          "scopes during Calendar consent."),
+                )
         if record is None:
             return None
         return build_google_credentials(record, store)

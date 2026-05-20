@@ -155,6 +155,89 @@ def _load_audio_path_for_zoom_id(zoom_id: str) -> str | None:
         return None
 
 
+def _load_audio_url_for_zoom_id(zoom_id: str) -> str | None:
+    """Look up the Zoom cloud download URL for a recording (filled
+    when the recording was first ingested — survives local-disk
+    audio cleanup). Returns ``None`` on lookup error."""
+    if not zoom_id:
+        return None
+    try:
+        from app.db import session_scope  # type: ignore
+        from app.models import ZoomRecording  # type: ignore
+
+        with session_scope() as session:
+            row = (
+                session.query(ZoomRecording)
+                .filter(ZoomRecording.zoom_id == zoom_id)
+                .one_or_none()
+            )
+            if row is None:
+                return None
+            url = (row.audio_url or "").strip()
+            return url or None
+    except Exception as e:  # noqa: BLE001
+        log.info(
+            "ceo_brain_bilingual_audio_url_lookup_failed",
+            zoom_id=zoom_id, error=str(e),
+        )
+        return None
+
+
+def _download_zoom_audio_to_temp(audio_url: str) -> str | None:
+    """Pull the recording bytes from Zoom cloud via the existing
+    `ZoomClient.download_audio` (needs OAuth + bearer token, both
+    already configured in settings). Returns a temp-file path the
+    caller must delete, or ``None`` on failure.
+
+    Cap matches the production `ZOOM_AUDIO_MAX_BYTES` so we don't
+    accidentally pull a gigabyte file on a misconfigured row.
+    """
+    if not audio_url:
+        return None
+    try:
+        import tempfile
+
+        from app.config import get_settings  # type: ignore
+        from app.zoom.client import ZoomClient  # type: ignore
+
+        s = get_settings()
+        if not (s.zoom_client_id and s.zoom_client_secret
+                and s.zoom_account_id):
+            log.info("ceo_brain_bilingual_zoom_oauth_missing")
+            return None
+        client = ZoomClient(
+            account_id=s.zoom_account_id,
+            client_id=s.zoom_client_id,
+            client_secret=s.zoom_client_secret,
+        )
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="bilingual_", suffix=".m4a", delete=False,
+        )
+        tmp.close()
+        written = client.download_audio(
+            url=audio_url,
+            dest_path=tmp.name,
+            max_bytes=getattr(s, "zoom_audio_max_bytes", 1024 * 1024 * 1024),
+        )
+        if not written:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+            return None
+        log.info(
+            "ceo_brain_bilingual_audio_downloaded",
+            tmp_path=tmp.name, bytes=written,
+        )
+        return tmp.name
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "ceo_brain_bilingual_audio_download_failed",
+            error=str(e), error_type=type(e).__name__,
+        )
+        return None
+
+
 def re_stt_english_via_whisper(
     *,
     zoom_id: str | None = None,
@@ -167,21 +250,33 @@ def re_stt_english_via_whisper(
     the primary transcript, but passes ``language="en"`` to Whisper
     so it stops auto-detecting Russian on English-language segments.
 
-    Resolves the audio path via:
-      1. explicit ``audio_path`` arg (used by the CLI smoke-test); or
-      2. ``ZoomRecording.audio_path`` lookup by ``zoom_id``.
+    Resolves the audio in this order:
+      1. explicit ``audio_path`` arg (CLI smoke-test);
+      2. ``ZoomRecording.audio_path`` lookup by ``zoom_id`` (in-disk
+         cached audio from the original ingestion);
+      3. on-demand download from ``ZoomRecording.audio_url`` (Zoom
+         cloud) via `ZoomClient.download_audio` — uses the same
+         OAuth credentials the ingestion pipeline already has. The
+         temp file is deleted after Whisper returns.
 
     Returns ``None`` on any failure — caller falls back to the
-    primary transcript. Honours Whisper's 24 MB per-request cap; for
-    larger files we'd need chunked-parallel (FR-CR-05-146a path)
-    but for v0.1 the existing single-shot covers the operator's
-    typical 30-60 min meeting audio after compression.
+    primary transcript.
     """
     if not openai_api_key:
         return None
     path = (audio_path or "").strip()
+    tmp_to_cleanup: str | None = None
     if not path and zoom_id:
         path = _load_audio_path_for_zoom_id(zoom_id) or ""
+    if not path and zoom_id:
+        url = _load_audio_url_for_zoom_id(zoom_id)
+        if url:
+            log.info(
+                "ceo_brain_bilingual_audio_local_miss_trying_cloud",
+                zoom_id=zoom_id,
+            )
+            path = _download_zoom_audio_to_temp(url) or ""
+            tmp_to_cleanup = path or None
     if not path:
         log.info("ceo_brain_bilingual_re_stt_skipped_no_audio")
         return None
@@ -199,6 +294,11 @@ def re_stt_english_via_whisper(
             "ceo_brain_bilingual_re_stt_read_failed",
             audio_path=path, error=str(e),
         )
+        if tmp_to_cleanup:
+            try:
+                os.unlink(tmp_to_cleanup)
+            except OSError:
+                pass
         return None
     from app.services.transcription import transcribe_bytes
 
@@ -209,15 +309,22 @@ def re_stt_english_via_whisper(
         mimetype = "video/mp4"
     else:
         mimetype = "audio/mpeg"
-    text = transcribe_bytes(
-        audio_bytes=audio_bytes,
-        mimetype=mimetype,
-        filename=os.path.basename(path),
-        openai_api_key=openai_api_key,
-        model=model,
-        prompt=whisper_prompt,
-        language="en",
-    )
+    try:
+        text = transcribe_bytes(
+            audio_bytes=audio_bytes,
+            mimetype=mimetype,
+            filename=os.path.basename(path),
+            openai_api_key=openai_api_key,
+            model=model,
+            prompt=whisper_prompt,
+            language="en",
+        )
+    finally:
+        if tmp_to_cleanup:
+            try:
+                os.unlink(tmp_to_cleanup)
+            except OSError:
+                pass
     if not text or not text.strip():
         return None
     return text.strip()

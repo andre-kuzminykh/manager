@@ -134,9 +134,11 @@ SLACK_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 "types": {
                     "type": "string",
                     "description": (
-                        "Comma-separated: public_channel,private_channel,im,mpim"
+                        "Comma-separated: public_channel,private_channel,"
+                        "im,mpim. Default: только public+private "
+                        "(не требует im:read / mpim:read scope)."
                     ),
-                    "default": "public_channel,private_channel,im",
+                    "default": "public_channel,private_channel",
                 },
                 "limit": {"type": "integer", "default": 200},
             },
@@ -315,7 +317,7 @@ def build_executors(
             r = bot_client.conversations_list(
                 types=(
                     inp.get("types")
-                    or "public_channel,private_channel,im"
+                    or "public_channel,private_channel"
                 ),
                 limit=min(max(int(inp.get("limit") or 200), 1), 1000),
             )

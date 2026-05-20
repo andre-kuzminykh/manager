@@ -409,8 +409,6 @@ def gather_via_direct_http(
             meeting_ids=ids_pool.get("meeting_id"),
             pass2_count=len(pass2),
         )
-        # Fill missing IDs from extracted pool. One ID per dependent
-        # call (take the first available, in order).
         filled_pass2: list[tuple[int, dict]] = []
         for idx, c in pass2:
             kind = _needs_id_fill(c)
@@ -419,16 +417,11 @@ def gather_via_direct_http(
                 continue
             pool = ids_pool.get(kind) or []
             if not pool:
-                # No IDs found in pass1 — skip this dependent call.
                 log.info(
                     "ceo_brain_direct_http_skip_no_id",
                     tool=c.get("tool"), need=kind,
                 )
-                # Add empty result so the synthesis sees this slot
-                # as "no data" rather than missing.
-                label = (
-                    f"{c.get('mcp')}::{c.get('tool')}#{idx}"
-                )
+                label = f"{c.get('mcp')}::{c.get('tool')}#{idx}"
                 out[label] = ""
                 continue
             filled = dict(c)
@@ -439,6 +432,42 @@ def gather_via_direct_http(
             )
             filled_pass2.append((idx, filled))
         out.update(_run_calls_parallel(filled_pass2))
+
+    # FR-CB2-3.31 hotfix #6 — auto-inject get_zoom_transcript when
+    # search calls produced zoom_ids but planner did NOT include any
+    # transcript fetch. Cap at 2 to keep latency bounded.
+    has_any_transcript = any(
+        (c.get("tool") or "").lower() in {"get_zoom_transcript", "get_meeting"}
+        for c in planned_calls
+    )
+    if not has_any_transcript:
+        ids_pool = _extract_ids_from_responses(out)
+        zoom_ids = ids_pool.get("zoom_id") or []
+        if zoom_ids:
+            calendar_mcp = next(
+                (
+                    c.get("mcp") for c in planned_calls
+                    if (c.get("tool") or "").startswith("search_zoom_meetings")
+                ),
+                None,
+            )
+            if calendar_mcp:
+                base_idx = len(planned_calls)
+                injected: list[tuple[int, dict]] = []
+                for j, zid in enumerate(zoom_ids[:2]):
+                    injected.append((
+                        base_idx + j,
+                        {
+                            "mcp": calendar_mcp,
+                            "tool": "get_zoom_transcript",
+                            "args": {"zoom_id": zid},
+                        },
+                    ))
+                log.info(
+                    "ceo_brain_direct_http_auto_transcript",
+                    zoom_ids=zoom_ids[:2],
+                )
+                out.update(_run_calls_parallel(injected))
 
     return out
 

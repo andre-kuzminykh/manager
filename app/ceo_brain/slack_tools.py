@@ -313,13 +313,20 @@ def build_executors(
         })
 
     def slack_list_channels(inp: dict) -> str:
+        # FR-CB2-3.34 — use `users.conversations` instead of
+        # `conversations.list`: the former returns only channels the
+        # calling bot is actually a member of. The latter lists ALL
+        # workspace channels (with is_member flag), which confuses
+        # the model when it tries to answer «в каких каналах ты
+        # добавлен» and returns is_member=False entries.
         try:
-            r = bot_client.conversations_list(
+            r = bot_client.users_conversations(
                 types=(
                     inp.get("types")
                     or "public_channel,private_channel"
                 ),
                 limit=min(max(int(inp.get("limit") or 200), 1), 1000),
+                exclude_archived=True,
             )
         except Exception as e:  # noqa: BLE001
             return _err(f"list_failed: {e}")

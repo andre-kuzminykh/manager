@@ -286,37 +286,64 @@ def re_stt_english_via_whisper(
             audio_path=path,
         )
         return None
-    try:
-        with open(path, "rb") as f:
-            audio_bytes = f.read()
-    except OSError as e:
-        log.warning(
-            "ceo_brain_bilingual_re_stt_read_failed",
-            audio_path=path, error=str(e),
-        )
-        if tmp_to_cleanup:
-            try:
-                os.unlink(tmp_to_cleanup)
-            except OSError:
-                pass
-        return None
-    from app.services.transcription import transcribe_bytes
+    from app.services.transcription import transcribe_chunks_parallel
 
-    ext = os.path.splitext(path)[1].lower()
-    if ext == ".m4a":
-        mimetype = "audio/mp4"
-    elif ext == ".mp4":
-        mimetype = "video/mp4"
+    # Whisper's per-request cap is 25 MB. The Zoom pipeline already
+    # has a chunk-splitter that keeps chunks ≤24 MB and parallel-
+    # transcribes them preserving order — reuse both. For files
+    # under the cap we still go through `transcribe_chunks_parallel`
+    # with a single-path list so the code path stays identical
+    # whether the recording is 5 min or 90 min.
+    whisper_max = 24 * 1024 * 1024
+    chunk_paths: list[str]
+    extra_tmp_chunks: list[str] = []
+    size = os.path.getsize(path)
+    if size <= whisper_max:
+        chunk_paths = [path]
     else:
-        mimetype = "audio/mpeg"
+        try:
+            from app.fireflies.pipeline import _split_audio_into_chunks
+
+            chunk_paths = _split_audio_into_chunks(
+                path, max_bytes=whisper_max,
+            )
+            # Splitter writes new chunks alongside the source; keep
+            # track so we can clean up.
+            extra_tmp_chunks = [c for c in chunk_paths if c != path]
+            log.info(
+                "ceo_brain_bilingual_audio_chunked",
+                size=size, chunks=len(chunk_paths),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ceo_brain_bilingual_audio_chunk_failed",
+                error=str(e), error_type=type(e).__name__,
+            )
+            if tmp_to_cleanup:
+                try:
+                    os.unlink(tmp_to_cleanup)
+                except OSError:
+                    pass
+            return None
+
+    def _mimetype_for(p: str) -> str:
+        e = os.path.splitext(p)[1].lower()
+        if e == ".m4a":
+            return "audio/mp4"
+        if e == ".mp4":
+            return "video/mp4"
+        return "audio/mpeg"
+
+    # FR-CB2-3.39 — pass `language="en"` through to every chunk so
+    # Whisper biases toward English on every segment.
     try:
-        text = transcribe_bytes(
-            audio_bytes=audio_bytes,
-            mimetype=mimetype,
-            filename=os.path.basename(path),
+        parts = transcribe_chunks_parallel(
+            chunk_paths,
             openai_api_key=openai_api_key,
             model=model,
             prompt=whisper_prompt,
+            mimetype_for=_mimetype_for,
+            max_workers=3,
             language="en",
         )
     finally:
@@ -325,9 +352,16 @@ def re_stt_english_via_whisper(
                 os.unlink(tmp_to_cleanup)
             except OSError:
                 pass
-    if not text or not text.strip():
+        for c in extra_tmp_chunks:
+            try:
+                os.unlink(c)
+            except OSError:
+                pass
+
+    joined = "\n".join(p for p in (parts or []) if p)
+    if not joined.strip():
         return None
-    return text.strip()
+    return joined.strip()
 
 
 def merge_transcripts(

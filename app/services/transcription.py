@@ -307,6 +307,7 @@ def transcribe_chunks_parallel(
     prompt: str | None = None,
     mimetype_for: callable | None = None,
     max_workers: int = 3,
+    language: str | None = None,
 ) -> list[str | None]:
     """FR-CR-05-146a — transcribe a list of audio-chunk paths
     in PARALLEL via a thread-pool, preserving order. Returns a
@@ -354,6 +355,7 @@ def transcribe_chunks_parallel(
             openai_api_key=openai_api_key,
             model=model,
             prompt=prompt,
+            language=language,
         )
 
     workers = max(1, min(max_workers, len(paths)))

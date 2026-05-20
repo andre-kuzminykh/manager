@@ -41,11 +41,14 @@ def upgrade() -> None:
         sa.Column("calendar_attendees", sa.JSON, nullable=True),
     )
     op.add_column(
-        "fireflies_transcripts",
+        "meeting_recordings",
         sa.Column("calendar_attendees", sa.JSON, nullable=True),
     )
 
 
 def downgrade() -> None:
-    op.drop_column("fireflies_transcripts", "calendar_attendees")
+    op.drop_column("meeting_recordings", "calendar_attendees")
     op.drop_column("zoom_recordings", "calendar_attendees")
+
+
+

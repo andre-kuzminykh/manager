@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     ceo_brain_slack_user_token: str = Field(
         default="", alias="CEO_BRAIN_SLACK_USER_TOKEN",
     )
+    # FR-CB2-3.36 — comma-separated list of Slack user IDs that
+    # ARE allowed to talk to the CEO Brain bot (DMs, @mentions).
+    # Empty (default) = no restriction, everyone can DM. When set,
+    # messages from non-listed users are silently ignored (no
+    # «access denied» reply — operator-pinned to avoid noise).
+    ceo_brain_allowed_users: str = Field(
+        default="", alias="CEO_BRAIN_ALLOWED_USERS",
+    )
 
     # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся
     # встречи в Google Calendar (определяется по совпадению title с

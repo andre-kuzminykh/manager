@@ -167,6 +167,27 @@ def handle_event(
     # edit, deletion, channel-join, bot-relay, etc. — never a
     # responder trigger).
     if responder is not None:
+        # FR-CB2-3.36 — operator-pinned whitelist. When set, only
+        # listed Slack user IDs may invoke the responder; others
+        # are silently ignored (no «access denied» reply).
+        from app.config import get_settings
+        allowed_raw = (
+            get_settings().ceo_brain_allowed_users or ""
+        ).strip()
+        allowed_set: set[str] = set()
+        if allowed_raw:
+            allowed_set = {
+                u.strip() for u in allowed_raw.split(",")
+                if u and u.strip()
+            }
+        if allowed_set:
+            sender = (payload.get("user") or "").strip()
+            if sender not in allowed_set:
+                log.info(
+                    "ceo_brain_responder_user_not_allowed",
+                    user=sender,
+                )
+                return result
         is_user_authored_message = (
             event_type == "message" and not subtype
         )

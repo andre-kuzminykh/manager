@@ -153,6 +153,85 @@ def test_brain_skips_self_messages(session, tmp_path, monkeypatch):
     assert r.archived is False
 
 
+def test_brain_allowed_users_whitelist(session, tmp_path, monkeypatch):
+    """FR-CB2-3.36 — when CEO_BRAIN_ALLOWED_USERS is set, only
+    messages from listed Slack user IDs trigger the responder.
+    Non-allowed users are silently ignored (no responder dispatch,
+    archive still happens for whitelisted channels)."""
+    from app.ceo_brain.dispatcher import (
+        _reset_responder_dedup_for_tests,
+        handle_event,
+    )
+    from app.config import get_settings
+
+    monkeypatch.setenv("CEO_BRAIN_ARCHIVE_DIR", str(tmp_path))
+    monkeypatch.setenv(
+        "CEO_BRAIN_ALLOWED_USERS",
+        "U_ALLOW_1, U_ALLOW_2 ,U_ALLOW_3",  # tolerate whitespace
+    )
+    get_settings.cache_clear()
+    _reset_responder_dedup_for_tests()
+
+    fired: list = []
+    def _r(p):
+        fired.append(p.get("user"))
+
+    base = {
+        "type": "message",
+        "channel": "D1",
+        "channel_type": "im",
+        "text": "hi",
+    }
+    # Allowed user → responder fires.
+    handle_event(
+        session,
+        {**base, "user": "U_ALLOW_2", "ts": "1779100200.000001"},
+        responder=_r,
+    )
+    # Not in whitelist → silently ignored.
+    handle_event(
+        session,
+        {**base, "user": "U_OUTSIDER", "ts": "1779100201.000002"},
+        responder=_r,
+    )
+    # Another allowed user → fires.
+    handle_event(
+        session,
+        {**base, "user": "U_ALLOW_3", "ts": "1779100202.000003"},
+        responder=_r,
+    )
+    assert fired == ["U_ALLOW_2", "U_ALLOW_3"]
+
+
+def test_brain_allowed_users_empty_means_no_restriction(
+    session, tmp_path, monkeypatch,
+):
+    """FR-CB2-3.36 — empty `CEO_BRAIN_ALLOWED_USERS` (default)
+    means everyone can talk to the bot (preserves current
+    behaviour for setups that don't opt in)."""
+    from app.ceo_brain.dispatcher import (
+        _reset_responder_dedup_for_tests,
+        handle_event,
+    )
+    from app.config import get_settings
+
+    monkeypatch.setenv("CEO_BRAIN_ARCHIVE_DIR", str(tmp_path))
+    monkeypatch.delenv("CEO_BRAIN_ALLOWED_USERS", raising=False)
+    get_settings.cache_clear()
+    _reset_responder_dedup_for_tests()
+
+    fired: list = []
+    handle_event(
+        session,
+        {
+            "type": "message", "channel": "D1", "channel_type": "im",
+            "user": "U_RANDO", "text": "hi", "ts": "1779100300.000001",
+        },
+        responder=lambda p: fired.append(p.get("user")),
+    )
+    assert fired == ["U_RANDO"]
+
+
 def test_history_poller_singleton_no_duplicates_on_reconnect(
     monkeypatch, tmp_path,
 ):

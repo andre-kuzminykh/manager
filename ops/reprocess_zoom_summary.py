@@ -143,13 +143,13 @@ def main() -> int:
     from app.zoom.client import ZoomRecordingMeta
     meta = ZoomRecordingMeta(
         id=args.zoom_id,
-        meeting_id="",
-        title="",
+        meeting_id=None,
+        title=None,
         meeting_date=None,
         duration_seconds=None,
         participants=[],
         audio_url=None,
-        zoom_share_url=None,
+        share_url=None,
         host_email=None,
     )
     with session_scope() as session:

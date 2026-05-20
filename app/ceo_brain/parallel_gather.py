@@ -220,7 +220,14 @@ def synthesize_final_answer(
 ) -> str:
     """One plain `messages.create` (no MCP, no beta) with the
     gathered tool data inlined. The model writes a clean answer
-    from the data alone, no risk of MCP handshake hang."""
+    from the data alone, no risk of MCP handshake hang.
+
+    Retries on transient errors (429 rate limit, APITimeoutError,
+    connection drops) up to 3 attempts with exponential backoff —
+    Anthropic's org-level 30K-input-tok/min limit can briefly
+    block synthesis when prior tool results were large.
+    """
+    import time as _time
     data_sections: list[str] = []
     for name, text in (gathered or {}).items():
         if text and text.strip():
@@ -230,6 +237,16 @@ def synthesize_final_answer(
     data_block = (
         "\n\n".join(data_sections) if data_sections else "(нет данных)"
     )
+    # FR-CB2-3.31 hotfix #8 — cap DATA at ~80K chars so we stay
+    # under Anthropic org's 30K-input-tok/min rate limit. One
+    # synthesis call burns input_tokens = (system + data + user
+    # prompt) tokens; 80K chars ≈ 20K tokens, leaving headroom
+    # for retries / concurrent requests.
+    if len(data_block) > 80_000:
+        data_block = (
+            data_block[:80_000]
+            + f"\n…[truncated {len(data_block) - 80_000} chars]"
+        )
     user_msg = (
         "Ниже — собранные данные из tool-вызовов:\n\n"
         f"<DATA>\n{data_block}\n</DATA>\n\n"
@@ -238,20 +255,45 @@ def synthesize_final_answer(
         "Не вызывай tools. Если данных недостаточно — честно скажи "
         "что именно отсутствует."
     )
-    try:
-        resp = anthropic_client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=[{"type": "text", "text": system_prompt_text}],
-            messages=[{"role": "user", "content": user_msg}],
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning(
-            "ceo_brain_synthesis_failed",
-            error=str(e), error_type=type(e).__name__,
-        )
-        return ""
-    return _harvest_response_text(resp)
+    last_error: str = ""
+    for attempt in range(1, 4):
+        try:
+            resp = anthropic_client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                system=[{"type": "text", "text": system_prompt_text}],
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            return _harvest_response_text(resp)
+        except Exception as e:  # noqa: BLE001
+            last_error = f"{type(e).__name__}: {str(e)[:200]}"
+            err_text = str(e).lower()
+            transient = (
+                "429" in str(e)
+                or "rate_limit" in err_text
+                or "timed out" in err_text
+                or type(e).__name__ in {
+                    "APITimeoutError", "RateLimitError",
+                }
+            )
+            if transient and attempt < 3:
+                wait = 8 * attempt  # 8, 16 sec
+                log.info(
+                    "ceo_brain_synthesis_retry",
+                    attempt=attempt, wait=wait, error=last_error,
+                )
+                _time.sleep(wait)
+                continue
+            log.warning(
+                "ceo_brain_synthesis_failed",
+                error=last_error, error_type=type(e).__name__,
+            )
+            return ""
+    log.warning(
+        "ceo_brain_synthesis_failed",
+        error=last_error,
+    )
+    return ""
 
 
 _ID_REGEXES = [

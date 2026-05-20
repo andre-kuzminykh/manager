@@ -182,36 +182,50 @@ def _coerce_args_to_schema(
     props = input_schema.get("properties") or {}
     required = input_schema.get("required") or []
     out: dict[str, Any] = {}
+    def _coerce_one(value: Any, expected: str) -> Any:
+        if expected == "string" and not isinstance(value, str):
+            return str(value)
+        if expected in {"integer", "number"} and not isinstance(value, (int, float)):
+            try:
+                num = int(str(value))
+                return num
+            except (TypeError, ValueError):
+                try:
+                    return float(str(value))
+                except (TypeError, ValueError):
+                    return value
+        if expected == "boolean" and not isinstance(value, bool):
+            if isinstance(value, str):
+                return value.lower() in {"true", "1", "yes"}
+            return bool(value)
+        return value
+
+    def _empty_for(expected: str) -> Any:
+        if expected == "string":
+            return ""
+        if expected in {"integer", "number"}:
+            return 10
+        if expected == "boolean":
+            return False
+        if expected == "array":
+            return []
+        if expected == "object":
+            return {}
+        return ""
+
     for k, v in arguments.items():
         if v is None:
             continue
         prop = props.get(k) or {}
         expected = (prop.get("type") if isinstance(prop, dict) else None) or "string"
-        if expected == "string" and not isinstance(v, str):
-            out[k] = str(v)
-        elif expected == "integer" and not isinstance(v, int):
-            try:
-                out[k] = int(str(v))
-            except (TypeError, ValueError):
-                out[k] = v
-        elif expected == "boolean" and not isinstance(v, bool):
-            out[k] = bool(v) if not isinstance(v, str) else v.lower() in {"true", "1", "yes"}
-        else:
-            out[k] = v
-    # Fill missing required args with empty defaults so n8n accepts.
+        out[k] = _coerce_one(v, expected)
+    # Fill missing required args with type-appropriate defaults.
     for req_key in required:
         if req_key in out:
             continue
         prop = props.get(req_key) or {}
         expected = (prop.get("type") if isinstance(prop, dict) else None) or "string"
-        if expected == "string":
-            out[req_key] = ""
-        elif expected == "integer":
-            out[req_key] = 10  # generic limit default
-        elif expected == "boolean":
-            out[req_key] = False
-        else:
-            out[req_key] = ""
+        out[req_key] = _empty_for(expected)
     return out
 
 

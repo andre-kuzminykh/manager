@@ -227,27 +227,97 @@ def extract_beneficiaries(
     model: str,
 ) -> list[BeneficiaryCandidate]:
     """Stage 2 — beneficiary picker. Returns up to `max_n`
-    candidates, empty list on any error."""
+    candidates.
+
+    FR-CR-05-171 — operator-pinned 2026-05-20: «ты всегда присылаешь
+    только по одному человеку, а надо по тем кто фигурирует во
+    встрече». Previously this stage delegated 100% of the picking to
+    the LLM, and the LLM frequently ignored the «bias attendees +
+    initial_persons over leadership» rule, returning only company
+    CEOs. Now the function:
+
+      1. SEEDS the result with every external attendee that has a
+         displayName, plus every Stage-0 `initial_person` extracted
+         from title/description — these MUST appear, no LLM whim
+         allowed.
+      2. If the seed already fills `max_n` — return it, skip the
+         LLM call entirely (cheaper + faster + deterministic).
+      3. Otherwise asks the LLM to TOP UP from leadership only, up
+         to the remaining slots; dedupes against the seed.
+
+    Net effect: a meeting with «Baris Yildiz (Apple) <> Artem
+    Sokolov» now always produces a brief about Baris, even if the
+    LLM still wants Tim Cook — Cook lands in the remaining slots
+    only after Baris is in.
+    """
+    seed: list[BeneficiaryCandidate] = []
+    seen: set[str] = set()
+
+    def _push(name: str, role: str | None, evidence: str) -> None:
+        n = (name or "").strip()
+        if not n:
+            return
+        key = n.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        seed.append(BeneficiaryCandidate(
+            person_name=n, person_role=role, evidence=evidence,
+        ))
+
+    # 1a. Seed initial_persons (Stage-0 extracted from title/desc).
+    for p in initial_persons or []:
+        if isinstance(p, PersonCandidate):
+            _push(p.person_name, p.person_role,
+                  "mentioned in event title/description")
+        elif isinstance(p, dict):
+            _push(
+                p.get("person_name") or "",
+                (p.get("person_role") or None) or None,
+                "mentioned in event title/description",
+            )
+    # 1b. Seed external attendees with a real display name. Bare-email
+    # attendees (no displayName) are dropped — operator-pinned: brief
+    # without a real name is noise.
+    external_attendees = _strip_internal_attendees(attendees or [])
+    for a in external_attendees:
+        if not isinstance(a, dict):
+            continue
+        name = (a.get("displayName") or a.get("name") or "").strip()
+        email = (a.get("email") or "").strip()
+        if not name:
+            continue
+        evidence = f"meeting attendee ({email})" if email else "meeting attendee"
+        _push(name, None, evidence)
+
+    max_n = max(1, int(max_n))
+    if len(seed) >= max_n:
+        log.info(
+            "brief_beneficiaries_seed_fills_quota",
+            seed_count=len(seed), max_n=max_n,
+            names=[b.person_name for b in seed],
+        )
+        return seed[:max_n]
+
+    # 2. Top up with leadership picks via LLM (only if we have
+    # leadership to pick from AND still have empty slots).
     leadership: list[dict[str, str]] = []
     if org_research is not None:
         leadership = list(getattr(org_research, "leadership", None) or [])
-    initial_payload: list[dict[str, Any]] = []
-    for p in initial_persons or []:
-        if isinstance(p, PersonCandidate):
-            initial_payload.append({
-                "person_name": p.person_name,
-                "person_role": p.person_role,
-            })
-        elif isinstance(p, dict):
-            initial_payload.append(p)
+    if not leadership:
+        log.info(
+            "brief_beneficiaries_no_leadership_to_top_up",
+            seed_count=len(seed),
+        )
+        return seed
+
+    remaining = max_n - len(seed)
     user_input = json.dumps(
         {
-            "org_name": getattr(org_research, "name", None)
-            if org_research is not None else None,
+            "org_name": getattr(org_research, "name", None),
             "leadership": leadership,
-            "initial_persons": initial_payload,
-            "attendees": _strip_internal_attendees(attendees),
-            "max_n": max(1, int(max_n)),
+            "already_included": [b.person_name for b in seed],
+            "max_n": remaining,
         },
         ensure_ascii=False,
         indent=2,
@@ -260,13 +330,11 @@ def extract_beneficiaries(
         raw = _call_llm_json(llm_backend, messages, model=model)
     except Exception as e:  # noqa: BLE001
         log.warning("brief_beneficiary_extract_failed", error=str(e))
-        return []
+        return seed
     if not isinstance(raw, dict):
-        return []
+        return seed
     rows = raw.get("beneficiaries") or []
-    out: list[BeneficiaryCandidate] = []
-    seen: set[str] = set()
-    for r in rows[: max(1, int(max_n))]:
+    for r in rows[:remaining]:
         if not isinstance(r, dict):
             continue
         name = (r.get("person_name") or "").strip()
@@ -276,12 +344,17 @@ def extract_beneficiaries(
         if key in seen:
             continue
         seen.add(key)
-        out.append(BeneficiaryCandidate(
+        seed.append(BeneficiaryCandidate(
             person_name=name,
             person_role=(r.get("person_role") or None) or None,
             evidence=(r.get("evidence") or "").strip(),
         ))
-    return out
+    log.info(
+        "brief_beneficiaries_picked",
+        total=len(seed), max_n=max_n,
+        names=[b.person_name for b in seed],
+    )
+    return seed[:max_n]
 
 
 __all__ = [

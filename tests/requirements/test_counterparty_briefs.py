@@ -339,8 +339,6 @@ def test_brief_beneficiary_extraction_picks_top_n():
     llm = MagicMock()
     llm.complete_json.return_value = {
         "beneficiaries": [
-            {"person_name": "Samer Nawaf Zawaideh", "person_role": "CIO",
-             "evidence": "attendee + listed leadership"},
             {"person_name": "Khaled Al Hashemi", "person_role": "CEO",
              "evidence": "listed leadership"},
         ]
@@ -354,8 +352,99 @@ def test_brief_beneficiary_extraction_picks_top_n():
         max_n=5,
         llm_backend=llm, model="gpt-test",
     )
+    # Samer comes in via the FR-CR-05-171 seed (no LLM whim needed);
+    # Khaled comes in as the leadership top-up.
     assert len(out) == 2
     assert out[0].person_name == "Samer Nawaf Zawaideh"
+    assert out[1].person_name == "Khaled Al Hashemi"
+
+
+def test_brief_beneficiary_always_includes_initial_persons():
+    """FR-CR-05-171 — operator-pinned 2026-05-20: «ты всегда
+    присылаешь только по одному человеку, а надо по тем кто
+    фигурирует во встрече». When the meeting title carries an
+    external name (Stage-0 extracts it into `initial_persons`) but
+    the org_research only has a generic leadership team, the
+    brief MUST include the actual attendee — not silently fall
+    back to picking only the company CEO from leadership.
+    """
+    from app.counterparty_briefs.extract import extract_beneficiaries
+    from app.counterparty_briefs.research import OrgResearch
+
+    # Simulates the operator's «Baris Yildiz (Apple) <> Artem Sokolov
+    # (Humanoid)» case. LLM was previously returning ONLY Tim Cook.
+    llm = MagicMock()
+    llm.complete_json.return_value = {
+        "beneficiaries": [
+            {"person_name": "Tim Cook", "person_role": "CEO",
+             "evidence": "Apple CEO from leadership"},
+        ]
+    }
+    out = extract_beneficiaries(
+        org_research=OrgResearch(
+            name="Apple",
+            leadership=[
+                {"name": "Tim Cook", "role": "CEO"},
+                {"name": "Luca Maestri", "role": "CFO"},
+            ],
+        ),
+        attendees=[],  # Calendar event without external invitee email
+        initial_persons=[{"person_name": "Baris Yildiz"}],
+        max_n=5,
+        llm_backend=llm, model="gpt-test",
+    )
+    names = [b.person_name for b in out]
+    assert "Baris Yildiz" in names, (
+        f"FR-CR-05-171: Baris (initial_person from title) MUST be "
+        f"in the beneficiaries; got {names}"
+    )
+    # Baris seeded first, Tim added as leadership top-up.
+    assert names[0] == "Baris Yildiz"
+    assert "Tim Cook" in names
+
+
+def test_brief_beneficiary_seed_skips_llm_when_quota_filled():
+    """FR-CR-05-171 — when the seed (initial_persons + named external
+    attendees) already fills `max_n`, don't burn an LLM call on the
+    leadership top-up."""
+    from app.counterparty_briefs.extract import extract_beneficiaries
+    from app.counterparty_briefs.research import OrgResearch
+
+    llm = MagicMock()
+    out = extract_beneficiaries(
+        org_research=OrgResearch(
+            name="X",
+            leadership=[{"name": "Generic CEO", "role": "CEO"}],
+        ),
+        attendees=[
+            {"email": "a@x.com", "displayName": "Alice External"},
+            {"email": "b@x.com", "displayName": "Bob External"},
+        ],
+        initial_persons=[{"person_name": "Carol Mentioned"}],
+        max_n=3,
+        llm_backend=llm, model="gpt-test",
+    )
+    names = [b.person_name for b in out]
+    assert names == ["Carol Mentioned", "Alice External", "Bob External"]
+    llm.complete_json.assert_not_called()
+
+
+def test_brief_beneficiary_external_attendee_with_email_only_skipped():
+    """FR-CR-05-171 — attendees with email but NO displayName get
+    dropped (we can't make a useful brief out of just an email)."""
+    from app.counterparty_briefs.extract import extract_beneficiaries
+    from app.counterparty_briefs.research import OrgResearch
+
+    llm = MagicMock()
+    llm.complete_json.return_value = {"beneficiaries": []}
+    out = extract_beneficiaries(
+        org_research=OrgResearch(name="X", leadership=[]),
+        attendees=[{"email": "anonymous@x.com"}],  # no displayName
+        initial_persons=[],
+        max_n=5,
+        llm_backend=llm, model="gpt-test",
+    )
+    assert out == []
 
 
 def test_brief_person_research_call():

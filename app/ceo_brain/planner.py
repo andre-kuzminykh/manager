@@ -29,7 +29,7 @@ def _tool_catalog_lines(
     tools_by_mcp: dict[str, list[dict]],
 ) -> str:
     """Render a compact catalog: for each MCP, list its tool names
-    + first line of description."""
+    + first line of description + REQUIRED args marked with `*`."""
     lines: list[str] = []
     for srv in mcp_servers:
         name = srv.get("name") or "?"
@@ -42,10 +42,24 @@ def _tool_catalog_lines(
             tname = t.get("name") or "?"
             desc = (t.get("description") or "").strip().split("\n")[0][:200]
             schema = t.get("inputSchema") or {}
-            props = (schema.get("properties") or {}) if isinstance(schema, dict) else {}
-            prop_names = ", ".join(props.keys())
+            if isinstance(schema, dict):
+                props = schema.get("properties") or {}
+                required = set(schema.get("required") or [])
+            else:
+                props, required = {}, set()
+            arg_parts = []
+            for pname in props.keys():
+                arg_parts.append(
+                    f"{pname}*" if pname in required else pname
+                )
+            arg_str = ", ".join(arg_parts)
+            req_note = ""
+            if required:
+                req_note = (
+                    f" [required: {', '.join(sorted(required))}]"
+                )
             lines.append(
-                f"  - {tname}({prop_names}) — {desc}"
+                f"  - {tname}({arg_str}){req_note} — {desc}"
             )
     return "\n".join(lines)
 
@@ -77,21 +91,23 @@ def plan_tool_calls(
         "    ...\n  ]\n}\n\n"
         "Правила:\n"
         "- Минимум tool-вызовов чтобы ответить. Обычно 2-5.\n"
-        "- Args должны быть валидными по схеме tool'а. Если не "
-        "уверен — оставь {} (пустые args).\n"
-        "- ВАЖНО для типов args: n8n-tools ОЖИДАЮТ STRINGS для всех "
-        "args (даже для числовых вроде `limit`, `count`). НЕ "
-        "пиши `limit: 5` — пиши `limit: \"5\"`. Иначе n8n "
-        "вернёт schema validation error.\n"
+        "- ВСЕ args ОБЯЗАТЕЛЬНО как STRINGS — даже числовые. "
+        "`limit: \"5\"` а НЕ `limit: 5`. Иначе schema error.\n"
+        "- ВСЕ required-args в каталоге помечены `*` или [required: ...]. "
+        "ВКЛЮЧАЙ их ВСЕГДА, даже если значение пустое: `chat_name: "
+        "\"\"`, `sender_name: \"\"` и т.п. Иначе n8n ругается «Required → "
+        "at <field>».\n"
+        "- QUERY для search-тулзов: используй ОБА языка когда уместно. "
+        "Если тема может звучать на русском и английском — пиши их "
+        "через пробел: `query: \"fundraising фандрайзинг\"`. Названия "
+        "встреч часто на английском («Fundraising daily», "
+        "«Strategic Investors»), а оператор спрашивает по-русски.\n"
         "- ОБЯЗАТЕЛЬНО двухступенчатый план для встреч/звонков: "
         "сначала `search_zoom_meetings` или `search_meetings` чтобы "
         "найти meeting_id/zoom_id → СРАЗУ ЖЕ добавляй "
-        "`get_zoom_transcript(zoom_id=<id>)` или "
-        "`get_meeting(meeting_id=<id>)` для top-1-3 кандидатов. "
-        "БЕЗ transcript-вызовов ответить НЕВОЗМОЖНО (search "
-        "возвращает только заголовки). Если id не известен заранее "
-        "— просто вторым шагом включи в план «get_zoom_transcript с "
-        "пустым args», и движок возьмёт первый результат search.\n"
+        "`get_zoom_transcript` или `get_meeting` БЕЗ id-args — наш "
+        "engine сам подставит zoom_id из результата search. Если id "
+        "известен из контекста — передай его явно.\n"
         "- Если вопрос про Telegram-сообщения / переписку (имена "
         "коллег вроде Алина, Ира, Артем, Дима, упоминания «вчера», "
         "«сегодня» в контексте сообщений) → ОБЯЗАТЕЛЬНО "

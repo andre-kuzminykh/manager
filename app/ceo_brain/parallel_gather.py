@@ -262,20 +262,36 @@ _ID_REGEXES = [
 ]
 
 
+_BAD_ID_TOKENS = {
+    "undefined", "null", "none", "n/a", "tbd", "<id>", "<null>", "",
+}
+
+
 def _extract_ids_from_responses(
     pass1_results: dict[str, str],
 ) -> dict[str, list[str]]:
     """Parse n8n search responses for IDs. Returns
     ``{kind: [id1, id2, ...]}`` where kind is `zoom_id` or
-    `meeting_id` — the arg key the dependent tool expects."""
+    `meeting_id` — the arg key the dependent tool expects.
+
+    Filters out placeholder tokens like `undefined` / `null` (n8n
+    sometimes returns these when the meeting record has no proper
+    id — calling get_zoom_transcript with `undefined` just returns
+    «не найден»).
+    """
     out: dict[str, list[str]] = {"zoom_id": [], "meeting_id": []}
     for body in pass1_results.values():
         if not body:
             continue
         for regex, kind in _ID_REGEXES:
             for m in regex.finditer(body):
-                val = m.group(1)
-                if val and val not in out[kind]:
+                val = (m.group(1) or "").strip()
+                if not val or val.lower() in _BAD_ID_TOKENS:
+                    continue
+                if len(val) < 6:
+                    # Too short to be a real Zoom/meeting id.
+                    continue
+                if val not in out[kind]:
                     out[kind].append(val)
     return out
 

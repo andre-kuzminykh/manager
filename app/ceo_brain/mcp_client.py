@@ -169,12 +169,18 @@ def _coerce_args_to_schema(
     JSON Schema `type:"string"`, but planner returns ints/bools.
     n8n then 400s with schema-validation error. Coerce types based
     on the declared schema; if schema is missing, default to string.
+
+    Also: fill any REQUIRED arg that the planner omitted with an
+    empty string (n8n typically treats `""` as "no filter"). Without
+    this, n8n returns «Required → at <field>» schema errors and
+    we lose data even though search criteria were sensible.
     """
     if not isinstance(arguments, dict):
-        return {}
+        arguments = {}
     if not isinstance(input_schema, dict):
         return {k: v for k, v in arguments.items()}
     props = input_schema.get("properties") or {}
+    required = input_schema.get("required") or []
     out: dict[str, Any] = {}
     for k, v in arguments.items():
         if v is None:
@@ -192,6 +198,20 @@ def _coerce_args_to_schema(
             out[k] = bool(v) if not isinstance(v, str) else v.lower() in {"true", "1", "yes"}
         else:
             out[k] = v
+    # Fill missing required args with empty defaults so n8n accepts.
+    for req_key in required:
+        if req_key in out:
+            continue
+        prop = props.get(req_key) or {}
+        expected = (prop.get("type") if isinstance(prop, dict) else None) or "string"
+        if expected == "string":
+            out[req_key] = ""
+        elif expected == "integer":
+            out[req_key] = 10  # generic limit default
+        elif expected == "boolean":
+            out[req_key] = False
+        else:
+            out[req_key] = ""
     return out
 
 

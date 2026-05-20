@@ -677,14 +677,24 @@ class ZoomPipeline:
                 t in p.lower() for t in op_tokens
             ):
                 return True
-        # 3. Transcript speaker tags. Whisper uses «<Name>: …» format.
-        head = (row.transcript_text or "")[:8000].lower()
-        if any(
-            (f"{t} sokolov" in head)
-            or (f"{t} соколов" in head)
-            or (f"\n{t}" in head and ":" in head)
-            for t in op_tokens
-        ):
+        # 3. Transcript speaker tags. Whisper writes them as
+        # «<Name>: …» at the start of a line. We MATCH ONLY at the
+        # line boundary so a passing mention of «Артем» elsewhere
+        # doesn't accidentally tick the gate. (Earlier looser check
+        # produced a false-positive on the 20/05 17:24 Fundraising
+        # daily — Алина mentioned Артем in passing, gate thought he
+        # was there, posted a summary about a meeting he missed.)
+        import re as _re
+
+        head = (row.transcript_text or "")[:8000]
+        # Lines that start with an operator-name speaker tag.
+        # Example matches: «Artem Sokolov: hey» / «Артем Соколов: что»
+        # / «Артём: давайте» (Russian short form, line start).
+        speaker_tag_re = _re.compile(
+            r"(?im)^\s*(?:artem|artyom|артем|артём)"
+            r"(?:\s+(?:sokolov|соколов))?\s*:",
+        )
+        if speaker_tag_re.search(head):
             return True
         # All available presence signals disagree with «operator
         # was here». The host_email gate above already confirmed

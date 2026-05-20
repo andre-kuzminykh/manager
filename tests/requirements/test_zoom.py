@@ -1997,6 +1997,31 @@ def test_operator_present_via_transcript_speaker_tag():
     assert pipe._operator_actually_present(row) is True
 
 
+def test_operator_absent_when_name_only_mentioned_in_transcript():
+    """FR-CR-05-173 regression — on the 20/05 17:24 Fundraising daily
+    Alina mentioned «Артем» / «Артур» in passing, but Артем was NOT on
+    the call. Earlier loose match (line contains operator's first name
+    + any colon anywhere in transcript) flipped the gate to True and
+    posted a wrong summary to operator's Slack DM. Strict speaker-tag
+    regex must NOT fire on a passing mention."""
+    from types import SimpleNamespace
+    pipe = _make_pipeline_stub()
+    row = SimpleNamespace(
+        calendar_attendees=[],
+        participants=["Alina Kolpakova", "Валентина"],
+        transcript_text=(
+            "Alina: Ну, я тут в другие сутки ходила...\n"
+            "Alina: Артем сказал что Артур ответит...\n"
+            "Jochen: Yes, makes sense.\n"
+        ),
+    )
+    assert pipe._operator_actually_present(row) is False, (
+        "passing mention of «Артем» inside Alina's speech must NOT "
+        "trip the gate — only an actual «Artem Sokolov:» speaker "
+        "line counts."
+    )
+
+
 def test_operator_absent_skips_short_summary_post():
     """The Baris-scenario, but for Zoom summary: meeting happened in
     the operator's room while teammates ran a sub-session WITHOUT

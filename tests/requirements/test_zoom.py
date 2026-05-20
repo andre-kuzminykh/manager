@@ -1484,11 +1484,10 @@ _PENDING_169 = _pytest_169.mark.xfail(
 )
 
 
-@_PENDING_169
 def test_calendar_attendees_resolved_via_zoom_url_match(session):
-    """A Calendar event whose `description` contains the Zoom join
-    URL of the recording wins as the match. Attendees from that
-    event are emailed-resolved through team_members + counterparties.
+    """A Calendar event whose `description` contains the Zoom
+    meeting id of the recording wins as the match. Attendees from
+    that event are email-resolved through team_members.
     """
     from app.services.calendar_attendees import (
         resolve_calendar_attendees_for_zoom,
@@ -1508,7 +1507,7 @@ def test_calendar_attendees_resolved_via_zoom_url_match(session):
     session.flush()
     row = ZoomRecording(
         zoom_id="ABC123==",
-        join_url="https://zoom.us/j/12345?pwd=x",
+        zoom_meeting_id="98765432101",
         title="Fundraising daily",
     )
     session.add(row)
@@ -1518,7 +1517,9 @@ def test_calendar_attendees_resolved_via_zoom_url_match(session):
         {
             "id": "evt1",
             "summary": "Fundraising daily",
-            "description": "Join Zoom: https://zoom.us/j/12345?pwd=x",
+            "description": (
+                "Join Zoom: https://zoom.us/j/98765432101?pwd=x"
+            ),
             "attendees": [
                 {"email": "artem@thehumanoid.ai",
                  "responseStatus": "accepted"},
@@ -1539,7 +1540,6 @@ def test_calendar_attendees_resolved_via_zoom_url_match(session):
     assert all(a["source"] == "team_member" for a in resolved["attendees"])
 
 
-@_PENDING_169
 def test_calendar_attendees_resolved_via_fuzzy_time_title_fallback(session):
     """When no Calendar event references the Zoom join URL, fall
     back to ±15 min start-time window + fuzzy title match."""
@@ -1560,7 +1560,7 @@ def test_calendar_attendees_resolved_via_fuzzy_time_title_fallback(session):
     row = ZoomRecording(
         zoom_id="XYZ==",
         title="Fundraising daily",
-        meeting_started_at=start,
+        meeting_date=start,
     )
     session.add(row)
     session.flush()
@@ -1589,7 +1589,6 @@ def test_calendar_attendees_resolved_via_fuzzy_time_title_fallback(session):
     ]
 
 
-@_PENDING_169
 def test_calendar_attendees_resolves_counterparty_email(session):
     """External attendees whose emails match a Counterparty row land
     with `source="counterparty"` and the canonical sheet name."""
@@ -1603,15 +1602,30 @@ def test_calendar_attendees_resolves_counterparty_email(session):
         email="artem@thehumanoid.ai",
         active=True,
     ))
-    session.add(Counterparty(
+    cp = Counterparty(
         name="Mohammed Al Fardan",
-        email="mohammed@externalvc.com",
+        name_normalised="mohammed al fardan",
+    )
+    session.add(cp)
+    session.flush()
+    # Counterparty emails live in CounterpartyAttribute JSON
+    # (personal_information.emails) — same shape the briefs
+    # pipeline writes.
+    from app.models import CounterpartyAttribute
+    session.add(CounterpartyAttribute(
+        counterparty_id=cp.id,
+        source="briefs",
+        attributes={
+            "personal_information": {
+                "emails": ["mohammed@externalvc.com"],
+            },
+        },
     ))
     session.flush()
     row = ZoomRecording(
         zoom_id="EXTERNAL==",
+        zoom_meeting_id="77777",
         title="Investor intro — Al Fardan",
-        join_url="https://zoom.us/j/77777",
     )
     session.add(row)
     session.flush()
@@ -1619,7 +1633,7 @@ def test_calendar_attendees_resolves_counterparty_email(session):
         {
             "id": "evt3",
             "summary": "Investor intro — Al Fardan",
-            "description": "https://zoom.us/j/77777",
+            "description": "https://zoom.us/j/77777?pwd=x",
             "attendees": [
                 {"email": "artem@thehumanoid.ai",
                  "responseStatus": "accepted"},
@@ -1639,7 +1653,6 @@ def test_calendar_attendees_resolves_counterparty_email(session):
     assert by_email["artem@thehumanoid.ai"]["source"] == "team_member"
 
 
-@_PENDING_169
 def test_calendar_attendees_includes_unknown_emails(session):
     """Emails that match neither team_members nor counterparties are
     NOT dropped — they're rendered with `source="unknown"` and the
@@ -1652,8 +1665,8 @@ def test_calendar_attendees_includes_unknown_emails(session):
 
     row = ZoomRecording(
         zoom_id="UNKNOWN==",
+        zoom_meeting_id="99999",
         title="Random sync",
-        join_url="https://zoom.us/j/99999",
     )
     session.add(row)
     session.flush()
@@ -1661,7 +1674,7 @@ def test_calendar_attendees_includes_unknown_emails(session):
         {
             "id": "evt4",
             "summary": "Random sync",
-            "description": "https://zoom.us/j/99999",
+            "description": "https://zoom.us/j/99999?pwd=x",
             "attendees": [
                 {"email": "sergei@newvc.com",
                  "displayName": "Sergei Newvc",
@@ -1683,7 +1696,6 @@ def test_calendar_attendees_includes_unknown_emails(session):
     ]
 
 
-@_PENDING_169
 def test_calendar_attendees_excludes_declined(session):
     """Attendees with `responseStatus="declined"` explicitly opted
     out — they're dropped from the rendered list (counted in trace
@@ -1706,7 +1718,7 @@ def test_calendar_attendees_excludes_declined(session):
     session.flush()
     row = ZoomRecording(
         zoom_id="DECLINED==",
-        join_url="https://zoom.us/j/55555",
+        zoom_meeting_id="55555",
     )
     session.add(row)
     session.flush()
@@ -1714,7 +1726,7 @@ def test_calendar_attendees_excludes_declined(session):
         {
             "id": "evt5",
             "summary": "Fundraising daily",
-            "description": "https://zoom.us/j/55555",
+            "description": "https://zoom.us/j/55555?pwd=x",
             "attendees": [
                 {"email": "artem@thehumanoid.ai",
                  "responseStatus": "accepted"},
@@ -1731,7 +1743,6 @@ def test_calendar_attendees_excludes_declined(session):
     assert resolved["dropped_declined"] == 1
 
 
-@_PENDING_169
 def test_calendar_attendees_falls_back_to_llm_when_event_missing(session):
     """When no Calendar event matches the recording, the resolver
     returns None so the pipeline falls back to the existing
@@ -1743,8 +1754,8 @@ def test_calendar_attendees_falls_back_to_llm_when_event_missing(session):
 
     row = ZoomRecording(
         zoom_id="NOEVENT==",
+        zoom_meeting_id="00000",
         title="Some recording",
-        join_url="https://zoom.us/j/00000",
     )
     session.add(row)
     session.flush()
@@ -1754,7 +1765,6 @@ def test_calendar_attendees_falls_back_to_llm_when_event_missing(session):
     assert resolved is None
 
 
-@_PENDING_169
 def test_summary_header_renders_calendar_attendees_when_present(session):
     """When `ZoomRecording.calendar_attendees` is populated and
     non-empty, the «Участники:» header line uses those resolved

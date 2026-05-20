@@ -68,6 +68,10 @@ class MeetingRecording(Base, TimestampMixin):
     )
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     participants: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    # FR-CR-05-169 — see same field on `ZoomRecording`.
+    calendar_attendees: Mapped[list[Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
     audio_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     fireflies_share_url: Mapped[str | None] = mapped_column(
         String(2048), nullable=True

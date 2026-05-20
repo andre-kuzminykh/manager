@@ -48,6 +48,48 @@ from app.zoom.client import ZoomClient, ZoomRecordingMeta
 log = get_logger(__name__)
 
 
+def build_meta_block_for_summary(row: ZoomRecording) -> str:
+    """FR-CR-05-169 — build the meta block (Заголовок / Дата /
+    Продолжительность / Участники) prepended to the transcript when
+    we call the detailed-summary LLM. Extracted from
+    `_step_detailed_summary` so the calendar-attendees integration
+    can be unit-tested in isolation.
+
+    Participant-line precedence:
+      1. `row.calendar_attendees` (non-empty) — rendered in event
+         order using each attendee's `resolved_name`.
+      2. else `row.participants` (LLM-from-transcript fallback).
+      3. else line omitted.
+    """
+    meta_lines = [
+        f"Заголовок: {row.title or '(без названия)'}",
+        (
+            f"Дата: {row.meeting_date.isoformat()}"
+            if row.meeting_date
+            else "Дата: —"
+        ),
+        (
+            f"Продолжительность: {row.duration_seconds // 60} мин"
+            if row.duration_seconds
+            else "Продолжительность: —"
+        ),
+    ]
+    cal = row.calendar_attendees or []
+    if cal:
+        names = [
+            (a.get("resolved_name") or a.get("display_name")
+             or a.get("email") or "").strip()
+            for a in cal
+            if isinstance(a, dict)
+        ]
+        names = [n for n in names if n]
+        if names:
+            meta_lines.append("Участники: " + ", ".join(names))
+    elif row.participants:
+        meta_lines.append("Участники: " + ", ".join(row.participants))
+    return "\n".join(meta_lines)
+
+
 @dataclass
 class ZoomPipelineReport:
     recording_id: int | None
@@ -79,12 +121,18 @@ class ZoomPipeline:
         llm_backend: Any,
         docs_factory=None,
         sender=None,
+        calendar_factory: Any | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._llm = llm_backend
         self._docs_factory = docs_factory
         self._sender = sender
+        # FR-CR-05-169 — optional callable returning a refreshed
+        # Google Calendar credentials object. When None, the calendar
+        # attendees enrichment step is skipped silently (pipeline
+        # falls back to existing LLM-from-transcript participants).
+        self._calendar_factory = calendar_factory
 
     # --- step 0: upsert the row -------------------------------
 
@@ -399,19 +447,22 @@ class ZoomPipeline:
         # the post-filter.
         if session is not None:
             self._kickoff_team_participants_async(row, session)
-        meta_lines = [
-            f"Заголовок: {row.title or '(без названия)'}",
-            f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}",
-            (
-                f"Продолжительность: {row.duration_seconds // 60} мин"
-                if row.duration_seconds
-                else "Продолжительность: —"
-            ),
-        ]
-        if row.participants:
-            meta_lines.append("Участники: " + ", ".join(row.participants))
+            # FR-CR-05-169 — resolve real attendees from the matching
+            # Google Calendar event. When successful the summary
+            # builder uses them in place of LLM-from-transcript
+            # `participants`. Best-effort: any failure logs + falls
+            # back to the existing LLM path.
+            try:
+                self._populate_calendar_attendees(row, session)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_calendar_attendees_step_failed",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
         user_prompt = (
-            "\n".join(meta_lines) + "\n\nТранскрипт:\n" + row.transcript_text
+            build_meta_block_for_summary(row)
+            + "\n\nТранскрипт:\n"
+            + row.transcript_text
         )
         try:
             text = self._llm.complete_text(  # type: ignore[attr-defined]
@@ -1165,6 +1216,55 @@ class ZoomPipeline:
             "zoom_participants_kickoff_async",
             zoom_id=row.zoom_id, team_members_count=len(tm_rows),
         )
+
+    def _populate_calendar_attendees(
+        self, row: ZoomRecording, session: Session,
+    ) -> None:
+        """FR-CR-05-169 — fetch matching Calendar event + resolve
+        attendees, persist on `row.calendar_attendees`. No-op when:
+
+          * the recording already has resolved attendees (idempotent);
+          * Calendar credentials aren't configured;
+          * no event matches the Zoom meeting id / time + title.
+
+        Never raises — caller wraps in try/except as a second line of
+        defence."""
+        if row.calendar_attendees:
+            return
+        if self._calendar_factory is None:
+            log.info(
+                "zoom_calendar_attendees_skipped_no_factory",
+                zoom_id=row.zoom_id,
+            )
+            return
+        if row.meeting_date is None:
+            return
+        from app.services.calendar_attendees import (
+            resolve_calendar_attendees_for_zoom,
+        )
+        from app.services.calendar_match import (
+            fetch_calendar_events_via_api,
+        )
+
+        try:
+            events = fetch_calendar_events_via_api(
+                meeting_dt=row.meeting_date,
+                window_minutes=120,
+                credentials_factory=self._calendar_factory,
+                calendar_id=self._settings.google_calendar_id,
+            ) or []
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_calendar_events_fetch_failed",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            return
+        resolved = resolve_calendar_attendees_for_zoom(
+            row, session, calendar_events=events,
+        )
+        if not resolved:
+            return
+        row.calendar_attendees = resolved["attendees"]
 
     def _ensure_team_participants(
         self,

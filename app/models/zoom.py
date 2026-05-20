@@ -73,6 +73,14 @@ class ZoomRecording(Base, TimestampMixin):
     )
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
     participants: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    # FR-CR-05-169 — attendees resolved from the matching Google
+    # Calendar event (when found). Authoritative when non-empty;
+    # falls back to `participants` (LLM-from-transcript) otherwise.
+    # See `app.services.calendar_attendees.resolve_calendar_attendees_for_zoom`
+    # for the shape.
+    calendar_attendees: Mapped[list[Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
     audio_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     zoom_share_url: Mapped[str | None] = mapped_column(
         String(2048), nullable=True

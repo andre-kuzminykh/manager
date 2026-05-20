@@ -153,12 +153,27 @@ def main() -> int:
                 api_base=settings.zoom_api_base,
                 oauth_url=settings.zoom_oauth_url,
             )
+            # FR-CR-05-169 — give the Zoom pipeline a Calendar
+            # credentials factory so it can resolve attendees from
+            # the matching event for each new recording. Best-effort
+            # — when SA or OAuth aren't configured the pipeline
+            # silently falls back to LLM-extracted participants.
+            try:
+                from app.sync.factories import (
+                    build_calendar_credentials_factory_with_sa_fallback,
+                )
+                _cal_factory = (
+                    build_calendar_credentials_factory_with_sa_fallback(settings)
+                )
+            except Exception:  # noqa: BLE001
+                _cal_factory = None
             zm_pipeline = ZoomPipeline(
                 settings=settings,
                 client=zm_client,
                 llm_backend=backend,
                 docs_factory=build_docs_factory(settings),
                 sender=listener._sender,  # noqa: SLF001 — same process
+                calendar_factory=_cal_factory,
             )
             listener.wire_zoom(
                 pipeline=zm_pipeline,

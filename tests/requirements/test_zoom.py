@@ -1765,6 +1765,178 @@ def test_calendar_attendees_falls_back_to_llm_when_event_missing(session):
     assert resolved is None
 
 
+# ---------------------------------------------------------------------------
+# FR-CR-05-172 — cross-reference Calendar invitees with actual Zoom
+# participants. Operator-pinned 2026-05-20: «оставить только их + к
+# зуму ещё может кто-то подключиться кого нет в встрече приглашенных».
+# ---------------------------------------------------------------------------
+
+
+def test_reconcile_zoom_matches_calendar_invitees_by_email():
+    """Direct email match keeps Calendar invitees who joined Zoom
+    and drops invitees who didn't show up — no LLM needed."""
+    from app.services.calendar_attendees import (
+        reconcile_with_zoom_participants,
+    )
+
+    cal = [
+        {"email": "a@x.com", "resolved_name": "Alice",
+         "source": "team_member", "response_status": "accepted"},
+        {"email": "b@x.com", "resolved_name": "Bob",
+         "source": "team_member", "response_status": "needsAction"},
+        {"email": "c@x.com", "resolved_name": "Carol (no-show)",
+         "source": "team_member", "response_status": "accepted"},
+    ]
+    zoom = [
+        {"user_name": "Alice", "user_email": "a@x.com"},
+        {"user_name": "Bob",   "user_email": "b@x.com"},
+    ]
+    res = reconcile_with_zoom_participants(
+        calendar_attendees=cal, zoom_participants=zoom,
+    )
+    names = [a["resolved_name"] for a in res["attendees"]]
+    assert names == ["Alice", "Bob"]
+    assert all(a["zoom_join_method"] == "email" for a in res["attendees"])
+    assert [a["resolved_name"] for a in res["unmatched_calendar"]] == [
+        "Carol (no-show)",
+    ]
+    assert res["llm_used"] is False
+
+
+def test_reconcile_zoom_matches_via_fuzzy_name_without_llm():
+    """Zoom shows up with a different email but same name → fuzzy
+    token match resolves it without burning an LLM call."""
+    from app.services.calendar_attendees import (
+        reconcile_with_zoom_participants,
+    )
+
+    cal = [
+        {"email": "irina.shipilova@skl.vc",
+         "resolved_name": "Ирина Шипилова",
+         "source": "team_member",
+         "response_status": "accepted"},
+    ]
+    zoom = [
+        {"user_name": "Ирина Шипилова",
+         "user_email": "irina@gmail.com"},
+    ]
+    res = reconcile_with_zoom_participants(
+        calendar_attendees=cal, zoom_participants=zoom,
+    )
+    assert len(res["attendees"]) == 1
+    assert res["attendees"][0]["zoom_join_method"] == "fuzzy"
+    assert res["llm_used"] is False
+
+
+def test_reconcile_zoom_calls_llm_only_for_leftover_pairs():
+    """When email + fuzzy both leave something unmatched on BOTH
+    sides AND an OpenAI client is provided, the LLM gets called
+    once and its match is honoured."""
+    from unittest.mock import MagicMock
+    from app.services.calendar_attendees import (
+        reconcile_with_zoom_participants,
+    )
+
+    cal = [
+        {"email": "secret@x.com",
+         "resolved_name": "Baris Yildiz",
+         "source": "team_member",
+         "response_status": "needsAction"},
+    ]
+    zoom = [
+        {"user_name": "B. Yildirim",
+         "user_email": "byildirim@apple.com"},
+    ]
+
+    client = MagicMock()
+    client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content=(
+            '{"matches": [{"cal_idx": 0, "zoom_idx": 0}]}'
+        )))],
+    )
+
+    res = reconcile_with_zoom_participants(
+        calendar_attendees=cal, zoom_participants=zoom,
+        openai_client=client,
+    )
+    assert client.chat.completions.create.call_count == 1
+    assert len(res["attendees"]) == 1
+    assert res["attendees"][0]["zoom_join_method"] == "llm"
+    assert res["llm_used"] is True
+
+
+def test_reconcile_zoom_includes_zoom_only_uninvited_attendees():
+    """Operator-pinned 2026-05-20: «к зуму может кто-то подключиться
+    кого нет в встрече приглашенных». The reconciler must add those
+    to the final list with `zoom_join_method="zoom_only"`."""
+    from app.services.calendar_attendees import (
+        reconcile_with_zoom_participants,
+    )
+
+    cal = [
+        {"email": "a@x.com", "resolved_name": "Alice",
+         "source": "team_member", "response_status": "accepted"},
+    ]
+    zoom = [
+        {"user_name": "Alice", "user_email": "a@x.com"},
+        {"user_name": "Surprise Guest",
+         "user_email": "surprise@gmail.com"},
+    ]
+    res = reconcile_with_zoom_participants(
+        calendar_attendees=cal, zoom_participants=zoom,
+    )
+    names = [a["resolved_name"] for a in res["attendees"]]
+    assert names == ["Alice", "Surprise Guest"]
+    methods = [a["zoom_join_method"] for a in res["attendees"]]
+    assert methods == ["email", "zoom_only"]
+    assert res["method_breakdown"]["zoom_only"] == 1
+
+
+def test_reconcile_zoom_only_uses_email_resolver_when_available():
+    """When the Zoom-only joiner's email matches a team_member /
+    counterparty in our DB, the resolver fills `resolved_name` and
+    `source` instead of falling back to raw Zoom user_name +
+    `source="unknown"`."""
+    from app.services.calendar_attendees import (
+        reconcile_with_zoom_participants,
+    )
+
+    def _resolver(email: str):
+        if email == "boss@vc.com":
+            return {"resolved_name": "Big Boss VC", "source": "counterparty"}
+        return None
+
+    res = reconcile_with_zoom_participants(
+        calendar_attendees=[],
+        zoom_participants=[
+            {"user_name": "boss_via_zoom", "user_email": "boss@vc.com"},
+        ],
+        email_resolver=_resolver,
+    )
+    assert len(res["attendees"]) == 1
+    a = res["attendees"][0]
+    assert a["resolved_name"] == "Big Boss VC"
+    assert a["source"] == "counterparty"
+    assert a["zoom_join_method"] == "zoom_only"
+
+
+def test_reconcile_zoom_empty_zoom_keeps_calendar_list():
+    """When Zoom returns no participants the reconciler returns the
+    Calendar list verbatim so the rendering surface doesn't suddenly
+    empty out."""
+    from app.services.calendar_attendees import (
+        reconcile_with_zoom_participants,
+    )
+
+    cal = [{"email": "a@x.com", "resolved_name": "Alice",
+            "source": "team_member", "response_status": "accepted"}]
+    res = reconcile_with_zoom_participants(
+        calendar_attendees=cal, zoom_participants=[],
+    )
+    assert res["attendees"] == cal
+    assert res["llm_used"] is False
+
+
 def test_summary_header_renders_calendar_attendees_when_present(session):
     """When `ZoomRecording.calendar_attendees` is populated and
     non-empty, the «Участники:» header line uses those resolved

@@ -369,6 +369,56 @@ class ZoomClient:
                 emails.add(e)
         return emails
 
+    def fetch_meeting_participants(
+        self, uuid: str, *, token: str | None = None,
+    ) -> list[dict[str, str]]:
+        """FR-CR-05-172 — return the FULL list of Zoom participants
+        for a recording (not just emails) so the summary pipeline
+        can cross-reference Calendar invitees against who ACTUALLY
+        joined the meeting.
+
+        Returns `[{user_name, user_email}, ...]`. Empty list on any
+        failure — never raises.
+        """
+        if not uuid:
+            return []
+        token = token or self._ensure_access_token()
+        if not token:
+            return []
+        encoded = urllib.parse.quote(uuid, safe="")
+        if uuid.startswith("/") or "//" in uuid:
+            encoded = urllib.parse.quote(encoded, safe="")
+        url = (
+            f"{self._api_base}/past_meetings/{encoded}/participants"
+            "?page_size=300"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            payload = self._request_func(url, headers, None, "GET")
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_fetch_participants_failed",
+                uuid=uuid, error=str(e),
+            )
+            return []
+        rows = (payload or {}).get("participants") or []
+        out: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            name = (r.get("user_name") or r.get("name") or "").strip()
+            email = (r.get("user_email") or r.get("email") or "").strip().lower()
+            key = (name.lower(), email)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"user_name": name, "user_email": email})
+        return out
+
     # --- audio download ---------------------------------------
 
     def download_audio(

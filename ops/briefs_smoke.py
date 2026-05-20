@@ -27,6 +27,8 @@ from app.counterparty_briefs.extract import (
     extract_event_counterparties,
 )
 from app.counterparty_briefs.research import OrgResearch, research_org
+from openai import OpenAI
+
 from app.intent.llm_backends import OpenAIBackend
 
 
@@ -48,7 +50,10 @@ def main() -> int:
     if not s.openai_api_key:
         print("ERROR: OPENAI_API_KEY not set.", file=sys.stderr)
         return 2
-    llm = OpenAIBackend(api_key=s.openai_api_key)
+    llm = OpenAIBackend(
+        client=OpenAI(api_key=s.openai_api_key),
+        model=s.counterparty_briefs_extract_model,
+    )
 
     print("=" * 70)
     print(f"Person: {args.person}")

@@ -35,6 +35,7 @@ existing LLM extraction.
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -305,6 +306,314 @@ def resolve_calendar_attendees_for_zoom(
     return result
 
 
+def _normalise_name_for_match(name: str) -> set[str]:
+    """Return a set of lowercased word-tokens for fuzzy matching.
+    «Артем Соколов» → {"артем", "соколов"}; «Sokolov, Artem» →
+    {"sokolov", "artem"}. Single-char tokens dropped (initials)."""
+    import re as _re
+
+    toks = _re.findall(r"\w+", (name or "").lower(), flags=_re.UNICODE)
+    return {t for t in toks if len(t) > 1}
+
+
+def _llm_reconcile_unmatched(
+    *,
+    unmatched_calendar: list[dict[str, Any]],
+    unmatched_zoom: list[dict[str, str]],
+    openai_client: Any,
+    model: str,
+) -> dict[int, int]:
+    """Ask a small OpenAI model to match unmatched Calendar invitees
+    with unmatched Zoom participants. Returns ``{calendar_idx:
+    zoom_idx}`` for each match the model is confident in.
+
+    Cheap single call — capped at ~20 candidates per side; beyond
+    that we'd want a real entity-resolution pipeline.
+    """
+    if not unmatched_calendar or not unmatched_zoom:
+        return {}
+    if not openai_client:
+        return {}
+    cal_payload = [
+        {
+            "idx": i,
+            "resolved_name": (a.get("resolved_name") or "").strip(),
+            "display_name": (a.get("display_name") or "").strip(),
+            "email": (a.get("email") or "").strip(),
+        }
+        for i, a in enumerate(unmatched_calendar[:20])
+    ]
+    zoom_payload = [
+        {
+            "idx": i,
+            "user_name": (p.get("user_name") or "").strip(),
+            "user_email": (p.get("user_email") or "").strip(),
+        }
+        for i, p in enumerate(unmatched_zoom[:20])
+    ]
+    system = (
+        "You are an entity-matcher. The user gives you two lists: "
+        "CALENDAR invitees and ZOOM participants for the SAME "
+        "meeting. Some Calendar invitees joined under a different "
+        "name / personal email in Zoom. Your job is to pair them "
+        "up. Only pair a Calendar invitee with a Zoom participant "
+        "when you are CONFIDENT they are the same person — partial "
+        "name match (same first OR last name), or strongly similar "
+        "transliterations (Ирина / Irina, Артем / Artem). Reply "
+        "with ONE valid JSON object: {\"matches\": [{\"cal_idx\": "
+        "<int>, \"zoom_idx\": <int>}, ...]}. Do NOT match by guess; "
+        "leave unmatched pairs out."
+    )
+    user_text = json.dumps(
+        {"calendar": cal_payload, "zoom": zoom_payload},
+        ensure_ascii=False, indent=2,
+    )
+    try:
+        resp = openai_client.chat.completions.create(
+            model=model,
+            max_tokens=512,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_text},
+            ],
+        )
+        content = (resp.choices[0].message.content or "").strip()
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "zoom_attendee_reconcile_llm_failed",
+            error=str(e), error_type=type(e).__name__,
+        )
+        return {}
+    try:
+        parsed = json.loads(content)
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "zoom_attendee_reconcile_llm_parse_failed", content=content[:200],
+        )
+        return {}
+    out: dict[int, int] = {}
+    for m in (parsed.get("matches") or []):
+        try:
+            ci = int(m.get("cal_idx"))
+            zi = int(m.get("zoom_idx"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= ci < len(unmatched_calendar) and 0 <= zi < len(unmatched_zoom):
+            # First match wins — don't let the LLM double-assign.
+            if ci not in out and zi not in out.values():
+                out[ci] = zi
+    return out
+
+
+def reconcile_with_zoom_participants(
+    *,
+    calendar_attendees: list[dict[str, Any]],
+    zoom_participants: list[dict[str, str]],
+    openai_client: Any | None = None,
+    llm_model: str = "gpt-4o-mini",
+    email_resolver: Any | None = None,
+) -> dict[str, Any]:
+    """FR-CR-05-172 — cross-reference Calendar invitees against who
+    actually joined Zoom. Returns
+
+        {
+          "attendees": [...everybody who actually was on the call...],
+          "unmatched_calendar": [...invited but didn't join...],
+          "method_breakdown": {"email":N, "fuzzy":N, "llm":N, "zoom_only":N},
+          "llm_used": bool,
+        }
+
+    Final ``attendees`` list contains:
+      * every Calendar invitee whose presence in Zoom we could
+        prove (email / fuzzy name / LLM match), AND
+      * every Zoom participant who joined the call BUT was NOT on
+        the Calendar invite (operator-pinned 2026-05-20: «к зуму
+        может кто-то подключиться кого нет в встрече приглашенных
+        тоже такой вариант»). These carry
+        ``zoom_join_method="zoom_only"``.
+
+    Calendar invitees who didn't join Zoom are dropped from
+    ``attendees`` and surfaced under ``unmatched_calendar`` for
+    diagnostics.
+
+    ``email_resolver`` (optional callable) maps a lowercase email
+    to ``{resolved_name, source}`` — used to resolve Zoom-only
+    participants against `team_members` / `counterparties` even
+    when they weren't on the Calendar invite. When not provided,
+    Zoom-only attendees keep their raw Zoom user_name and
+    ``source="unknown"``.
+    """
+    if not calendar_attendees and not zoom_participants:
+        return {
+            "attendees": [],
+            "unmatched_calendar": [],
+            "method_breakdown": {"email": 0, "fuzzy": 0, "llm": 0, "zoom_only": 0},
+            "llm_used": False,
+        }
+    if calendar_attendees and not zoom_participants:
+        # No Zoom data — can't filter. Return calendar list as-is
+        # so the caller's downstream rendering is unaffected.
+        return {
+            "attendees": list(calendar_attendees),
+            "unmatched_calendar": [],
+            "method_breakdown": {"email": 0, "fuzzy": 0, "llm": 0, "zoom_only": 0},
+            "llm_used": False,
+        }
+
+    # 1. Direct email match (cheapest).
+    cal_used: set[int] = set()
+    zoom_used: set[int] = set()
+    matches: list[tuple[int, int, str]] = []  # (cal_idx, zoom_idx, method)
+    zoom_by_email: dict[str, int] = {}
+    for zi, p in enumerate(zoom_participants):
+        e = (p.get("user_email") or "").strip().lower()
+        if e and e not in zoom_by_email:
+            zoom_by_email[e] = zi
+    for ci, a in enumerate(calendar_attendees):
+        e = (a.get("email") or "").strip().lower()
+        if e and e in zoom_by_email:
+            zi = zoom_by_email[e]
+            if zi not in zoom_used:
+                matches.append((ci, zi, "email"))
+                cal_used.add(ci)
+                zoom_used.add(zi)
+
+    # 2. Fuzzy name match on what's left (no LLM).
+    cal_tokens: dict[int, set[str]] = {}
+    for ci, a in enumerate(calendar_attendees):
+        if ci in cal_used:
+            continue
+        toks = (
+            _normalise_name_for_match(a.get("resolved_name") or "")
+            | _normalise_name_for_match(a.get("display_name") or "")
+        )
+        if toks:
+            cal_tokens[ci] = toks
+    for zi, p in enumerate(zoom_participants):
+        if zi in zoom_used:
+            continue
+        z_toks = _normalise_name_for_match(p.get("user_name") or "")
+        if not z_toks:
+            continue
+        for ci, c_toks in cal_tokens.items():
+            if ci in cal_used:
+                continue
+            if c_toks & z_toks:  # any shared word-token wins
+                matches.append((ci, zi, "fuzzy"))
+                cal_used.add(ci)
+                zoom_used.add(zi)
+                break
+
+    # 3. LLM reconcile for stubborn unmatched pairs (only when both
+    # sides have leftovers — no point calling the LLM otherwise).
+    unmatched_cal = [
+        calendar_attendees[i] for i in range(len(calendar_attendees))
+        if i not in cal_used
+    ]
+    unmatched_zoom = [
+        zoom_participants[i] for i in range(len(zoom_participants))
+        if i not in zoom_used
+    ]
+    llm_used = False
+    llm_matches: dict[int, int] = {}
+    if unmatched_cal and unmatched_zoom and openai_client is not None:
+        # Rebuild the unmatched lists with the SAME ordering as the
+        # caller's; need to track original indexes.
+        cal_orig_idx = [
+            i for i in range(len(calendar_attendees)) if i not in cal_used
+        ]
+        zoom_orig_idx = [
+            i for i in range(len(zoom_participants)) if i not in zoom_used
+        ]
+        llm_matches = _llm_reconcile_unmatched(
+            unmatched_calendar=unmatched_cal,
+            unmatched_zoom=unmatched_zoom,
+            openai_client=openai_client,
+            model=llm_model,
+        )
+        if llm_matches:
+            llm_used = True
+            for sub_ci, sub_zi in llm_matches.items():
+                ci = cal_orig_idx[sub_ci]
+                zi = zoom_orig_idx[sub_zi]
+                if ci in cal_used or zi in zoom_used:
+                    continue
+                matches.append((ci, zi, "llm"))
+                cal_used.add(ci)
+                zoom_used.add(zi)
+
+    # Assemble final attendees list — everybody who was actually
+    # on the call (matched Calendar invitees + Zoom-only joiners).
+    joined: list[dict[str, Any]] = []
+    method_count = {"email": 0, "fuzzy": 0, "llm": 0, "zoom_only": 0}
+    # 1) Calendar invitees who joined, in Calendar order for stability.
+    for ci, zi, method in sorted(matches, key=lambda x: x[0]):
+        method_count[method] = method_count.get(method, 0) + 1
+        rec = dict(calendar_attendees[ci])
+        rec["zoom_join_method"] = method
+        zp = zoom_participants[zi]
+        rec.setdefault("zoom_user_name", zp.get("user_name"))
+        rec.setdefault("zoom_user_email", zp.get("user_email"))
+        joined.append(rec)
+    # 2) Zoom-only participants — joined but not on the Calendar
+    # invite. Try to resolve their Zoom email against the operator's
+    # people tables; otherwise surface the raw Zoom user_name with
+    # source="unknown" so the operator sees who it was.
+    for zi in range(len(zoom_participants)):
+        if zi in zoom_used:
+            continue
+        zp = zoom_participants[zi]
+        email = (zp.get("user_email") or "").strip().lower()
+        user_name = (zp.get("user_name") or "").strip()
+        resolved_name = ""
+        source = "unknown"
+        if email_resolver is not None and email:
+            try:
+                resolved = email_resolver(email) or None
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_attendee_zoom_only_resolver_failed",
+                    email=email, error=str(e),
+                )
+                resolved = None
+            if resolved:
+                resolved_name = (resolved.get("resolved_name") or "").strip()
+                source = (resolved.get("source") or "unknown").strip()
+        if not resolved_name:
+            resolved_name = user_name or email
+        method_count["zoom_only"] += 1
+        joined.append({
+            "email": email,
+            "display_name": user_name,
+            "resolved_name": resolved_name,
+            "source": source,
+            "response_status": "joined_zoom_only",
+            "zoom_join_method": "zoom_only",
+            "zoom_user_name": user_name,
+            "zoom_user_email": email,
+        })
+    final_unmatched_cal = [
+        calendar_attendees[i] for i in range(len(calendar_attendees))
+        if i not in cal_used
+    ]
+    log.info(
+        "zoom_attendee_reconcile_done",
+        joined_count=len(joined),
+        unmatched_calendar=len(final_unmatched_cal),
+        method_breakdown=method_count,
+        llm_used=llm_used,
+    )
+    return {
+        "attendees": joined,
+        "unmatched_calendar": final_unmatched_cal,
+        "method_breakdown": method_count,
+        "llm_used": llm_used,
+    }
+
+
 __all__ = [
     "resolve_calendar_attendees_for_zoom",
+    "reconcile_with_zoom_participants",
 ]

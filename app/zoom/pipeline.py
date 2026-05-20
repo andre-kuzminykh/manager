@@ -1351,9 +1351,109 @@ class ZoomPipeline:
         resolved = resolve_calendar_attendees_for_zoom(
             row, session, calendar_events=events,
         )
-        if not resolved:
+        cal_attendees = (resolved or {}).get("attendees") or []
+        # FR-CR-05-172 — cross-reference Calendar invitees with the
+        # ACTUAL Zoom participants and (a) drop calendar invitees who
+        # didn't join, (b) add Zoom participants who joined but were
+        # NOT on the Calendar invite (operator-pinned: «к зуму может
+        # кто-то подключиться кого нет в встрече приглашенных»).
+        # Best-effort: any Zoom API failure leaves the Calendar-only
+        # list as the source of truth.
+        zoom_attendees = self._reconcile_with_zoom_participants(
+            row, session, cal_attendees,
+        )
+        final = zoom_attendees or cal_attendees
+        if not final:
             return
-        row.calendar_attendees = resolved["attendees"]
+        row.calendar_attendees = final
+
+    def _reconcile_with_zoom_participants(
+        self,
+        row: ZoomRecording,
+        session: Session,
+        calendar_attendees: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
+        """FR-CR-05-172 — pull `/past_meetings/{uuid}/participants`
+        and reconcile against `calendar_attendees`. Returns the
+        merged final list (matched Calendar invitees + Zoom-only
+        joiners) or ``None`` when Zoom returned no participants /
+        the API call failed.
+        """
+        try:
+            zoom_participants = self._client.fetch_meeting_participants(
+                row.zoom_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "zoom_participants_fetch_failed",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            return None
+        if not zoom_participants:
+            log.info(
+                "zoom_participants_empty",
+                zoom_id=row.zoom_id,
+                calendar_count=len(calendar_attendees),
+            )
+            return None
+        from app.services.calendar_attendees import (
+            _build_counterparty_email_map,
+            reconcile_with_zoom_participants,
+        )
+        from app.agenda.service import _build_email_to_name_map
+
+        email_to_team = _build_email_to_name_map(session)
+        email_to_cp = _build_counterparty_email_map(session)
+
+        def _resolver(email: str) -> dict | None:
+            e = (email or "").strip().lower()
+            if not e:
+                return None
+            if e in email_to_team:
+                return {
+                    "resolved_name": email_to_team[e],
+                    "source": "team_member",
+                }
+            if e in email_to_cp:
+                return {
+                    "resolved_name": email_to_cp[e],
+                    "source": "counterparty",
+                }
+            return None
+
+        openai_client = None
+        api_key = (self._settings.openai_api_key or "").strip()
+        if api_key:
+            try:
+                from openai import OpenAI
+                openai_client = OpenAI(api_key=api_key)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_participants_reconcile_openai_init_failed",
+                    error=str(e),
+                )
+        result = reconcile_with_zoom_participants(
+            calendar_attendees=calendar_attendees,
+            zoom_participants=zoom_participants,
+            openai_client=openai_client,
+            llm_model=(
+                getattr(
+                    self._settings,
+                    "zoom_bilingual_detector_model",
+                    "gpt-4o-mini",
+                )
+            ),
+            email_resolver=_resolver,
+        )
+        log.info(
+            "zoom_attendees_after_zoom_reconcile",
+            zoom_id=row.zoom_id,
+            joined_count=len(result.get("attendees") or []),
+            unmatched_calendar=len(result.get("unmatched_calendar") or []),
+            method_breakdown=result.get("method_breakdown"),
+            llm_used=result.get("llm_used"),
+        )
+        return result.get("attendees") or []
 
     def _ensure_team_participants(
         self,

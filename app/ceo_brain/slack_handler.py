@@ -210,14 +210,36 @@ def _build_responder_callback(
         if not channel:
             return
 
+        # FR-CB2-3.35 — instant aliveness signal. Operator-pinned
+        # 2026-05-20 («он не сразу шлёт думаю, как будто думаешь не
+        # ответит — реакция сразу что живой»). Two-step:
+        #   1. React with 👀 on the operator's message (~100ms).
+        #   2. Post the «🤔 думаю...» placeholder SYNCHRONOUSLY
+        #      before launching the heavy daemon — guarantees the
+        #      operator sees it within ~300ms regardless of
+        #      thread-pool scheduling.
+        # Both steps fail gracefully if scopes missing (reactions
+        # needs `reactions:write` — optional).
+        if ts:
+            try:
+                slack_client.reactions_add(
+                    channel=channel, timestamp=ts, name="eyes",
+                )
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "ceo_brain_reaction_add_failed",
+                    error=str(e),
+                )
+
+        placeholder_ts = post_placeholder(
+            slack=slack_client,
+            channel=channel,
+            thread_ts=thread_ts,
+        )
+        if not placeholder_ts:
+            return
+
         def _run() -> None:
-            placeholder_ts = post_placeholder(
-                slack=slack_client,
-                channel=channel,
-                thread_ts=thread_ts,
-            )
-            if not placeholder_ts:
-                return
             history: list[dict[str, Any]] = []
             # Only pull thread context when this message lives in
             # an actual thread; for a top-level DM message there's

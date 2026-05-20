@@ -80,35 +80,62 @@ def _call_single_mcp(
     model: str,
     max_tokens: int,
     extra_system: str | None = None,
+    max_attempts: int = 2,
 ) -> str:
     """One `beta.messages.create` with a SINGLE MCP server in
-    `mcp_servers`. Returns harvested text (empty string on error)."""
+    `mcp_servers`. Returns harvested text (empty string on error
+    after retries).
+
+    Retries once on transient errors (APITimeoutError, MCP
+    handshake glitch) — single-MCP calls can occasionally hit
+    cold-start latency or transient timeouts on the n8n side.
+    """
     name = server.get("name") or "?"
-    try:
-        kwargs: dict[str, Any] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "betas": ["mcp-client-2025-04-04"],
-            "mcp_servers": [server],
-            "messages": [{"role": "user", "content": sub_question}],
-        }
-        if extra_system:
-            kwargs["system"] = [
-                {"type": "text", "text": extra_system}
-            ]
-        resp = anthropic_client.beta.messages.create(**kwargs)
-        text = _harvest_response_text(resp)
-        log.info(
-            "ceo_brain_parallel_gather_ok",
-            mcp=name, chars=len(text),
-        )
-        return text
-    except Exception as e:  # noqa: BLE001
-        log.warning(
-            "ceo_brain_parallel_gather_failed",
-            mcp=name, error=str(e), error_type=type(e).__name__,
-        )
-        return ""
+    last_error: str = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            kwargs: dict[str, Any] = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "betas": ["mcp-client-2025-04-04"],
+                "mcp_servers": [server],
+                "messages": [{"role": "user", "content": sub_question}],
+                # Longer per-call timeout for the parallel gather —
+                # individual MCPs can legitimately take 60-120 sec
+                # to fetch + return large transcripts.
+                "timeout": 120.0,
+            }
+            if extra_system:
+                kwargs["system"] = [
+                    {"type": "text", "text": extra_system}
+                ]
+            resp = anthropic_client.beta.messages.create(**kwargs)
+            text = _harvest_response_text(resp)
+            log.info(
+                "ceo_brain_parallel_gather_ok",
+                mcp=name, chars=len(text), attempt=attempt,
+            )
+            return text
+        except Exception as e:  # noqa: BLE001
+            last_error = f"{type(e).__name__}: {str(e)[:150]}"
+            transient = (
+                type(e).__name__ == "APITimeoutError"
+                or "timed out" in str(e).lower()
+                or "connection error while communicating with mcp" in str(e).lower()
+            )
+            if transient and attempt < max_attempts:
+                log.info(
+                    "ceo_brain_parallel_gather_retry",
+                    mcp=name, attempt=attempt, error=last_error,
+                )
+                continue
+            log.warning(
+                "ceo_brain_parallel_gather_failed",
+                mcp=name, error=last_error,
+                error_type=type(e).__name__, attempt=attempt,
+            )
+            return ""
+    return ""
 
 
 def gather_from_mcps(

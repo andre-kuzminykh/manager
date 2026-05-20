@@ -1,0 +1,165 @@
+"""FR-CB2-3.31 — Tool-call planner via haiku.
+
+Given an operator question + the catalog of available MCP tools
+(fetched once via `mcp_client.list_tools` per endpoint), ask
+`claude-haiku-4-5` to return a JSON list of `(mcp_name, tool_name,
+arguments)` triplets to execute via direct HTTP.
+
+This replaces Anthropic's MCP connector for the "decide what to
+call" step. Each picked tool is then invoked through
+`mcp_client.call_tool` in parallel.
+
+The planner is intentionally lightweight — one haiku call, JSON
+output, no tool use. ~1 sec latency. If the model returns garbage
+JSON, fall back to a single MCP with the operator's question as
+the only call.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from app.logging_setup import get_logger
+
+log = get_logger(__name__)
+
+
+def _tool_catalog_lines(
+    mcp_servers: list[dict],
+    tools_by_mcp: dict[str, list[dict]],
+) -> str:
+    """Render a compact catalog: for each MCP, list its tool names
+    + first line of description."""
+    lines: list[str] = []
+    for srv in mcp_servers:
+        name = srv.get("name") or "?"
+        lines.append(f"\n[{name}]")
+        tools = tools_by_mcp.get(name) or []
+        if not tools:
+            lines.append("  (no tools listed)")
+            continue
+        for t in tools:
+            tname = t.get("name") or "?"
+            desc = (t.get("description") or "").strip().split("\n")[0][:200]
+            schema = t.get("inputSchema") or {}
+            props = (schema.get("properties") or {}) if isinstance(schema, dict) else {}
+            prop_names = ", ".join(props.keys())
+            lines.append(
+                f"  - {tname}({prop_names}) — {desc}"
+            )
+    return "\n".join(lines)
+
+
+def plan_tool_calls(
+    *,
+    question: str,
+    mcp_servers: list[dict],
+    tools_by_mcp: dict[str, list[dict]],
+    anthropic_client: Any,
+    today_iso: str | None = None,
+) -> list[dict[str, Any]]:
+    """Ask haiku to plan the tool calls. Returns a list of
+    ``{mcp: name, tool: name, args: dict, reason: str}`` triplets.
+    Empty list on failure (caller decides fallback).
+    """
+    if not mcp_servers or not question:
+        return []
+    catalog = _tool_catalog_lines(mcp_servers, tools_by_mcp)
+    prompt = (
+        f"Сегодня: {today_iso or '<today>'}\n\n"
+        f"Вопрос оператора: {question}\n\n"
+        f"Доступные MCP-серверы и их tools:\n{catalog}\n\n"
+        "Задача: выбери список tool-вызовов которые надо сделать "
+        "чтобы ответить на вопрос. Возвращай ТОЛЬКО JSON, без "
+        "markdown-блоков. Формат:\n"
+        "{\n  \"calls\": [\n"
+        "    {\"mcp\":\"<name>\",\"tool\":\"<tool_name>\",\"args\":{...}},\n"
+        "    ...\n  ]\n}\n\n"
+        "Правила:\n"
+        "- Минимум tool-вызовов чтобы ответить. Обычно 2-4.\n"
+        "- Args должны быть валидными по схеме tool'а. Если не "
+        "уверен — оставь {} (пустые args).\n"
+        "- Если вопрос про встречи / транскрипты / задачи → ищи "
+        "сначала через search_*, потом обязательно "
+        "get_zoom_transcript / get_meeting для top-кандидатов.\n"
+        "- Если вопрос про Telegram-сообщения / переписку → "
+        "search_messages в n8n_drive с релевантными query и датами.\n"
+        "- Если нужны компании/контакты → search в hubspot/rocketreach.\n"
+        "- Если несколько источников релевантны (например встречи + "
+        "сообщения) — включи все нужные.\n"
+        "- НЕ ВЫДУМЫВАЙ tool-имена или args-ключи: бери только из "
+        "каталога выше."
+    )
+    try:
+        resp = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "ceo_brain_planner_call_failed",
+            error=str(e), error_type=type(e).__name__,
+        )
+        return []
+    raw = ""
+    for b in (getattr(resp, "content", None) or []):
+        if getattr(b, "type", None) == "text":
+            raw += getattr(b, "text", "") or ""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`")
+        if raw.lower().startswith("json"):
+            raw = raw[4:].strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception:  # noqa: BLE001
+        log.info("ceo_brain_planner_bad_json", raw=raw[:300])
+        return []
+    if not isinstance(parsed, dict):
+        return []
+    calls = parsed.get("calls") or []
+    if not isinstance(calls, list):
+        return []
+    # Validate each call.
+    name_to_server = {s.get("name"): s for s in mcp_servers}
+    tool_names_per_mcp = {
+        m: {t.get("name") for t in (tools_by_mcp.get(m) or [])}
+        for m in name_to_server
+    }
+    out: list[dict[str, Any]] = []
+    for item in calls:
+        if not isinstance(item, dict):
+            continue
+        mcp_name = item.get("mcp")
+        tool_name = item.get("tool")
+        args = item.get("args") or {}
+        if not mcp_name or not tool_name:
+            continue
+        if mcp_name not in name_to_server:
+            continue
+        if tool_name not in (tool_names_per_mcp.get(mcp_name) or set()):
+            log.info(
+                "ceo_brain_planner_unknown_tool",
+                mcp=mcp_name, tool=tool_name,
+            )
+            continue
+        if not isinstance(args, dict):
+            args = {}
+        out.append({
+            "mcp": mcp_name,
+            "tool": tool_name,
+            "args": args,
+        })
+    log.info(
+        "ceo_brain_planner_plan",
+        question_chars=len(question), calls=len(out),
+        plan=[
+            {"mcp": c["mcp"], "tool": c["tool"]}
+            for c in out
+        ],
+    )
+    return out
+
+
+__all__ = ["plan_tool_calls"]

@@ -253,7 +253,67 @@ def synthesize_final_answer(
     return _harvest_response_text(resp)
 
 
+def gather_via_direct_http(
+    *,
+    planned_calls: list[dict[str, Any]],
+    mcp_servers: list[dict[str, Any]],
+    per_call_timeout: float = 30.0,
+) -> dict[str, str]:
+    """FR-CB2-3.31 — execute planned tool calls in parallel via
+    direct HTTP to n8n MCP endpoints, completely bypassing
+    Anthropic-MCP.
+
+    Returns ``{label: harvested_text}`` where label is
+    ``"<mcp_name>::<tool_name>"`` so multiple calls to the same MCP
+    don't collide.
+
+    Each individual call goes through `mcp_client.call_tool`,
+    which has its own session caching + retry. Threads + futures
+    add a hard wall-timeout so a single misbehaving call can't
+    block the entire gather.
+    """
+    from app.ceo_brain.mcp_client import call_tool
+
+    name_to_url = {s.get("name"): s.get("url") for s in (mcp_servers or [])}
+    out: dict[str, str] = {}
+    if not planned_calls:
+        return out
+
+    def _runner(call: dict[str, Any]) -> tuple[str, str]:
+        mcp_name = call.get("mcp") or "?"
+        tool_name = call.get("tool") or "?"
+        args = call.get("args") or {}
+        url = name_to_url.get(mcp_name)
+        label = f"{mcp_name}::{tool_name}"
+        if not url:
+            return label, ""
+        ok, body = call_tool(
+            url=url, tool_name=tool_name, arguments=args,
+            timeout=per_call_timeout,
+        )
+        return label, body if ok else ""
+
+    workers = min(len(planned_calls), 8)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_runner, c) for c in planned_calls]
+        for fut in as_completed(futures, timeout=None):
+            try:
+                label, text = fut.result(
+                    timeout=per_call_timeout + 5
+                )
+                out[label] = text
+            except FuturesTimeout:
+                log.warning("ceo_brain_direct_http_future_timeout")
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "ceo_brain_direct_http_future_raised",
+                    error=str(e),
+                )
+    return out
+
+
 __all__ = [
     "gather_from_mcps",
+    "gather_via_direct_http",
     "synthesize_final_answer",
 ]

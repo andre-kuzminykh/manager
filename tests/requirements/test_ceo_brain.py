@@ -890,6 +890,161 @@ def test_smart_mcp_routing_fallback_on_classifier_failure():
     assert out_bad == all_servers
 
 
+def test_mcp_http_init_and_tool_call(monkeypatch):
+    """FR-CB2-3.31 — direct HTTP MCP client does the JSON-RPC dance:
+    POST initialize → capture session id → POST tools/call with the
+    session id → parse SSE/JSON → return content text."""
+    import json as _json
+    from app.ceo_brain import mcp_client
+
+    mcp_client.reset_all_sessions_for_tests()
+
+    posts: list = []
+
+    class _Resp:
+        def __init__(self, *, status=200, body="", headers=None):
+            self.status_code = status
+            self.text = body
+            self.headers = headers or {}
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    class _FakeSession:
+        def post(self, url, json=None, headers=None, timeout=None):
+            posts.append({"url": url, "body": json, "headers": headers})
+            method = (json or {}).get("method")
+            if method == "initialize":
+                return _Resp(
+                    status=200,
+                    body=_json.dumps({"jsonrpc": "2.0", "id": 1, "result": {}}),
+                    headers={"Mcp-Session-Id": "sess-abc"},
+                )
+            if method == "notifications/initialized":
+                return _Resp(status=200, body="")
+            if method == "tools/call":
+                # SSE format like n8n returns.
+                payload = {
+                    "jsonrpc": "2.0", "id": 200,
+                    "result": {
+                        "content": [
+                            {"type": "text", "text": "real n8n payload"},
+                        ],
+                    },
+                }
+                return _Resp(
+                    status=200,
+                    body=f"event: message\ndata: {_json.dumps(payload)}\n\n",
+                )
+            return _Resp(status=200, body="")
+
+    monkeypatch.setattr(mcp_client.requests, "Session", _FakeSession)
+
+    ok, text = mcp_client.call_tool(
+        url="https://n8n.example/mcp/x",
+        tool_name="get_zoom_transcript",
+        arguments={"zoom_id": "abc"},
+    )
+    assert ok is True
+    assert text == "real n8n payload"
+
+    # Verify the dance: initialize → notifications/initialized → tools/call.
+    methods = [(p["body"] or {}).get("method") for p in posts]
+    assert methods[0] == "initialize"
+    assert "notifications/initialized" in methods
+    assert "tools/call" in methods
+    # The tools/call request carried the captured session id.
+    tools_call = [
+        p for p in posts if (p["body"] or {}).get("method") == "tools/call"
+    ][0]
+    assert tools_call["headers"]["Mcp-Session-Id"] == "sess-abc"
+
+
+def test_planner_returns_tool_calls_per_mcp():
+    """FR-CB2-3.31 — planner asks haiku for a JSON list of tool
+    calls; output is validated against the available tool catalog
+    (unknown tools dropped, unknown MCPs dropped)."""
+    from types import SimpleNamespace
+    from app.ceo_brain.planner import plan_tool_calls
+
+    anthropic = MagicMock()
+    anthropic.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(
+            type="text",
+            text=(
+                '{"calls": ['
+                '{"mcp":"n8n_calendar","tool":"search_zoom_meetings","args":{"query":"fundraising"}},'
+                '{"mcp":"n8n_drive","tool":"search_messages","args":{"query":"Йохан"}},'
+                '{"mcp":"n8n_calendar","tool":"unknown_tool","args":{}},'  # dropped
+                '{"mcp":"n8n_NOTREAL","tool":"x","args":{}}'  # dropped
+                ']}'
+            ),
+        )],
+    )
+
+    calls = plan_tool_calls(
+        question="что обсудили с Йоханом по фандрайзингу",
+        mcp_servers=[
+            {"name": "n8n_calendar", "url": "u1"},
+            {"name": "n8n_drive", "url": "u2"},
+        ],
+        tools_by_mcp={
+            "n8n_calendar": [
+                {"name": "search_zoom_meetings", "description": "Zoom",
+                 "inputSchema": {"properties": {"query": {}}}},
+                {"name": "get_zoom_transcript", "description": "T",
+                 "inputSchema": {"properties": {"zoom_id": {}}}},
+            ],
+            "n8n_drive": [
+                {"name": "search_messages", "description": "Tg",
+                 "inputSchema": {"properties": {"query": {}}}},
+            ],
+        },
+        anthropic_client=anthropic,
+    )
+    # Only the 2 valid calls survive.
+    assert len(calls) == 2
+    names = [(c["mcp"], c["tool"]) for c in calls]
+    assert ("n8n_calendar", "search_zoom_meetings") in names
+    assert ("n8n_drive", "search_messages") in names
+    # Args preserved.
+    cal_args = [c["args"] for c in calls if c["mcp"] == "n8n_calendar"][0]
+    assert cal_args == {"query": "fundraising"}
+
+
+def test_direct_http_gather_aggregates(monkeypatch):
+    """FR-CB2-3.31 — `gather_via_direct_http` fires N calls in
+    parallel via mcp_client and aggregates by `mcp::tool` label."""
+    from app.ceo_brain import parallel_gather, mcp_client
+
+    calls_made: list = []
+
+    def _fake_call_tool(*, url, tool_name, arguments, timeout=30.0, retries=1):
+        calls_made.append({"url": url, "tool": tool_name, "args": arguments})
+        return True, f"data from {tool_name}"
+
+    monkeypatch.setattr(mcp_client, "call_tool", _fake_call_tool)
+
+    out = parallel_gather.gather_via_direct_http(
+        planned_calls=[
+            {"mcp": "n8n_calendar", "tool": "search_meetings", "args": {"q": "X"}},
+            {"mcp": "n8n_calendar", "tool": "get_zoom_transcript", "args": {"id": "Y"}},
+            {"mcp": "n8n_drive", "tool": "search_messages", "args": {}},
+        ],
+        mcp_servers=[
+            {"name": "n8n_calendar", "url": "u1"},
+            {"name": "n8n_drive", "url": "u2"},
+        ],
+    )
+    assert set(out.keys()) == {
+        "n8n_calendar::search_meetings",
+        "n8n_calendar::get_zoom_transcript",
+        "n8n_drive::search_messages",
+    }
+    assert "data from search_meetings" in out["n8n_calendar::search_meetings"]
+    assert len(calls_made) == 3
+
+
 def test_per_mcp_parallel_gather_aggregates_in_threads():
     """FR-CB2-3.30 — `gather_from_mcps` fires one Anthropic call
     per MCP server in parallel and aggregates `{name: text}`."""

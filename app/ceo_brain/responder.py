@@ -791,16 +791,133 @@ def run_responder(
             )
             request = {**request, "mcp_servers": picked}
 
-    # FR-CB2-3.30 — per-MCP parallel gather. When MCP servers are
-    # configured, instead of ONE create() with all servers (subject
-    # to parallel-handshake hangs), fire N parallel create() calls
-    # each with a SINGLE server, then synthesize a final answer
-    # from the gathered data via a no-MCP messages.create.
-    # Local Slack tools (FR-CB2-3.16) bypass this entirely — they
-    # only fire when the operator's question routes through the
-    # synthesis turn explicitly. (Operator's primary use case is
-    # MCP data; local tools are rare.)
+    # FR-CB2-3.31 — direct-HTTP gather (replaces FR-CB2-3.30
+    # Anthropic-MCP gather). The Anthropic-MCP connector compounds
+    # latency 5-15 sec per inner tool call (operator-observed
+    # 2026-05-20: minutes on multi-step queries, timeouts). Going
+    # direct HTTP to n8n MCP returns the same data in 1.97 sec per
+    # call. Architecture:
+    #   1. fetch tool catalogs (`mcp_client.list_tools`, cached
+    #      per URL)
+    #   2. haiku planner picks `[(mcp, tool, args), ...]`
+    #   3. parallel HTTP calls via `gather_via_direct_http`
+    #   4. final synthesis via Anthropic (no MCP, no beta)
     if request.get("mcp_servers") and last_user_q:
+        from app.ceo_brain.mcp_client import list_tools as _mcp_list_tools
+        from app.ceo_brain.parallel_gather import (
+            gather_via_direct_http,
+            synthesize_final_answer,
+        )
+        from app.ceo_brain.planner import plan_tool_calls
+
+        log.info(
+            "ceo_brain_direct_http_start",
+            mcp_count=len(request["mcp_servers"]),
+            mcps=[s.get("name") for s in request["mcp_servers"]],
+        )
+        # Briefly tell operator something is happening.
+        try:
+            slack.chat_update(
+                channel=channel, ts=placeholder_ts,
+                text="🔄 планирую и параллельно дёргаю MCP…",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 1. tool catalogs
+        tools_by_mcp: dict[str, list[dict]] = {}
+        for srv in request["mcp_servers"]:
+            name = srv.get("name") or ""
+            url = srv.get("url") or ""
+            if not name or not url:
+                continue
+            tools_by_mcp[name] = _mcp_list_tools(url)
+
+        # 2. plan
+        from datetime import datetime as _dt, timezone as _tz
+        today_iso = (today or _dt.now(_tz.utc)).strftime("%Y-%m-%d")
+        planned = plan_tool_calls(
+            question=last_user_q,
+            mcp_servers=request["mcp_servers"],
+            tools_by_mcp=tools_by_mcp,
+            anthropic_client=anthropic_client,
+            today_iso=today_iso,
+        )
+        if not planned:
+            # Planner failed — fall back to Anthropic-MCP gather
+            # (FR-CB2-3.30) which still has its retry+wall-timeout.
+            log.info(
+                "ceo_brain_planner_empty_fallback_to_anthropic_mcp",
+            )
+            from app.ceo_brain.parallel_gather import (
+                gather_from_mcps,
+            )
+            gathered_raw = gather_from_mcps(
+                question=last_user_q,
+                picked_mcps=request["mcp_servers"],
+                anthropic_client=anthropic_client,
+            )
+        else:
+            # 3. parallel direct HTTP
+            gathered_raw = gather_via_direct_http(
+                planned_calls=planned,
+                mcp_servers=request["mcp_servers"],
+            )
+
+        # 4. synthesize
+        sys_blocks = request.get("system") or []
+        sys_text = ""
+        if isinstance(sys_blocks, list):
+            for sb in sys_blocks:
+                if isinstance(sb, dict) and sb.get("text"):
+                    sys_text = sb["text"]
+                    break
+        final_text = synthesize_final_answer(
+            question=last_user_q,
+            gathered=gathered_raw,
+            anthropic_client=anthropic_client,
+            system_prompt_text=sys_text,
+        )
+        tool_uses: list[dict[str, Any]] = [
+            {"name": label, "input": {}}
+            for label, txt in gathered_raw.items() if txt
+        ]
+        rendered = format_final_response(
+            text=final_text or
+                "_(модель не сформулировала ответ — см. источники)_",
+            tool_uses=tool_uses,
+        )
+        _final_render_to_slack(
+            slack=slack, channel=channel,
+            placeholder_ts=placeholder_ts,
+            thread_ts=placeholder_thread_ts,
+            text=rendered,
+            sleep=sleep,
+        )
+        if db_session is not None:
+            return persist_run(
+                db_session,
+                slack_channel_id=channel,
+                slack_event_ts=slack_event_ts or placeholder_ts,
+                slack_placeholder_ts=placeholder_ts,
+                request_payload={
+                    **request,
+                    "_direct_http": True,
+                    "planned_calls": planned,
+                    "gathered_labels": list(gathered_raw.keys()),
+                },
+                response_text=final_text or "",
+                tool_uses=tool_uses,
+                status="done" if (final_text or "").strip() else "failed",
+                cost_usd=0,
+                started_at=started_at,
+                completed_at=datetime.now(timezone.utc),
+            )
+        return None
+
+    # FR-CB2-3.30 — per-MCP parallel gather (now unreachable for
+    # MCP requests; kept for tests/back-compat only).
+    if False and request.get("mcp_servers") and last_user_q:
         from app.ceo_brain.parallel_gather import (
             gather_from_mcps,
             synthesize_final_answer,

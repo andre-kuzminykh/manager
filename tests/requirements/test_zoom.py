@@ -1461,3 +1461,331 @@ def test_settings_zoom_polling_defaults():
     assert s.zoom_poll_interval_seconds == 60
     assert s.zoom_poll_batch_size == 10
     assert s.fireflies_poll_interval_seconds == 60
+
+
+# ---------------------------------------------------------------------------
+# FR-CR-05-169 — Calendar-driven participants for meeting summaries.
+#
+# Operator-pinned 2026-05-20: meeting summaries' «Участники» line must
+# reflect REAL people from the matching Google Calendar event,
+# resolved against team_members + employees + counterparties — not
+# whatever the LLM hallucinated out of the transcript.
+#
+# These tests are xfail(strict=True) until the implementation lands.
+# When the feature is in: each test description below maps 1:1 to a
+# scenario in the spec entry (FR-CR-05-169 in SPEC.md).
+# ---------------------------------------------------------------------------
+
+import pytest as _pytest_169
+
+_PENDING_169 = _pytest_169.mark.xfail(
+    strict=True,
+    reason="FR-CR-05-169 — Calendar-driven participants not yet implemented",
+)
+
+
+@_PENDING_169
+def test_calendar_attendees_resolved_via_zoom_url_match(session):
+    """A Calendar event whose `description` contains the Zoom join
+    URL of the recording wins as the match. Attendees from that
+    event are emailed-resolved through team_members + counterparties.
+    """
+    from app.services.calendar_attendees import (
+        resolve_calendar_attendees_for_zoom,
+    )
+    from app.models import TeamMember, ZoomRecording
+
+    session.add(TeamMember(
+        real_name="Артем Соколов",
+        email="artem@thehumanoid.ai",
+        active=True,
+    ))
+    session.add(TeamMember(
+        real_name="Ирина Шипилова",
+        email="irina@thehumanoid.ai",
+        active=True,
+    ))
+    session.flush()
+    row = ZoomRecording(
+        zoom_id="ABC123==",
+        join_url="https://zoom.us/j/12345?pwd=x",
+        title="Fundraising daily",
+    )
+    session.add(row)
+    session.flush()
+
+    fake_events = [
+        {
+            "id": "evt1",
+            "summary": "Fundraising daily",
+            "description": "Join Zoom: https://zoom.us/j/12345?pwd=x",
+            "attendees": [
+                {"email": "artem@thehumanoid.ai",
+                 "responseStatus": "accepted"},
+                {"email": "irina@thehumanoid.ai",
+                 "responseStatus": "accepted"},
+            ],
+        },
+    ]
+    resolved = resolve_calendar_attendees_for_zoom(
+        row, session, calendar_events=fake_events,
+    )
+    assert resolved is not None
+    assert resolved["match_method"] == "url"
+    emails = [a["email"] for a in resolved["attendees"]]
+    names = [a["resolved_name"] for a in resolved["attendees"]]
+    assert emails == ["artem@thehumanoid.ai", "irina@thehumanoid.ai"]
+    assert names == ["Артем Соколов", "Ирина Шипилова"]
+    assert all(a["source"] == "team_member" for a in resolved["attendees"])
+
+
+@_PENDING_169
+def test_calendar_attendees_resolved_via_fuzzy_time_title_fallback(session):
+    """When no Calendar event references the Zoom join URL, fall
+    back to ±15 min start-time window + fuzzy title match."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.calendar_attendees import (
+        resolve_calendar_attendees_for_zoom,
+    )
+    from app.models import TeamMember, ZoomRecording
+
+    session.add(TeamMember(
+        real_name="Артем Соколов",
+        email="artem@thehumanoid.ai",
+        active=True,
+    ))
+    session.flush()
+    start = datetime(2026, 5, 19, 14, 0, tzinfo=timezone.utc)
+    row = ZoomRecording(
+        zoom_id="XYZ==",
+        title="Fundraising daily",
+        meeting_started_at=start,
+    )
+    session.add(row)
+    session.flush()
+    # event description has NO join URL — fuzzy fallback expected.
+    fake_events = [
+        {
+            "id": "evt2",
+            "summary": "Fundraising  Daily ",  # case+whitespace drift
+            "description": "agenda: investor pipeline review",
+            "start": {
+                "dateTime": (start + timedelta(minutes=3)).isoformat(),
+            },
+            "attendees": [
+                {"email": "artem@thehumanoid.ai",
+                 "responseStatus": "accepted"},
+            ],
+        },
+    ]
+    resolved = resolve_calendar_attendees_for_zoom(
+        row, session, calendar_events=fake_events,
+    )
+    assert resolved is not None
+    assert resolved["match_method"] == "fuzzy"
+    assert [a["resolved_name"] for a in resolved["attendees"]] == [
+        "Артем Соколов",
+    ]
+
+
+@_PENDING_169
+def test_calendar_attendees_resolves_counterparty_email(session):
+    """External attendees whose emails match a Counterparty row land
+    with `source="counterparty"` and the canonical sheet name."""
+    from app.services.calendar_attendees import (
+        resolve_calendar_attendees_for_zoom,
+    )
+    from app.models import Counterparty, TeamMember, ZoomRecording
+
+    session.add(TeamMember(
+        real_name="Артем Соколов",
+        email="artem@thehumanoid.ai",
+        active=True,
+    ))
+    session.add(Counterparty(
+        name="Mohammed Al Fardan",
+        email="mohammed@externalvc.com",
+    ))
+    session.flush()
+    row = ZoomRecording(
+        zoom_id="EXTERNAL==",
+        title="Investor intro — Al Fardan",
+        join_url="https://zoom.us/j/77777",
+    )
+    session.add(row)
+    session.flush()
+    fake_events = [
+        {
+            "id": "evt3",
+            "summary": "Investor intro — Al Fardan",
+            "description": "https://zoom.us/j/77777",
+            "attendees": [
+                {"email": "artem@thehumanoid.ai",
+                 "responseStatus": "accepted"},
+                {"email": "mohammed@externalvc.com",
+                 "responseStatus": "accepted"},
+            ],
+        },
+    ]
+    resolved = resolve_calendar_attendees_for_zoom(
+        row, session, calendar_events=fake_events,
+    )
+    by_email = {a["email"]: a for a in resolved["attendees"]}
+    assert by_email["mohammed@externalvc.com"]["source"] == "counterparty"
+    assert by_email["mohammed@externalvc.com"]["resolved_name"] == (
+        "Mohammed Al Fardan"
+    )
+    assert by_email["artem@thehumanoid.ai"]["source"] == "team_member"
+
+
+@_PENDING_169
+def test_calendar_attendees_includes_unknown_emails(session):
+    """Emails that match neither team_members nor counterparties are
+    NOT dropped — they're rendered with `source="unknown"` and the
+    Calendar-supplied displayName (or email) so operator can add to
+    the sheet later."""
+    from app.services.calendar_attendees import (
+        resolve_calendar_attendees_for_zoom,
+    )
+    from app.models import ZoomRecording
+
+    row = ZoomRecording(
+        zoom_id="UNKNOWN==",
+        title="Random sync",
+        join_url="https://zoom.us/j/99999",
+    )
+    session.add(row)
+    session.flush()
+    fake_events = [
+        {
+            "id": "evt4",
+            "summary": "Random sync",
+            "description": "https://zoom.us/j/99999",
+            "attendees": [
+                {"email": "sergei@newvc.com",
+                 "displayName": "Sergei Newvc",
+                 "responseStatus": "accepted"},
+            ],
+        },
+    ]
+    resolved = resolve_calendar_attendees_for_zoom(
+        row, session, calendar_events=fake_events,
+    )
+    assert resolved["attendees"] == [
+        {
+            "email": "sergei@newvc.com",
+            "display_name": "Sergei Newvc",
+            "resolved_name": "Sergei Newvc",
+            "source": "unknown",
+            "response_status": "accepted",
+        }
+    ]
+
+
+@_PENDING_169
+def test_calendar_attendees_excludes_declined(session):
+    """Attendees with `responseStatus="declined"` explicitly opted
+    out — they're dropped from the rendered list (counted in trace
+    as `dropped_declined`)."""
+    from app.services.calendar_attendees import (
+        resolve_calendar_attendees_for_zoom,
+    )
+    from app.models import TeamMember, ZoomRecording
+
+    session.add(TeamMember(
+        real_name="Артем Соколов",
+        email="artem@thehumanoid.ai",
+        active=True,
+    ))
+    session.add(TeamMember(
+        real_name="Дима Дроздов",
+        email="dima.d@thehumanoid.ai",
+        active=True,
+    ))
+    session.flush()
+    row = ZoomRecording(
+        zoom_id="DECLINED==",
+        join_url="https://zoom.us/j/55555",
+    )
+    session.add(row)
+    session.flush()
+    fake_events = [
+        {
+            "id": "evt5",
+            "summary": "Fundraising daily",
+            "description": "https://zoom.us/j/55555",
+            "attendees": [
+                {"email": "artem@thehumanoid.ai",
+                 "responseStatus": "accepted"},
+                {"email": "dima.d@thehumanoid.ai",
+                 "responseStatus": "declined"},
+            ],
+        },
+    ]
+    resolved = resolve_calendar_attendees_for_zoom(
+        row, session, calendar_events=fake_events,
+    )
+    names = [a["resolved_name"] for a in resolved["attendees"]]
+    assert names == ["Артем Соколов"]
+    assert resolved["dropped_declined"] == 1
+
+
+@_PENDING_169
+def test_calendar_attendees_falls_back_to_llm_when_event_missing(session):
+    """When no Calendar event matches the recording, the resolver
+    returns None so the pipeline falls back to the existing
+    LLM-from-transcript extraction (FR-CR-05-130)."""
+    from app.services.calendar_attendees import (
+        resolve_calendar_attendees_for_zoom,
+    )
+    from app.models import ZoomRecording
+
+    row = ZoomRecording(
+        zoom_id="NOEVENT==",
+        title="Some recording",
+        join_url="https://zoom.us/j/00000",
+    )
+    session.add(row)
+    session.flush()
+    resolved = resolve_calendar_attendees_for_zoom(
+        row, session, calendar_events=[],
+    )
+    assert resolved is None
+
+
+@_PENDING_169
+def test_summary_header_renders_calendar_attendees_when_present(session):
+    """When `ZoomRecording.calendar_attendees` is populated and
+    non-empty, the «Участники:» header line uses those resolved
+    names IN EVENT ORDER. Falls back to `row.participants` only
+    when calendar_attendees is None / empty."""
+    from app.zoom.pipeline import build_meta_block_for_summary  # placeholder name
+    from app.models import ZoomRecording
+
+    row = ZoomRecording(
+        zoom_id="HEADER==",
+        title="Fundraising daily",
+        participants=["Whisper-Mangled Artyom", "Whisper-Mangled Irina"],
+        calendar_attendees=[
+            {"email": "artem@thehumanoid.ai",
+             "resolved_name": "Артем Соколов",
+             "source": "team_member",
+             "response_status": "accepted",
+             "display_name": "Artem Sokolov"},
+            {"email": "irina@thehumanoid.ai",
+             "resolved_name": "Ирина Шипилова",
+             "source": "team_member",
+             "response_status": "accepted",
+             "display_name": "Irina Shipilova"},
+            {"email": "mohammed@externalvc.com",
+             "resolved_name": "Mohammed Al Fardan",
+             "source": "counterparty",
+             "response_status": "accepted",
+             "display_name": "Mohammed Al Fardan"},
+        ],
+    )
+    block = build_meta_block_for_summary(row)
+    assert "Участники: Артем Соколов, Ирина Шипилова, Mohammed Al Fardan" in block
+    # LLM-mangled names must NOT appear when calendar source is present.
+    assert "Whisper-Mangled" not in block

@@ -637,6 +637,61 @@ class ZoomPipeline:
 
     # --- step 5: short summary + Telegram -----------------------
 
+    def _operator_actually_present(self, row: ZoomRecording) -> bool:
+        """FR-CR-05-173 — operator-pinned 2026-05-20: «скидывать
+        только те встречи, где есть 1@humanoid». host_email matches
+        when the operator's Zoom room HOSTED a meeting, but that
+        proves nothing about whether the operator JOINED.
+
+        Returns True when we can prove the operator was actually
+        on the call via any of:
+          (a) calendar_attendees has an email == operator email;
+          (b) participants (LLM-extracted from transcript) contains
+              «Artem» / «Артем» tokens;
+          (c) transcript_text speaker tags include «Artem Sokolov:»
+              / «Артем Соколов:».
+        Returns True (allow) when host_email == operator AND nothing
+        in the row contradicts presence — we can't prove absence
+        from missing signals, so don't block on optimistic gate.
+        Returns False ONLY when host_email == operator BUT every
+        attendee + speaker signal we DO have lacks the operator —
+        that's the «his Zoom room, no Артем in chat» case the
+        operator wants filtered out.
+        """
+        required = (
+            self._settings.zoom_required_email or ""
+        ).strip().lower()
+        if not required:
+            return True
+        # 1. Calendar attendees — strongest signal we have.
+        for a in (row.calendar_attendees or []):
+            if not isinstance(a, dict):
+                continue
+            email = (a.get("email") or "").strip().lower()
+            if email == required:
+                return True
+        # 2. LLM-extracted participants from transcript.
+        op_tokens = ("artem", "артем", "артём", "artyom")
+        for p in (row.participants or []):
+            if isinstance(p, str) and any(
+                t in p.lower() for t in op_tokens
+            ):
+                return True
+        # 3. Transcript speaker tags. Whisper uses «<Name>: …» format.
+        head = (row.transcript_text or "")[:8000].lower()
+        if any(
+            (f"{t} sokolov" in head)
+            or (f"{t} соколов" in head)
+            or (f"\n{t}" in head and ":" in head)
+            for t in op_tokens
+        ):
+            return True
+        # All available presence signals disagree with «operator
+        # was here». The host_email gate above already confirmed
+        # this is the operator's Zoom room, so the meeting happened
+        # WITHOUT the operator — skip the post.
+        return False
+
     def _step_short_summary(
         self, session: Session, row: ZoomRecording
     ) -> bool:
@@ -672,6 +727,25 @@ class ZoomPipeline:
                 # on every poll.
                 row.short_summary_sent = True
                 return True
+        # FR-CR-05-173 — operator-pinned 2026-05-20: even when the
+        # host_email matches, only post when the operator was
+        # ACTUALLY on the call (joined the Zoom). The operator's
+        # recurring Zoom room records meetings teammates run without
+        # them; those should never land in the operator's Slack/TG.
+        if required and not self._operator_actually_present(row):
+            log.info(
+                "zoom_step_short_summary_skipped_operator_absent",
+                zoom_id=row.zoom_id, title=row.title,
+                required=required,
+                participants=list(row.participants or []),
+                calendar_attendees=[
+                    (a or {}).get("email") for a in (row.calendar_attendees or [])
+                ],
+                hint=("FR-CR-05-173 — host owns the Zoom room but "
+                      "didn't join the meeting; not posting."),
+            )
+            row.short_summary_sent = True
+            return True
         if not row.detailed_summary:
             row.last_error = "no detailed summary for short summary"
             return False

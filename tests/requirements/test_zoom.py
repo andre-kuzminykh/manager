@@ -1937,6 +1937,98 @@ def test_reconcile_zoom_empty_zoom_keeps_calendar_list():
     assert res["llm_used"] is False
 
 
+# ---------------------------------------------------------------------------
+# FR-CR-05-173 — operator-presence gate for the Slack short summary.
+# Operator-pinned 2026-05-20: «скидывать только те встречи, где есть
+# 1@humanoid» — host_email matching the operator's email proves only
+# that it's the operator's Zoom room, NOT that the operator joined
+# the call.
+# ---------------------------------------------------------------------------
+
+
+def _make_pipeline_stub(required_email: str = "1@thehumanoid.ai"):
+    from types import SimpleNamespace
+    from app.zoom.pipeline import ZoomPipeline
+
+    pipe = ZoomPipeline.__new__(ZoomPipeline)
+    pipe._settings = SimpleNamespace(zoom_required_email=required_email)
+    return pipe
+
+
+def test_operator_present_via_calendar_attendees():
+    """FR-CR-05-173 — calendar_attendees contains the operator's
+    email → presence confirmed → short summary posts."""
+    from types import SimpleNamespace
+    pipe = _make_pipeline_stub()
+    row = SimpleNamespace(
+        calendar_attendees=[{"email": "1@thehumanoid.ai"}],
+        participants=[], transcript_text="",
+    )
+    assert pipe._operator_actually_present(row) is True
+
+
+def test_operator_present_via_participants():
+    """LLM-extracted participants contains «Artem» / «Артем» →
+    presence confirmed even when calendar lookup failed."""
+    from types import SimpleNamespace
+    pipe = _make_pipeline_stub()
+    row = SimpleNamespace(
+        calendar_attendees=[],
+        participants=["Artem Sokolov", "Jochen"],
+        transcript_text="",
+    )
+    assert pipe._operator_actually_present(row) is True
+    row.participants = ["Артем Соколов"]
+    assert pipe._operator_actually_present(row) is True
+    row.participants = ["Артём Соколов"]  # ё variant
+    assert pipe._operator_actually_present(row) is True
+
+
+def test_operator_present_via_transcript_speaker_tag():
+    """Speaker tag `Artem Sokolov:` in the transcript head →
+    presence confirmed."""
+    from types import SimpleNamespace
+    pipe = _make_pipeline_stub()
+    row = SimpleNamespace(
+        calendar_attendees=[],
+        participants=[],
+        transcript_text="Artem Sokolov: Hey Guys\nJochen: Hi back.\n",
+    )
+    assert pipe._operator_actually_present(row) is True
+
+
+def test_operator_absent_skips_short_summary_post():
+    """The Baris-scenario, but for Zoom summary: meeting happened in
+    the operator's room while teammates ran a sub-session WITHOUT
+    them. No calendar match, LLM participants don't mention the
+    operator, transcript has no operator speaker tag → gate returns
+    False → short summary is skipped."""
+    from types import SimpleNamespace
+    pipe = _make_pipeline_stub()
+    row = SimpleNamespace(
+        calendar_attendees=[],
+        participants=["Jochen Ruda", "Alina Kolpakova", "Валентина"],
+        transcript_text=(
+            "Ну, я тут в другие сутки ходила в нашем. Так, ну, в "
+            "целом на сегодня все задачи..."
+        ),
+    )
+    assert pipe._operator_actually_present(row) is False
+
+
+def test_operator_presence_gate_disabled_without_required_email():
+    """When ZOOM_REQUIRED_EMAIL is empty (no operator configured),
+    the presence check is a no-op (always True) so single-tenant
+    setups without the operator gate don't accidentally suppress
+    all posts."""
+    from types import SimpleNamespace
+    pipe = _make_pipeline_stub(required_email="")
+    row = SimpleNamespace(
+        calendar_attendees=[], participants=[], transcript_text="",
+    )
+    assert pipe._operator_actually_present(row) is True
+
+
 def test_summary_header_renders_calendar_attendees_when_present(session):
     """When `ZoomRecording.calendar_attendees` is populated and
     non-empty, the «Участники:» header line uses those resolved

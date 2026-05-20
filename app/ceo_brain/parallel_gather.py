@@ -446,13 +446,27 @@ def gather_via_direct_http(
                 label = f"{c.get('mcp')}::{c.get('tool')}#{idx}"
                 out[label] = ""
                 continue
-            filled = dict(c)
-            filled["args"] = {**(c.get("args") or {}), kind: pool[0]}
-            log.info(
-                "ceo_brain_direct_http_filled_id",
-                tool=c.get("tool"), kind=kind, value=pool[0],
-            )
-            filled_pass2.append((idx, filled))
+            # FR-CB2-3.31 hotfix #7 — fan out across top-3 IDs in
+            # parallel instead of picking only the first one. n8n's
+            # search returns by score, but the highest-score
+            # meeting can be a 1-min empty placeholder while the
+            # real 60-min one is third in the list. Trying multiple
+            # in parallel + keeping all non-empty results lets
+            # synthesis use whichever has real content.
+            base_label = f"{c.get('mcp')}::{c.get('tool')}#{idx}"
+            for j, val in enumerate(pool[:3]):
+                filled = dict(c)
+                filled["args"] = {
+                    **(c.get("args") or {}), kind: val,
+                }
+                # Use sub-idx to keep labels unique.
+                sub_idx = idx + (j * 100)
+                filled_pass2.append((sub_idx, filled))
+                log.info(
+                    "ceo_brain_direct_http_filled_id",
+                    tool=c.get("tool"), kind=kind, value=val,
+                    candidate=j + 1, of=min(len(pool), 3),
+                )
         out.update(_run_calls_parallel(filled_pass2))
 
     # FR-CB2-3.31 hotfix #6 — auto-inject get_zoom_transcript when
@@ -476,7 +490,10 @@ def gather_via_direct_http(
             if calendar_mcp:
                 base_idx = len(planned_calls)
                 injected: list[tuple[int, dict]] = []
-                for j, zid in enumerate(zoom_ids[:2]):
+                # Try top-3 zoom_ids in parallel (FR-CB2-3.31
+                # hotfix #7). Synthesis uses whichever has real
+                # content; empty/short responses get ignored.
+                for j, zid in enumerate(zoom_ids[:3]):
                     injected.append((
                         base_idx + j,
                         {
@@ -487,7 +504,7 @@ def gather_via_direct_http(
                     ))
                 log.info(
                     "ceo_brain_direct_http_auto_transcript",
-                    zoom_ids=zoom_ids[:2],
+                    zoom_ids=zoom_ids[:3],
                 )
                 out.update(_run_calls_parallel(injected))
 

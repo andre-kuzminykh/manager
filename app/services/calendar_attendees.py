@@ -114,10 +114,22 @@ def _extract_meeting_ids_from_description(description: str) -> set[str]:
     return {m.group(1) for m in _ZOOM_URL_RE.finditer(description)}
 
 
+def _event_title(event: dict[str, Any]) -> str:
+    """Pull the event title regardless of which shape we got.
+    `app.services.calendar_match.fetch_calendar_events_via_api`
+    renames Calendar API's ``summary`` to ``title`` before
+    returning; tests supply raw API events with ``summary``. Accept
+    both so the same resolver works for prod + tests."""
+    return (event.get("title") or event.get("summary") or "").strip()
+
+
 def _coerce_event_start(event: dict[str, Any]) -> datetime | None:
-    """Lift Calendar API ``event.start.dateTime`` (or ``date``) into
-    a tz-aware ``datetime``. Returns ``None`` on missing / malformed
-    data — caller skips the event."""
+    """Lift the event start time into a tz-aware ``datetime``.
+    Handles both shapes:
+      * wrapper format: ``event["start"]`` is a flat ISO string
+        (`fetch_calendar_events_via_api`).
+      * raw Calendar API: ``event["start"]`` is a dict with
+        ``dateTime`` or ``date``."""
     s = event.get("start") or {}
     if isinstance(s, str):
         raw = s
@@ -128,7 +140,6 @@ def _coerce_event_start(event: dict[str, Any]) -> datetime | None:
     if not raw:
         return None
     try:
-        # Python 3.11+ fromisoformat handles "Z" suffix.
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
         dt = datetime.fromisoformat(raw)
@@ -179,7 +190,7 @@ def _find_matching_event(
                 continue
             if abs(ev_start - meeting_date) > _FUZZY_TIME_WINDOW:
                 continue
-            if _title_fuzzy_overlap(meeting_title, ev.get("summary") or ""):
+            if _title_fuzzy_overlap(meeting_title, _event_title(ev)):
                 return ev, "fuzzy"
     return None, ""
 

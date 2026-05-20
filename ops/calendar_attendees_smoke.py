@@ -44,7 +44,7 @@ from app.zoom.pipeline import build_meta_block_for_summary
 
 
 def _summary_of(ev: dict[str, Any]) -> str:
-    return (ev.get("summary") or "(no title)")[:80]
+    return (ev.get("title") or ev.get("summary") or "(no title)")[:80]
 
 
 def main() -> int:
@@ -119,10 +119,19 @@ def main() -> int:
                   file=sys.stderr)
             return 5
         print(f"  → {len(events)} event(s) in window")
-        for ev in events[:5]:
+        for ev in events[:10]:
             cal_id = ev.get("_calendar_id") or "?"
-            print(f"    - [{cal_id}] {_summary_of(ev)} | "
-                  f"attendees={len(ev.get('attendees') or [])}")
+            desc = (ev.get("description") or "").replace("\n", " ")
+            has_zid = (
+                row.zoom_meeting_id and row.zoom_meeting_id in (
+                    ev.get("description") or ""
+                )
+            )
+            tag = "✓ZID" if has_zid else "    "
+            print(f"    [{tag}] [{cal_id}] {_summary_of(ev)!r:50} | "
+                  f"attendees={len(ev.get('attendees') or []):2d} | "
+                  f"start={ev.get('start')} | "
+                  f"desc[:80]={desc[:80]!r}")
 
         print("\n[3/4] Resolving attendees…")
         resolved = resolve_calendar_attendees_for_zoom(

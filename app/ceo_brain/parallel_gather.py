@@ -26,7 +26,7 @@ fail.
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 from typing import Any
 
 from app.logging_setup import get_logger
@@ -147,10 +147,19 @@ def gather_from_mcps(
     max_tokens: int = _DEFAULT_GATHER_MAX_TOKENS,
     extra_system: str | None = None,
     sub_questions: dict[str, str] | None = None,
+    per_call_wall_timeout: float = 90.0,
 ) -> dict[str, str]:
     """Fire one Anthropic+MCP call per MCP server in parallel.
     Returns ``{mcp_name: harvested_text}``. Empty string on
-    per-server failure.
+    per-server failure OR on hard wall-timeout.
+
+    ``per_call_wall_timeout`` — hard upper bound (sec) we wait for
+    each future. Anthropic SDK's own `timeout` kwarg isn't honoured
+    for MCP-bearing calls (operator-observed 2026-05-20: a single
+    call hung 6 min despite `timeout=120`), so we enforce it on the
+    future. The underlying HTTP request can't be cancelled, but we
+    stop waiting and treat the MCP as empty so the rest of the
+    gather + synthesis can proceed.
 
     ``sub_questions`` lets the caller pass a per-MCP refined query
     (from the classifier); otherwise the operator's original
@@ -175,10 +184,21 @@ def gather_from_mcps(
                 extra_system=extra_system,
             )
             future_to_name[fut] = name
-        for fut in as_completed(future_to_name):
+        for fut in as_completed(future_to_name, timeout=None):
             name = future_to_name[fut]
             try:
-                out[name] = fut.result() or ""
+                out[name] = fut.result(
+                    timeout=per_call_wall_timeout,
+                ) or ""
+            except FuturesTimeout:
+                log.warning(
+                    "ceo_brain_parallel_gather_future_timeout",
+                    mcp=name, wall_timeout=per_call_wall_timeout,
+                )
+                out[name] = ""
+                # Best-effort cancel (no-op once thread is running,
+                # but at least frees the future slot).
+                fut.cancel()
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "ceo_brain_parallel_gather_future_raised",

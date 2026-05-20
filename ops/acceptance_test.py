@@ -111,6 +111,19 @@ _CASES: list[tuple[str, str, str | None]] = [
         "и что Алина писала в телеграм",
         None,  # хотим оба источника
     ),
+    (
+        "10 Follow-up — context resolution",
+        # FR-CB2-3.37 — this is asked in a synthetic thread after a
+        # prior turn that referenced Irina. Acceptance harness
+        # supplies thread_history with prior user/assistant exchange.
+        "а за вчера?",
+        None,
+    ),
+    (
+        "11 Follow-up — meeting drill-down",
+        "а на встречах что Ира говорила сегодня",
+        "n8n_calendar",
+    ),
 ]
 
 
@@ -129,6 +142,7 @@ def _run_one(
     all_servers_with_self: list[dict],
     system_prompt: str,
     slack_self_executors: dict | None,
+    thread_context: list[dict] | None = None,
 ) -> dict:
     """Run one question end-to-end. Returns dict with diagnostic
     fields + pass/fail."""
@@ -150,6 +164,7 @@ def _run_one(
             question=question,
             all_servers=all_servers_with_self,
             anthropic_client=client,
+            thread_context=thread_context,
         )
         out["picked"] = [s.get("name") for s in picked]
 
@@ -168,6 +183,7 @@ def _run_one(
             tools_by_mcp=tools_by_mcp,
             anthropic_client=client,
             today_iso=today_iso,
+            thread_context=thread_context,
         )
         out["planned"] = [
             {
@@ -270,16 +286,39 @@ def main() -> int:
     print("=" * 70)
     print("CEO Brain Acceptance Suite")
     print("=" * 70)
+    # FR-CB2-3.37 — synthetic thread context for follow-up cases.
+    # When the question is a follow-up («а за вчера», «а на
+    # встречах что Ира говорила сегодня»), seed prior turns so
+    # classifier+planner can resolve the implicit reference.
+    follow_up_seed = [
+        {"role": "user",
+         "content": "что сегодня сказала Ира на встрече?"},
+        {"role": "assistant",
+         "content": "Ира сегодня говорила на Fundraising daily про "
+                    "investor pipeline: статус EQT, фильтрация "
+                    "таблицы инвесторов, новые имена."},
+    ]
+    follow_up_labels = {
+        "10 Follow-up — context resolution",
+        "11 Follow-up — meeting drill-down",
+    }
+
     for label, question, hint in _CASES:
         print(f"\n[{label}]")
         print(f"  Q: {question}")
         if hint:
             print(f"  hint: expect to use {hint}")
+        thread_ctx = (
+            follow_up_seed if label in follow_up_labels else None
+        )
+        if thread_ctx:
+            print(f"  thread_context: {len(thread_ctx)} prior turns")
         result = _run_one(
             client=client, question=question,
             all_servers_with_self=servers_with_self,
             system_prompt=system_prompt,
             slack_self_executors=slack_self_executors,
+            thread_context=thread_ctx,
         )
         print(f"  ⏱ {result['elapsed_sec']}s")
         print(f"  picked: {result['picked']}")

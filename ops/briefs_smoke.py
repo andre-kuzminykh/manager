@@ -50,15 +50,25 @@ def main() -> int:
     if not s.openai_api_key:
         print("ERROR: OPENAI_API_KEY not set.", file=sys.stderr)
         return 2
+    # `s.counterparty_briefs_extract_model` is the production knob;
+    # the operator's .env may leave it empty, in which case OpenAI's
+    # API rejects requests with «you must provide a model parameter».
+    # Fall back to gpt-4o-mini so the smoke runs deterministically.
+    extract_model = (s.counterparty_briefs_extract_model or "").strip() \
+        or "gpt-4o-mini"
+    research_model = (s.counterparty_briefs_research_model or "").strip() \
+        or extract_model
     llm = OpenAIBackend(
         client=OpenAI(api_key=s.openai_api_key),
-        model=s.counterparty_briefs_extract_model,
+        model=extract_model,
     )
 
     print("=" * 70)
-    print(f"Person: {args.person}")
-    print(f"Org:    {args.org}")
-    print(f"max_n:  {args.max_n}")
+    print(f"Person:         {args.person}")
+    print(f"Org:            {args.org}")
+    print(f"max_n:          {args.max_n}")
+    print(f"extract_model:  {extract_model}")
+    print(f"research_model: {research_model}")
     print("=" * 70)
 
     # Synthesize the operator's exact Calendar shape.
@@ -82,7 +92,7 @@ def main() -> int:
     ex = extract_event_counterparties(
         event=event,
         llm_backend=llm,
-        model=s.counterparty_briefs_extract_model,
+        model=extract_model,
     )
     print(f"  org_name:        {ex.org_name!r}")
     print(f"  initial_persons: {[p.person_name for p in ex.initial_persons]}")
@@ -106,7 +116,7 @@ def main() -> int:
             org_research = research_org(
                 org_name=ex.org_name or args.org,
                 llm_backend=llm,
-                model=s.counterparty_briefs_research_model,
+                model=research_model,
                 budget_usd=float(s.counterparty_briefs_llm_budget_usd),
             )
         except Exception as e:  # noqa: BLE001
@@ -131,7 +141,7 @@ def main() -> int:
         initial_persons=ex.initial_persons,
         max_n=args.max_n,
         llm_backend=llm,
-        model=s.counterparty_briefs_extract_model,
+        model=extract_model,
     )
     names = [b.person_name for b in out]
     print(f"  → {len(out)} beneficiaries: {names}")

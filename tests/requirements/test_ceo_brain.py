@@ -1035,7 +1035,9 @@ def test_direct_http_gather_aggregates(monkeypatch):
     out = parallel_gather.gather_via_direct_http(
         planned_calls=[
             {"mcp": "n8n_calendar", "tool": "search_meetings", "args": {"q": "X"}},
-            {"mcp": "n8n_calendar", "tool": "get_zoom_transcript", "args": {"id": "Y"}},
+            # Explicit zoom_id → goes to pass-1, not pass-2.
+            {"mcp": "n8n_calendar", "tool": "get_zoom_transcript",
+             "args": {"zoom_id": "Y"}},
             {"mcp": "n8n_drive", "tool": "search_messages", "args": {}},
         ],
         mcp_servers=[
@@ -1052,6 +1054,57 @@ def test_direct_http_gather_aggregates(monkeypatch):
     }
     assert "data from search_meetings" in out["n8n_calendar::search_meetings#0"]
     assert len(calls_made) == 3
+
+
+def test_direct_http_gather_two_pass_fills_zoom_id(monkeypatch):
+    """FR-CB2-3.31 hotfix #5 — when planner asks for
+    `get_zoom_transcript` without `zoom_id`, gather runs the
+    search call first, extracts `Zoom ID: ...` from its response,
+    auto-fills the dependent call, runs pass-2."""
+    from app.ceo_brain import parallel_gather, mcp_client
+
+    received_args: dict[str, dict] = {}
+
+    def _fake(*, url, tool_name, arguments, timeout=30.0,
+              retries=1, input_schema=None):
+        received_args[tool_name] = arguments
+        if tool_name == "search_zoom_meetings":
+            return True, (
+                "Найдено: 1\n\n[1] 2026-05-19\n"
+                "Title: Fundraising daily\n"
+                "Zoom ID: Es0xxBa8RHG4lPl9Z5ZMGQ==\n"
+            )
+        if tool_name == "get_zoom_transcript":
+            zid = arguments.get("zoom_id") or ""
+            return True, f"TRANSCRIPT for {zid}: blah blah"
+        return True, ""
+
+    monkeypatch.setattr(mcp_client, "call_tool", _fake)
+
+    out = parallel_gather.gather_via_direct_http(
+        planned_calls=[
+            {"mcp": "n8n_calendar", "tool": "search_zoom_meetings",
+             "args": {"query": "fundraising"}},
+            # zoom_id NOT provided — should be auto-filled.
+            {"mcp": "n8n_calendar", "tool": "get_zoom_transcript",
+             "args": {}},
+        ],
+        mcp_servers=[
+            {"name": "n8n_calendar", "url": "u1"},
+        ],
+    )
+    # The transcript call received the zoom_id extracted from the
+    # search response.
+    assert (
+        received_args["get_zoom_transcript"]["zoom_id"]
+        == "Es0xxBa8RHG4lPl9Z5ZMGQ=="
+    )
+    # And the transcript bucket actually has the real payload.
+    transcript_bucket = [
+        v for k, v in out.items()
+        if "get_zoom_transcript" in k
+    ][0]
+    assert "TRANSCRIPT for Es0xxBa8" in transcript_bucket
 
 
 def test_per_mcp_parallel_gather_aggregates_in_threads():

@@ -270,6 +270,7 @@ def call_tool(
                 "ceo_brain_mcp_tool_ok",
                 url=url[:60], tool=tool_name,
                 chars=len(joined), attempt=attempt + 1,
+                preview=joined[:300].replace("\n", " "),
             )
             return True, joined
         except Exception as e:  # noqa: BLE001

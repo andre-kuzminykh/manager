@@ -26,6 +26,7 @@ fail.
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout, as_completed
 from typing import Any
 
@@ -253,6 +254,44 @@ def synthesize_final_answer(
     return _harvest_response_text(resp)
 
 
+_ID_REGEXES = [
+    # Zoom transcripts return: "Zoom ID: fs/KyHH5RL2x2oEeFjNC3Q=="
+    (re.compile(r"Zoom ID:\s*([A-Za-z0-9+/=_-]+)"), "zoom_id"),
+    # search_meetings returns: "ID: 6ce44e03-6c5d-4c52-ba24-..."
+    (re.compile(r"\bID:\s*([A-Za-z0-9+/=_-]+)"), "meeting_id"),
+]
+
+
+def _extract_ids_from_responses(
+    pass1_results: dict[str, str],
+) -> dict[str, list[str]]:
+    """Parse n8n search responses for IDs. Returns
+    ``{kind: [id1, id2, ...]}`` where kind is `zoom_id` or
+    `meeting_id` — the arg key the dependent tool expects."""
+    out: dict[str, list[str]] = {"zoom_id": [], "meeting_id": []}
+    for body in pass1_results.values():
+        if not body:
+            continue
+        for regex, kind in _ID_REGEXES:
+            for m in regex.finditer(body):
+                val = m.group(1)
+                if val and val not in out[kind]:
+                    out[kind].append(val)
+    return out
+
+
+def _needs_id_fill(call: dict) -> str | None:
+    """Returns the arg key (`zoom_id` or `meeting_id`) that should
+    be auto-filled if missing. None if not a transcript-fetch."""
+    tool = (call.get("tool") or "").lower()
+    args = call.get("args") or {}
+    if tool == "get_zoom_transcript" and not args.get("zoom_id"):
+        return "zoom_id"
+    if tool == "get_meeting" and not args.get("meeting_id"):
+        return "meeting_id"
+    return None
+
+
 def gather_via_direct_http(
     *,
     planned_calls: list[dict[str, Any]],
@@ -285,9 +324,8 @@ def gather_via_direct_http(
                 schemas_by_name[(mcp_name, t.get("name") or "")] = (
                     t.get("inputSchema") or {}
                 )
-    out: dict[str, str] = {}
     if not planned_calls:
-        return out
+        return {}
 
     def _runner(call: dict[str, Any], idx: int) -> tuple[str, str]:
         mcp_name = call.get("mcp") or "?"
@@ -306,25 +344,86 @@ def gather_via_direct_http(
         )
         return label, body if ok else ""
 
-    workers = min(len(planned_calls), 8)
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = [
-            ex.submit(_runner, c, i)
-            for i, c in enumerate(planned_calls)
-        ]
-        for fut in as_completed(futures, timeout=None):
-            try:
-                label, text = fut.result(
-                    timeout=per_call_timeout + 5
+    def _run_calls_parallel(
+        calls_with_idx: list[tuple[int, dict]],
+    ) -> dict[str, str]:
+        bucket: dict[str, str] = {}
+        if not calls_with_idx:
+            return bucket
+        workers = min(len(calls_with_idx), 8)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = [
+                ex.submit(_runner, c, i) for i, c in calls_with_idx
+            ]
+            for fut in as_completed(futures, timeout=None):
+                try:
+                    label, text = fut.result(
+                        timeout=per_call_timeout + 5
+                    )
+                    bucket[label] = text
+                except FuturesTimeout:
+                    log.warning("ceo_brain_direct_http_future_timeout")
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "ceo_brain_direct_http_future_raised",
+                        error=str(e),
+                    )
+        return bucket
+
+    # FR-CB2-3.31 hotfix #5 — split into 2 phases by dependency:
+    #   pass 1: everything without missing required ID
+    #   pass 2: transcript-fetches that need IDs extracted from
+    #           pass-1 results
+    pass1: list[tuple[int, dict]] = []
+    pass2: list[tuple[int, dict]] = []
+    for i, c in enumerate(planned_calls):
+        if _needs_id_fill(c):
+            pass2.append((i, c))
+        else:
+            pass1.append((i, c))
+
+    out: dict[str, str] = {}
+    out.update(_run_calls_parallel(pass1))
+
+    if pass2:
+        ids_pool = _extract_ids_from_responses(out)
+        log.info(
+            "ceo_brain_direct_http_pass2_ids",
+            zoom_ids=ids_pool.get("zoom_id"),
+            meeting_ids=ids_pool.get("meeting_id"),
+            pass2_count=len(pass2),
+        )
+        # Fill missing IDs from extracted pool. One ID per dependent
+        # call (take the first available, in order).
+        filled_pass2: list[tuple[int, dict]] = []
+        for idx, c in pass2:
+            kind = _needs_id_fill(c)
+            if not kind:
+                filled_pass2.append((idx, c))
+                continue
+            pool = ids_pool.get(kind) or []
+            if not pool:
+                # No IDs found in pass1 — skip this dependent call.
+                log.info(
+                    "ceo_brain_direct_http_skip_no_id",
+                    tool=c.get("tool"), need=kind,
                 )
-                out[label] = text
-            except FuturesTimeout:
-                log.warning("ceo_brain_direct_http_future_timeout")
-            except Exception as e:  # noqa: BLE001
-                log.warning(
-                    "ceo_brain_direct_http_future_raised",
-                    error=str(e),
+                # Add empty result so the synthesis sees this slot
+                # as "no data" rather than missing.
+                label = (
+                    f"{c.get('mcp')}::{c.get('tool')}#{idx}"
                 )
+                out[label] = ""
+                continue
+            filled = dict(c)
+            filled["args"] = {**(c.get("args") or {}), kind: pool[0]}
+            log.info(
+                "ceo_brain_direct_http_filled_id",
+                tool=c.get("tool"), kind=kind, value=pool[0],
+            )
+            filled_pass2.append((idx, filled))
+        out.update(_run_calls_parallel(filled_pass2))
+
     return out
 
 

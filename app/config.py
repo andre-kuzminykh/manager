@@ -182,6 +182,23 @@ class Settings(BaseSettings):
         default="whisper-1",
         alias="CEO_BRAIN_BILINGUAL_WHISPER_MODEL",
     )
+    # FR-CB2-3.39 chunked reconciler — split both transcripts into
+    # batches of this many input chars so the LLM always covers the
+    # full primary regardless of length. Smaller = more batches, more
+    # cost / latency, but each batch fits comfortably in the model's
+    # context window. 30k chars ≈ 7.5K tokens of input — leaves room
+    # for the system prompt and a full 16K-token output.
+    ceo_brain_bilingual_reconcile_batch_input_chars: int = Field(
+        default=30_000,
+        alias="CEO_BRAIN_BILINGUAL_RECONCILE_BATCH_INPUT_CHARS",
+    )
+    # Max output tokens per reconciler batch. 16,384 = gpt-4o's
+    # single-response cap; lower it only when you intentionally want
+    # a shorter, summarised output per batch.
+    ceo_brain_bilingual_reconcile_max_tokens_per_batch: int = Field(
+        default=16_384,
+        alias="CEO_BRAIN_BILINGUAL_RECONCILE_MAX_TOKENS_PER_BATCH",
+    )
 
     # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся
     # встречи в Google Calendar (определяется по совпадению title с

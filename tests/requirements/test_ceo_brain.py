@@ -2306,6 +2306,54 @@ def test_bilingual_reconcile_merges_via_llm(monkeypatch):
     assert trace_sink[0]["secondary_chars"] > 0
 
 
+def test_bilingual_reconcile_chunked_covers_full_transcript():
+    """FR-CB2-3.39 — operator-pinned: «надо весь текст выдать
+    транскрипта всегда, по частям если не вмещается». Long primary
+    + secondary must be split into ≥2 batches and the chunked
+    merger must call the LLM that many times, concatenating outputs.
+    """
+    from app.ceo_brain.bilingual_restorer import merge_transcripts_chunked
+
+    # 90K primary, 60K secondary — both well over a 30K batch budget,
+    # so 3 batches expected (ceil(90000 / 30000) = 3).
+    primary = ("Artyom: russian line padding x" * 3000)[:90_000]
+    secondary = ("Artem: english line padding x" * 2100)[:60_000]
+
+    call_log: list[tuple[int, int]] = []
+
+    def _fake_create(*, model, max_tokens, temperature, messages):
+        user_msg = next(
+            (m["content"] for m in messages if m["role"] == "user"), "",
+        )
+        # Track input sizes so the test sees that each batch shrinks.
+        call_log.append((len(user_msg), max_tokens))
+        out = MagicMock()
+        out.choices = [
+            MagicMock(message=MagicMock(content=f"MERGED_BATCH_{len(call_log)}")),
+        ]
+        return out
+
+    client = MagicMock()
+    client.chat.completions.create.side_effect = _fake_create
+
+    result = merge_transcripts_chunked(
+        primary=primary,
+        secondary=secondary,
+        openai_client=client,
+        batch_input_chars=30_000,
+    )
+
+    assert result is not None
+    assert "MERGED_BATCH_1" in result
+    assert "MERGED_BATCH_2" in result
+    assert "MERGED_BATCH_3" in result
+    assert client.chat.completions.create.call_count == 3
+    # Each call's user message must be smaller than the full
+    # primary+secondary blob — confirms the chunker actually sliced.
+    for input_size, _ in call_log:
+        assert input_size < len(primary) + len(secondary)
+
+
 def test_bilingual_restorer_falls_back_when_audio_missing(monkeypatch):
     """FR-CB2-3.39 — when the detector says YES but the audio file
     can't be resolved (no DB row for the zoom_id), the orchestrator

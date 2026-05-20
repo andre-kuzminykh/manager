@@ -998,6 +998,12 @@ def run_responder(
                 bilingual_whisper_model=(
                     _s.ceo_brain_bilingual_whisper_model
                 ),
+                bilingual_reconcile_batch_input_chars=(
+                    _s.ceo_brain_bilingual_reconcile_batch_input_chars
+                ),
+                bilingual_reconcile_max_tokens_per_batch=(
+                    _s.ceo_brain_bilingual_reconcile_max_tokens_per_batch
+                ),
                 bilingual_trace_sink=_bi_traces,
             )
             if _bi_traces:

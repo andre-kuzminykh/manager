@@ -30,7 +30,7 @@ import argparse
 import sys
 
 from app.ceo_brain.bilingual_restorer import (
-    merge_transcripts,
+    merge_transcripts_chunked,
     re_stt_english_via_whisper,
     should_re_stt_english,
 )
@@ -196,12 +196,14 @@ def main() -> int:
     print(_head(secondary, args.max_head))
     _dump("secondary_en", secondary)
 
-    print("\n[4/4] Reconciler — merging PRIMARY + SECONDARY…")
-    merged = merge_transcripts(
+    print("\n[4/4] Reconciler (chunked) — merging PRIMARY + SECONDARY…")
+    merged = merge_transcripts_chunked(
         primary=primary,
         secondary=secondary,
         openai_client=openai_client,
         model=s.ceo_brain_bilingual_reconciler_model,
+        batch_input_chars=s.ceo_brain_bilingual_reconcile_batch_input_chars,
+        max_tokens_per_batch=s.ceo_brain_bilingual_reconcile_max_tokens_per_batch,
     )
     if not merged:
         print("  → reconciler returned nothing. Stopping.")

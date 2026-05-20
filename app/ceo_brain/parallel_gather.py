@@ -359,6 +359,8 @@ def _maybe_restore_bilingual_in_place(
     detector_model: str,
     reconciler_model: str,
     whisper_model: str = "whisper-1",
+    reconcile_batch_input_chars: int = 30_000,
+    reconcile_max_tokens_per_batch: int = 16_384,
     trace_sink: list[dict[str, Any]] | None = None,
 ) -> None:
     """FR-CB2-3.39 — post-process get_zoom_transcript buckets.
@@ -398,6 +400,8 @@ def _maybe_restore_bilingual_in_place(
             detector_model=detector_model,
             reconciler_model=reconciler_model,
             whisper_model=whisper_model,
+            reconcile_batch_input_chars=reconcile_batch_input_chars,
+            reconcile_max_tokens_per_batch=reconcile_max_tokens_per_batch,
         )
         trace["label"] = label
         log.info(
@@ -428,6 +432,8 @@ def gather_via_direct_http(
     bilingual_detector_model: str = "gpt-4o-mini",
     bilingual_reconciler_model: str = "gpt-4o",
     bilingual_whisper_model: str = "whisper-1",
+    bilingual_reconcile_batch_input_chars: int = 30_000,
+    bilingual_reconcile_max_tokens_per_batch: int = 16_384,
     bilingual_trace_sink: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
     """FR-CB2-3.31 — execute planned tool calls in parallel via
@@ -630,6 +636,8 @@ def gather_via_direct_http(
         detector_model=bilingual_detector_model,
         reconciler_model=bilingual_reconciler_model,
         whisper_model=bilingual_whisper_model,
+        reconcile_batch_input_chars=bilingual_reconcile_batch_input_chars,
+        reconcile_max_tokens_per_batch=bilingual_reconcile_max_tokens_per_batch,
         trace_sink=bilingual_trace_sink,
     )
 

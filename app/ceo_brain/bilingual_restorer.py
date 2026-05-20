@@ -119,6 +119,115 @@ def should_re_stt_english(
     return decision
 
 
+def merge_transcripts_chunked(
+    *,
+    primary: str,
+    secondary: str,
+    openai_client: Any,
+    model: str = "gpt-4o",
+    batch_input_chars: int = 30_000,
+    max_tokens_per_batch: int = 16_384,
+) -> str | None:
+    """Chunked reconciler — always returns a reconciled output that
+    covers the ENTIRE primary transcript regardless of length.
+    Operator-pinned: «мне надо весь текст выдать транскрипта всегда
+    чтобы выдавал, то есть если он не вмещается, надо несколько
+    батчей и чтобы всегда так работало».
+
+    Strategy:
+      1. Decide how many batches we need from the LARGER of the two
+         transcripts so each batch's input is ≤ ``batch_input_chars``.
+      2. Cut both transcripts at proportional offsets, snapping to
+         nearby newline / sentence-end boundaries via
+         ``_find_cut_point`` so cuts don't strand mid-sentence.
+      3. Reconcile each (primary_i, secondary_i) pair via
+         ``merge_transcripts``; concatenate outputs.
+
+    If both fit comfortably in one batch — collapses to a single
+    call (no overhead). Returns ``None`` only when ANY batch
+    fails — partial results are not returned (the caller falls
+    back to the primary, which is at least complete).
+    """
+    if not primary or not primary.strip():
+        return None
+    if not secondary or not secondary.strip():
+        return None
+    longer = max(len(primary), len(secondary))
+    n_batches = max(1, -(-longer // batch_input_chars))  # ceil division
+    if n_batches == 1:
+        return merge_transcripts(
+            primary=primary,
+            secondary=secondary,
+            openai_client=openai_client,
+            model=model,
+            max_input_chars=batch_input_chars,
+            max_tokens=max_tokens_per_batch,
+        )
+
+    def _split(text: str, n: int) -> list[str]:
+        cuts = [0]
+        for i in range(1, n):
+            ideal = i * len(text) // n
+            cuts.append(_find_cut_point(text, ideal))
+        cuts.append(len(text))
+        # Dedupe accidental zero-width slices (text shorter than n).
+        cuts = sorted(set(cuts))
+        return [text[cuts[i]:cuts[i + 1]] for i in range(len(cuts) - 1)]
+
+    p_chunks = _split(primary, n_batches)
+    s_chunks = _split(secondary, n_batches)
+    # Align lengths — pad the shorter list with empty strings so
+    # we can zip cleanly.
+    while len(p_chunks) < n_batches:
+        p_chunks.append("")
+    while len(s_chunks) < n_batches:
+        s_chunks.append("")
+
+    log.info(
+        "ceo_brain_bilingual_reconcile_chunked_start",
+        n_batches=n_batches,
+        primary_chars=len(primary),
+        secondary_chars=len(secondary),
+        batch_input_chars=batch_input_chars,
+    )
+    merged_parts: list[str] = []
+    for i, (p, s) in enumerate(zip(p_chunks, s_chunks), start=1):
+        if not p.strip() and not s.strip():
+            continue
+        # If one side is empty for this slice, hand the other through
+        # untouched — nothing to reconcile against.
+        if not s.strip():
+            merged_parts.append(p)
+            continue
+        if not p.strip():
+            merged_parts.append(s)
+            continue
+        out = merge_transcripts(
+            primary=p,
+            secondary=s,
+            openai_client=openai_client,
+            model=model,
+            max_input_chars=batch_input_chars,
+            max_tokens=max_tokens_per_batch,
+        )
+        if not out:
+            log.warning(
+                "ceo_brain_bilingual_reconcile_chunked_batch_failed",
+                batch=i, of=n_batches,
+            )
+            return None
+        merged_parts.append(out)
+        log.info(
+            "ceo_brain_bilingual_reconcile_chunked_batch_ok",
+            batch=i, of=n_batches,
+            in_primary_chars=len(p),
+            in_secondary_chars=len(s),
+            out_chars=len(out),
+        )
+
+    return "\n\n".join(merged_parts) if merged_parts else None
+
+
 def _load_audio_path_for_zoom_id(zoom_id: str) -> str | None:
     """Look up the on-disk audio path for a Zoom recording. Returns
     ``None`` when the recording row is missing, the audio file
@@ -364,6 +473,47 @@ def re_stt_english_via_whisper(
     return joined.strip()
 
 
+def _find_cut_point(text: str, target: int, window: int = 2000) -> int:
+    """Return an offset close to ``target`` that lands on a natural
+    boundary (newline → sentence end → whitespace). Falls back to
+    the exact ``target`` when nothing better is within ``window``
+    chars on either side. Keeps chunked-reconciler cuts from
+    landing mid-sentence and stranding context."""
+    n = len(text)
+    if target <= 0 or target >= n:
+        return max(0, min(target, n))
+    lo = max(0, target - window)
+    hi = min(n, target + window)
+    # 1st choice — newline closest to target
+    best = -1
+    best_dist = window + 1
+    for i in range(lo, hi):
+        if text[i] == "\n":
+            d = abs(i + 1 - target)
+            if d < best_dist:
+                best = i + 1
+                best_dist = d
+    if best != -1:
+        return best
+    # 2nd — sentence-end punctuation followed by space
+    for i in range(lo, hi - 1):
+        if text[i] in ".!?…" and text[i + 1] == " ":
+            d = abs(i + 1 - target)
+            if d < best_dist:
+                best = i + 1
+                best_dist = d
+    if best != -1:
+        return best
+    # 3rd — any whitespace
+    for i in range(lo, hi):
+        if text[i].isspace():
+            d = abs(i - target)
+            if d < best_dist:
+                best = i
+                best_dist = d
+    return best if best != -1 else target
+
+
 def merge_transcripts(
     *,
     primary: str,
@@ -428,6 +578,8 @@ def restore_transcript_bilingual(
     detector_model: str = "gpt-4o-mini",
     reconciler_model: str = "gpt-4o",
     whisper_model: str = "whisper-1",
+    reconcile_batch_input_chars: int = 30_000,
+    reconcile_max_tokens_per_batch: int = 16_384,
 ) -> tuple[str, dict[str, Any]]:
     """End-to-end orchestrator. Returns ``(final_text, trace)``.
 
@@ -492,11 +644,13 @@ def restore_transcript_bilingual(
             )
             return transcript, trace
         trace["secondary_chars"] = len(secondary)
-        merged = merge_transcripts(
+        merged = merge_transcripts_chunked(
             primary=transcript,
             secondary=secondary,
             openai_client=openai_client,
             model=reconciler_model,
+            batch_input_chars=reconcile_batch_input_chars,
+            max_tokens_per_batch=reconcile_max_tokens_per_batch,
         )
         if not merged:
             trace["stage"] = "reconciler_failed"
@@ -517,5 +671,6 @@ __all__ = [
     "should_re_stt_english",
     "re_stt_english_via_whisper",
     "merge_transcripts",
+    "merge_transcripts_chunked",
     "restore_transcript_bilingual",
 ]

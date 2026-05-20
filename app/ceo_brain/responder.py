@@ -465,6 +465,7 @@ def select_mcps_for_question(
     question: str,
     all_servers: list[dict],
     anthropic_client: Any,
+    thread_context: list[dict] | None = None,
 ) -> list[dict]:
     """FR-CB2-3.25 — pick the subset of MCP servers actually needed
     to answer this question. Reduces parallel handshake load and
@@ -474,6 +475,11 @@ def select_mcps_for_question(
     ~1 sec but saves 30-300 sec on handshake retries downstream.
     On ANY failure (network, malformed JSON, unknown names) falls
     back to the full server list (no degradation).
+
+    FR-CB2-3.37 — when ``thread_context`` is provided (last 2-3
+    messages in the thread, oldest first), include it in the prompt
+    so the classifier resolves follow-up questions like «а за
+    вчера», «а на встречах».
     """
     if not all_servers or not question:
         return list(all_servers)
@@ -483,12 +489,33 @@ def select_mcps_for_question(
         desc = _MCP_DESCRIPTIONS.get(name, "(no description)")
         catalog_lines.append(f"- {name}: {desc}")
     catalog = "\n".join(catalog_lines)
+    # FR-CB2-3.37 — render thread context (last 2-3 messages) so
+    # follow-ups make sense in isolation.
+    context_block = ""
+    if thread_context:
+        ctx_lines = []
+        for m in thread_context[-3:]:
+            role = m.get("role") or "?"
+            txt = (m.get("content") or "").strip()
+            if not txt:
+                continue
+            label = "Оператор" if role == "user" else "Бот"
+            ctx_lines.append(f"- {label}: {txt[:300]}")
+        if ctx_lines:
+            context_block = (
+                "Недавний контекст в треде (для расшифровки "
+                "follow-up вопросов вроде «а за вчера», «а на "
+                "встречах»):\n" + "\n".join(ctx_lines) + "\n\n"
+            )
+
     prompt = (
-        f"Вопрос оператора: {question}\n\n"
+        f"{context_block}"
+        f"Текущий вопрос оператора: {question}\n\n"
         "Доступные источники данных (MCP servers):\n"
         f"{catalog}\n\n"
-        "Какие источники реально нужны, чтобы ответить на этот "
-        "вопрос? Включай только те, что СКОРЕЕ ВСЕГО содержат "
+        "Какие источники реально нужны, чтобы ответить на ЭТОТ "
+        "вопрос (учитывая контекст треда выше, если есть)? Включай "
+        "только те, что СКОРЕЕ ВСЕГО содержат "
         "релевантные данные. Когда сомневаешься — включай. "
         "Минимум 1 источник.\n\n"
         "ВАЖНО: если в вопросе упоминаются имена коллег "
@@ -805,10 +832,21 @@ def run_responder(
                     last_user_q = content
                     break
         if last_user_q:
+            # FR-CB2-3.37 — provide last 2-3 thread messages as
+            # context so follow-ups («а за вчера», «а на встречах»)
+            # resolve. Exclude the trailing current question so it
+            # doesn't duplicate.
+            ctx = [
+                m for m in (thread_history or [])
+                if isinstance(m, dict) and m.get("content")
+            ]
+            if ctx and ctx[-1].get("content", "").strip() == last_user_q.strip():
+                ctx = ctx[:-1]
             picked = select_mcps_for_question(
                 question=last_user_q,
                 all_servers=request["mcp_servers"],
                 anthropic_client=anthropic_client,
+                thread_context=ctx[-3:] if ctx else None,
             )
             request = {**request, "mcp_servers": picked}
 
@@ -888,12 +926,20 @@ def run_responder(
         # 2. plan
         from datetime import datetime as _dt, timezone as _tz
         today_iso = (today or _dt.now(_tz.utc)).strftime("%Y-%m-%d")
+        # FR-CB2-3.37 — same thread context to planner.
+        plan_ctx = [
+            m for m in (thread_history or [])
+            if isinstance(m, dict) and m.get("content")
+        ]
+        if plan_ctx and plan_ctx[-1].get("content", "").strip() == last_user_q.strip():
+            plan_ctx = plan_ctx[:-1]
         planned = plan_tool_calls(
             question=last_user_q,
             mcp_servers=request["mcp_servers"],
             tools_by_mcp=tools_by_mcp,
             anthropic_client=anthropic_client,
             today_iso=today_iso,
+            thread_context=plan_ctx[-3:] if plan_ctx else None,
         )
         if not planned:
             # Planner failed — fall back to Anthropic-MCP gather

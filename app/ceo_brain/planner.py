@@ -223,20 +223,44 @@ def plan_tool_calls(
     tools_by_mcp: dict[str, list[dict]],
     anthropic_client: Any,
     today_iso: str | None = None,
+    thread_context: list[dict] | None = None,
 ) -> list[dict[str, Any]]:
     """Ask haiku to plan the tool calls. Returns a list of
     ``{mcp: name, tool: name, args: dict, reason: str}`` triplets.
     Empty list on failure (caller decides fallback).
+
+    FR-CB2-3.37 — ``thread_context`` is the last 2-3 messages from
+    the Slack thread (oldest first, role+content). When present,
+    rendered into the prompt so follow-up questions like «а за
+    вчера» resolve correctly.
     """
     if not mcp_servers or not question:
         return []
     catalog = _tool_catalog_lines(mcp_servers, tools_by_mcp)
+    context_block = ""
+    if thread_context:
+        ctx_lines = []
+        for m in thread_context[-3:]:
+            role = m.get("role") or "?"
+            txt = (m.get("content") or "").strip()
+            if not txt:
+                continue
+            label = "Оператор" if role == "user" else "Бот"
+            ctx_lines.append(f"- {label}: {txt[:300]}")
+        if ctx_lines:
+            context_block = (
+                "Недавний контекст в треде (для расшифровки "
+                "follow-up вопросов вроде «а за вчера», «а на "
+                "встречах»):\n" + "\n".join(ctx_lines) + "\n\n"
+            )
     prompt = (
         f"Сегодня: {today_iso or '<today>'}\n\n"
-        f"Вопрос оператора: {question}\n\n"
+        f"{context_block}"
+        f"Текущий вопрос оператора: {question}\n\n"
         f"Доступные MCP-серверы и их tools:\n{catalog}\n\n"
         "Задача: выбери список tool-вызовов которые надо сделать "
-        "чтобы ответить на вопрос. Возвращай ТОЛЬКО JSON, без "
+        "чтобы ответить на ЭТОТ вопрос (учитывая контекст треда "
+        "выше, если есть). Возвращай ТОЛЬКО JSON, без "
         "markdown-блоков. Формат:\n"
         "{\n  \"calls\": [\n"
         "    {\"mcp\":\"<name>\",\"tool\":\"<tool_name>\",\"args\":{...}},\n"

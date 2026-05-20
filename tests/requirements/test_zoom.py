@@ -1955,6 +1955,67 @@ def _make_pipeline_stub(required_email: str = "1@thehumanoid.ai"):
     return pipe
 
 
+def test_ensure_team_participants_prefers_calendar_attendees():
+    """FR-CR-05-174 — when row.calendar_attendees is populated AND
+    contains team_member entries, `_ensure_team_participants` must
+    return THOSE names, NOT call the LLM extractor (which has been
+    hallucinating phantom names like «Валентина» from transcript
+    mentions)."""
+    from types import SimpleNamespace
+    from app.zoom.pipeline import ZoomPipeline
+
+    pipe = ZoomPipeline.__new__(ZoomPipeline)
+    pipe._settings = SimpleNamespace()
+
+    row = SimpleNamespace(
+        zoom_id="ABC==",
+        transcript_text="Some transcript here mentioning Валентина",
+        calendar_attendees=[
+            {"resolved_name": "Артем Соколов", "source": "team_member"},
+            {"resolved_name": "Ирина Шипилова", "source": "team_member"},
+            # Non-team-member entries must be excluded from the
+            # task-owner pool.
+            {"resolved_name": "Mohammed Al Fardan",
+             "source": "counterparty"},
+            {"resolved_name": "Unknown Joiner", "source": "unknown"},
+        ],
+        __dict__={},
+    )
+    known_employees = [
+        {"real_name": "Артем Соколов"},
+        {"real_name": "Ирина Шипилова"},
+        {"real_name": "Дмитрий Седов"},
+    ]
+    out = ZoomPipeline._ensure_team_participants(
+        pipe, row, known_employees,
+    )
+    assert out == ["Артем Соколов", "Ирина Шипилова"]
+
+
+def test_ensure_team_participants_falls_back_to_llm_when_no_calendar():
+    """FR-CR-05-174 — when calendar_attendees is empty (no Calendar
+    event matched, OR Zoom API gave nothing), preserve the existing
+    behaviour and fall through to the LLM extractor — we MUST NOT
+    regress meetings where the calendar enrichment failed."""
+    from types import SimpleNamespace
+    from app.zoom.pipeline import ZoomPipeline
+
+    pipe = ZoomPipeline.__new__(ZoomPipeline)
+    pipe._settings = SimpleNamespace()
+
+    row = SimpleNamespace(
+        zoom_id="EMPTY==",
+        transcript_text="",  # forces the early return in fallback
+        calendar_attendees=[],
+        __dict__={},
+    )
+    out = ZoomPipeline._ensure_team_participants(
+        pipe, row, known_employees=[{"real_name": "Артем Соколов"}],
+    )
+    # empty transcript → fallback returns [] (existing behaviour)
+    assert out == []
+
+
 def test_operator_present_via_calendar_attendees():
     """FR-CR-05-173 — calendar_attendees contains the operator's
     email → presence confirmed → short summary posts."""

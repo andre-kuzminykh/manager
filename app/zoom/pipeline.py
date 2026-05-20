@@ -1550,6 +1550,15 @@ class ZoomPipeline:
         started a future (parallel with detailed_summary), wait
         for it instead of starting a fresh LLM call.
 
+        FR-CR-05-174 — operator-pinned 2026-05-20: prefer the
+        authoritative list from `row.calendar_attendees` (Calendar
+        attendees ∩ actual Zoom participants, FR-CR-05-169 +
+        FR-CR-05-172) over the LLM-from-transcript fallback when
+        present. Filters to `source="team_member"` because task
+        ownership requires an internal teammate. The earlier flow
+        produced phantom owners like «Валентина» when the LLM
+        hallucinated names from passing transcript mentions.
+
         Returns a list of canonical real_names from
         team_members.real_name (validated, no Whisper
         hallucinations). Empty list when no team_members are
@@ -1558,6 +1567,44 @@ class ZoomPipeline:
         cached = row.__dict__.get("_zm_team_participants")
         if cached is not None:
             return list(cached)
+        # FR-CR-05-174 — authoritative path first.
+        cal = row.calendar_attendees or []
+        known_real_names = {
+            (e.get("real_name") or "").strip()
+            for e in (known_employees or [])
+            if (e.get("real_name") or "").strip()
+        }
+        from_calendar: list[str] = []
+        seen: set[str] = set()
+        for a in cal:
+            if not isinstance(a, dict):
+                continue
+            if (a.get("source") or "").strip() != "team_member":
+                continue
+            name = (a.get("resolved_name") or "").strip()
+            if not name:
+                continue
+            # Only include names we can match to known_employees —
+            # task-owner resolver downstream needs that link to map
+            # name → telegram_id / slack_user_id.
+            if known_real_names and name not in known_real_names:
+                continue
+            key = name.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            from_calendar.append(name)
+        if from_calendar:
+            row.__dict__["_zm_team_participants"] = from_calendar
+            log.info(
+                "zoom_participants_from_calendar_attendees",
+                zoom_id=row.zoom_id,
+                participants=from_calendar,
+                participants_count=len(from_calendar),
+                hint=("FR-CR-05-174 — used authoritative Zoom+Calendar "
+                      "join, skipped LLM extraction"),
+            )
+            return list(from_calendar)
         if not row.transcript_text or not known_employees:
             row.__dict__["_zm_team_participants"] = []
             return []

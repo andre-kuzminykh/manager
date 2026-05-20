@@ -371,7 +371,7 @@ def merge_transcripts(
     openai_client: Any,
     model: str = "gpt-4o",
     max_input_chars: int = 60_000,
-    max_tokens: int = 4096,
+    max_tokens: int = 16_384,
 ) -> str | None:
     """Reconciler step. Asks the OpenAI model to emit a single
     final transcript combining the two passes. Returns ``None``

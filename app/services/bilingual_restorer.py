@@ -99,7 +99,7 @@ def should_re_stt_english(
         )
     except Exception as e:  # noqa: BLE001
         log.info(
-            "ceo_brain_bilingual_detector_failed",
+            "zoom_bilingual_detector_failed",
             error=str(e), error_type=type(e).__name__,
         )
         return False
@@ -107,13 +107,13 @@ def should_re_stt_english(
         text = (resp.choices[0].message.content or "").strip().upper()
     except Exception as e:  # noqa: BLE001
         log.info(
-            "ceo_brain_bilingual_detector_parse_failed",
+            "zoom_bilingual_detector_parse_failed",
             error=str(e),
         )
         return False
     decision = text.startswith("YES")
     log.info(
-        "ceo_brain_bilingual_detector_decided",
+        "zoom_bilingual_detector_decided",
         decision=decision, raw=text[:32],
     )
     return decision
@@ -184,7 +184,7 @@ def merge_transcripts_chunked(
         s_chunks.append("")
 
     log.info(
-        "ceo_brain_bilingual_reconcile_chunked_start",
+        "zoom_bilingual_reconcile_chunked_start",
         n_batches=n_batches,
         primary_chars=len(primary),
         secondary_chars=len(secondary),
@@ -212,13 +212,13 @@ def merge_transcripts_chunked(
         )
         if not out:
             log.warning(
-                "ceo_brain_bilingual_reconcile_chunked_batch_failed",
+                "zoom_bilingual_reconcile_chunked_batch_failed",
                 batch=i, of=n_batches,
             )
             return None
         merged_parts.append(out)
         log.info(
-            "ceo_brain_bilingual_reconcile_chunked_batch_ok",
+            "zoom_bilingual_reconcile_chunked_batch_ok",
             batch=i, of=n_batches,
             in_primary_chars=len(p),
             in_secondary_chars=len(s),
@@ -251,14 +251,14 @@ def _load_audio_path_for_zoom_id(zoom_id: str) -> str | None:
                 return None
             if not os.path.exists(path):
                 log.info(
-                    "ceo_brain_bilingual_audio_missing_on_disk",
+                    "zoom_bilingual_audio_missing_on_disk",
                     zoom_id=zoom_id, audio_path=path,
                 )
                 return None
             return path
     except Exception as e:  # noqa: BLE001
         log.info(
-            "ceo_brain_bilingual_audio_lookup_failed",
+            "zoom_bilingual_audio_lookup_failed",
             zoom_id=zoom_id, error=str(e),
         )
         return None
@@ -286,7 +286,7 @@ def _load_audio_url_for_zoom_id(zoom_id: str) -> str | None:
             return url or None
     except Exception as e:  # noqa: BLE001
         log.info(
-            "ceo_brain_bilingual_audio_url_lookup_failed",
+            "zoom_bilingual_audio_url_lookup_failed",
             zoom_id=zoom_id, error=str(e),
         )
         return None
@@ -312,7 +312,7 @@ def _download_zoom_audio_to_temp(audio_url: str) -> str | None:
         s = get_settings()
         if not (s.zoom_client_id and s.zoom_client_secret
                 and s.zoom_account_id):
-            log.info("ceo_brain_bilingual_zoom_oauth_missing")
+            log.info("zoom_bilingual_zoom_oauth_missing")
             return None
         client = ZoomClient(
             account_id=s.zoom_account_id,
@@ -335,13 +335,13 @@ def _download_zoom_audio_to_temp(audio_url: str) -> str | None:
                 pass
             return None
         log.info(
-            "ceo_brain_bilingual_audio_downloaded",
+            "zoom_bilingual_audio_downloaded",
             tmp_path=tmp.name, bytes=written,
         )
         return tmp.name
     except Exception as e:  # noqa: BLE001
         log.warning(
-            "ceo_brain_bilingual_audio_download_failed",
+            "zoom_bilingual_audio_download_failed",
             error=str(e), error_type=type(e).__name__,
         )
         return None
@@ -381,17 +381,17 @@ def re_stt_english_via_whisper(
         url = _load_audio_url_for_zoom_id(zoom_id)
         if url:
             log.info(
-                "ceo_brain_bilingual_audio_local_miss_trying_cloud",
+                "zoom_bilingual_audio_local_miss_trying_cloud",
                 zoom_id=zoom_id,
             )
             path = _download_zoom_audio_to_temp(url) or ""
             tmp_to_cleanup = path or None
     if not path:
-        log.info("ceo_brain_bilingual_re_stt_skipped_no_audio")
+        log.info("zoom_bilingual_re_stt_skipped_no_audio")
         return None
     if not os.path.exists(path):
         log.info(
-            "ceo_brain_bilingual_re_stt_skipped_missing",
+            "zoom_bilingual_re_stt_skipped_missing",
             audio_path=path,
         )
         return None
@@ -420,12 +420,12 @@ def re_stt_english_via_whisper(
             # track so we can clean up.
             extra_tmp_chunks = [c for c in chunk_paths if c != path]
             log.info(
-                "ceo_brain_bilingual_audio_chunked",
+                "zoom_bilingual_audio_chunked",
                 size=size, chunks=len(chunk_paths),
             )
         except Exception as e:  # noqa: BLE001
             log.warning(
-                "ceo_brain_bilingual_audio_chunk_failed",
+                "zoom_bilingual_audio_chunk_failed",
                 error=str(e), error_type=type(e).__name__,
             )
             if tmp_to_cleanup:
@@ -554,7 +554,7 @@ def merge_transcripts(
         )
     except Exception as e:  # noqa: BLE001
         log.warning(
-            "ceo_brain_bilingual_reconciler_failed",
+            "zoom_bilingual_reconciler_failed",
             error=str(e), error_type=type(e).__name__,
         )
         return None
@@ -562,7 +562,7 @@ def merge_transcripts(
         text = (resp.choices[0].message.content or "").strip()
     except Exception as e:  # noqa: BLE001
         log.warning(
-            "ceo_brain_bilingual_reconciler_parse_failed", error=str(e),
+            "zoom_bilingual_reconciler_parse_failed", error=str(e),
         )
         return None
     return text or None
@@ -660,7 +660,7 @@ def restore_transcript_bilingual(
         return merged, trace
     except Exception as e:  # noqa: BLE001
         log.warning(
-            "ceo_brain_bilingual_restore_unexpected_error",
+            "zoom_bilingual_restore_unexpected_error",
             error=str(e), error_type=type(e).__name__,
         )
         trace["stage"] = trace["stage"] or "unexpected_error"

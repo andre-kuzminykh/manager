@@ -384,9 +384,98 @@ class ZoomPipeline:
                     except OSError:
                         pass
         row.transcript_text = transcript
+        # FR-CR-05-170 — bilingual restoration: if enabled, re-STT
+        # the SAME audio in English-biased mode and let an LLM merge
+        # primary + secondary into one canonical transcript. The
+        # restored text BECOMES `row.transcript_text` so every
+        # downstream step (detailed_summary, short_summary, tasks,
+        # Doc export, CEO Brain MCP queries) sees the clean version.
+        # Best-effort: any failure leaves the primary Whisper text
+        # in place.
+        try:
+            self._maybe_restore_bilingual_transcript(row)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "zoom_bilingual_restore_step_failed",
+                zoom_id=row.zoom_id, error=str(e),
+            )
         row.transcribed = True
         row.last_error = None
         return True
+
+    def _maybe_restore_bilingual_transcript(self, row: ZoomRecording) -> None:
+        """FR-CR-05-170 — gate + dispatch the bilingual restorer.
+
+        Gated by `ZOOM_BILINGUAL_RESTORATION_ENABLED`. When enabled
+        and OpenAI key is available, runs:
+            (a) detector on `row.transcript_text`;
+            (b) second Whisper pass at `language="en"` on the SAME
+                `row.audio_path` (downloads from Zoom cloud if the
+                local copy was purged — see
+                `bilingual_restorer.re_stt_english_via_whisper`);
+            (c) chunked reconciler LLM call.
+        Replaces `row.transcript_text` with the reconciled output.
+        """
+        if not self._settings.zoom_bilingual_restoration_enabled:
+            return
+        if not (row.transcript_text or "").strip():
+            return
+        api_key = self._settings.openai_api_key
+        if not api_key:
+            log.info(
+                "zoom_bilingual_skipped_no_openai_key",
+                zoom_id=row.zoom_id,
+            )
+            return
+        try:
+            from openai import OpenAI
+            openai_client = OpenAI(api_key=api_key)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "zoom_bilingual_openai_init_failed",
+                zoom_id=row.zoom_id, error=str(e),
+            )
+            return
+        from app.services.bilingual_restorer import (
+            restore_transcript_bilingual,
+        )
+
+        restored, trace = restore_transcript_bilingual(
+            transcript=row.transcript_text,
+            zoom_id=row.zoom_id,
+            audio_path=row.audio_path,
+            openai_client=openai_client,
+            openai_api_key=api_key,
+            detector_model=(
+                self._settings.zoom_bilingual_detector_model
+            ),
+            reconciler_model=(
+                self._settings.zoom_bilingual_reconciler_model
+            ),
+            whisper_model=(
+                self._settings.zoom_bilingual_whisper_model
+            ),
+            reconcile_batch_input_chars=(
+                self._settings.zoom_bilingual_reconcile_batch_input_chars
+            ),
+            reconcile_max_tokens_per_batch=(
+                self._settings.zoom_bilingual_reconcile_max_tokens_per_batch
+            ),
+        )
+        log.info(
+            "zoom_bilingual_restore_result",
+            zoom_id=row.zoom_id,
+            stage=trace.get("stage"),
+            decision=trace.get("decision"),
+            primary_chars=trace.get("primary_chars"),
+            secondary_chars=trace.get("secondary_chars"),
+            final_chars=trace.get("final_chars"),
+        )
+        # Only swap in the restored text on a real merge — every
+        # short-circuit path (detector_said_no / re_stt_failed /
+        # reconciler_failed) returns the primary verbatim.
+        if trace.get("stage") == "restored" and restored:
+            row.transcript_text = restored
 
     def _find_vtt_download_url(self, row: ZoomRecording) -> str | None:
         """FR-CR-05-148 — find the Zoom-side VTT transcript file

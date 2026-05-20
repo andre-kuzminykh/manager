@@ -2205,33 +2205,39 @@ def _make_openai_stub(detector_reply: str, reconciler_reply: str) -> MagicMock:
 
 
 def test_bilingual_restorer_disabled_by_default(monkeypatch):
-    """FR-CB2-3.39 — when the flag is off, ``gather_via_direct_http``
-    must NOT touch transcript buckets even if an OpenAI client is
-    supplied. Verified by passing a sentinel and asserting it was
-    never invoked."""
-    from app.ceo_brain.parallel_gather import (
-        _maybe_restore_bilingual_in_place,
-    )
+    """FR-CR-05-170 — when ``ZOOM_BILINGUAL_RESTORATION_ENABLED`` is
+    off (default), the zoom-pipeline transcribe step must NOT touch
+    ``row.transcript_text`` or call OpenAI. Verified by checking the
+    text stays exactly as Whisper wrote it."""
+    from types import SimpleNamespace
+    from app.zoom.pipeline import ZoomPipeline
 
-    sentinel_client = MagicMock()
-    out = {"n8n_calendar::get_zoom_transcript#42": "Ира сказала..."}
-    _maybe_restore_bilingual_in_place(
-        out,
-        bilingual_enabled=False,
-        openai_client=sentinel_client,
+    sentinel_settings = SimpleNamespace(
+        zoom_bilingual_restoration_enabled=False,
         openai_api_key="sk-test",
-        detector_model="gpt-4o-mini",
-        reconciler_model="gpt-4o",
+        zoom_bilingual_detector_model="gpt-4o-mini",
+        zoom_bilingual_reconciler_model="gpt-4o",
+        zoom_bilingual_whisper_model="whisper-1",
+        zoom_bilingual_reconcile_batch_input_chars=30000,
+        zoom_bilingual_reconcile_max_tokens_per_batch=16384,
     )
-    assert out["n8n_calendar::get_zoom_transcript#42"] == "Ира сказала..."
-    sentinel_client.chat.completions.create.assert_not_called()
+    pipeline = ZoomPipeline.__new__(ZoomPipeline)
+    pipeline._settings = sentinel_settings
+
+    class _Row:
+        transcript_text = "Ира сказала..."
+        zoom_id = "ABC=="
+        audio_path = "/tmp/x.m4a"
+    row = _Row()
+    pipeline._maybe_restore_bilingual_transcript(row)
+    assert row.transcript_text == "Ира сказала..."
 
 
 def test_bilingual_detector_decides_yes_for_mixed():
     """FR-CB2-3.39 — detector returns True when the OpenAI model
     answers YES, False otherwise. Exercises the parsing logic
     around leading/trailing whitespace and case."""
-    from app.ceo_brain.bilingual_restorer import should_re_stt_english
+    from app.services.bilingual_restorer import should_re_stt_english
 
     yes_client = MagicMock()
     yes_client.chat.completions.create.return_value = MagicMock(
@@ -2253,57 +2259,51 @@ def test_bilingual_detector_decides_yes_for_mixed():
 
 
 def test_bilingual_reconcile_merges_via_llm(monkeypatch):
-    """FR-CB2-3.39 — full happy path: detector says YES, Whisper
-    re-pass returns an English transcript, reconciler emits the
-    merged text. ``out`` bucket is replaced in place and the trace
-    sink receives a ``stage=restored`` entry."""
-    from app.ceo_brain.parallel_gather import (
-        _maybe_restore_bilingual_in_place,
-    )
+    """FR-CR-05-170 — happy path inside `_step_transcribe`: detector
+    says YES, Whisper re-pass returns an English transcript,
+    reconciler emits merged text. ``row.transcript_text`` is replaced
+    in place with the restored version."""
+    from types import SimpleNamespace
+    from app.zoom.pipeline import ZoomPipeline
 
     client = _make_openai_stub(
         detector_reply="YES",
         reconciler_reply="MERGED: Ира + Mohammed Al Fardan...",
     )
 
-    # Stub the Whisper re-pass to return a synthetic English
-    # transcript without touching disk / OpenAI.
     def _fake_re_stt(*, zoom_id, audio_path, openai_api_key,
                     model, whisper_prompt=None):
         assert zoom_id == "abcdef12345678"
         return "Mohammed Al Fardan said..."
 
     monkeypatch.setattr(
-        "app.ceo_brain.bilingual_restorer.re_stt_english_via_whisper",
+        "app.services.bilingual_restorer.re_stt_english_via_whisper",
         _fake_re_stt,
     )
+    monkeypatch.setattr(
+        "app.zoom.pipeline.OpenAI" if False else "openai.OpenAI",
+        lambda **kw: client,
+    )
 
-    out = {
-        "n8n_calendar::get_zoom_transcript#7": (
-            "Zoom ID: abcdef12345678\n\nИра... shafler..."
-        ),
-        "n8n_calendar::search_zoom_meetings#1": "ID: abc...",
-    }
-    trace_sink: list[dict] = []
-    _maybe_restore_bilingual_in_place(
-        out,
-        bilingual_enabled=True,
-        openai_client=client,
+    settings = SimpleNamespace(
+        zoom_bilingual_restoration_enabled=True,
         openai_api_key="sk-test",
-        detector_model="gpt-4o-mini",
-        reconciler_model="gpt-4o",
-        trace_sink=trace_sink,
+        zoom_bilingual_detector_model="gpt-4o-mini",
+        zoom_bilingual_reconciler_model="gpt-4o",
+        zoom_bilingual_whisper_model="whisper-1",
+        zoom_bilingual_reconcile_batch_input_chars=30000,
+        zoom_bilingual_reconcile_max_tokens_per_batch=16384,
     )
+    pipeline = ZoomPipeline.__new__(ZoomPipeline)
+    pipeline._settings = settings
 
-    assert out["n8n_calendar::get_zoom_transcript#7"].startswith(
-        "MERGED: "
-    )
-    # search bucket must be untouched.
-    assert out["n8n_calendar::search_zoom_meetings#1"] == "ID: abc..."
-    assert len(trace_sink) == 1
-    assert trace_sink[0]["stage"] == "restored"
-    assert trace_sink[0]["decision"] is True
-    assert trace_sink[0]["secondary_chars"] > 0
+    class _Row:
+        transcript_text = "Ира... shafler..."
+        zoom_id = "abcdef12345678"
+        audio_path = "/tmp/audio.m4a"
+    row = _Row()
+    pipeline._maybe_restore_bilingual_transcript(row)
+    assert row.transcript_text.startswith("MERGED: ")
 
 
 def test_bilingual_reconcile_chunked_covers_full_transcript():
@@ -2312,7 +2312,7 @@ def test_bilingual_reconcile_chunked_covers_full_transcript():
     + secondary must be split into ≥2 batches and the chunked
     merger must call the LLM that many times, concatenating outputs.
     """
-    from app.ceo_brain.bilingual_restorer import merge_transcripts_chunked
+    from app.services.bilingual_restorer import merge_transcripts_chunked
 
     # 90K primary, 60K secondary — both well over a 30K batch budget,
     # so 3 batches expected (ceil(90000 / 30000) = 3).
@@ -2359,7 +2359,7 @@ def test_bilingual_restorer_falls_back_when_audio_missing(monkeypatch):
     can't be resolved (no DB row for the zoom_id), the orchestrator
     must return the primary transcript unchanged with
     ``stage='re_stt_no_audio'`` and MUST NOT invoke the reconciler."""
-    from app.ceo_brain.bilingual_restorer import (
+    from app.services.bilingual_restorer import (
         restore_transcript_bilingual,
     )
 
@@ -2370,7 +2370,7 @@ def test_bilingual_restorer_falls_back_when_audio_missing(monkeypatch):
 
     # Force the audio-path lookup to return None (no DB row).
     monkeypatch.setattr(
-        "app.ceo_brain.bilingual_restorer._load_audio_path_for_zoom_id",
+        "app.services.bilingual_restorer._load_audio_path_for_zoom_id",
         lambda zoom_id: None,
     )
 

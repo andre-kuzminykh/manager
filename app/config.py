@@ -145,59 +145,56 @@ class Settings(BaseSettings):
     ceo_brain_allowed_users: str = Field(
         default="", alias="CEO_BRAIN_ALLOWED_USERS",
     )
-    # FR-CB2-3.39 — bilingual transcript restoration. After a Zoom
-    # transcript is fetched, optionally (a) ask an LLM if the text
-    # contains garbled English / mixed-language segments, (b) trigger
-    # a second STT pass with `lang=en` against an operator-configured
-    # endpoint, (c) merge the two transcripts via LLM so each segment
-    # ends up in the right language. All three steps are wrapped in
-    # try/except — pipeline degrades to the original transcript on any
-    # failure. Default OFF (operator tests on traces first).
-    ceo_brain_bilingual_restoration_enabled: bool = Field(
+    # FR-CR-05-170 — bilingual transcript restoration applied during
+    # Zoom ingestion (in `_step_transcribe`, right after Whisper).
+    # When enabled, every fresh transcript goes through:
+    #   (a) detector — does it look like a bilingual call with garbled
+    #       English segments?
+    #   (b) second Whisper pass with `language="en"` on the SAME audio;
+    #   (c) reconciler LLM merges Russian + English passes into ONE
+    #       canonical transcript stored on `row.transcript_text`.
+    # All downstream steps (detailed_summary, short_summary, tasks,
+    # Doc export, CEO Brain MCP queries) consume the restored text.
+    # Default OFF — operator first verifies via `ops/bilingual_smoke`
+    # then flips this on.
+    zoom_bilingual_restoration_enabled: bool = Field(
         default=False,
-        alias="CEO_BRAIN_BILINGUAL_RESTORATION_ENABLED",
-    )
-    # OpenAI key for the bilingual detector + reconciler calls (kept
-    # separate from `OPENAI_API_KEY` so the operator can use a
-    # different account / budget for CEO Brain LLM work). Falls back
-    # to `OPENAI_API_KEY` when empty.
-    ceo_brain_openai_api_key: str = Field(
-        default="", alias="CEO_BRAIN_OPENAI_API_KEY",
+        alias="ZOOM_BILINGUAL_RESTORATION_ENABLED",
     )
     # Model id for the bilingual detector (fast/cheap binary call).
-    ceo_brain_bilingual_detector_model: str = Field(
+    zoom_bilingual_detector_model: str = Field(
         default="gpt-4o-mini",
-        alias="CEO_BRAIN_BILINGUAL_DETECTOR_MODEL",
+        alias="ZOOM_BILINGUAL_DETECTOR_MODEL",
     )
     # Model id for the bilingual reconciler (merges two transcripts).
-    ceo_brain_bilingual_reconciler_model: str = Field(
+    zoom_bilingual_reconciler_model: str = Field(
         default="gpt-4o",
-        alias="CEO_BRAIN_BILINGUAL_RECONCILER_MODEL",
+        alias="ZOOM_BILINGUAL_RECONCILER_MODEL",
     )
     # Whisper model id for the second STT pass (operator-pinned:
     # «тот же STT что и брал, но язык англ» — reuses
     # `app.services.transcription.transcribe_bytes` with
     # `language="en"`, same OpenAI key as the primary Whisper pass).
-    ceo_brain_bilingual_whisper_model: str = Field(
+    zoom_bilingual_whisper_model: str = Field(
         default="whisper-1",
-        alias="CEO_BRAIN_BILINGUAL_WHISPER_MODEL",
+        alias="ZOOM_BILINGUAL_WHISPER_MODEL",
     )
-    # FR-CB2-3.39 chunked reconciler — split both transcripts into
-    # batches of this many input chars so the LLM always covers the
-    # full primary regardless of length. Smaller = more batches, more
-    # cost / latency, but each batch fits comfortably in the model's
-    # context window. 30k chars ≈ 7.5K tokens of input — leaves room
-    # for the system prompt and a full 16K-token output.
-    ceo_brain_bilingual_reconcile_batch_input_chars: int = Field(
+    # Chunked reconciler — split both transcripts into batches of this
+    # many input chars so the LLM always covers the full primary
+    # regardless of length. Smaller = more batches, more cost /
+    # latency, but each batch fits comfortably in the context window.
+    # 30k chars ≈ 7.5K tokens of input — leaves room for system prompt
+    # and a full 16K-token output.
+    zoom_bilingual_reconcile_batch_input_chars: int = Field(
         default=30_000,
-        alias="CEO_BRAIN_BILINGUAL_RECONCILE_BATCH_INPUT_CHARS",
+        alias="ZOOM_BILINGUAL_RECONCILE_BATCH_INPUT_CHARS",
     )
     # Max output tokens per reconciler batch. 16,384 = gpt-4o's
     # single-response cap; lower it only when you intentionally want
     # a shorter, summarised output per batch.
-    ceo_brain_bilingual_reconcile_max_tokens_per_batch: int = Field(
+    zoom_bilingual_reconcile_max_tokens_per_batch: int = Field(
         default=16_384,
-        alias="CEO_BRAIN_BILINGUAL_RECONCILE_MAX_TOKENS_PER_BATCH",
+        alias="ZOOM_BILINGUAL_RECONCILE_MAX_TOKENS_PER_BATCH",
     )
 
     # FR-CR-05-165 — Pre-meeting agenda. За N минут до повторяющейся

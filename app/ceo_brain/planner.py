@@ -52,7 +52,13 @@ _OPERATOR_TOOL_DESCRIPTIONS: dict[tuple[str, str], str] = {
         "Зови ОБЯЗАТЕЛЬНО после search_zoom_meetings — без "
         "транскрипта нельзя ответить на вопросы «что сказал», "
         "«что обсудили». Можешь оставить zoom_id пустым — engine "
-        "сам подставит первый из search-результата."
+        "сам подставит первый из search-результата. "
+        "ВАЖНО: `search_fragment` ВСЕГДА оставляй ПУСТОЙ СТРОКОЙ — "
+        "тебе нужен ПОЛНЫЙ транскрипт без фильтра. Имя человека "
+        "или ключевое слово ИСКАТЬ В ОТВЕТЕ ТЫ САМ из полного "
+        "текста — n8n при заполненном search_fragment отдаёт только "
+        "буквальные совпадения и пропускает варианты (Ира/Ирина/"
+        "Irina/Shipilova), что приводит к пустому ответу."
     ),
     ("n8n_calendar", "get_meeting"): (
         "ПОЛНЫЙ транскрипт + summary + action items внешней "
@@ -406,6 +412,23 @@ def plan_tool_calls(
             "ceo_brain_planner_backfill",
             mcp=mcp_name, tool=tname,
         )
+    # Post-process: force `search_fragment=""` on get_zoom_transcript
+    # / get_meeting so we always receive the FULL transcript. The
+    # synthesis LLM later extracts specific quotes / names from the
+    # whole text — n8n's substring filter misses variants like
+    # «Ира» vs «Ирина» / «Irina» / «Shipilova» and was making the
+    # bot answer «не нашёл реплик» on perfectly normal questions.
+    for c in out:
+        tname = (c.get("tool") or "").lower()
+        if tname in {"get_zoom_transcript", "get_meeting"}:
+            args = c.setdefault("args", {})
+            if args.get("search_fragment"):
+                log.info(
+                    "ceo_brain_planner_cleared_search_fragment",
+                    tool=tname,
+                    original=args["search_fragment"],
+                )
+            args["search_fragment"] = ""
     log.info(
         "ceo_brain_planner_plan",
         question_chars=len(question), calls=len(out),

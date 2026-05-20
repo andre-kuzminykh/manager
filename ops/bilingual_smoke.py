@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from app.ceo_brain.bilingual_restorer import (
+from app.services.bilingual_restorer import (
     merge_transcripts_chunked,
     re_stt_english_via_whisper,
     should_re_stt_english,
@@ -138,20 +138,18 @@ def main() -> int:
         print(f"  wrote {len(content)} chars → {path}")
 
     s = get_settings()
-    oai_key = (s.ceo_brain_openai_api_key or s.openai_api_key).strip()
+    oai_key = (s.openai_api_key or "").strip()
     if not oai_key:
-        print("ERROR: OPENAI key not set "
-              "(CEO_BRAIN_OPENAI_API_KEY or OPENAI_API_KEY).",
-              file=sys.stderr)
+        print("ERROR: OPENAI_API_KEY not set.", file=sys.stderr)
         return 2
 
     print("=" * 70)
     print(f"Zoom ID: {args.zoom_id}")
-    print(f"Detector model:   {s.ceo_brain_bilingual_detector_model}")
-    print(f"Reconciler model: {s.ceo_brain_bilingual_reconciler_model}")
-    print(f"Whisper model:    {s.ceo_brain_bilingual_whisper_model}")
-    print(f"Flag (CEO_BRAIN_BILINGUAL_RESTORATION_ENABLED): "
-          f"{s.ceo_brain_bilingual_restoration_enabled}")
+    print(f"Detector model:   {s.zoom_bilingual_detector_model}")
+    print(f"Reconciler model: {s.zoom_bilingual_reconciler_model}")
+    print(f"Whisper model:    {s.zoom_bilingual_whisper_model}")
+    print(f"Flag (ZOOM_BILINGUAL_RESTORATION_ENABLED): "
+          f"{s.zoom_bilingual_restoration_enabled}")
     print(f"Detector-only:    {args.detector_only}")
     print(f"Audio path arg:   {args.audio_path or '(use DB lookup)'}")
     print("=" * 70)
@@ -170,7 +168,7 @@ def main() -> int:
     decision = should_re_stt_english(
         transcript=primary,
         openai_client=openai_client,
-        model=s.ceo_brain_bilingual_detector_model,
+        model=s.zoom_bilingual_detector_model,
     )
     print(f"  → decision = {'YES' if decision else 'NO'}")
     if not decision:
@@ -185,7 +183,7 @@ def main() -> int:
         zoom_id=args.zoom_id,
         audio_path=args.audio_path,
         openai_api_key=oai_key,
-        model=s.ceo_brain_bilingual_whisper_model,
+        model=s.zoom_bilingual_whisper_model,
     )
     if not secondary:
         print("  → Whisper returned no text (or audio file not found). "
@@ -201,9 +199,9 @@ def main() -> int:
         primary=primary,
         secondary=secondary,
         openai_client=openai_client,
-        model=s.ceo_brain_bilingual_reconciler_model,
-        batch_input_chars=s.ceo_brain_bilingual_reconcile_batch_input_chars,
-        max_tokens_per_batch=s.ceo_brain_bilingual_reconcile_max_tokens_per_batch,
+        model=s.zoom_bilingual_reconciler_model,
+        batch_input_chars=s.zoom_bilingual_reconcile_batch_input_chars,
+        max_tokens_per_batch=s.zoom_bilingual_reconcile_max_tokens_per_batch,
     )
     if not merged:
         print("  → reconciler returned nothing. Stopping.")

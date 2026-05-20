@@ -450,6 +450,13 @@ _MCP_DESCRIPTIONS: dict[str, str] = {
         "search_contacts. Используй для look-up по инвесторам / "
         "клиентам / counterparty info."
     ),
+    "slack_self": (
+        "Slack-инструменты самого CEO Brain бота: список каналов "
+        "куда подключен, поиск сообщений в Slack, чтение истории "
+        "канала, поиск юзера по email, permalink. Используй когда "
+        "вопрос про сам Slack — «в каких каналах ты добавлен», "
+        "«найди в slack сообщение X», «кто такой пользователь Y»."
+    ),
 }
 
 
@@ -808,6 +815,30 @@ def run_responder(
     #   2. haiku planner picks `[(mcp, tool, args), ...]`
     #   3. parallel HTTP calls via `gather_via_direct_http`
     #   4. final synthesis via Anthropic (no MCP, no beta)
+    # FR-CB2-3.32 — virtual `slack_self` MCP for local Slack tools.
+    # Operator-observed 2026-05-20: «в каких каналах ты добавлен»
+    # questions couldn't reach `slack_list_channels` because the
+    # direct-HTTP pipeline only saw n8n MCPs. Inject a synthetic
+    # MCP entry so the classifier/planner can pick local tools too.
+    SLACK_SELF_URL = "local://slack"
+    if last_user_q:
+        servers_with_self = list(request.get("mcp_servers") or [])
+        # Add slack_self if not already there.
+        if not any(s.get("name") == "slack_self" for s in servers_with_self):
+            servers_with_self.append({
+                "name": "slack_self",
+                "url": SLACK_SELF_URL,
+                "type": "url",
+            })
+        # Re-classify with slack_self in the mix.
+        picked2 = select_mcps_for_question(
+            question=last_user_q,
+            all_servers=servers_with_self,
+            anthropic_client=anthropic_client,
+        )
+        # Keep slack_self only if classifier picked it explicitly.
+        request = {**request, "mcp_servers": picked2}
+
     if request.get("mcp_servers") and last_user_q:
         from app.ceo_brain.mcp_client import list_tools as _mcp_list_tools
         from app.ceo_brain.parallel_gather import (
@@ -815,13 +846,13 @@ def run_responder(
             synthesize_final_answer,
         )
         from app.ceo_brain.planner import plan_tool_calls
+        from app.ceo_brain.slack_tools import SLACK_TOOL_SCHEMAS
 
         log.info(
             "ceo_brain_direct_http_start",
             mcp_count=len(request["mcp_servers"]),
             mcps=[s.get("name") for s in request["mcp_servers"]],
         )
-        # Briefly tell operator something is happening.
         try:
             slack.chat_update(
                 channel=channel, ts=placeholder_ts,
@@ -835,7 +866,14 @@ def run_responder(
         for srv in request["mcp_servers"]:
             name = srv.get("name") or ""
             url = srv.get("url") or ""
-            if not name or not url:
+            if not name:
+                continue
+            if name == "slack_self":
+                # Local tools — catalog comes from SLACK_TOOL_SCHEMAS,
+                # not an HTTP roundtrip.
+                tools_by_mcp[name] = list(SLACK_TOOL_SCHEMAS)
+                continue
+            if not url:
                 continue
             tools_by_mcp[name] = _mcp_list_tools(url)
 
@@ -865,10 +903,12 @@ def run_responder(
             )
         else:
             # 3. parallel direct HTTP — pass schemas for arg coercion
+            #    plus local executors for `slack_self` virtual MCP.
             gathered_raw = gather_via_direct_http(
                 planned_calls=planned,
                 mcp_servers=request["mcp_servers"],
                 tools_by_mcp=tools_by_mcp,
+                local_tool_executors=tool_executors or None,
             )
 
         # 4. synthesize

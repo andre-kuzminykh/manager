@@ -314,6 +314,7 @@ def gather_via_direct_http(
     mcp_servers: list[dict[str, Any]],
     tools_by_mcp: dict[str, list[dict]] | None = None,
     per_call_timeout: float = 30.0,
+    local_tool_executors: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """FR-CB2-3.31 — execute planned tool calls in parallel via
     direct HTTP to n8n MCP endpoints, completely bypassing
@@ -347,9 +348,30 @@ def gather_via_direct_http(
         mcp_name = call.get("mcp") or "?"
         tool_name = call.get("tool") or "?"
         args = call.get("args") or {}
-        url = name_to_url.get(mcp_name)
         # Unique label per planned call to avoid bucket collision.
         label = f"{mcp_name}::{tool_name}#{idx}"
+        # FR-CB2-3.32 — virtual `slack_self` MCP dispatches to local
+        # Python executor (slack_tools.build_executors output), no
+        # HTTP roundtrip.
+        if mcp_name == "slack_self":
+            execs = local_tool_executors or {}
+            executor = execs.get(tool_name)
+            if executor is None:
+                log.warning(
+                    "ceo_brain_local_executor_missing",
+                    tool=tool_name,
+                )
+                return label, ""
+            try:
+                result = executor(args)
+                return label, str(result) if result else ""
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "ceo_brain_local_executor_failed",
+                    tool=tool_name, error=str(e),
+                )
+                return label, ""
+        url = name_to_url.get(mcp_name)
         if not url:
             return label, ""
         schema = schemas_by_name.get((mcp_name, tool_name))

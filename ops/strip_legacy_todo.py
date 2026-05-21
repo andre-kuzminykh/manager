@@ -85,9 +85,15 @@ def main() -> int:
                 # Rebuild: pull raw title + doc_url, then re-wrap
                 # cleanly from scratch using the pipeline helpers
                 # so the output is identical to what the live
-                # pipeline produces.
+                # pipeline produces. NOTE: «\n\n» (blank line)
+                # between title and body — the live pipeline always
+                # emits this separator, so the strip must preserve
+                # it. `_force_meeting_title_first_line` swaps the
+                # whole first line by splitting on the first «\n»,
+                # so we keep the double newline by injecting it
+                # right after the placeholder.
                 stripped_full = (
-                    "PLACEHOLDER_TITLE\n" + stripped_plain.lstrip()
+                    "PLACEHOLDER_TITLE\n\n" + stripped_plain.lstrip()
                 )
                 stripped_full = _force_meeting_title_first_line(
                     stripped_full, r.title or "", r.meeting_date,

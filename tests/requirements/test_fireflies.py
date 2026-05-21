@@ -2590,3 +2590,77 @@ def test_fireflies_step_send_short_summary_proceeds_when_operator_is_first(Sessi
         # or admin list was empty and the early-exit kept it False.
         # Either way, the SKIPPED reason was NOT the host filter.
 
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-179 — runtime kill-switches for the four background pipelines.
+#
+# Operator-pinned 2026-05-21: «давай пока остановим все агенды и саммери».
+# Settings expose four env-controlled booleans that gate the periodic
+# listeners + runners. When any is False the corresponding background work
+# is a no-op. These tests pin the gate behaviour so a future refactor can't
+# silently re-enable a listener that prod has disabled.
+# --------------------------------------------------------------------------- #
+
+
+def test_fireflies_listener_poll_off_when_realtime_disabled():
+    """`_maybe_poll_fireflies` short-circuits when wired with
+    `enabled=False` — mirror of the Zoom listener's
+    `test_zoom_listener_poll_off_by_default`. Pins the
+    `FIREFLIES_REALTIME_ENABLED=false` runtime kill-switch."""
+    from app.orchestrator import Orchestrator
+    from app.telegram_bot.listener import TelegramListener
+    from app.telegram_ingest.service import TelegramIngestService
+
+    class _NoopClassifier:
+        def classify(self, *a, **k):
+            from app.intent.types import IntentClassification, IntentType
+
+            return IntentClassification(
+                intent=IntentType.unknown, confidence=0.0,
+            )
+
+    class _StubFirefliesClient:
+        def __init__(self):
+            self.calls = 0
+
+        def list_transcripts(self, *, limit, skip=0):
+            self.calls += 1
+            return []
+
+    class _StubFirefliesPipeline:
+        def __init__(self):
+            self._client = _StubFirefliesClient()
+            self.processed: list[str] = []
+
+        def process_one(self, session, t):
+            self.processed.append(t.id)
+            from types import SimpleNamespace
+            return SimpleNamespace(
+                skipped_reason=None, tasks_created=0, errors=[],
+            )
+
+    ingest = TelegramIngestService(
+        classifier=_NoopClassifier(),
+        orchestrator=Orchestrator(Settings()),
+    )
+    listener = TelegramListener(token="", ingest=ingest)
+    pipe = _StubFirefliesPipeline()
+    listener.wire_fireflies(
+        pipeline=pipe, enabled=False,
+        poll_interval_seconds=60, poll_batch_size=10,
+    )
+    listener._maybe_poll_fireflies()
+    assert pipe._client.calls == 0
+    assert pipe.processed == []
+
+
+def test_settings_listener_kill_switches_default_to_off():
+    """Все четыре kill-switch'а должны по дефолту быть выключены,
+    чтобы свежий деплой не начал сам долбить Zoom / Fireflies /
+    Calendar API. Operator должен явно opt-in каждый флаг в .env.
+    """
+    s = Settings()
+    assert s.zoom_realtime_enabled is False
+    assert s.fireflies_realtime_enabled is False
+    assert s.agenda_enabled is False
+    assert s.counterparty_briefs_enabled is False

@@ -1927,8 +1927,27 @@ class FirefliesPipeline:
         if not row.detailed_summary:
             row.last_error = "no detailed summary as short-summary input"
             return False
+        # FR-CR-05-183 — calendar_attendees authoritative for the
+        # «Участники:» line. Falls back to Fireflies' raw API
+        # participants only when no calendar match (or empty
+        # attendees) — never to LLM-from-transcript guesses, which
+        # hallucinate teammates merely mentioned in speech.
+        cal_attendees_names: list[str] = []
+        for a in (row.calendar_attendees or []):
+            if not isinstance(a, dict):
+                continue
+            nm = (
+                a.get("resolved_name") or a.get("display_name")
+                or a.get("email") or ""
+            ).strip()
+            if nm:
+                cal_attendees_names.append(nm)
+        if cal_attendees_names:
+            effective_participants = cal_attendees_names
+        else:
+            effective_participants = list(row.participants or [])
         participants_block = "\n".join(
-            f"  - {p}" for p in (row.participants or []) if p
+            f"  - {p}" for p in effective_participants if p
         ) or "  (нет данных)"
         meta_line = (
             f"meeting_title: {row.title or ''}\n"

@@ -2413,3 +2413,118 @@ def test_zoom_pipeline_constructs_openai_client_for_reconcile(monkeypatch):
     assert captured.get("openai_client") is not None, (
         "pipeline must pass a constructed openai_client to reconcile"
     )
+
+
+def test_short_summary_participants_block_uses_calendar_attendees_first(session):
+    """FR-CR-05-183 — operator-pinned 2026-05-21: «так не должно
+    быть» о FR-CR-05-139 LLM-from-transcript guessing for the
+    «Участники:» line. The short-summary user prompt MUST list
+    `row.calendar_attendees` (resolved People names), NEVER fall
+    through to LLM-guessed teammates. Pins the precedence so a
+    refactor can't reintroduce «Tatsiana Zaretskaya»-style
+    hallucinations.
+    """
+    from datetime import datetime, timezone
+    from app.config import Settings
+    from app.models import ZoomRecording
+    from app.zoom.pipeline import ZoomPipeline
+
+    captured: dict = {}
+
+    class _StubLLM:
+        def complete_text(self, **kwargs):
+            captured["user_prompt"] = kwargs.get("user_prompt", "")
+            return (
+                "21/05 - Fundraising daily\n\n"
+                "Участники: dummy\n\nfoo bar"
+            )
+
+    class _StubClient:
+        def fetch_meeting_participants(self, zoom_id):
+            return []
+
+    pipeline = ZoomPipeline(
+        settings=Settings(),
+        client=_StubClient(),
+        llm_backend=_StubLLM(),
+    )
+
+    row = ZoomRecording(
+        zoom_id="FR-CR-05-183==",
+        title="Fundraising daily",
+        meeting_date=datetime(2026, 5, 21, 9, 0, tzinfo=timezone.utc),
+        duration_seconds=2400,
+        detailed_summarised=True,
+        detailed_summary="Some detailed body. " * 50,
+        participants=["Tatsiana Zaretskaya", "Phantom Person"],
+        calendar_attendees=[
+            {"email": "1@thehumanoid.ai",
+             "resolved_name": "Артем Соколов",
+             "source": "team_member",
+             "response_status": "accepted"},
+            {"email": "kaa@thehumanoid.ai",
+             "resolved_name": "Alina Kolpakova",
+             "source": "team_member",
+             "response_status": "needsAction"},
+            {"email": "irina.shipilova@thehumanoid.ai",
+             "resolved_name": "Ирина Шипилова",
+             "source": "team_member",
+             "response_status": "needsAction"},
+        ],
+    )
+    session.add(row)
+    session.flush()
+
+    pipeline._step_short_summary(session=session, row=row)
+    up = captured.get("user_prompt", "")
+    assert "Артем Соколов" in up
+    assert "Alina Kolpakova" in up
+    assert "Ирина Шипилова" in up
+    assert "Tatsiana Zaretskaya" not in up
+    assert "Phantom Person" not in up
+
+
+def test_short_summary_participants_falls_back_to_zoom_raw_when_no_calendar(
+    session,
+):
+    """FR-CR-05-183 — fallback path: empty calendar_attendees →
+    row.participants (Zoom API raw display names)."""
+    from datetime import datetime, timezone
+    from app.config import Settings
+    from app.models import ZoomRecording
+    from app.zoom.pipeline import ZoomPipeline
+
+    captured: dict = {}
+
+    class _StubLLM:
+        def complete_text(self, **kwargs):
+            captured["user_prompt"] = kwargs.get("user_prompt", "")
+            return "21/05 - Fallback\n\nУчастники: x\n\ny"
+
+    class _StubClient:
+        def fetch_meeting_participants(self, zoom_id):
+            return []
+
+    pipeline = ZoomPipeline(
+        settings=Settings(),
+        client=_StubClient(),
+        llm_backend=_StubLLM(),
+    )
+
+    row = ZoomRecording(
+        zoom_id="FR-CR-05-183-FB==",
+        title="Some Internal Sync",
+        meeting_date=datetime(2026, 5, 21, 14, 0, tzinfo=timezone.utc),
+        duration_seconds=1800,
+        detailed_summarised=True,
+        detailed_summary="Body. " * 80,
+        participants=["Alice Latin", "Bob Latin"],
+        calendar_attendees=None,
+    )
+    session.add(row)
+    session.flush()
+
+    pipeline._step_short_summary(session=session, row=row)
+    up = captured.get("user_prompt", "")
+    assert "Alice Latin" in up
+    assert "Bob Latin" in up

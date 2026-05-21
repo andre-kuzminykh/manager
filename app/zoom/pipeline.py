@@ -792,8 +792,32 @@ class ZoomPipeline:
             tm_rows = as_known_employees(session, prefer_telegram=True)
         except Exception:  # noqa: BLE001
             tm_rows = []
-        team_participants = self._ensure_team_participants(row, tm_rows)
-        effective_participants = team_participants or list(row.participants or [])
+        # FR-CR-05-181 / FR-CR-05-183 — calendar_attendees (resolved
+        # through People + Counterparty + Zoom-reconcile) is the
+        # AUTHORITATIVE source for the «Участники:» line. We do NOT
+        # fall back to FR-CR-05-139 LLM-from-transcript guessing
+        # (operator-pinned 2026-05-21: «так не должно быть» — that
+        # path hallucinates teammates merely mentioned in speech,
+        # like «Tatsiana Zaretskaya» showing up in a Fundraising daily
+        # she wasn't invited to). Precedence:
+        #   1. row.calendar_attendees (resolved_name in event order)
+        #   2. row.participants (Zoom API raw — display names from
+        #      the actual join list, not LLM-guessed)
+        #   3. «(нет данных)»
+        cal_attendees_names: list[str] = []
+        for a in (row.calendar_attendees or []):
+            if not isinstance(a, dict):
+                continue
+            nm = (
+                a.get("resolved_name") or a.get("display_name")
+                or a.get("email") or ""
+            ).strip()
+            if nm:
+                cal_attendees_names.append(nm)
+        if cal_attendees_names:
+            effective_participants = cal_attendees_names
+        else:
+            effective_participants = list(row.participants or [])
         participants_block = "\n".join(
             f"  - {p}" for p in effective_participants if p
         ) or "  (нет данных)"

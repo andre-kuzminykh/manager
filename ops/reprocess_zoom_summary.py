@@ -51,6 +51,14 @@ def main() -> int:
         help="Don't post the short summary or per-task cards.",
     )
     ap.add_argument(
+        "--force-retranscribe", action="store_true",
+        help="Clear `transcribed` + transcript_text so Whisper "
+        "re-runs from audio. Required to trigger FR-CR-05-170 "
+        "bilingual restoration on recordings that already have a "
+        "cached transcript. Audio must still be reachable (local "
+        "audio_path OR Zoom cloud audio_url not yet expired).",
+    )
+    ap.add_argument(
         "--keep-summary", action="store_true",
         help="Don't clear `detailed_summarised`; just refresh "
         "downstream (short_summary, Doc, tasks).",
@@ -99,6 +107,12 @@ def main() -> int:
         row.google_doc_url = None
         # Clear participants caches so FR-CR-05-169 runs fresh.
         row.calendar_attendees = None
+        # --force-retranscribe: also clear `transcribed` so Whisper
+        # re-runs from audio + FR-CR-05-170 bilingual restoration
+        # kicks in. Requires audio to still be available.
+        if args.force_retranscribe:
+            row.transcribed = False
+            row.transcript_text = None
         if args.no_slack:
             # Mark short summary as «already sent» so the pipeline
             # skips the post-to-Slack step. Doc + Telegram are

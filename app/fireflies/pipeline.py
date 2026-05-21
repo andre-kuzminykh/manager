@@ -1087,12 +1087,16 @@ class FirefliesPipeline:
         # (was sequential — operator-pinned «Whisper-чанки
         # параллельно»). Order preserved by `pool.map`, so the
         # joined transcript is still chronological.
+        # FR-CR-05-177 — diarize models serialized to 1 worker.
+        is_diarize_for_workers = "diarize" in (
+            self._settings.fireflies_whisper_model or ""
+        ).lower()
         transcript_parts = transcribe_chunks_parallel(
             audio_paths,
             openai_api_key=api_key,
             model=self._settings.fireflies_whisper_model,
             prompt=whisper_prompt,
-            max_workers=3,
+            max_workers=1 if is_diarize_for_workers else 3,
         )
         for i, t in enumerate(transcript_parts):
             if not t:

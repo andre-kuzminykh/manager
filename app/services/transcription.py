@@ -115,7 +115,12 @@ def transcribe_bytes(
     try:
         from openai import OpenAI
 
-        client = OpenAI(api_key=openai_api_key)
+        # FR-CR-05-177 — 300 s read timeout: diarize on a 20-min
+        # chunk takes ~60-90 s; without an explicit timeout the
+        # client default (10 min) hides hangs and burns operator
+        # wall-clock. Per-chunk retries left to the caller's
+        # pool wrapper, not here.
+        client = OpenAI(api_key=openai_api_key, timeout=300.0)
         kwargs: dict[str, Any] = {
             "model": model,
             "file": (filename, audio_bytes, mimetype),

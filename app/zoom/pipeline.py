@@ -314,13 +314,19 @@ class ZoomPipeline:
                  else "audio/mpeg")
             )
 
+        # FR-CR-05-177 — diarize models hung silently when fired
+        # in parallel on long chunks; serialize them to 1 worker.
+        # whisper-1 keeps the original 3-worker fan-out.
+        is_diarize_for_workers = "diarize" in (
+            self._settings.fireflies_whisper_model or ""
+        ).lower()
         transcript_parts = transcribe_chunks_parallel(
             audio_paths,
             openai_api_key=api_key,
             model=self._settings.fireflies_whisper_model,
             prompt=whisper_prompt,
             mimetype_for=_mt,
-            max_workers=3,
+            max_workers=1 if is_diarize_for_workers else 3,
         )
         whisper_failed = any(t is None or not (t or "").strip()
                              for t in transcript_parts)

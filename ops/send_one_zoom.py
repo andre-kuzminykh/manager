@@ -91,6 +91,14 @@ def main() -> int:
         "--no-mark-sent", action="store_true",
         help="Don't flip row.short_summary_sent=True. Pure dry-of-DB.",
     )
+    ap.add_argument(
+        "--no-tasks", action="store_true",
+        help=(
+            "Operator-pinned 2026-05-21 — don't post the task thread "
+            "reply and don't append «TODO:» trailer to the parent. "
+            "Parent-only mode (summary in Slack, no tasks anywhere)."
+        ),
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -126,7 +134,9 @@ def main() -> int:
         body, reused_todo = _split_short_summary(row.short_summary)
         # FR-CR-05-184 — parent ends with «TODO:» so the reader
         # knows tasks landed in the thread below. No emojis.
-        parent_raw = body + "\n\nTODO:"
+        # FR-CR-05-189 — `--no-tasks` skips both the trailer and
+        # the thread reply (parent-only mode).
+        parent_raw = body if args.no_tasks else body + "\n\nTODO:"
         parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
         chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 
@@ -136,7 +146,10 @@ def main() -> int:
         print(chunks[0][:400] + ("…" if len(chunks[0]) > 400 else ""))
         print("-" * 70)
 
-        if args.reuse_todo and reused_todo:
+        if args.no_tasks:
+            print("\n[2/3] --no-tasks — skipping tasks thread.")
+            tasks_text = ""
+        elif args.reuse_todo and reused_todo:
             print(
                 f"\n[2/3] Reusing existing To-Do from row.short_summary "
                 f"({len(reused_todo)} chars, FR-CR-05-119/163 "

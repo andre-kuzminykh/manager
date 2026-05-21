@@ -52,6 +52,13 @@ def main() -> int:
         ],
     )
     ap.add_argument("--no-mark-sent", action="store_true")
+    ap.add_argument(
+        "--no-tasks", action="store_true",
+        help=(
+            "Operator-pinned 2026-05-21 — skip tasks thread reply "
+            "AND «TODO:» trailer on parent. Parent-only mode."
+        ),
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -85,7 +92,8 @@ def main() -> int:
             return 5
 
         body, reused_todo = _split_short_summary(row.short_summary)
-        parent_raw = body + "\n\nTODO:"
+        # FR-CR-05-189 — parent-only mode skips «TODO:» trailer.
+        parent_raw = body if args.no_tasks else body + "\n\nTODO:"
         parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
         chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 
@@ -94,7 +102,10 @@ def main() -> int:
         print(chunks[0][:300] + ("…" if len(chunks[0]) > 300 else ""))
         print("-" * 70)
 
-        if args.reuse_todo and reused_todo:
+        if args.no_tasks:
+            print("\n[2/3] --no-tasks — skipping tasks thread.")
+            tasks_text = ""
+        elif args.reuse_todo and reused_todo:
             print(
                 f"\n[2/3] Reusing existing To-Do "
                 f"({len(reused_todo)} chars)."

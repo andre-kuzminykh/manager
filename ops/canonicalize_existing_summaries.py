@@ -70,7 +70,27 @@ def main() -> int:
         "--workers", type=int, default=6,
         help="Parallel LLM workers (default 6).",
     )
+    ap.add_argument(
+        "--exclude-title-contains", action="append", default=[],
+        help="Skip records whose title contains this substring "
+             "(case-insensitive). Repeatable.",
+    )
+    ap.add_argument(
+        "--only-artem", action="store_true",
+        help="Only process records where Артем appears in the "
+             "short_summary «Участники:» line.",
+    )
     args = ap.parse_args()
+    excludes = [s.lower() for s in (args.exclude_title_contains or []) if s]
+
+    def _has_artem(short_summary: str) -> bool:
+        for line in (short_summary or "").split("\n"):
+            if line.startswith("Участники:"):
+                ll = line.lower()
+                return any(n in ll for n in [
+                    "артем", "артём", "artem", "sokolov", "соколов",
+                ])
+        return False
 
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
@@ -83,6 +103,8 @@ def main() -> int:
 
     # Step 1: build worklist (each (record, field) → one WorkItem)
     worklist: list[WorkItem] = []
+    skipped_excluded = 0
+    skipped_no_artem = 0
     with session_scope() as session:
         if not args.skip_zoom:
             for i, r in enumerate(session.query(ZoomRecording).filter(
@@ -90,6 +112,13 @@ def main() -> int:
                 ZoomRecording.meeting_date < end,
             ).order_by(ZoomRecording.meeting_date).all(), start=1):
                 if not (r.short_summary or "").strip():
+                    continue
+                title_low = (r.title or "").lower()
+                if any(e in title_low for e in excludes):
+                    skipped_excluded += 1
+                    continue
+                if args.only_artem and not _has_artem(r.short_summary):
+                    skipped_no_artem += 1
                     continue
                 title = (r.title or "")[:55]
                 if not args.skip_detailed and (r.detailed_summary or "").strip():
@@ -108,6 +137,13 @@ def main() -> int:
             ).order_by(MeetingRecording.meeting_date).all(), start=1):
                 if not (r.short_summary or "").strip():
                     continue
+                title_low = (r.title or "").lower()
+                if any(e in title_low for e in excludes):
+                    skipped_excluded += 1
+                    continue
+                if args.only_artem and not _has_artem(r.short_summary):
+                    skipped_no_artem += 1
+                    continue
                 title = (r.title or "")[:55]
                 if not args.skip_detailed and (r.detailed_summary or "").strip():
                     worklist.append(WorkItem(
@@ -118,6 +154,10 @@ def main() -> int:
                     idx=i, src="fireflies", rid=r.fireflies_id, title=title,
                     field="short", text=r.short_summary,
                 ))
+    if skipped_excluded:
+        print(f"  (skipped {skipped_excluded} excluded-by-title records)")
+    if skipped_no_artem:
+        print(f"  (skipped {skipped_no_artem} non-Артем records)")
     print(f"Worklist: {len(worklist)} (record, field) pairs. "
           f"Parallelism: {args.workers}.")
 

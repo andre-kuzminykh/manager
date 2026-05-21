@@ -42,10 +42,41 @@ from ops.send_summaries_19_21 import (
 )
 
 
+def _split_short_summary(text: str) -> tuple[str, str]:
+    """FR-CR-05-184 — split a short_summary string at the To-Do
+    marker. Returns (body_without_todo, todo_block).
+
+    `_strip_llm_todo_block` already removes the entire trailing
+    To-Do section. We compute it as the suffix that the strip
+    consumed. The pipeline's `_build_todo_section` appends a
+    formatted, already-filtered (DIRECTIONS_IMPORTANT) list — so
+    this is a free-of-charge source for the thread reply, no
+    re-extraction needed.
+    """
+    body = _strip_llm_todo_block(text).rstrip()
+    if body == text.rstrip():
+        return body, ""
+    suffix = text[len(body):].lstrip("\n").rstrip()
+    return body, suffix
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--zoom-id", required=True)
     ap.add_argument("--channel", required=True)
+    ap.add_argument(
+        "--reuse-todo", action="store_true", default=True,
+        help="Reuse the To-Do block already embedded in "
+        "row.short_summary (from the pipeline's deterministic "
+        "_build_todo_section, FR-CR-05-119+FR-CR-05-163 filtered). "
+        "Default. Skips ephemeral LLM re-extraction.",
+    )
+    ap.add_argument(
+        "--ephemeral-tasks", dest="reuse_todo", action="store_false",
+        help="Run a FRESH ephemeral LLM task extraction at send "
+        "time (slow). Useful when row's To-Do is stale or you want "
+        "to verify the FR-CR-05-178 ephemeral path.",
+    )
     ap.add_argument(
         "--token-key", default="ceo_brain_slack_bot_token",
         choices=[
@@ -92,11 +123,10 @@ def main() -> int:
                   file=sys.stderr)
             return 5
 
-        parent_raw = _strip_llm_todo_block(row.short_summary).rstrip()
-        # FR-CR-05-184 — operator-pinned: parent ends with «TODO:»
-        # so the reader knows tasks landed in the thread below.
-        # Operator-pinned 2026-05-21: NO emojis.
-        parent_raw = parent_raw + "\n\nTODO:"
+        body, reused_todo = _split_short_summary(row.short_summary)
+        # FR-CR-05-184 — parent ends with «TODO:» so the reader
+        # knows tasks landed in the thread below. No emojis.
+        parent_raw = body + "\n\nTODO:"
         parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
         chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 
@@ -106,16 +136,28 @@ def main() -> int:
         print(chunks[0][:400] + ("…" if len(chunks[0]) > 400 else ""))
         print("-" * 70)
 
-        print("\n[2/3] Ephemeral task extraction (LLM)…")
-        tasks = _extract_important_tasks_ephemeral(
-            row, settings=s, llm_backend=llm,
-        )
-        print(f"      → {len(tasks)} important tasks "
-              f"(DIRECTIONS_IMPORTANT filter)")
-        for i, t in enumerate(tasks, start=1):
-            owner = f" — {t['owner']}" if t['owner'] else ""
-            print(f"      {i}) [{t['direction']}] {t['title'][:70]}{owner}")
-        tasks_text = _render_tasks_block(tasks)
+        if args.reuse_todo and reused_todo:
+            print(
+                f"\n[2/3] Reusing existing To-Do from row.short_summary "
+                f"({len(reused_todo)} chars, FR-CR-05-119/163 "
+                "filtered) — no ephemeral LLM call."
+            )
+            tasks_text = reused_todo
+            # Slack-format conversion below.
+        else:
+            print("\n[2/3] Ephemeral task extraction (LLM)…")
+            tasks = _extract_important_tasks_ephemeral(
+                row, settings=s, llm_backend=llm,
+            )
+            print(
+                f"      → {len(tasks)} important tasks "
+                "(DIRECTIONS_IMPORTANT filter)"
+            )
+            for i, t in enumerate(tasks, start=1):
+                owner = f" — {t['owner']}" if t['owner'] else ""
+                print(f"      {i}) [{t['direction']}] "
+                      f"{t['title'][:70]}{owner}")
+            tasks_text = _render_tasks_block(tasks)
         if tasks_text:
             tasks_text = _compact_for_slack(_to_slack_mrkdwn(tasks_text))
 

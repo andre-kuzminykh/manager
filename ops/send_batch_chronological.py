@@ -1,39 +1,41 @@
-"""Operator-pinned 2026-05-21 — batch reprocess Zoom + Fireflies
-recordings 19-21 мая. Прогоняет `reprocess_zoom_summary` для каждой
-Zoom-записи и `reprocess_fireflies_summary` для каждой Fireflies-записи,
-ВСЕГДА с ``--no-slack`` (Slack-отправка — отдельный шаг через
-``send_summaries_19_21``).
+"""Send ALL prepared meeting summaries (Zoom + Fireflies) to a Slack
+channel in chronological order (oldest → newest). Skips rows that
+aren't READY (no short_summary / no google_doc_url / already sent).
 
-Перед прогоном выводит таблицу (через ``preview_summaries_19_21``-логику)
-и спрашивает подтверждение. ``--yes`` пропускает интерактив.
+Wraps `ops.send_one_zoom` and `ops.send_one_fireflies` — same parent
++ thread Slack format, same defensive Task DELETE.
+
+Operator-pinned 2026-05-21: «потом еще подберем firefiles в таком
+же формате и в правильном хронологическом порядке опубликуем».
 
 Usage:
-    docker compose exec -T bot python -m ops.batch_reprocess_19_21 \\
-        --start 2026-05-19 --end 2026-05-22 --min-minutes 10
+    docker compose exec -T bot python -m ops.send_batch_chronological \\
+        --start 2026-05-19 --end 2026-05-22 --min-minutes 10 \\
+        --channel D0ASY5QF6UX --dry-run
+
+    # real:
+    docker compose exec -T bot python -m ops.send_batch_chronological \\
+        --start 2026-05-19 --end 2026-05-22 --min-minutes 10 \\
+        --channel D0ASY5QF6UX --yes
 """
 from __future__ import annotations
 
 import argparse
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 from app.db import session_scope
 from app.models import MeetingRecording, ZoomRecording
 
 
-def _status_for(row, source: str) -> str:
-    if row.short_summary_sent:
-        return "DONE"
-    if not (row.transcript_text or "").strip():
-        return "NEEDS_REPROC"
-    if not (row.detailed_summary or "").strip():
-        return "NEEDS_REPROC"
-    if not (row.short_summary or "").strip():
-        return "NEEDS_REPROC"
-    if not (row.google_doc_url or "").strip():
-        return "NEEDS_REPROC"
-    return "READY"
+def _ready(row) -> bool:
+    return (
+        not row.short_summary_sent
+        and bool((row.short_summary or "").strip())
+        and bool((row.google_doc_url or "").strip())
+    )
 
 
 def main() -> int:
@@ -41,21 +43,20 @@ def main() -> int:
     ap.add_argument("--start", required=True)
     ap.add_argument("--end", required=True)
     ap.add_argument("--min-minutes", type=int, default=10)
+    ap.add_argument("--channel", required=True)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--yes", action="store_true")
     ap.add_argument(
-        "--yes", action="store_true",
-        help="Skip interactive confirmation.",
+        "--sleep", type=float, default=2.0,
+        help="Seconds between Slack posts (rate-limit cushion).",
     )
     ap.add_argument(
         "--skip-zoom", action="store_true",
-        help="Skip Zoom reprocess (only Fireflies).",
+        help="Only Fireflies records.",
     )
     ap.add_argument(
         "--skip-fireflies", action="store_true",
-        help="Skip Fireflies reprocess (only Zoom).",
-    )
-    ap.add_argument(
-        "--force-all", action="store_true",
-        help="Reprocess READY rows too. Default skips them.",
+        help="Only Zoom records.",
     )
     args = ap.parse_args()
 
@@ -72,10 +73,7 @@ def main() -> int:
             ).all():
                 if (r.duration_seconds or 0) < min_secs:
                     continue
-                st = _status_for(r, "zoom")
-                if st == "DONE":
-                    continue
-                if st == "READY" and not args.force_all:
+                if not _ready(r):
                     continue
                 candidates.append(
                     (r.meeting_date, "zoom", r.zoom_id, r.title or "")
@@ -87,21 +85,21 @@ def main() -> int:
             ).all():
                 if (r.duration_seconds or 0) < min_secs:
                     continue
-                st = _status_for(r, "fireflies")
-                if st == "DONE":
-                    continue
-                if st == "READY" and not args.force_all:
+                if not _ready(r):
                     continue
                 candidates.append(
-                    (r.meeting_date, "fireflies", r.fireflies_id, r.title or "")
+                    (
+                        r.meeting_date, "fireflies", r.fireflies_id,
+                        r.title or "",
+                    )
                 )
 
     candidates.sort(key=lambda x: x[0])
     print(
-        f"\n# Batch reprocess plan: {len(candidates)} records "
+        f"\n# Chronological send plan: {len(candidates)} READY records "
         f"({args.start} .. {args.end}, ≥ {args.min_minutes} min)"
     )
-    print(f"{'#':<3} {'date':<14} {'src':<10} title")
+    print(f"\n{'#':<3} {'date':<14} {'src':<10} title")
     print("-" * 100)
     for i, (dt, src, rid, title) in enumerate(candidates, start=1):
         print(
@@ -110,16 +108,20 @@ def main() -> int:
         )
     print("-" * 100)
     if not candidates:
-        print("Nothing to do.")
+        print("Nothing to send.")
         return 0
 
+    if args.dry_run:
+        print("\n--dry-run, not posting. Pass --yes to send.")
+        return 0
     if not args.yes:
-        ans = input("\nProceed? [yes/N]: ").strip().lower()
-        if ans != "yes":
+        ans = input("\nProceed and post to Slack in this order? [yes/N]: ")
+        if ans.strip().lower() != "yes":
             print("Aborted.")
             return 1
 
     failures: list[tuple[str, str, str]] = []
+    sent = 0
     for i, (dt, src, rid, title) in enumerate(candidates, start=1):
         print(
             f"\n=== [{i}/{len(candidates)}] {dt.strftime('%m-%d %H:%M')} "
@@ -127,44 +129,36 @@ def main() -> int:
         )
         if src == "zoom":
             cmd = [
-                "python", "-m", "ops.reprocess_zoom_summary",
+                "python", "-m", "ops.send_one_zoom",
                 "--zoom-id", rid,
-                "--force-retranscribe",
-                "--no-slack",
-                # FR-CR-05-178 — mock mode: no Task rows persisted.
-                # send_summaries_19_21 will extract tasks ephemerally.
-                "--skip-tasks",
+                "--channel", args.channel,
             ]
         else:
             cmd = [
-                "python", "-m", "ops.reprocess_fireflies_summary",
+                "python", "-m", "ops.send_one_fireflies",
                 "--fireflies-id", rid,
-                "--no-slack",
-                # FR-CR-05-178 — mock mode, no Task rows for FF too.
-                "--skip-tasks",
+                "--channel", args.channel,
             ]
         try:
-            proc = subprocess.run(cmd, capture_output=False, timeout=1800)
+            proc = subprocess.run(cmd, capture_output=False, timeout=300)
             if proc.returncode != 0:
                 failures.append((rid, title, f"rc={proc.returncode}"))
+            else:
+                sent += 1
         except subprocess.TimeoutExpired:
             failures.append((rid, title, "timeout"))
         except Exception as e:  # noqa: BLE001
             failures.append((rid, title, str(e)))
+        time.sleep(args.sleep)
 
     print("\n" + "=" * 70)
     print(
-        f"Batch done. OK: {len(candidates) - len(failures)}   "
-        f"Failed: {len(failures)}"
+        f"Sent: {sent}/{len(candidates)}   Failed: {len(failures)}"
     )
     if failures:
         print("\nFailures:")
         for rid, title, err in failures:
             print(f"  [{err}] {rid} {title}")
-    print(
-        "\nNext: run preview again to see READY-rows; then "
-        "send_summaries_19_21 to post to Slack."
-    )
     return 0 if not failures else 4
 
 

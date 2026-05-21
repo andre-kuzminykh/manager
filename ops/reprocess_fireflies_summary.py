@@ -50,6 +50,14 @@ def main() -> int:
         help="Don't clear `detailed_summarised`; just refresh "
         "downstream (short_summary, Doc, tasks).",
     )
+    ap.add_argument(
+        "--skip-tasks", action="store_true",
+        help="FR-CR-05-178 — skip ALL task-related steps "
+        "(extract_tasks, verify, canonicalize, consolidate, "
+        "dedupe, classify_directions, post_task_cards). Zero "
+        "INSERTs into Task table. Same semantics as the Zoom "
+        "reprocess --skip-tasks flag.",
+    )
     args = ap.parse_args()
 
     s = get_settings()
@@ -85,7 +93,13 @@ def main() -> int:
         if not args.keep_summary:
             row.detailed_summarised = False
             row.detailed_summary = None
-        row.tasks_extracted = False
+        # FR-CR-05-178 — --skip-tasks: leave tasks_extracted=True so
+        # the LLM-touching `_step_extract_tasks` short-circuits and
+        # NO Task rows are written.
+        if args.skip_tasks:
+            row.tasks_extracted = True
+        else:
+            row.tasks_extracted = False
         row.short_summary_sent = False
         row.doc_exported = False
         row.google_doc_id = None
@@ -108,6 +122,29 @@ def main() -> int:
     extract_model = (s.fireflies_summary_model or "gpt-4o").strip()
     llm = OpenAIBackend(client=openai_client, model=extract_model)
     cal_factory = build_calendar_credentials_factory_with_sa_fallback(s)
+    # FR-CR-05-178 — --skip-tasks: monkey-patch ALL task-related
+    # FirefliesPipeline methods to no-ops (mirror of zoom reprocess).
+    if args.skip_tasks:
+        FirefliesPipeline._step_verify_tasks = (
+            lambda self, session, row: 0
+        )
+        FirefliesPipeline._step_canonicalize_task_names = (
+            lambda self, session, row: 0
+        )
+        FirefliesPipeline._step_consolidate_tasks = (
+            lambda self, session, row: 0
+        )
+        FirefliesPipeline._step_classify_directions = (
+            lambda self, session, row: 0
+        )
+        # FirefliesPipeline has _step_post_task_cards too.
+        if hasattr(FirefliesPipeline, "_step_post_task_cards"):
+            FirefliesPipeline._step_post_task_cards = (
+                lambda self, session, row: 0
+            )
+        # `_dedupe_meeting_tasks` is module-level.
+        from app.fireflies import pipeline as _ffp
+        _ffp._dedupe_meeting_tasks = lambda *a, **kw: 0
     pipeline = FirefliesPipeline(
         settings=s,
         client=ff_client,

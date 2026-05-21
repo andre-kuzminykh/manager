@@ -72,19 +72,38 @@ def main() -> int:
         print(f"google_calendar_id: {s.google_calendar_id}")
         print()
 
-        events = fetch_calendar_events_via_api(
-            api_credentials_factory=cal_factory,
-            api_calendar_id=s.google_calendar_id,
-            window_start=win_start,
-            window_end=win_end,
-        )
-        print(f"Found {len(events)} events in window:")
+        # google_calendar_id can be comma-separated list of calendars
+        calendar_ids = [
+            c.strip() for c in (s.google_calendar_id or "primary").split(",")
+            if c.strip()
+        ]
+        events: list = []
+        for cid in calendar_ids:
+            try:
+                ev = fetch_calendar_events_via_api(
+                    md,
+                    window_minutes=args.window_min,
+                    credentials_factory=cal_factory,
+                    calendar_id=cid,
+                )
+                print(f"Calendar {cid[:50]}: {len(ev)} events")
+                events.extend(ev)
+            except Exception as e:  # noqa: BLE001
+                print(f"Calendar {cid[:50]}: ERR {e}")
+        print()
+        print(f"Total events across all calendars: {len(events)}")
         print()
         for ev in events:
             ev_id = ev.get("id") or "?"
-            summary = ev.get("summary") or "?"
-            start = (ev.get("start") or {}).get("dateTime") \
-                    or (ev.get("start") or {}).get("date") or "?"
+            # fetch_calendar_events_via_api returns shape with
+            # `title` (not `summary`) per FR-CR-05-144 normalisation
+            summary = (
+                ev.get("title") or ev.get("summary") or "?"
+            )
+            start = (
+                ev.get("start") or (ev.get("start_raw") or {}).get("dateTime")
+                or "?"
+            )
             attendees = ev.get("attendees") or []
             atts_count = len(attendees)
             decl = sum(

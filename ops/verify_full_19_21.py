@@ -15,6 +15,12 @@ trace of EVERYTHING that will land in Slack:
     ⚠ default / ✅ extracted
   - Pre-formatted send command for one-at-a-time posting
 
+ALSO writes structured outputs for later querying:
+  - ``/tmp/verify_full.csv`` — one row per check (record_id, src,
+    check_type, status, key, value). Open in Excel / column -t.
+  - ``/tmp/verify_full.json`` — array of {record_id, ...record_trace}
+    for jq queries.
+
 Usage:
     docker exec manager-bot-1 python -m ops.verify_full_19_21 \\
         --start 2026-05-19 --end 2026-05-22 \\
@@ -26,6 +32,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import re
 import sys
 from datetime import datetime, timezone
@@ -72,11 +80,24 @@ def main() -> int:
     ap.add_argument(
         "--exclude-title-contains", action="append", default=[],
     )
+    ap.add_argument(
+        "--csv-out", default="/tmp/verify_full.csv",
+        help="Structured per-check CSV output path.",
+    )
+    ap.add_argument(
+        "--json-out", default="/tmp/verify_full.json",
+        help="Structured per-record JSON output path.",
+    )
     args = ap.parse_args()
 
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
     excludes = [s.lower() for s in (args.exclude_title_contains or []) if s]
+
+    # CSV: one row per check
+    csv_rows: list[dict[str, str]] = []
+    # JSON: one nested object per record
+    json_records: list[dict] = []
 
     with session_scope() as s:
         # Pre-fetch TeamMember + Counterparty for trace lookups
@@ -205,6 +226,28 @@ def main() -> int:
             )
 
             rid = r.zoom_id if src == "zoom" else r.fireflies_id
+
+            # Per-record trace dict for JSON
+            record_trace: dict = {
+                "idx": i,
+                "src": src,
+                "rid": rid,
+                "meeting_date": r.meeting_date.isoformat(),
+                "title": r.title,
+                "google_doc_url": r.google_doc_url,
+                "checks": {},
+            }
+
+            def _add_csv(check_type: str, status: str, key: str = "",
+                         value: str = "") -> None:
+                csv_rows.append({
+                    "idx": str(i), "src": src, "rid": rid,
+                    "meeting_date": r.meeting_date.strftime("%Y-%m-%d %H:%M"),
+                    "title": (r.title or "")[:80],
+                    "check_type": check_type, "status": status,
+                    "key": key, "value": value,
+                })
+
             print()
             print("=" * 100)
             print(
@@ -220,11 +263,15 @@ def main() -> int:
                 )
                 url = url_match.group(0) if url_match else "?"
                 print(f"  [TITLE+LINK]    ✅ hyperlinked → {url[:80]}")
+                _add_csv("hyperlink", "ok", "url", url)
+                record_trace["checks"]["hyperlink"] = {"ok": True, "url": url}
             else:
                 print(
                     f"  [TITLE+LINK]    ❌ no hyperlink in first line:\n"
                     f"                  {first_line[:100]}"
                 )
+                _add_csv("hyperlink", "fail", "first_line", first_line[:100])
+                record_trace["checks"]["hyperlink"] = {"ok": False}
 
             # Calendar
             print(
@@ -232,6 +279,37 @@ def main() -> int:
                 f"resolved_via_people={n_resolved} unknown={n_unknown} "
                 f"declined={n_decline}"
             )
+            _add_csv(
+                "calendar", "ok" if n_cal > 0 else "warn",
+                "summary",
+                f"attendees={n_cal} resolved={n_resolved} unknown={n_unknown} declined={n_decline}",
+            )
+            cal_trace = []
+            for a in cal:
+                if not isinstance(a, dict):
+                    continue
+                ct = {
+                    "name": a.get("resolved_name") or a.get("display_name")
+                            or a.get("email") or "?",
+                    "email": a.get("email") or "",
+                    "resolution_method": a.get("resolution_method") or "",
+                    "rsvp": a.get("response_status") or "",
+                    "resolved_via_people": bool(a.get("resolved_name")),
+                }
+                cal_trace.append(ct)
+                _add_csv(
+                    "calendar_attendee",
+                    "ok" if ct["resolved_via_people"] else "warn",
+                    ct["name"][:40],
+                    f"email={ct['email']} via={'people' if ct['resolved_via_people'] else 'raw'} rsvp={ct['rsvp']}",
+                )
+            record_trace["checks"]["calendar"] = {
+                "count": n_cal,
+                "resolved_via_people": n_resolved,
+                "unknown": n_unknown,
+                "declined": n_decline,
+                "attendees": cal_trace,
+            }
             for a in cal[:8]:
                 if not isinstance(a, dict):
                     continue
@@ -257,24 +335,41 @@ def main() -> int:
                 f"  [PEOPLE TRACE]  in_TeamMember={len(people_hits)} "
                 f"not_in_TeamMember={len(people_misses)}"
             )
+            people_in_tm = []
+            for nm in people_hits:
+                m = members_by_norm[_norm(nm)]
+                people_in_tm.append({
+                    "name": nm, "tm_id": m.id, "role": m.role or "",
+                })
+                _add_csv("people_hit", "ok", nm[:40],
+                         f"tm_id={m.id} role={m.role or '—'}")
             for nm in people_hits[:6]:
                 m = members_by_norm[_norm(nm)]
                 print(
                     f"                  ✅ {nm:<24} → TeamMember id={m.id} "
                     f"role={(m.role or '—')[:30]}"
                 )
+            for nm in people_misses:
+                _add_csv("people_miss", "warn", nm[:40], "not_in_TeamMember")
             for nm in people_misses[:4]:
                 print(f"                  ❌ {nm} (not in TeamMember)")
+            record_trace["checks"]["people"] = {
+                "hits": people_in_tm,
+                "misses": people_misses,
+            }
 
             # Counterparty trace
             print(
                 f"  [COUNTERPARTY]  mentioned in body: {len(cp_hits)} "
                 f"matched canonical names"
             )
+            for nm in cp_hits:
+                _add_csv("counterparty_hit", "ok", nm[:60], "in_directory")
             for nm in list(cp_hits)[:8]:
                 print(f"                  ✅ {nm}")
             if len(cp_hits) > 8:
                 print(f"                  · ...and {len(cp_hits) - 8} more")
+            record_trace["checks"]["counterparties"] = list(cp_hits)
 
             # Participants line in Slack
             print(f"  [PARTICIPANTS]  «Участники: {part_line[:100]}»")
@@ -284,12 +379,14 @@ def main() -> int:
 
             # Tasks
             print(f"  [TODO]          {len(tasks)} tasks")
+            task_trace = []
             for num, title, owner, dl in tasks:
                 owner_clean = owner.strip()
                 in_tm = _norm(owner_clean) in members_by_norm
                 owner_check = "✅" if in_tm else "❌"
                 dl_clean = dl.strip()
-                if dl_clean == default_dl:
+                deadline_is_default = (dl_clean == default_dl)
+                if deadline_is_default:
                     dl_check = "⚠ default(meeting_date 18:00)"
                 else:
                     dl_check = "✅ extracted-from-text"
@@ -299,6 +396,23 @@ def main() -> int:
                     f"{owner_clean:<22} {owner_check} | "
                     f"{dl_clean} {dl_check}"
                 )
+                t = {
+                    "num": int(num),
+                    "title": title.strip(),
+                    "owner": owner_clean,
+                    "owner_in_tm": in_tm,
+                    "deadline": dl_clean,
+                    "deadline_is_default": deadline_is_default,
+                }
+                task_trace.append(t)
+                _add_csv(
+                    "task", "ok" if in_tm else "warn",
+                    f"#{num} owner={owner_clean}",
+                    (f"deadline={dl_clean} "
+                     f"{'default' if deadline_is_default else 'extracted'} "
+                     f"| {title.strip()[:80]}"),
+                )
+            record_trace["checks"]["tasks"] = task_trace
 
             # Send command
             if src == "zoom":
@@ -312,10 +426,32 @@ def main() -> int:
                     f"--fireflies-id {rid} --channel D0ASY5QF6UX"
                 )
             print(f"  [SEND CMD]      {cmd}")
+            record_trace["send_cmd"] = cmd
+            json_records.append(record_trace)
 
         print()
         print("=" * 100)
         print(f"Total READY: {len(rows)} — send chronologically (oldest first)")
+
+    # Write CSV
+    if csv_rows:
+        with open(args.csv_out, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "idx", "src", "rid", "meeting_date", "title",
+                    "check_type", "status", "key", "value",
+                ],
+            )
+            w.writeheader()
+            for row in csv_rows:
+                w.writerow(row)
+        print(f"\nCSV trace: {args.csv_out} ({len(csv_rows)} rows)")
+    # Write JSON
+    if json_records:
+        with open(args.json_out, "w", encoding="utf-8") as f:
+            json.dump(json_records, f, ensure_ascii=False, indent=2)
+        print(f"JSON trace: {args.json_out} ({len(json_records)} records)")
     return 0
 
 

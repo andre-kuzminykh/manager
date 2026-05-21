@@ -100,10 +100,17 @@ def transcribe_bytes(
     if not openai_api_key or not audio_bytes:
         return None
     # FR-CR-05-177 — OpenAI's diarization-capable models
-    # (e.g. `gpt-4o-transcribe-diarize`) reject the `prompt` kwarg
-    # with `invalid_request_error` («Prompt is not supported for
-    # diarization models»). Drop it for those models so the bias
-    # phrases don't crash the whole transcription call.
+    # (e.g. `gpt-4o-transcribe-diarize`) have two API differences
+    # vs `whisper-1`:
+    #   1. They REJECT `prompt` with
+    #      «Prompt is not supported for diarization models».
+    #   2. They REQUIRE a `chunking_strategy` kwarg —
+    #      «chunking_strategy is required for diarization models».
+    #      `"auto"` lets the model pick a reasonable internal split.
+    # Both shifts surfaced 2026-05-21 when OpenAI promoted the
+    # diarize endpoint out of preview; we already chunk audio
+    # client-side to fit the 25 MB upload cap, the chunking strategy
+    # here governs the model's INTERNAL diarization windowing.
     is_diarization_model = "diarize" in (model or "").lower()
     try:
         from openai import OpenAI
@@ -117,6 +124,8 @@ def transcribe_bytes(
             kwargs["prompt"] = prompt
         if language:
             kwargs["language"] = language
+        if is_diarization_model:
+            kwargs["chunking_strategy"] = "auto"
         resp = client.audio.transcriptions.create(**kwargs)
     except Exception as e:  # noqa: BLE001
         log.warning("whisper_call_failed", error=str(e), filename=filename)

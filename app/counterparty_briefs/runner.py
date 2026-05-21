@@ -688,10 +688,21 @@ class CounterpartyBriefRunner:
             ts = self._send_slack_dm(text=top_text)
             if not ts:
                 return
-            # Operator-pinned 2026-05-18: persons go as thread
-            # replies under the org top message so the DM
-            # surface stays clean.
-            for person in person_payloads:
+            # Operator-pinned 2026-05-21: «либо ничего нет либо
+            # research_failed — надо тогда удалить». Drop persons
+            # whose research failed (no doc_url AND a note) — the
+            # «<name> — N/A (research_failed)» line is noise.
+            person_payloads_for_slack = [
+                p for p in person_payloads
+                if p.get("doc_url") or not p.get("note")
+            ]
+            if not person_payloads_for_slack:
+                log.info(
+                    "brief_all_persons_failed_skipping_thread",
+                    event_id=ev_id,
+                    persons=[p.get("display_name") for p in person_payloads],
+                )
+            for person in person_payloads_for_slack:
                 reply_text = render_person_thread_reply(person=person)
                 reply_ts = self._send_slack_dm(
                     text=reply_text, thread_ts=ts,

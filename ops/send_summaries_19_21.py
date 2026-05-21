@@ -37,16 +37,19 @@ from datetime import datetime, timezone
 
 from app.config import get_settings
 from app.db import session_scope
-from app.fireflies.pipeline import (
-    _build_todo_section,
-    _strip_llm_todo_block,
-)
+from app.fireflies.pipeline import _strip_llm_todo_block
+from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
+from app.intent.llm_backends import OpenAIBackend
 from app.models import MeetingRecording, Task, TaskSourceKind, ZoomRecording
 from app.services.slack_mirror import (
     SLACK_TEXT_CHUNK_CHARS,
     _compact_for_slack,
     _split_for_slack,
     _to_slack_mrkdwn,
+)
+from app.services.task_direction import (
+    DIRECTIONS_IMPORTANT,
+    classify_directions,
 )
 
 
@@ -88,6 +91,122 @@ def _gather_candidates(
         out.append((r.meeting_date, "fireflies", r))
     out.sort(key=lambda x: x[0])
     return out
+
+
+def _extract_important_tasks_ephemeral(
+    row,
+    *,
+    settings,
+    llm_backend,
+) -> list[dict]:
+    """FR-CR-05-178 — ephemeral task extraction at send time.
+
+    Calls TASK_EXTRACTION_SYSTEM LLM on row.transcript_text +
+    detailed_summary, classifies each task by direction, and
+    returns ONLY tasks with direction ∈ DIRECTIONS_IMPORTANT.
+    Nothing is persisted to DB.
+
+    Returns: list of {"title": str, "owner": str, "direction": str}.
+    """
+    import json as _json
+
+    transcript = (row.transcript_text or "").strip()
+    detailed = (row.detailed_summary or "").strip()
+    if not transcript and not detailed:
+        return []
+    # Build the participants line — same precedence as the pipeline.
+    parts: list[str] = []
+    cal = row.calendar_attendees or []
+    if isinstance(cal, list) and cal:
+        for a in cal:
+            if isinstance(a, dict):
+                name = (
+                    a.get("resolved_name") or a.get("display_name")
+                    or a.get("email") or ""
+                ).strip()
+                if name:
+                    parts.append(name)
+    if not parts and row.participants:
+        parts = [p for p in row.participants if p]
+    participants_line = (
+        ("meeting_participants:\n  - " + "\n  - ".join(parts))
+        if parts else ""
+    )
+    user_prompt = (
+        "Return JSON: `{\"tasks\": [{\"title\": ..., "
+        "\"description\": ..., \"owner\": ..., \"priority\": ...}, "
+        "...]}`. Empty list ok.\n\n"
+        f"Заголовок: {row.title or '(без названия)'}\n"
+        f"{participants_line}\n\n"
+        "ДЕТАЛЬНОЕ САММЕРИ:\n"
+        f"{detailed[:15000]}\n\n"
+        "ТРАНСКРИПТ:\n"
+        f"{transcript[:60000]}"
+    )
+    try:
+        raw = llm_backend.complete_text(
+            system_prompt=TASK_EXTRACTION_SYSTEM,
+            user_prompt=user_prompt,
+            model=settings.fireflies_tasks_model,
+            reasoning_effort=(
+                settings.fireflies_tasks_reasoning_effort or None
+            ),
+            response_format={"type": "json_object"},
+        ) or ""
+    except Exception as e:  # noqa: BLE001
+        print(f"    WARN: ephemeral task extraction failed: {e}")
+        return []
+    try:
+        parsed = _json.loads(raw) if raw else {}
+    except _json.JSONDecodeError:
+        return []
+    raw_tasks = (parsed or {}).get("tasks") or []
+    if not isinstance(raw_tasks, list):
+        return []
+    # Direction classification: assign sequential ids so the
+    # classifier returns {id: direction}.
+    direction_input = [
+        {
+            "id": i,
+            "title": (t.get("title") or "")[:200],
+            "description": (t.get("description") or "")[:300],
+        }
+        for i, t in enumerate(raw_tasks)
+        if isinstance(t, dict)
+    ]
+    directions = classify_directions(
+        tasks=direction_input,
+        meeting_context=detailed[:3000] or None,
+        llm_backend=llm_backend,
+        model=settings.fireflies_tasks_model,
+    )
+    out: list[dict] = []
+    for i, t in enumerate(raw_tasks):
+        if not isinstance(t, dict):
+            continue
+        d = directions.get(i, "other")
+        if d not in DIRECTIONS_IMPORTANT:
+            continue
+        out.append({
+            "title": (t.get("title") or "").strip(),
+            "owner": (t.get("owner") or "").strip(),
+            "direction": d,
+        })
+    return out
+
+
+def _render_tasks_block(tasks: list[dict]) -> str:
+    """Numbered To-Do list, one paragraph per task — Slack renders
+    `\\n\\n` between paragraphs."""
+    if not tasks:
+        return ""
+    lines: list[str] = []
+    for i, t in enumerate(tasks, start=1):
+        title = t["title"] or "(без описания)"
+        owner = t["owner"]
+        suffix = f" — {owner}" if owner else ""
+        lines.append(f"{i}) {title}{suffix}")
+    return "To-Do:\n\n" + "\n\n".join(lines)
 
 
 def _split_parent_and_tasks(short_summary: str) -> tuple[str, str]:
@@ -169,11 +288,32 @@ def main() -> int:
             client = None
             SlackApiError = Exception  # noqa: N806
 
+        # FR-CR-05-178 — LLM backend for ephemeral task extraction.
+        # No Task rows are persisted; we just call the LLM, classify
+        # by direction, render to Slack thread, discard.
+        from openai import OpenAI
+        openai_client = OpenAI(api_key=s.openai_api_key)
+        ephemeral_llm = OpenAIBackend(
+            client=openai_client,
+            model=s.fireflies_tasks_model,
+        )
+
         sent = 0
         for i, (dt, src, r) in enumerate(cands, start=1):
-            parent_text, tasks_text = _split_parent_and_tasks(
+            # Parent text: strip any LLM-emitted To-Do from existing
+            # short_summary. We DO NOT use the existing deterministic
+            # To-Do (which would read DB Task rows — in mock mode
+            # there are none anyway).
+            parent_text = _strip_llm_todo_block(
                 r.short_summary or ""
+            ).rstrip()
+            # Tasks block: ephemeral LLM extraction + DIRECTIONS
+            # filter, NO DB writes.
+            tasks_list = _extract_important_tasks_ephemeral(
+                r, settings=s, llm_backend=ephemeral_llm,
             )
+            tasks_text = _render_tasks_block(tasks_list)
+
             parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_text))
             if tasks_text:
                 tasks_text = _compact_for_slack(_to_slack_mrkdwn(tasks_text))
@@ -193,10 +333,15 @@ def main() -> int:
             )
             if args.dry_run:
                 print(f"    parent[0] preview: "
-                      f"{parent_chunks[0][:160].replace(chr(10), ' / ')}…")
-                if tasks_text:
-                    print(f"    tasks preview: "
-                          f"{tasks_text[:160].replace(chr(10), ' / ')}…")
+                      f"{parent_chunks[0][:200].replace(chr(10), ' / ')}…")
+                if tasks_list:
+                    print(f"    important tasks ({len(tasks_list)}):")
+                    for j, t in enumerate(tasks_list, start=1):
+                        owner = f" — {t['owner']}" if t['owner'] else ""
+                        print(f"      {j}) [{t['direction']}] "
+                              f"{t['title'][:80]}{owner}")
+                else:
+                    print("    important tasks: (none)")
                 continue
 
             parent_ts = None
@@ -236,13 +381,10 @@ def main() -> int:
                 continue
 
             r.short_summary_sent = True
-            # Operator-pinned 2026-05-21: «задачи в бд не записывать
-            # именно эти». Tasks были нужны временно — чтобы
-            # _build_todo_section отрендерил тред-реплику. После
-            # успешного поста — HARD DELETE, ноль следа в БД. FK
-            # из task_subscriptions / daily_plan / sync / intent /
-            # telegram все на CASCADE или SET NULL, так что DELETE
-            # безопасен.
+            # FR-CR-05-178 — defensive: hard-DELETE any Task rows
+            # that may have slipped through (e.g. if batch was run
+            # without --skip-tasks). In normal flow this finds zero
+            # rows since reprocess used --skip-tasks.
             sk = (TaskSourceKind.zoom if src == "zoom"
                   else TaskSourceKind.fireflies)
             sid = r.zoom_id if src == "zoom" else r.fireflies_id
@@ -255,7 +397,9 @@ def main() -> int:
             session.flush()
             sent += 1
             print(
-                f"    posted ts={parent_ts}    hard-deleted {wiped} tasks"
+                f"    posted ts={parent_ts}    "
+                f"ephemeral tasks={len(tasks_list)}   "
+                f"defensive-deleted {wiped} DB tasks"
             )
             time.sleep(args.sleep)
 

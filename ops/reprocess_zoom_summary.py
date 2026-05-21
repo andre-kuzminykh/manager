@@ -63,6 +63,14 @@ def main() -> int:
         help="Don't clear `detailed_summarised`; just refresh "
         "downstream (short_summary, Doc, tasks).",
     )
+    ap.add_argument(
+        "--skip-tasks", action="store_true",
+        help="Skip the extract_tasks step entirely — no Task rows "
+        "written to DB by this reprocess. Operator-pinned "
+        "2026-05-21: «задачи в бд не записывать именно эти». "
+        "Use together with ops.send_summaries_19_21 which extracts "
+        "tasks at post time, in-memory only.",
+    )
     args = ap.parse_args()
 
     s = get_settings()
@@ -100,7 +108,14 @@ def main() -> int:
         if not args.keep_summary:
             row.detailed_summarised = False
             row.detailed_summary = None
-        row.tasks_extracted = False
+        # FR-CR-05-178 — --skip-tasks: leave tasks_extracted=True so
+        # the LLM-touching `_step_extract_tasks` short-circuits and
+        # NO Task rows are written. Operator-pinned 2026-05-21:
+        # «задачи в бд не записывать ... полностью в моке».
+        if args.skip_tasks:
+            row.tasks_extracted = True
+        else:
+            row.tasks_extracted = False
         row.short_summary_sent = False
         row.doc_exported = False
         row.google_doc_id = None

@@ -131,6 +131,9 @@ def main() -> int:
                 "--zoom-id", rid,
                 "--force-retranscribe",
                 "--no-slack",
+                # FR-CR-05-178 — mock mode: no Task rows persisted.
+                # send_summaries_19_21 will extract tasks ephemerally.
+                "--skip-tasks",
             ]
         else:
             cmd = [

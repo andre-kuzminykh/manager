@@ -2664,3 +2664,143 @@ def test_settings_listener_kill_switches_default_to_off():
     assert s.fireflies_realtime_enabled is False
     assert s.agenda_enabled is False
     assert s.counterparty_briefs_enabled is False
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-181 follow-up for Fireflies (FR-CR-05-176 sibling).
+#
+# Fireflies' counterpart of the Zoom attendees contract. Fireflies has NO
+# zoom-side reconcile step (no /past_meetings/{uuid}/participants endpoint).
+# The contract: Calendar attendees → People resolve → `row.calendar_attendees`
+# → `build_meta_block_for_summary` renders the «Участники: …» line.
+# --------------------------------------------------------------------------- #
+
+
+def test_fireflies_pipeline_populates_calendar_attendees_end_to_end(
+    session, monkeypatch,
+):
+    """FR-CR-05-176/181 — calling `_populate_calendar_attendees` on a
+    MeetingRecording fetches Calendar events, matches by fuzzy title +
+    time, resolves invitee emails through People, and writes the result
+    to `row.calendar_attendees`. Downstream `build_meta_block_for_summary`
+    renders them. NO Zoom reconcile step (Fireflies has no equivalent
+    endpoint)."""
+    from datetime import datetime, timezone
+    from app.config import Settings
+    from app.fireflies.pipeline import (
+        FirefliesPipeline,
+        build_meta_block_for_summary,
+    )
+    from app.models import MeetingRecording, TeamMember
+
+    session.add(TeamMember(
+        real_name="Артем Соколов", email="1@thehumanoid.ai", active=True,
+    ))
+    session.add(TeamMember(
+        real_name="Andre Kuzminykh", email="andre@thehumanoid.ai", active=True,
+    ))
+
+    meeting_dt = datetime(2026, 5, 19, 8, 15, 0, tzinfo=timezone.utc)
+    row = MeetingRecording(
+        fireflies_id="ff-fr181-1",
+        title="Humanoid x CDIB Capital",
+        meeting_date=meeting_dt,
+        participants=["Whisper-Mangled Artem"],
+    )
+    session.add(row)
+    session.flush()
+
+    fake_events = [
+        {
+            "id": "evt-cdib-19",
+            "title": "Humanoid x CDIB Capital",
+            "start": "2026-05-19T08:15:00+00:00",
+            "end": "2026-05-19T09:00:00+00:00",
+            "description": "",
+            "organizer": {"email": "1@thehumanoid.ai"},
+            "creator": {"email": "1@thehumanoid.ai"},
+            "attendees": [
+                {"email": "1@thehumanoid.ai",
+                 "responseStatus": "accepted"},
+                {"email": "andre@thehumanoid.ai",
+                 "responseStatus": "accepted"},
+            ],
+        },
+    ]
+
+    def _fake_fetch_events(meeting_dt, *, window_minutes,
+                           credentials_factory, calendar_id):  # noqa: ANN001
+        return fake_events
+
+    monkeypatch.setattr(
+        "app.services.calendar_match.fetch_calendar_events_via_api",
+        _fake_fetch_events,
+    )
+
+    settings = Settings(
+        GOOGLE_CALENDAR_ID="primary",
+        OPENAI_API_KEY="sk-fr181",
+    )
+
+    class _NoopClient: pass
+    class _NoopLLM: pass
+    def _cal_factory():
+        return object()
+    pipeline = FirefliesPipeline(
+        settings=settings,
+        client=_NoopClient(),
+        llm_backend=_NoopLLM(),
+        calendar_factory=_cal_factory,
+    )
+
+    pipeline._populate_calendar_attendees(row, session)
+
+    assert row.calendar_attendees, "calendar_attendees must be populated"
+    names = [a.get("resolved_name") for a in row.calendar_attendees]
+    assert names == ["Артем Соколов", "Andre Kuzminykh"]
+
+    block = build_meta_block_for_summary(row)
+    assert "Участники: Артем Соколов, Andre Kuzminykh" in block
+    # Raw Fireflies participants (LLM-mangled) MUST NOT appear when
+    # calendar_attendees is populated.
+    assert "Whisper-Mangled" not in block
+
+
+def test_fireflies_pipeline_skips_calendar_attendees_when_no_factory(
+    session, monkeypatch,
+):
+    """FR-CR-05-176 — when `calendar_factory=None` (env doesn't have
+    Calendar creds), populator is a NO-OP. Fireflies falls back to the
+    raw `row.participants` list in the meta block — back-compat with
+    pre-FR-CR-05-176 deploys."""
+    from datetime import datetime, timezone
+    from app.config import Settings
+    from app.fireflies.pipeline import (
+        FirefliesPipeline,
+        build_meta_block_for_summary,
+    )
+    from app.models import MeetingRecording
+
+    row = MeetingRecording(
+        fireflies_id="ff-fr181-2",
+        title="No Calendar",
+        meeting_date=datetime.now(timezone.utc),
+        participants=["Anna", "Boris"],
+    )
+    session.add(row)
+    session.flush()
+
+    settings = Settings()
+    class _NoopClient: pass
+    class _NoopLLM: pass
+    pipeline = FirefliesPipeline(
+        settings=settings,
+        client=_NoopClient(),
+        llm_backend=_NoopLLM(),
+        calendar_factory=None,
+    )
+    pipeline._populate_calendar_attendees(row, session)
+    assert not row.calendar_attendees
+
+    block = build_meta_block_for_summary(row)
+    assert "Участники: Anna, Boris" in block

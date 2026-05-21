@@ -2149,3 +2149,267 @@ def test_summary_header_renders_calendar_attendees_when_present(session):
     assert "Участники: Артем Соколов, Ирина Шипилова, Mohammed Al Fardan" in block
     # LLM-mangled names must NOT appear when calendar source is present.
     assert "Whisper-Mangled" not in block
+
+
+# ---------------------------------------------------------------------------
+# FR-CR-05-181 — END-TO-END attendees resolution contract for Zoom summaries.
+#
+# Operator-pinned 2026-05-21 («зафиксируй этот подход в спецификации, тестами
+# полностью обклей весь код чтобы это было так и всегда так для всех зум
+# встреч саммери»). Welds together FR-CR-05-169 (calendar→People resolve),
+# FR-CR-05-172 (Zoom-participants reconcile with email/fuzzy/LLM tiers), and
+# FR-CR-05-174 (meta-block prefers calendar_attendees) into one invariant the
+# whole pipeline must uphold.
+#
+# Contract under test:
+#   For ANY ZoomRecording that has `meeting_date` set AND the Zoom pipeline
+#   has a `calendar_factory`, `_populate_calendar_attendees(row, session)`:
+#     1. Fetches Calendar events ±120min around meeting_date.
+#     2. Matches the recording via URL (zoom_meeting_id) OR fuzzy
+#        (title+time≤15min).
+#     3. Resolves each invitee email against TeamMember/Employee/Counterparty
+#        tables → `resolved_name` carries the People-table form (Russian if
+#        that's how the row was entered), NOT the Calendar `displayName`.
+#     4. Pulls Zoom join list (`/past_meetings/{uuid}/participants`) and
+#        reconciles via 3 tiers: (a) email, (b) fuzzy token overlap,
+#        (c) LLM cyrillic↔latin reconcile — REQUIRES openai_api_key in
+#        settings; the pipeline MUST construct the client and pass it
+#        through to `reconcile_with_zoom_participants`.
+#     5. Writes the final list to `row.calendar_attendees`. Downstream
+#        `build_meta_block_for_summary(row)` MUST render those resolved
+#        names in the «Участники: …» line.
+# ---------------------------------------------------------------------------
+
+
+def test_zoom_pipeline_attendees_end_to_end_resolves_through_all_tiers(
+    session, monkeypatch,
+):
+    """End-to-end: ONE ZoomRecording row, mocked Calendar fetch + Zoom
+    fetch_meeting_participants + OpenAI LLM client → final
+    `row.calendar_attendees` is the 6-person People-resolved list, and
+    `build_meta_block_for_summary` renders all 6 in event order.
+
+    This is THE test future refactors must not break. It pins the
+    «Calendar → People → Zoom-reconcile» contract for Zoom summaries.
+    """
+    from datetime import datetime, timezone
+    from app.config import Settings
+    from app.models import TeamMember, ZoomRecording
+    from app.zoom.pipeline import (
+        ZoomPipeline,
+        build_meta_block_for_summary,
+    )
+
+    # ------- seed People (TeamMember rows the resolver hits) -------
+    seed = [
+        ("Артем Соколов",       "1@thehumanoid.ai"),
+        ("Alina Kolpakova",     "kaa@thehumanoid.ai"),
+        ("Дмитрий Седов",       "dmitry.sedov@thehumanoid.ai"),
+        ("Ирина Шипилова",      "irina.shipilova@thehumanoid.ai"),
+        ("Ольга Пономаренко",   "oponomarenko@cohengresser.com"),
+        ("Елена Радионова",     "elena.radionova@sokolov.ch"),
+    ]
+    for name, email in seed:
+        session.add(TeamMember(real_name=name, email=email, active=True))
+
+    meeting_dt = datetime(2026, 5, 21, 9, 1, 5, tzinfo=timezone.utc)
+    row = ZoomRecording(
+        zoom_id="FR-CR-05-181-ZOOM==",
+        zoom_meeting_id="92413003555",
+        title="Fundraising daily",
+        meeting_date=meeting_dt,
+        duration_seconds=2400,
+    )
+    session.add(row)
+    session.flush()
+
+    # ------- mock Calendar API fetch — returns ONE matched event -------
+    fake_events = [
+        {
+            "id": "u3ptf7u78tn5f152lb5vvl9m59_20260521T113000Z",
+            "title": "Fundraising daily",
+            "start": "2026-05-21T09:00:00+00:00",
+            "end": "2026-05-21T09:40:00+00:00",
+            "description": (
+                "Join Zoom Meeting "
+                "https://zoom.us/j/92413003555?pwd=xxx"
+            ),
+            "organizer": {"email": "1@thehumanoid.ai"},
+            "creator": {"email": "1@thehumanoid.ai"},
+            "attendees": [
+                {"email": e, "responseStatus": "accepted"}
+                for _, e in seed
+            ],
+        }
+    ]
+
+    def _fake_fetch_events(meeting_dt, *, window_minutes,
+                           credentials_factory, calendar_id):  # noqa: ANN001
+        return fake_events
+
+    monkeypatch.setattr(
+        "app.services.calendar_match.fetch_calendar_events_via_api",
+        _fake_fetch_events,
+    )
+
+    # ------- mock Zoom client `fetch_meeting_participants` -------
+    # Mimics PROD: cyrillic People names vs latin Zoom display names,
+    # plus mismatched emails — only LLM tier resolves these.
+    fake_zoom = [
+        {"user_name": "Artem Sokolov",    "user_email": "1@thehumanoid.ai"},
+        {"user_name": "Alina Kolpakova",  "user_email": ""},
+        {"user_name": "Dmitry Sedov",     "user_email": ""},
+        {"user_name": "Irina Shipilova",  "user_email": "irina.shipilova@skl.vc"},
+        {"user_name": "Olga",             "user_email": ""},
+        {"user_name": "Elena Radionova",  "user_email": "elena.radionova@sokolov.ch"},
+    ]
+
+    class _StubZoomClient:
+        def fetch_meeting_participants(self, zoom_id):
+            return list(fake_zoom)
+
+    # ------- mock OpenAI LLM — returns the 3 cyrillic↔latin matches -------
+    class _StubLLMResponse:
+        class _Msg:
+            def __init__(self, content):
+                self.content = content
+        def __init__(self, content):
+            self.choices = [type("C", (), {"message": self._Msg(content)})()]
+    import json as _json
+    # Indices are into the UNMATCHED lists (after email+fuzzy passes
+    # eat Artem/Alina/Elena), so {0:0, 1:1, 2:2} corresponds to
+    # Дмитрий↔Dmitry, Ирина↔Irina, Ольга↔Olga.
+    llm_payload = {
+        "matches": [
+            {"cal_idx": 0, "zoom_idx": 0},
+            {"cal_idx": 1, "zoom_idx": 1},
+            {"cal_idx": 2, "zoom_idx": 2},
+        ],
+    }
+
+    class _StubChat:
+        class _Completions:
+            def create(self, **kwargs):
+                return _StubLLMResponse(_json.dumps(llm_payload))
+        completions = _Completions()
+
+    class _StubOpenAI:
+        chat = _StubChat()
+        def __init__(self, **kw): pass
+
+    monkeypatch.setattr("openai.OpenAI", _StubOpenAI)
+
+    # ------- build pipeline with the stubs -------
+    settings = Settings(
+        OPENAI_API_KEY="sk-test-fr181",
+        GOOGLE_CALENDAR_ID="primary",
+    )
+
+    def _calendar_factory():
+        return object()
+
+    class _NoopLLM: pass
+    pipeline = ZoomPipeline(
+        settings=settings,
+        client=_StubZoomClient(),
+        llm_backend=_NoopLLM(),
+        calendar_factory=_calendar_factory,
+    )
+
+    # ------- exercise the contract -------
+    pipeline._populate_calendar_attendees(row, session)
+
+    # ------- assertions -------
+    assert row.calendar_attendees, "calendar_attendees must be populated"
+    names = [a.get("resolved_name") for a in row.calendar_attendees]
+    # ALL 6 resolved to People-table names — NOT raw Zoom display names.
+    assert "Артем Соколов" in names
+    assert "Alina Kolpakova" in names
+    assert "Дмитрий Седов" in names, (
+        "Cyrillic resolved_name must beat the latin Zoom display "
+        "name — this is the LLM-tier outcome operator depends on"
+    )
+    assert "Ирина Шипилова" in names
+    assert "Ольга Пономаренко" in names
+    assert "Елена Радионова" in names
+    # NO raw zoom-only joiners — every cal invitee got reconciled.
+    assert all(
+        a.get("zoom_join_method") != "zoom_only"
+        for a in row.calendar_attendees
+    ), "All 6 calendar invitees must reconcile against Zoom joins"
+
+    # build_meta_block_for_summary renders «Участники: …» from those names.
+    block = build_meta_block_for_summary(row)
+    assert "Участники:" in block
+    for name in [
+        "Артем Соколов", "Alina Kolpakova", "Дмитрий Седов",
+        "Ирина Шипилова", "Ольга Пономаренко", "Елена Радионова",
+    ]:
+        assert name in block, (
+            f"meta-block must include People-resolved name {name!r}, "
+            f"got: {block!r}"
+        )
+
+
+def test_zoom_pipeline_constructs_openai_client_for_reconcile(monkeypatch):
+    """FR-CR-05-181 — pin that the Zoom pipeline MUST construct an
+    `openai.OpenAI(api_key=...)` client and pass it through to
+    `reconcile_with_zoom_participants`. Without this, the LLM tier
+    never fires and cyrillic↔latin pairs fall through as `zoom_only`
+    with raw Zoom names — operator regression 2026-05-21.
+    """
+    from app.zoom.pipeline import ZoomPipeline
+    from app.config import Settings
+    from app.models import ZoomRecording
+
+    captured: dict = {}
+
+    def _stub_reconcile(*, calendar_attendees, zoom_participants,
+                        openai_client=None, llm_model="", **kw):
+        captured["openai_client"] = openai_client
+        captured["llm_model"] = llm_model
+        return {
+            "attendees": list(calendar_attendees),
+            "unmatched_calendar": [],
+            "method_breakdown": {"email": 0, "fuzzy": 0,
+                                 "llm": 0, "zoom_only": 0},
+            "llm_used": False,
+        }
+
+    monkeypatch.setattr(
+        "app.services.calendar_attendees.reconcile_with_zoom_participants",
+        _stub_reconcile,
+    )
+
+    class _StubZoomClient:
+        def fetch_meeting_participants(self, zoom_id):
+            return [{"user_name": "Anyone", "user_email": ""}]
+
+    class _StubOpenAI:
+        def __init__(self, *, api_key):
+            captured["openai_init_api_key"] = api_key
+
+    monkeypatch.setattr("openai.OpenAI", _StubOpenAI)
+
+    settings = Settings(OPENAI_API_KEY="sk-fr181-pin")
+
+    class _NoopLLM: pass
+    pipeline = ZoomPipeline(
+        settings=settings,
+        client=_StubZoomClient(),
+        llm_backend=_NoopLLM(),
+    )
+
+    row = ZoomRecording(zoom_id="X==", title="t")
+
+    pipeline._reconcile_with_zoom_participants(
+        row, session=None, calendar_attendees=[
+            {"email": "a@x", "resolved_name": "A",
+             "source": "team_member", "response_status": "accepted"},
+        ],
+    )
+
+    assert captured.get("openai_init_api_key") == "sk-fr181-pin"
+    assert captured.get("openai_client") is not None, (
+        "pipeline must pass a constructed openai_client to reconcile"
+    )

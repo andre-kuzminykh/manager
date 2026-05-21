@@ -388,6 +388,83 @@ class ZoomPipeline:
                     zoom_id=row.zoom_id,
                 )
 
+            # FR-CR-05-186 — operator-pinned 2026-05-21: «закрепи это
+            # на уровне спеки и тестов чтобы мы пробовали другую
+            # модель если будут галюцинации». When the primary STT
+            # hallucinated AND the VTT fallback is empty/missing,
+            # retry the transcribe with `ZOOM_FALLBACK_WHISPER_MODEL`
+            # (default `whisper-1`). Legacy whisper-1 has different
+            # silent-section behaviour and often succeeds where the
+            # newer gpt-4o-transcribe-family models loop on
+            # «так, ну что, поехали…» style filler. We keep the
+            # fallback transcript ONLY if it doesn't itself trip the
+            # hallucination heuristic.
+            if (
+                is_hallucinated
+                and (not transcript or len(transcript) < 200)
+                and self._settings.zoom_fallback_whisper_enabled
+            ):
+                fb_model = (
+                    self._settings.zoom_fallback_whisper_model or "whisper-1"
+                )
+                primary_model = self._settings.fireflies_whisper_model or ""
+                if fb_model and fb_model.lower() != primary_model.lower():
+                    log.info(
+                        "zoom_whisper_fallback_to_alt_model",
+                        zoom_id=row.zoom_id,
+                        primary_model=primary_model,
+                        fallback_model=fb_model,
+                    )
+                    _zte_h(
+                        source="zoom", recording_id=row.zoom_id,
+                        event="zoom_whisper_fallback_to_alt_model",
+                        primary_model=primary_model,
+                        fallback_model=fb_model,
+                    )
+                    try:
+                        fb_parts = transcribe_chunks_parallel(
+                            audio_paths,
+                            openai_api_key=api_key,
+                            model=fb_model,
+                            prompt=whisper_prompt,
+                            mimetype_for=_mt,
+                            max_workers=3,
+                        )
+                        fb_text = "\n".join(t or "" for t in fb_parts).strip()
+                        fb_hallucinated = looks_like_whisper_hallucination(
+                            fb_text
+                        )
+                        if fb_text and not fb_hallucinated:
+                            log.info(
+                                "zoom_whisper_alt_model_succeeded",
+                                zoom_id=row.zoom_id,
+                                fallback_model=fb_model,
+                                fallback_chars=len(fb_text),
+                            )
+                            _zte_h(
+                                source="zoom", recording_id=row.zoom_id,
+                                event="zoom_whisper_alt_model_succeeded",
+                                fallback_chars=len(fb_text),
+                            )
+                            transcript = fb_text
+                            is_hallucinated = False
+                            whisper_failed = False
+                        else:
+                            log.warning(
+                                "zoom_whisper_alt_model_also_failed",
+                                zoom_id=row.zoom_id,
+                                fallback_model=fb_model,
+                                fallback_chars=len(fb_text),
+                                fallback_hallucinated=fb_hallucinated,
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        log.warning(
+                            "zoom_whisper_alt_model_exception",
+                            zoom_id=row.zoom_id,
+                            fallback_model=fb_model,
+                            error=str(e),
+                        )
+
         if whisper_failed and not transcript:
             row.last_error = "transcribe failed: Whisper empty + no VTT fallback"
             return False

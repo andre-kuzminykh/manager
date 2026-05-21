@@ -179,6 +179,21 @@ class Settings(BaseSettings):
         default="whisper-1",
         alias="ZOOM_BILINGUAL_WHISPER_MODEL",
     )
+    # FR-CR-05-186 — operator-pinned 2026-05-21: when the primary
+    # STT model output trips the hallucination heuristic AND the
+    # Zoom-side VTT fallback is empty/missing, retry the
+    # transcribe with `ZOOM_FALLBACK_WHISPER_MODEL` (default
+    # `whisper-1` — legacy model with different silent-section
+    # behaviour). Keep the fallback transcript ONLY if it doesn't
+    # itself trip the heuristic.
+    zoom_fallback_whisper_enabled: bool = Field(
+        default=True,
+        alias="ZOOM_FALLBACK_WHISPER_ENABLED",
+    )
+    zoom_fallback_whisper_model: str = Field(
+        default="whisper-1",
+        alias="ZOOM_FALLBACK_WHISPER_MODEL",
+    )
     # Chunked reconciler — split both transcripts into batches of this
     # many input chars so the LLM always covers the full primary
     # regardless of length. Smaller = more batches, more cost /

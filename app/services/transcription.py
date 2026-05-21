@@ -99,6 +99,12 @@ def transcribe_bytes(
     """
     if not openai_api_key or not audio_bytes:
         return None
+    # FR-CR-05-177 — OpenAI's diarization-capable models
+    # (e.g. `gpt-4o-transcribe-diarize`) reject the `prompt` kwarg
+    # with `invalid_request_error` («Prompt is not supported for
+    # diarization models»). Drop it for those models so the bias
+    # phrases don't crash the whole transcription call.
+    is_diarization_model = "diarize" in (model or "").lower()
     try:
         from openai import OpenAI
 
@@ -107,7 +113,7 @@ def transcribe_bytes(
             "model": model,
             "file": (filename, audio_bytes, mimetype),
         }
-        if prompt:
+        if prompt and not is_diarization_model:
             kwargs["prompt"] = prompt
         if language:
             kwargs["language"] = language

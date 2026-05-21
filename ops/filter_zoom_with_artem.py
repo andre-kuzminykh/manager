@@ -64,12 +64,22 @@ def main() -> int:
         "--out", default="/tmp/zoom_ids_bilingual_with_artem.txt",
         help="Output path for filtered zoom_ids",
     )
+    ap.add_argument(
+        "--required-email", default=None,
+        help="Override ZOOM_REQUIRED_EMAIL (e.g. 1@thehumanoid.ai). "
+        "Useful when the env var is unset in the running container.",
+    )
     args = ap.parse_args()
 
     s = get_settings()
-    required = (s.zoom_required_email or "").strip().lower()
+    required = (
+        args.required_email or s.zoom_required_email or ""
+    ).strip().lower()
     if not required:
-        print("ERROR: ZOOM_REQUIRED_EMAIL not set.", file=sys.stderr)
+        print(
+            "ERROR: ZOOM_REQUIRED_EMAIL not set and --required-email "
+            "not passed.", file=sys.stderr,
+        )
         return 2
 
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)

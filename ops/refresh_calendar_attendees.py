@@ -111,19 +111,26 @@ def main() -> int:
             before = r.calendar_attendees or []
             print(f"  BEFORE: {_attendees_summary(before)}")
 
-            # Re-run calendar attendees populate
+            # Re-run calendar attendees populate. _populate_calendar_attendees
+            # is idempotent — if row.calendar_attendees is non-empty it
+            # returns early. Force-refresh by clearing first.
+            if not args.dry_run:
+                r.calendar_attendees = None
             try:
+                from unittest.mock import MagicMock
                 if src == "zoom":
                     from app.zoom.pipeline import ZoomPipeline
                     pipe = ZoomPipeline(
-                        settings=s, llm_backend=llm,
+                        settings=s, client=MagicMock(),
+                        llm_backend=llm,
                         calendar_factory=cal_factory,
                     )
                     pipe._populate_calendar_attendees(r, session)
                 else:
                     from app.fireflies.pipeline import FirefliesPipeline
                     pipe = FirefliesPipeline(
-                        settings=s, llm_backend=llm,
+                        settings=s, client=MagicMock(),
+                        llm_backend=llm,
                         calendar_factory=cal_factory,
                     )
                     pipe._populate_calendar_attendees(r, session)

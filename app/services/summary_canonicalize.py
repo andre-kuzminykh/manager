@@ -169,54 +169,42 @@ def resolve_people_to_team_members(
 
 
 def resolve_organizations_to_counterparties(
-    mentions: list[str], session: Session,
+    mentions: list[str],
+    session: Session,
+    *,
+    llm_backend: LLMBackend,
+    model: str,
+    trace_source: str | None = None,
+    trace_recording_id: str | None = None,
 ) -> dict[str, str]:
-    """Map each mention → canonical Counterparty.name when there's
-    a confident match.
+    """Map each mention → canonical Counterparty.name using the
+    LLM-based resolver (FR-CR-05-129 Pass 2). Battle-tested for
+    fuzzy / phonetic / transliterated forms.
     """
     if not mentions:
         return {}
     cps = session.query(Counterparty).all()
     if not cps:
         return {}
+    from app.services.counterparty_match import resolve_mentions_to_directory
+
+    # LLM returns {mention: counterparty_id | None}
+    resolved = resolve_mentions_to_directory(
+        mentions=mentions,
+        directory=cps,
+        llm_backend=llm_backend,
+        model=model,
+        trace_source=trace_source,
+        trace_recording_id=trace_recording_id,
+    )
+    id_to_name: dict[int, str] = {cp.id: cp.name for cp in cps}
     out: dict[str, str] = {}
-    for mention in mentions:
-        mention_norm = _norm(mention)
-        if not mention_norm:
+    for mention, cp_id in resolved.items():
+        if cp_id is None:
             continue
-        # 1) Exact match — skip (no rewrite needed)
-        exact_hit = any(
-            (cp.name_normalised or _norm(cp.name)) == mention_norm
-            for cp in cps
-        )
-        if exact_hit:
-            continue
-        # 2) Substring match — mention is part of canonical or
-        #    canonical is part of mention
-        best_match: Counterparty | None = None
-        best_score = 0
-        for cp in cps:
-            cp_norm = cp.name_normalised or _norm(cp.name)
-            if not cp_norm:
-                continue
-            # Prefer matches where one is a clean substring of the other
-            if mention_norm == cp_norm:
-                best_match = cp
-                best_score = 1000
-                break
-            if (
-                mention_norm in cp_norm
-                or cp_norm in mention_norm
-            ):
-                # Score by length of shorter side
-                score = min(len(mention_norm), len(cp_norm))
-                if score > best_score:
-                    best_match = cp
-                    best_score = score
-        if best_match and best_score >= 4:
-            canonical = best_match.name
-            if _norm(canonical) != mention_norm:
-                out[mention] = canonical
+        canonical = id_to_name.get(cp_id)
+        if canonical and _norm(canonical) != _norm(mention):
+            out[mention] = canonical
     return out
 
 
@@ -244,6 +232,9 @@ def canonicalize_summary_text(
     )
     org_map = resolve_organizations_to_counterparties(
         entities["organizations"], session,
+        llm_backend=llm_backend, model=model,
+        trace_source=trace_source,
+        trace_recording_id=trace_recording_id,
     )
     full_map: dict[str, str] = {**people_map, **org_map}
     log.info(

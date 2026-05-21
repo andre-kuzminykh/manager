@@ -132,22 +132,12 @@ def main() -> int:
             return 5
 
         body, reused_todo = _split_short_summary(row.short_summary)
-        # FR-CR-05-184 — parent ends with «TODO:» so the reader
-        # knows tasks landed in the thread below. No emojis.
-        # FR-CR-05-189 — `--no-tasks` skips both the trailer and
-        # the thread reply (parent-only mode).
-        parent_raw = body if args.no_tasks else body + "\n\nTODO:"
-        parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
-        chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 
-        print(f"\n[1/3] Parent body — {len(chunks)} chunk(s), "
-              f"first chunk {len(chunks[0])} chars:")
-        print("-" * 70)
-        print(chunks[0][:400] + ("…" if len(chunks[0]) > 400 else ""))
-        print("-" * 70)
-
+        # Compute tasks FIRST. Trailer «TODO:» on parent is
+        # appended ONLY if a thread reply will follow with tasks.
+        # Operator-pinned 2026-05-21: «если их нет не надо писать TODO».
         if args.no_tasks:
-            print("\n[2/3] --no-tasks — skipping tasks thread.")
+            print("\n[1/3] --no-tasks — skipping tasks thread.")
             tasks_text = ""
         elif args.reuse_todo and reused_todo:
             print(
@@ -173,6 +163,18 @@ def main() -> int:
             tasks_text = _render_tasks_block(tasks)
         if tasks_text:
             tasks_text = _compact_for_slack(_to_slack_mrkdwn(tasks_text))
+
+        # Build parent — append «TODO:» trailer ONLY if there
+        # will be a thread reply with tasks.
+        parent_raw = body + ("\n\nTODO:" if tasks_text else "")
+        parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
+        chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
+
+        print(f"\n[2/3] Parent body — {len(chunks)} chunk(s), "
+              f"first chunk {len(chunks[0])} chars:")
+        print("-" * 70)
+        print(chunks[0][:400] + ("…" if len(chunks[0]) > 400 else ""))
+        print("-" * 70)
 
         if args.dry_run:
             print("\n[3/3] --dry-run — no Slack call. Done.")

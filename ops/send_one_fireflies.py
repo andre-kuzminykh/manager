@@ -92,27 +92,21 @@ def main() -> int:
             return 5
 
         body, reused_todo = _split_short_summary(row.short_summary)
-        # FR-CR-05-189 — parent-only mode skips «TODO:» trailer.
-        parent_raw = body if args.no_tasks else body + "\n\nTODO:"
-        parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
-        chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 
-        print(f"\n[1/3] Parent body — {len(chunks)} chunk(s):")
-        print("-" * 70)
-        print(chunks[0][:300] + ("…" if len(chunks[0]) > 300 else ""))
-        print("-" * 70)
-
+        # Compute tasks FIRST so we can decide whether to append
+        # the «TODO:» trailer to the parent body. Operator-pinned
+        # 2026-05-21: don't print «TODO:» if there are no tasks.
         if args.no_tasks:
-            print("\n[2/3] --no-tasks — skipping tasks thread.")
+            print("\n[1/3] --no-tasks — skipping tasks thread.")
             tasks_text = ""
         elif args.reuse_todo and reused_todo:
             print(
-                f"\n[2/3] Reusing existing To-Do "
+                f"\n[1/3] Reusing existing To-Do "
                 f"({len(reused_todo)} chars)."
             )
             tasks_text = reused_todo
         else:
-            print("\n[2/3] Ephemeral task extraction…")
+            print("\n[1/3] Ephemeral task extraction…")
             tasks = _extract_important_tasks_ephemeral(
                 row, settings=s, llm_backend=llm,
             )
@@ -120,6 +114,17 @@ def main() -> int:
             tasks_text = _render_tasks_block(tasks)
         if tasks_text:
             tasks_text = _compact_for_slack(_to_slack_mrkdwn(tasks_text))
+
+        # Now build parent — append «TODO:» trailer ONLY if there
+        # will be a thread reply with tasks.
+        parent_raw = body + ("\n\nTODO:" if tasks_text else "")
+        parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
+        chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
+
+        print(f"\n[2/3] Parent body — {len(chunks)} chunk(s):")
+        print("-" * 70)
+        print(chunks[0][:300] + ("…" if len(chunks[0]) > 300 else ""))
+        print("-" * 70)
 
         if args.dry_run:
             print("\n[3/3] --dry-run — no Slack call. Done.")

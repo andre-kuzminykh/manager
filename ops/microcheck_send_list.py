@@ -38,9 +38,18 @@ import argparse
 import re
 import sys
 
+from datetime import time as dtime
+
 from app.db import session_scope
+from app.fireflies.pipeline import _build_todo_section
 from app.models import MeetingRecording, TeamMember, ZoomRecording
 from app.models.counterparty import Counterparty
+from app.models.task import Task, TaskSourceKind
+from app.services.slack_mirror import (
+    _compact_for_slack,
+    _to_slack_mrkdwn,
+)
+from ops._send_helpers import build_parent_raw
 
 
 CYR_RE = re.compile(r"[А-Яа-яЁё]")
@@ -184,23 +193,61 @@ def main() -> int:
             n_cp = _count_directory_matches(detailed, cp_norms)
             has_short = bool(short.strip())
 
-            todo = _todo_block(short)
-            tasks = TASK_RE.findall(todo)
-            n_tasks = len(tasks)
+            # ---- Tasks straight from DB (READ-ONLY) ---- #
+            # source_kind = "fireflies" or "zoom", source_conversation_id
+            # = fireflies_id / zoom_id. Alive rows only (deleted_at IS NULL).
+            src_kind = (
+                TaskSourceKind.fireflies if src == "fireflies"
+                else TaskSourceKind.zoom
+            )
+            conv_id = r.fireflies_id if src == "fireflies" else r.zoom_id
+            db_tasks = (
+                session.query(Task)
+                .filter(Task.source_kind == src_kind)
+                .filter(Task.source_conversation_id == conv_id)
+                .filter(Task.deleted_at.is_(None))
+                .order_by(Task.id)
+                .all()
+            )
+            n_tasks = len(db_tasks)
 
             md = r.meeting_date
-            default_dl = f"{md.day:02d}.{md.month:02d}.{md.year} 18:00"
+            default_due_date = md.date()
+            default_due_time = dtime(18, 0)
             owner_ok = True
             dl_real = True
+            filt_ok = True  # every task has a non-empty category
             owner_misses: list[str] = []
             dl_misses: list[str] = []
-            for _num, t_title, owner, dl in tasks:
-                if _norm(owner.strip()) not in members_by_norm:
+            filt_misses: list[str] = []
+            task_lines: list[str] = []
+            for t in db_tasks:
+                owner = (t.owner_display_name or "").strip()
+                if not owner or _norm(owner) not in members_by_norm:
                     owner_ok = False
-                    owner_misses.append(owner.strip())
-                if dl.strip() == default_dl:
+                    owner_misses.append(owner or "(none)")
+                is_default_dl = (
+                    t.due_date == default_due_date
+                    and (t.due_time is None or t.due_time == default_due_time)
+                )
+                if t.due_date is None or is_default_dl:
                     dl_real = False
-                    dl_misses.append(t_title.strip()[:40])
+                    dl_misses.append((t.title or "")[:40])
+                if not (t.category or "").strip():
+                    filt_ok = False
+                    filt_misses.append((t.title or "")[:40])
+                dl_str = (
+                    t.due_date.strftime("%d.%m.%Y")
+                    + (
+                        f" {t.due_time.strftime('%H:%M')}"
+                        if t.due_time else ""
+                    )
+                ) if t.due_date else "—"
+                task_lines.append(
+                    f"        · #{t.id} {(t.title or '')[:55]:<55} | "
+                    f"owner={owner[:24]:<24} | due={dl_str:<16} | "
+                    f"cat={(t.category or '—')[:14]}"
+                )
 
             report.append({
                 "idx": i,
@@ -216,25 +263,29 @@ def main() -> int:
                 "tsk": str(n_tasks),
                 "tsk_own": "—" if n_tasks == 0 else _check(owner_ok),
                 "tsk_dl": "—" if n_tasks == 0 else _check(dl_real),
+                "tsk_filt": "—" if n_tasks == 0 else _check(filt_ok),
                 "_owner_miss": owner_misses,
                 "_dl_miss": dl_misses,
+                "_filt_miss": filt_misses,
+                "_task_lines": task_lines,
                 "_first_line": first[:90],
                 "_last_err": (getattr(r, "last_error", None) or "")[:80],
             })
 
         cols = [
-            ("#",        "idx",     3),
-            ("date",     "date",    11),
-            ("src",      "src",     4),
-            ("title",    "title",   40),
-            ("link",     "link",    4),
-            ("biling",   "biling",  6),
-            ("det_ppl",  "det_ppl", 7),
-            ("det_cp",   "det_cp",  6),
-            ("short",    "short",   5),
-            ("tsk",      "tsk",     3),
-            ("tsk_own",  "tsk_own", 7),
-            ("tsk_dl",   "tsk_dl",  6),
+            ("#",        "idx",      3),
+            ("date",     "date",     11),
+            ("src",      "src",      4),
+            ("title",    "title",    40),
+            ("link",     "link",     4),
+            ("biling",   "biling",   6),
+            ("det_ppl",  "det_ppl",  7),
+            ("det_cp",   "det_cp",   6),
+            ("short",    "short",    5),
+            ("tsk",      "tsk",      3),
+            ("tsk_filt", "tsk_filt", 8),
+            ("tsk_own",  "tsk_own",  7),
+            ("tsk_dl",   "tsk_dl",   6),
         ]
         header = " | ".join(h.ljust(w) for h, _, w in cols)
         sep = "-+-".join("-" * w for _, _, w in cols)
@@ -251,9 +302,10 @@ def main() -> int:
         print("  det_ppl  # canonical TeamMember names in detailed_summary")
         print("  det_cp   # canonical Counterparty names in detailed_summary")
         print("  short    short_summary present")
-        print("  tsk      # tasks parsed from TODO block")
-        print("  tsk_own  every task owner exists in TeamMember")
-        print("  tsk_dl   every task deadline ≠ default meeting_date 18:00")
+        print("  tsk      # alive Task rows (deleted_at IS NULL) in DB")
+        print("  tsk_filt every task has a `category` (direction tag)")
+        print("  tsk_own  every task owner_display_name exists in TeamMember")
+        print("  tsk_dl   every task due_date ≠ default meeting_date 18:00")
         print()
 
         print("DETAIL PER RECORD:")
@@ -262,13 +314,67 @@ def main() -> int:
                 f"\n  [{rec['idx']}] {rec['date']} [{rec['src']}] "
                 f"{rec['title']}"
             )
-            print(f"      first line: {rec['_first_line']}")
+            if rec['_task_lines']:
+                print(f"      tasks ({rec['tsk']}):")
+                for line in rec['_task_lines']:
+                    print(line)
+            else:
+                print("      tasks: (none in DB)")
             if rec['tsk_own'] == "✗":
-                print(f"      owner not in TM: {', '.join(rec['_owner_miss'])}")
+                print(f"      ⚠ owner not in TM: {', '.join(rec['_owner_miss'])}")
             if rec['tsk_dl'] == "✗":
-                print(f"      tasks with default deadline: {', '.join(rec['_dl_miss'])}")
+                print(f"      ⚠ tasks with default deadline: {', '.join(rec['_dl_miss'])}")
+            if rec['tsk_filt'] == "✗":
+                print(f"      ⚠ tasks without category: {', '.join(rec['_filt_miss'])}")
             if rec['_last_err']:
                 print(f"      last_error: {rec['_last_err']}")
+
+        # ---- Rendered Slack-ready preview per record ---- #
+        print()
+        print("=" * 100)
+        print("RENDERED PREVIEW (exactly what would land in Slack):")
+        print("=" * 100)
+        for i, (src, r) in enumerate(rows, start=1):
+            src_kind = (
+                TaskSourceKind.fireflies if src == "fireflies"
+                else TaskSourceKind.zoom
+            )
+            conv_id = r.fireflies_id if src == "fireflies" else r.zoom_id
+            tasks_block = _build_todo_section(
+                session,
+                source_kind=src_kind,
+                source_conversation_id=conv_id,
+            )
+            # Same compose pipeline as send_one_* — body is the stored
+            # short_summary (already has the <a href> hyperlink on
+            # line 1 from _wrap_short_summary_with_doc_link). The
+            # «TODO:» trailer is appended only when there's a tasks
+            # block (FR-CR-05-189b).
+            body = (r.short_summary or "").rstrip()
+            parent_raw = build_parent_raw(body, tasks_block or None)
+            parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
+            thread_text = (
+                _compact_for_slack(_to_slack_mrkdwn(tasks_block))
+                if tasks_block else ""
+            )
+            print()
+            print("─" * 100)
+            print(
+                f"# [{i}] {r.meeting_date.strftime('%d/%m %H:%M')} "
+                f"[{src}] {(r.title or '')[:60]}"
+            )
+            print("─" * 100)
+            print("PARENT MESSAGE:")
+            print(parent_text)
+            if thread_text:
+                print()
+                print("THREAD REPLY (To-Do):")
+                print(thread_text)
+            else:
+                print()
+                print("THREAD REPLY: (none — no tasks, no TODO: trailer either)")
+        print()
+        print("─" * 100)
 
     return 0
 

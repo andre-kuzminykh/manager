@@ -37,7 +37,10 @@ from sqlalchemy.orm import Session
 from app.intent.llm_backends import LLMBackend
 from app.models import TeamMember
 from app.models.counterparty import Counterparty
-from app.services.counterparty_match import canonicalize_text
+from app.services.counterparty_match import (
+    canonicalize_text,
+    resolve_mentions_to_directory,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -230,8 +233,6 @@ def resolve_organizations_to_counterparties(
     cps = session.query(Counterparty).all()
     if not cps:
         return {}
-    from app.services.counterparty_match import resolve_mentions_to_directory
-
     # LLM returns {mention: counterparty_id | None}
     resolved = resolve_mentions_to_directory(
         mentions=filtered,

@@ -126,16 +126,20 @@ def test_resolve_people_no_team_members(session):
 
 
 def test_resolve_people_picks_best_token_overlap(session):
-    """When the mention has tokens overlapping multiple members,
-    pick the one with the highest overlap score."""
+    """FR-CR-05-191 v3 — multi-token mention's LAST token (surname)
+    must appear in the candidate's tokens. Among candidates that
+    pass the surname filter, the one with highest total token
+    overlap wins."""
     session.add_all([
         TeamMember(real_name="Anna Smith", telegram_user_id=1, active=True),
         TeamMember(real_name="Anna Sokolova", telegram_user_id=2, active=True),
     ])
     session.flush()
-    # "Anna Sokolova Petrov" matches "Anna Sokolova" by 2 tokens
-    out = resolve_people_to_team_members(["Anna Sokolova Petrov"], session)
-    assert out["Anna Sokolova Petrov"] == "Anna Sokolova"
+    # "Anna Michelle Sokolova": last token "sokolova" matches the
+    # second member; first member's tokens lack "sokolova" → it's
+    # filtered out by the v3 surname-anchor guard before scoring.
+    out = resolve_people_to_team_members(["Anna Michelle Sokolova"], session)
+    assert out["Anna Michelle Sokolova"] == "Anna Sokolova"
 
 
 # --------------------------------------------------------------------------- #

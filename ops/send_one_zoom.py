@@ -29,7 +29,7 @@ from app.config import get_settings
 from app.db import session_scope
 from app.fireflies.pipeline import _strip_llm_todo_block
 from app.intent.llm_backends import OpenAIBackend
-from app.models import ZoomRecording
+from app.models import Task, TaskSourceKind, ZoomRecording
 from app.services.slack_mirror import (
     SLACK_TEXT_CHUNK_CHARS,
     _compact_for_slack,
@@ -202,8 +202,22 @@ def main() -> int:
         if not args.no_mark_sent:
             row.short_summary_sent = True
             session.flush()
-            session.commit()
-            print("      row.short_summary_sent = True")
+
+        # FR-CR-05-178 — defensive hard-DELETE of any Task rows
+        # persisted for this zoom_id. Pipeline's deterministic
+        # `_build_todo_section` reads them to render the To-Do, but
+        # operator's contract is «никакие задачи не создавать в бд»
+        # — keep zero footprint after the Slack post. FKs cascade.
+        wiped = (
+            session.query(Task)
+            .filter(Task.source_kind == TaskSourceKind.zoom)
+            .filter(Task.source_conversation_id == row.zoom_id)
+            .delete(synchronize_session=False)
+        )
+        session.flush()
+        session.commit()
+        if wiped:
+            print(f"      defensive-deleted {wiped} stale Task rows")
 
     print("\nDone.")
     return 0

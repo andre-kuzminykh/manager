@@ -201,7 +201,12 @@ def _sniff_audio_extension(path: str) -> str | None:
     return None
 
 
-def _split_audio_into_chunks(path: str, *, max_bytes: int) -> list[str]:
+def _split_audio_into_chunks(
+    path: str,
+    *,
+    max_bytes: int,
+    max_duration_seconds: float | None = None,
+) -> list[str]:
     """FR-CR-05-115 — split `path` (an mp3 file) into chunks
     each ≤ `max_bytes`, using `ffmpeg -c copy` so we don't
     re-encode (preserves the audio bitrate). Returns the list
@@ -212,17 +217,36 @@ def _split_audio_into_chunks(path: str, *, max_bytes: int) -> list[str]:
     target chunk duration that should produce ≤ max_bytes
     chunks, then slice every `chunk_seconds` seconds. Round
     up the chunk count so we never under-split.
+
+    FR-CR-05-177 — `max_duration_seconds` is an upper bound on
+    chunk duration. OpenAI's diarization models cap input at
+    1400 s/chunk regardless of file size; pass a safety margin
+    (~1300 s) to keep chunks under the limit. When None the
+    chunker only respects the byte cap (original behaviour).
     """
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg not on PATH")
     size = os.path.getsize(path)
-    if size <= max_bytes:
-        return [path]
     duration = _ffprobe_duration_seconds(path)
+    needs_byte_split = size > max_bytes
+    needs_duration_split = (
+        max_duration_seconds is not None
+        and duration > max_duration_seconds
+    )
+    if not needs_byte_split and not needs_duration_split:
+        return [path]
     if duration <= 0:
         raise RuntimeError(f"audio duration non-positive: {duration}")
     # +5% safety margin so we don't sit right at max_bytes.
-    n_chunks = max(2, math.ceil(size * 1.05 / max_bytes))
+    n_chunks_bytes = (
+        math.ceil(size * 1.05 / max_bytes) if needs_byte_split else 1
+    )
+    n_chunks_dur = (
+        math.ceil(duration / max_duration_seconds)
+        if max_duration_seconds is not None
+        else 1
+    )
+    n_chunks = max(2, n_chunks_bytes, n_chunks_dur)
     chunk_seconds = duration / n_chunks
     base, _, in_ext = path.rpartition(".")
     if not base:
@@ -1033,12 +1057,18 @@ class FirefliesPipeline:
         # прогонять в whisper, а потом склеивать». Chunk via
         # ffmpeg into ≤24 MB pieces, transcribe each, join.
         whisper_max = 24 * 1024 * 1024
-        if size <= whisper_max:
+        # FR-CR-05-177 — diarization models cap audio at 1400 s.
+        whisper_model = self._settings.fireflies_whisper_model or ""
+        is_diarize = "diarize" in whisper_model.lower()
+        max_dur = 1300.0 if is_diarize else None
+        if size <= whisper_max and not is_diarize:
             audio_paths = [row.audio_path]
         else:
             try:
                 audio_paths = _split_audio_into_chunks(
-                    row.audio_path, max_bytes=whisper_max
+                    row.audio_path,
+                    max_bytes=whisper_max,
+                    max_duration_seconds=max_dur,
                 )
             except Exception as e:  # noqa: BLE001
                 row.last_error = f"audio chunking failed: {e}"
@@ -1048,6 +1078,7 @@ class FirefliesPipeline:
                 fireflies_id=row.fireflies_id,
                 size=size,
                 chunks=len(audio_paths),
+                max_duration_seconds=max_dur,
             )
         # FR-CR-05-146a — parallel Whisper across all chunks
         # (was sequential — operator-pinned «Whisper-чанки

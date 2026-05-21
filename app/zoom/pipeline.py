@@ -275,12 +275,20 @@ class ZoomPipeline:
 
         size = os.path.getsize(row.audio_path)
         whisper_max = 24 * 1024 * 1024
-        if size <= whisper_max:
+        # FR-CR-05-177 — OpenAI's diarization models cap audio at
+        # 1400 s/chunk. We respect that AS WELL AS the 24 MB byte
+        # cap; chunker picks the stricter of the two splits.
+        whisper_model = self._settings.fireflies_whisper_model or ""
+        is_diarize = "diarize" in whisper_model.lower()
+        max_dur = 1300.0 if is_diarize else None
+        if size <= whisper_max and not is_diarize:
             audio_paths = [row.audio_path]
         else:
             try:
                 audio_paths = _split_audio_into_chunks(
-                    row.audio_path, max_bytes=whisper_max
+                    row.audio_path,
+                    max_bytes=whisper_max,
+                    max_duration_seconds=max_dur,
                 )
             except Exception as e:  # noqa: BLE001
                 row.last_error = f"audio chunking failed: {e}"
@@ -290,6 +298,7 @@ class ZoomPipeline:
                 zoom_id=row.zoom_id,
                 size=size,
                 chunks=len(audio_paths),
+                max_duration_seconds=max_dur,
             )
         # FR-CR-05-146a — parallel Whisper across all chunks
         # (was sequential — operator-pinned «Whisper-чанки

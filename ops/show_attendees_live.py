@@ -150,10 +150,22 @@ def main() -> int:
             print("\nFinal attendees = Calendar invited (no Zoom data to reconcile)")
             final = resolved
         else:
+            # FR-CR-05-172 — LLM fallback for cyrillic↔latin name
+            # mismatches («Дмитрий Седов» vs «Dmitry Sedov») that the
+            # pure-fuzzy step misses. Without an OpenAI client those
+            # entries get dropped as `zoom_only` with raw Zoom names.
+            openai_client = None
+            if s.openai_api_key:
+                try:
+                    from openai import OpenAI
+                    openai_client = OpenAI(api_key=s.openai_api_key)
+                except Exception:  # noqa: BLE001
+                    openai_client = None
             reconcile = reconcile_with_zoom_participants(
                 calendar_attendees=resolved,
                 zoom_participants=zoom_parts,
-                openai_client=None,
+                openai_client=openai_client,
+                llm_model="gpt-4o-mini",
             )
             final = reconcile.get("attendees") or []
             print(

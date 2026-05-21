@@ -210,8 +210,22 @@ def resolve_organizations_to_counterparties(
     """Map each mention → canonical Counterparty.name using the
     LLM-based resolver (FR-CR-05-129 Pass 2). Battle-tested for
     fuzzy / phonetic / transliterated forms.
+
+    FR-CR-05-191c — hard-skip own-company / self-references like
+    «Humanoid» so the LLM resolver doesn't accidentally rewrite
+    them to phonetically-similar entries in the directory
+    («Humane» is a different company; «Humanoid» is the operator's
+    own company name and must NEVER be canonicalized).
     """
     if not mentions:
+        return {}
+    # Own-company name list — never rewrite these to anything.
+    SELF_REFS = {"humanoid", "humain", "humanoid headquarters"}
+    filtered = [
+        m for m in mentions
+        if (m or "").strip().lower() not in SELF_REFS
+    ]
+    if not filtered:
         return {}
     cps = session.query(Counterparty).all()
     if not cps:
@@ -220,7 +234,7 @@ def resolve_organizations_to_counterparties(
 
     # LLM returns {mention: counterparty_id | None}
     resolved = resolve_mentions_to_directory(
-        mentions=mentions,
+        mentions=filtered,
         directory=cps,
         llm_backend=llm_backend,
         model=model,

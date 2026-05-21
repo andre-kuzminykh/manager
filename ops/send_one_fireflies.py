@@ -115,9 +115,10 @@ def main() -> int:
         if tasks_text:
             tasks_text = _compact_for_slack(_to_slack_mrkdwn(tasks_text))
 
-        # Now build parent — append «TODO:» trailer ONLY if there
-        # will be a thread reply with tasks.
-        parent_raw = body + ("\n\nTODO:" if tasks_text else "")
+        # Now build parent — FR-CR-05-189b: append «TODO:» trailer
+        # ONLY if there will be a thread reply with tasks.
+        from ops._send_helpers import build_parent_raw
+        parent_raw = build_parent_raw(body, tasks_text)
         parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
         chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 

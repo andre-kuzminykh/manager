@@ -65,6 +65,13 @@ def main() -> int:
             "(case-insensitive). Repeatable."
         ),
     )
+    ap.add_argument(
+        "--no-tasks", action="store_true",
+        help=(
+            "FR-CR-05-189 — pass through to each send_one_* call. "
+            "Parent-only mode (no «TODO:» trailer, no thread reply)."
+        ),
+    )
     args = ap.parse_args()
     excludes = [s.lower() for s in (args.exclude_title_contains or []) if s]
 
@@ -157,6 +164,8 @@ def main() -> int:
                 "--fireflies-id", rid,
                 "--channel", args.channel,
             ]
+        if args.no_tasks:
+            cmd.append("--no-tasks")
         try:
             proc = subprocess.run(cmd, capture_output=False, timeout=300)
             if proc.returncode != 0:

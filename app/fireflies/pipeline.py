@@ -2250,8 +2250,13 @@ class FirefliesPipeline:
             "\n".join(f"  - {p}" for p in _ff_filtered_participants if p)
             or "  (нет данных)"
         )
+        # FR-CR-05-185 — provide today_date so the LLM can resolve
+        # relative deadlines ("завтра", "в понедельник") into ISO
+        # `YYYY-MM-DD` for the `due_date` field on each task.
         meta = (
             f"meeting_title: {row.title or ''}\n"
+            f"meeting_date: {row.meeting_date.isoformat() if row.meeting_date else ''}\n"
+            f"today_date: {date.today().isoformat()}\n"
             f"\nmeeting_participants (REAL NAMES of who was on this call,\n"
             f"use to disambiguate identical first names — Rule 8):\n"
             f"{participants_lines}\n"
@@ -2274,7 +2279,9 @@ class FirefliesPipeline:
         user_prompt = (
             "Return JSON: `{\"tasks\": [{\"title\": ..., "
             "\"description\": ..., \"owner\": ..., "
-            "\"priority\": ...}, ...]}`. Empty list ok.\n\n"
+            "\"priority\": ..., \"due_date\": "
+            "\"YYYY-MM-DD or omit\", \"due_time\": "
+            "\"HH:MM or omit\"}, ...]}`. Empty list ok.\n\n"
             + user_prompt
         )
         try:
@@ -2439,7 +2446,20 @@ class FirefliesPipeline:
                         break
             try:
                 from app.models import TaskPriority, TaskStatus
+                # FR-CR-05-185 — let LLM emit a relative-deadline-
+                # resolved ISO date. Parser falls back to today/18:00
+                # when the model omits or emits an unparseable value.
+                from app.services.task_due import (
+                    parse_due_date_from_llm,
+                    parse_due_time_from_llm,
+                )
 
+                llm_due_date = parse_due_date_from_llm(
+                    t.get("due_date"), fallback=today,
+                )
+                llm_due_time = parse_due_time_from_llm(
+                    t.get("due_time"), fallback=time(18, 0),
+                )
                 task_status = TaskStatus.todo  # due=today → todo per FR-CR-04
                 task = Task(
                     title=title[:10_000],
@@ -2447,8 +2467,8 @@ class FirefliesPipeline:
                     owner_user_id=owner_user_id,
                     owner_display_name=owner_display_name,
                     priority=TaskPriority(priority) if priority in {p.value for p in TaskPriority} else TaskPriority.medium,
-                    due_date=today,  # FR-CR-05-39: meeting tasks default to today
-                    due_time=time(18, 0),  # FR-CR-05-63: default 18:00 deadline
+                    due_date=llm_due_date,
+                    due_time=llm_due_time,
                     status=task_status,
                     is_current_week=True,
                     source_kind=TaskSourceKind.fireflies,
@@ -2547,7 +2567,9 @@ class FirefliesPipeline:
         user_prompt = (
             "Return JSON: `{\"tasks\": [{\"title\": ..., "
             "\"description\": ..., \"owner\": ..., "
-            "\"priority\": ...}, ...]}`. Empty list ok.\n\n"
+            "\"priority\": ..., \"due_date\": "
+            "\"YYYY-MM-DD or omit\", \"due_time\": "
+            "\"HH:MM or omit\"}, ...]}`. Empty list ok.\n\n"
             + user_prompt
         )
         try:
@@ -2643,14 +2665,22 @@ class FirefliesPipeline:
                     if priority_raw in {p.value for p in TaskPriority}
                     else TaskPriority.medium
                 )
+                # FR-CR-05-185 — same LLM-due-date parser as the
+                # primary extraction step above.
+                from app.services.task_due import (
+                    parse_due_date_from_llm as _pdd,
+                    parse_due_time_from_llm as _pdt,
+                )
+                llm_due_date = _pdd(t.get("due_date"), fallback=today)
+                llm_due_time = _pdt(t.get("due_time"), fallback=time(18, 0))
                 task = Task(
                     title=title[:10_000],
                     description=description,
                     owner_user_id=owner_uid,
                     owner_display_name=owner_display_name,
                     priority=priority,
-                    due_date=today,
-                    due_time=time(18, 0),
+                    due_date=llm_due_date,
+                    due_time=llm_due_time,
                     status=TaskStatus.todo,
                     is_current_week=True,
                     source_kind=TaskSourceKind.fireflies,

@@ -1774,17 +1774,22 @@ class ZoomPipeline:
         prompt_user = (
             f"Заголовок: {row.title or '(без названия)'}\n"
             f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}\n"
+            f"today_date: {today.isoformat()}\n"
             "\nmeeting_participants (REAL NAMES of who was on this call,\n"
             "use to disambiguate identical first names — Rule 8):\n"
             f"{participants_block}\n"
             "\nИзвестные сотрудники:\n"
             f"{emp_table}\n\nПодробный отчёт:\n{row.detailed_summary}"
         )
-        # FR-CR-05-129 — JSON-mode (no tools) so reasoning works.
+        # FR-CR-05-129 + FR-CR-05-185 — JSON-mode (no tools) so
+        # reasoning works. Each task may carry due_date / due_time
+        # resolved by the LLM against today_date.
         prompt_user = (
             "Return JSON: `{\"tasks\": [{\"title\": ..., "
             "\"description\": ..., \"owner\": ..., "
-            "\"priority\": ...}, ...]}`. Empty list ok.\n\n"
+            "\"priority\": ..., \"due_date\": "
+            "\"YYYY-MM-DD or omit\", \"due_time\": "
+            "\"HH:MM or omit\"}, ...]}`. Empty list ok.\n\n"
             + prompt_user
         )
         try:
@@ -1931,6 +1936,15 @@ class ZoomPipeline:
                    llm_owner=llm_owner_raw, final_owner=owner_uid,
                    resolution=owner_resolution)
             try:
+                # FR-CR-05-185 — LLM-extracted relative-deadline
+                # resolved to ISO date. Parser falls back when the
+                # model omits or emits an unparseable value.
+                from app.services.task_due import (
+                    parse_due_date_from_llm as _pdd,
+                    parse_due_time_from_llm as _pdt,
+                )
+                llm_due_date = _pdd(t.get("due_date"), fallback=today)
+                llm_due_time = _pdt(t.get("due_time"), fallback=time(18, 0))
                 task = Task(
                     title=title[:10_000],
                     description=(t.get("description") or "").strip() or None,
@@ -1938,8 +1952,8 @@ class ZoomPipeline:
                     status=TaskStatus.todo,
                     owner_user_id=owner_uid,
                     owner_display_name=owner_display_name,
-                    due_date=today,
-                    due_time=time(18, 0),  # FR-CR-05-63
+                    due_date=llm_due_date,
+                    due_time=llm_due_time,
                     is_current_week=True,
                     source_kind=TaskSourceKind.zoom,
                     # FR-CR-05-118 — wire join key so
@@ -2138,6 +2152,13 @@ class ZoomPipeline:
             except ValueError:
                 priority = TaskPriority.medium
             try:
+                # FR-CR-05-185 — LLM-due-date parser.
+                from app.services.task_due import (
+                    parse_due_date_from_llm as _pdd2,
+                    parse_due_time_from_llm as _pdt2,
+                )
+                llm_due_date = _pdd2(t.get("due_date"), fallback=today)
+                llm_due_time = _pdt2(t.get("due_time"), fallback=time(18, 0))
                 task = Task(
                     title=title[:10_000],
                     description=(t.get("description") or "").strip() or None,
@@ -2145,8 +2166,8 @@ class ZoomPipeline:
                     status=TaskStatus.todo,
                     owner_user_id=owner_uid,
                     owner_display_name=owner_display_name,
-                    due_date=today,
-                    due_time=time(18, 0),
+                    due_date=llm_due_date,
+                    due_time=llm_due_time,
                     is_current_week=True,
                     source_kind=TaskSourceKind.zoom,
                     source_conversation_id=row.zoom_id,

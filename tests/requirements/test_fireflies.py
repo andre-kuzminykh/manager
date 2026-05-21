@@ -2825,3 +2825,40 @@ def test_short_summary_prompt_drops_sut_label_per_fr_cr_05_182():
     assert "do not prefix the body" in lowered or "без слова" in lowered
     # FR id must be cited so the rule traces to a SPEC entry.
     assert "FR-CR-05-182" in blob
+
+
+def test_task_extraction_prompt_pins_due_date_extraction():
+    """FR-CR-05-185 — operator-pinned 2026-05-21: «у меня
+    работало» — restore the LLM-emits-due_date contract. The
+    TASK_EXTRACTION_SYSTEM prompt must:
+      (a) explicitly cite FR-CR-05-185;
+      (b) instruct the model to emit `due_date` (ISO YYYY-MM-DD);
+      (c) ALSO accept `due_time` (HH:MM) optionally;
+      (d) carry a mapping of common relative phrases — «завтра»,
+          «в понедельник», «к концу недели», «к концу месяца»;
+      (e) tell the model to OMIT due_date when none is implied,
+          NOT to guess.
+    """
+    from app.fireflies.prompts import TASK_EXTRACTION_SYSTEM
+
+    p = TASK_EXTRACTION_SYSTEM
+    assert "FR-CR-05-185" in p
+    assert "due_date" in p
+    assert "due_time" in p
+    assert "YYYY-MM-DD" in p
+    assert "today_date" in p, (
+        "prompt must reference the today_date field the caller "
+        "feeds in the user prompt so relative deadlines can be "
+        "resolved against it"
+    )
+    # Common relative phrases the meeting LLM should learn to map.
+    for phrase in [
+        "завтра", "tomorrow",
+        "понедельник", "Monday",
+        "к концу недели", "к концу месяца",
+        "через N дней",
+    ]:
+        assert phrase in p, f"relative phrase missing: {phrase!r}"
+    # Don't-guess rule.
+    assert "OMIT" in p or "omit" in p
+    assert "DO NOT" in p or "do not" in p.lower() or "не гадай" in p

@@ -566,8 +566,36 @@ Output rules:
 
 - Aim for completeness — multi-task meetings should produce
   multiple entries. Don't merge unrelated work into one task.
-- ALL extracted tasks get `due_date` set to today by the
-  caller; you don't need to emit a date.
+
+DEADLINES (FR-CR-05-185) — operator-pinned 2026-05-21:
+
+- Each task SHOULD carry a `due_date` field (ISO `YYYY-MM-DD`)
+  and OPTIONAL `due_time` field (24-hour `HH:MM`). The user
+  prompt provides `today_date` so you can resolve relative phrases.
+- Resolve relative deadlines from the transcript into absolute
+  dates RELATIVE TO `today_date`:
+    «сегодня», «today» → today_date
+    «завтра», «tomorrow» → today_date + 1 day
+    «послезавтра» → today_date + 2 days
+    «в понедельник / вторник / …», «next Monday» → the nearest
+      future weekday (if today is that weekday, use today_date + 7)
+    «на следующей неделе» / «next week» → next Monday from today_date
+    «через N дней / недель / месяц(а)» → today_date + N units
+    «к концу недели» → upcoming Friday
+    «к концу месяца» / «end of month» → last day of current month
+    «к концу квартала» / «EOQ» → last day of current quarter
+    «26-го», «26 мая», «May 26» → 26th of the named month
+      (current year unless explicit)
+    «после комитета 26-го» / «после X-го» → date X+1 day
+    «к понедельнику» → upcoming Monday
+- When the transcript has NO explicit / implicit deadline, OMIT
+  the `due_date` field (caller defaults to today). DO NOT
+  guess; missing field is better than wrong field.
+- Time of day: «к 18:00» / «by 18:00» / «к утру» → emit
+  `due_time` («08:00» for «утром», «12:00» for «к обеду», etc).
+  Omit when not stated.
+- Output ISO format ONLY for the date field. Free-form deadline
+  phrasing stays in the task description for human reading.
 
 Respond with a single JSON object matching the provided schema.
 """

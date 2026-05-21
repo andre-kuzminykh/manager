@@ -153,6 +153,33 @@ def main() -> int:
     extract_model = (s.fireflies_summary_model or "gpt-4o").strip()
     llm = OpenAIBackend(client=openai_client, model=extract_model)
     cal_factory = build_calendar_credentials_factory_with_sa_fallback(s)
+    # FR-CR-05-178 — --skip-tasks: monkey-patch ALL task-related
+    # pipeline steps to no-ops. The initial `_step_extract_tasks`
+    # already short-circuits via `tasks_extracted=True`, but the
+    # downstream verify/canonicalize/consolidate/dedupe/
+    # classify_directions steps gate only on `detailed_summarised`
+    # and will happily insert Task rows of their own. Replace each
+    # method with a no-op so the pipeline runs everything ELSE
+    # (transcribe, bilingual, calendar_attendees, detailed_summary,
+    # counterparty match, Doc export, short_summary) but never
+    # touches the `tasks` table.
+    if args.skip_tasks:
+        from app.fireflies import pipeline as _ff
+        ZoomPipeline._step_verify_tasks = lambda self, session, row: 0
+        ZoomPipeline._step_canonicalize_task_names = (
+            lambda self, session, row: 0
+        )
+        ZoomPipeline._step_consolidate_tasks = (
+            lambda self, session, row: 0
+        )
+        ZoomPipeline._step_classify_directions = (
+            lambda self, session, row: 0
+        )
+        ZoomPipeline._step_post_task_cards = (
+            lambda self, session, row: 0
+        )
+        # `_dedupe_meeting_tasks` is module-level in fireflies.
+        _ff._dedupe_meeting_tasks = lambda *a, **kw: 0
     pipeline = ZoomPipeline(
         settings=s,
         client=zm_client,

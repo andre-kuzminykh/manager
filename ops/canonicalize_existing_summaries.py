@@ -48,17 +48,31 @@ class WorkResult:
 def _process_one(item: WorkItem, llm_backend, model: str) -> WorkResult:
     """Worker: open own session, run canonicalize, return result.
     Also fetches extracted entity lists for verbose logging.
+
+    FR-CR-05-191b — explicitly calls `_seed_counterparties_from_orgs`
+    BEFORE `resolve_organizations_to_counterparties` so the LLM
+    matcher always sees a directory containing the freshly-extracted
+    orgs. Without this seed step the resolver's directory is the
+    stale pre-existing rows and every mention returns null. This
+    mirrors what `canonicalize_summary_text` does in the live
+    pipeline.
     """
+    from app.services.counterparty_match import canonicalize_text
     from app.services.summary_canonicalize import (
+        _seed_counterparties_from_orgs,
         extract_name_entities,
         resolve_organizations_to_counterparties,
         resolve_people_to_team_members,
     )
-    from app.services.counterparty_match import canonicalize_text
 
     with session_scope() as session:
         entities = extract_name_entities(
             item.text, llm_backend=llm_backend, model=model,
+        )
+        # Auto-seed Counterparty BEFORE LLM resolve so the matcher
+        # has the actual companies in the directory to match against.
+        _seed_counterparties_from_orgs(
+            entities["organizations"], session,
         )
         people_map = resolve_people_to_team_members(
             entities["people"], session,

@@ -93,6 +93,10 @@ def main() -> int:
             return 5
 
         parent_raw = _strip_llm_todo_block(row.short_summary).rstrip()
+        # FR-CR-05-184 — operator-pinned: parent ends with «TODO:»
+        # so the reader knows tasks landed in the thread below.
+        # Operator-pinned 2026-05-21: NO emojis.
+        parent_raw = parent_raw + "\n\nTODO:"
         parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
         chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 

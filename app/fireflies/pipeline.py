@@ -549,12 +549,21 @@ def _first_sentence(text: str, *, limit: int = 240) -> str:
 
 _TODO_SECTION_HEADERS_RE = __import__("re").compile(
     # FR-CR-05-119 — match a heading line for an LLM-emitted
-    # To-Do / next-steps block + everything after it up to the
-    # next blank-blank-line boundary or end-of-string. Used to
-    # strip such a block before we append the deterministic one.
+    # To-Do / next-steps block + everything after it up to
+    # end-of-string. The To-Do block is ALWAYS the last block in
+    # the short summary, so we greedily strip to end.
+    #
+    # FR-CR-05-184 — operator-pinned 2026-05-21: previous regex
+    # used a `\n{2,}\S` lookahead that bailed out at the blank
+    # line BEFORE the first task — stripping ONLY the «To-Do:»
+    # header and leaking the tasks themselves into the Slack
+    # parent post (visible: «18) Benjamin... — Alina Kolpakova»
+    # in the parent body). Replace the alternation with `\Z`-only
+    # so the entire trailer including every numbered task is
+    # removed.
     r"\n{1,2}(?:to[\s\-]?do|to do list|следующие\s+шаги|"
     r"next\s+steps|action\s+items|action\s+list|"
-    r"задачи|to[-\s]do list)\s*:[\s\S]*?(?=\n{2,}\S|\Z)",
+    r"задачи|to[-\s]do list)\s*:[\s\S]*\Z",
     flags=__import__("re").IGNORECASE,
 )
 

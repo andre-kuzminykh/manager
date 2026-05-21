@@ -196,17 +196,31 @@ def _extract_important_tasks_ephemeral(
 
 
 def _render_tasks_block(tasks: list[dict]) -> str:
-    """Numbered To-Do list, one paragraph per task — Slack renders
-    `\\n\\n` between paragraphs."""
+    """FR-CR-05-178 / FR-CR-05-184 — numbered To-Do for the Slack
+    thread reply. Format matches the pipeline's deterministic
+    rendering so operator sees one consistent layout:
+
+        N) Title — Owner • DD.MM.YYYY HH:MM
+
+    Deadline defaults to today at 18:00 (FR-CR-05-119 convention).
+    """
     if not tasks:
         return ""
+    from datetime import date, datetime, time, timezone
+
+    today_18 = datetime.combine(
+        date.today(), time(18, 0),
+    ).strftime("%d.%m.%Y %H:%M")
     lines: list[str] = []
     for i, t in enumerate(tasks, start=1):
         title = t["title"] or "(без описания)"
         owner = t["owner"]
-        suffix = f" — {owner}" if owner else ""
-        lines.append(f"{i}) {title}{suffix}")
-    return "To-Do:\n\n" + "\n\n".join(lines)
+        suffix_parts = []
+        if owner:
+            suffix_parts.append(owner)
+        suffix_parts.append(today_18)
+        lines.append(f"{i}) {title} — {' • '.join(suffix_parts)}")
+    return "\n\n".join(lines)
 
 
 def _split_parent_and_tasks(short_summary: str) -> tuple[str, str]:

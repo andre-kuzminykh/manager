@@ -41,18 +41,43 @@ class WorkResult:
     item: WorkItem
     new_text: str | None
     applied: dict[str, str]
+    people_extracted: list[str]
+    orgs_extracted: list[str]
 
 
 def _process_one(item: WorkItem, llm_backend, model: str) -> WorkResult:
-    """Worker: open own session, run canonicalize, return result."""
+    """Worker: open own session, run canonicalize, return result.
+    Also fetches extracted entity lists for verbose logging.
+    """
+    from app.services.summary_canonicalize import (
+        extract_name_entities,
+        resolve_organizations_to_counterparties,
+        resolve_people_to_team_members,
+    )
+    from app.services.counterparty_match import canonicalize_text
+
     with session_scope() as session:
-        new_text, applied = canonicalize_summary_text(
-            item.text,
-            session=session, llm_backend=llm_backend, model=model,
+        entities = extract_name_entities(
+            item.text, llm_backend=llm_backend, model=model,
+        )
+        people_map = resolve_people_to_team_members(
+            entities["people"], session,
+        )
+        org_map = resolve_organizations_to_counterparties(
+            entities["organizations"], session,
+            llm_backend=llm_backend, model=model,
             trace_source=f"{item.src}_{item.field}",
             trace_recording_id=item.rid,
         )
-    return WorkResult(item=item, new_text=new_text, applied=applied)
+    full_map: dict[str, str] = {**people_map, **org_map}
+    new_text = (
+        canonicalize_text(item.text, full_map) if full_map else item.text
+    )
+    return WorkResult(
+        item=item, new_text=new_text, applied=full_map,
+        people_extracted=entities["people"],
+        orgs_extracted=entities["organizations"],
+    )
 
 
 def main() -> int:
@@ -79,6 +104,10 @@ def main() -> int:
         "--only-artem", action="store_true",
         help="Only process records where Артем appears in the "
              "short_summary «Участники:» line.",
+    )
+    ap.add_argument(
+        "--verbose", action="store_true",
+        help="Print full extracted entity lists per record.",
     )
     args = ap.parse_args()
     excludes = [s.lower() for s in (args.exclude_title_contains or []) if s]
@@ -179,6 +208,15 @@ def main() -> int:
             mark = "✏" if res.applied else "—"
             print(f"  [{done_count}/{len(worklist)}] {mark} "
                   f"{res.item.src} {res.item.field} | {res.item.title}")
+            if args.verbose:
+                if res.people_extracted:
+                    print(f"        people ({len(res.people_extracted)}): "
+                          f"{', '.join(res.people_extracted[:30])}"
+                          + (" …" if len(res.people_extracted) > 30 else ""))
+                if res.orgs_extracted:
+                    print(f"        orgs ({len(res.orgs_extracted)}): "
+                          f"{', '.join(res.orgs_extracted[:30])}"
+                          + (" …" if len(res.orgs_extracted) > 30 else ""))
             if res.applied:
                 for m, c in res.applied.items():
                     print(f"        '{m}' → '{c}'")

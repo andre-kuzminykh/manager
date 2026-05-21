@@ -115,15 +115,29 @@ def resolve_people_to_team_members(
     mentions: list[str], session: Session,
 ) -> dict[str, str]:
     """Map each mention → canonical TeamMember.real_name when there's
-    a confident match. Skips mentions that already equal the canonical
-    form (no rewrite needed).
+    a confident match.
 
-    Match strategies (in order):
-      1. Exact case-insensitive name match → no rewrite, skip
-      2. Last-name token match (one TeamMember's surname appears as
-         a token in the mention OR mention's last token appears in
-         TeamMember name) → rewrite
-      3. First-name + last-initial / email-local match
+    Match strategies (FR-CR-05-191 v3 — stricter than v2 to avoid
+    false rewrites like «Chris Watkins» → «Chris Windle» (different
+    people sharing first name) or «Кристиан Вольман» → «Кристиан»
+    (mention longer than canonical, would lose surname):
+
+      1. Exact case-insensitive match → already canonical, skip
+      2. Single-token mention (e.g., «Boris»):
+         - Must equal canonical's FIRST WORD
+         - If multiple members share that first word → ambiguous, skip
+      3. Multi-token mention (e.g., «Jared Cannon»):
+         - LAST TOKEN of mention MUST appear in canonical
+           (surname-based matching — first names may have typos but
+           the family name anchors the identity)
+         - Avoids same-first-name-different-surname false matches
+           («Chris Doran» last="doran" not in «Chris Windle» tokens)
+         - Avoids dropping surnames («Кристиан Вольман» last="вольман"
+           not in «Кристиан» tokens)
+         - Allows first-name typos to canonicalize («Jared Cannon»
+           last="cannon" matches «Jarad Cannon» tokens ✓)
+         - If multiple members tie for top shared-token score →
+           ambiguous, skip
     """
     if not mentions:
         return {}
@@ -140,31 +154,47 @@ def resolve_people_to_team_members(
         mention_norm = _norm(mention)
         if not mention_norm:
             continue
-        mention_tokens = set(re.findall(r"\w+", mention_norm))
-        # 1) Exact match — no rewrite needed
-        exact_hit = any(
-            _norm(m.real_name) == mention_norm for m in members
-        )
-        if exact_hit:
+        mention_words = mention_norm.split()
+        if not mention_words:
             continue
-        # 2) Token-overlap with at least one shared token of len >= 3
-        best_match: TeamMember | None = None
-        best_score = 0
+        # 1) Exact match — already canonical
+        if any(_norm(m.real_name) == mention_norm for m in members):
+            continue
+        mention_word_count = len(mention_words)
+        mention_last = mention_words[-1]
+        # 2/3) Score every candidate
+        candidates: list[tuple[TeamMember, int]] = []
         for m in members:
             canonical_norm = _norm(m.real_name)
-            canonical_tokens = set(re.findall(r"\w+", canonical_norm))
-            intersect = {
-                t for t in (mention_tokens & canonical_tokens)
-                if len(t) >= 3
-            }
-            score = len(intersect)
-            if score > best_score:
-                best_match = m
-                best_score = score
-        if best_match and best_score >= 1:
-            canonical = best_match.real_name
-            if _norm(canonical) != mention_norm:
-                out[mention] = canonical
+            canonical_words = canonical_norm.split()
+            if not canonical_words:
+                continue
+            if mention_word_count == 1:
+                # Single-token mention must equal canonical's FIRST word
+                if mention_words[0] != canonical_words[0]:
+                    continue
+                score = 1
+            else:
+                # Multi-token mention: last token (surname) must appear
+                # in canonical's tokens. Avoids same-first-name matches.
+                if mention_last not in set(canonical_words):
+                    continue
+                # Score by total token overlap so ties favour fuller match
+                shared = set(mention_words) & set(canonical_words)
+                score = len(shared)
+            candidates.append((m, score))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda x: -x[1])
+        top_score = candidates[0][1]
+        top_candidates = [c for c in candidates if c[1] == top_score]
+        # Ambiguous — more than one TeamMember tied at top → skip
+        if len(top_candidates) > 1:
+            continue
+        best_member = top_candidates[0][0]
+        canonical = best_member.real_name
+        if _norm(canonical) != mention_norm:
+            out[mention] = canonical
     return out
 
 

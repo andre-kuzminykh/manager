@@ -88,14 +88,13 @@ def main() -> int:
             MeetingRecording.meeting_date < end,
         ).all()
         for r in f_rows:
-            # FR-CR-05-188: FF может не заполнять duration_seconds.
-            # Фильтр по duration используем только если поле > 0.
-            # Иначе требуем хотя бы непустой transcript_text > 1500 chars
-            # (≈ 2 минуты речи) — отсекает audio_*.ogg войс-нотки.
-            dur = r.duration_seconds or 0
-            if dur > 0 and dur < min_secs:
-                continue
-            if dur == 0 and len((r.transcript_text or "").strip()) < 1500:
+            # FR-CR-05-188: FF API хранит длительность в МИНУТАХ,
+            # но наш пайплайн сохраняет в поле `duration_seconds`
+            # без конвертации (unit-confusion на стороне FF). Поэтому
+            # фильтр по duration для FF не используем — берём
+            # transcript_text >= 1500 chars (≈ 2 мин речи) как
+            # надёжный сигнал «реальный митинг, не audio_*.ogg».
+            if len((r.transcript_text or "").strip()) < 1500:
                 continue
             rows.append((r.meeting_date, "fireflies", r))
 

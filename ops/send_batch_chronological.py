@@ -101,11 +101,10 @@ def main() -> int:
                 MeetingRecording.meeting_date >= start,
                 MeetingRecording.meeting_date < end,
             ).all():
-                # FR-CR-05-188: FF может не заполнять duration_seconds.
-                dur = r.duration_seconds or 0
-                if dur > 0 and dur < min_secs:
-                    continue
-                if dur == 0 and len((r.transcript_text or "").strip()) < 1500:
+                # FR-CR-05-188: FF API хранит длительность в МИНУТАХ,
+                # не секундах. Игнорируем `duration_seconds` для FF и
+                # фильтруем по transcript_text >= 1500 chars.
+                if len((r.transcript_text or "").strip()) < 1500:
                     continue
                 if not _ready(r):
                     continue

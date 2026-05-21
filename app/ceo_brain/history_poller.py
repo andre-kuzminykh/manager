@@ -140,6 +140,14 @@ class SlackHistoryPoller:
         # replies. Keyed `f"{channel}:{thread_ts}"`. The set of
         # active threads is rebuilt each tick from archive activity.
         self._thread_high_water: dict[str, str] = {}
+        # FR-CR-05-180 — threads whose `conversations.replies` keeps
+        # returning `thread_not_found` (parent deleted / dropped from
+        # Slack indexer). We blacklist by `f"{channel}:{thread_ts}"`
+        # so the poller stops dragging them through every tick. Set
+        # rebuilds across restarts via the archive — if the parent
+        # really IS gone the next archive lookup just won't bring it
+        # back. Local in-memory; no DB persistence needed.
+        self._dead_threads: set[str] = set()
 
     def start(self) -> threading.Thread | None:
         if not self._channels:
@@ -324,6 +332,13 @@ class SlackHistoryPoller:
         self, channel: str, thread_ts: str,
     ) -> int:
         key = f"{channel}:{thread_ts}"
+        # FR-CR-05-180 — skip dead threads (already confirmed
+        # thread_not_found by an earlier tick). Saves one
+        # `conversations.replies` API hit per dead thread per
+        # second — operator's DM has piled up enough orphan
+        # threads that the noise drowned everything else in logs.
+        if key in self._dead_threads:
+            return 0
         oldest = self._thread_high_water.get(key, thread_ts)
         try:
             resp = self._slack.conversations_replies(
@@ -334,10 +349,23 @@ class SlackHistoryPoller:
                 limit=self._page_limit,
             )
         except Exception as e:  # noqa: BLE001
-            log.info(
-                "ceo_brain_thread_poll_failed",
-                channel=channel, thread_ts=thread_ts, error=str(e),
-            )
+            # `thread_not_found` is permanent — parent message is
+            # gone, no point polling it again. Other errors (network,
+            # rate-limit, transient 5xx) might recover, so we only
+            # blacklist on the explicit «not found» signal.
+            err_str = str(e)
+            if "thread_not_found" in err_str:
+                self._dead_threads.add(key)
+                log.info(
+                    "ceo_brain_thread_marked_dead",
+                    channel=channel, thread_ts=thread_ts,
+                )
+            else:
+                log.info(
+                    "ceo_brain_thread_poll_failed",
+                    channel=channel, thread_ts=thread_ts,
+                    error=err_str,
+                )
             return 0
         if not resp.get("ok"):
             return 0

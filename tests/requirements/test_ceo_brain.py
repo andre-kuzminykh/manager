@@ -2385,3 +2385,91 @@ def test_bilingual_restorer_falls_back_when_audio_missing(monkeypatch):
     assert trace["stage"] == "re_stt_failed"
     # Only the detector call happened — reconciler never invoked.
     assert client.chat.completions.create.call_count == 1
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-180 — dead-thread blacklist in CEO Brain history poller.
+#
+# Operator-pinned 2026-05-21: «флуд thread_not_found в логах».
+# When `conversations.replies` returns `thread_not_found` for a thread
+# (parent message deleted), poller adds it to an in-memory blacklist
+# so subsequent ticks skip it instead of re-hitting the API every second.
+# --------------------------------------------------------------------------- #
+
+
+def test_history_poller_blacklists_dead_thread_on_thread_not_found(
+    monkeypatch,
+):
+    """First poll on a thread that returns `thread_not_found` records
+    the (channel, thread_ts) in the dead-thread set; the next poll on
+    the same key short-circuits before hitting Slack."""
+    from app.ceo_brain.history_poller import SlackHistoryPoller
+
+    calls: list[tuple[str, str]] = []
+
+    class _FakeSlack:
+        def conversations_replies(
+            self, *, channel, ts, oldest, inclusive, limit,
+        ):  # noqa: D401
+            calls.append((channel, ts))
+            from slack_sdk.errors import SlackApiError
+            err_resp = type(
+                "FakeResp", (), {
+                    "data": {"ok": False, "error": "thread_not_found"},
+                    "status_code": 200,
+                },
+            )()
+            raise SlackApiError(
+                message="thread_not_found", response=err_resp,
+            )
+
+    poller = SlackHistoryPoller(
+        slack_client=_FakeSlack(),
+        bot_user_id="UBOT",
+        channels=["D-DEAD"],
+        responder=None,
+    )
+
+    # First poll → records as dead.
+    n1 = poller._poll_thread_once("D-DEAD", "1779000000.000001")
+    assert n1 == 0
+    assert (
+        "D-DEAD:1779000000.000001" in poller._dead_threads
+    )
+    assert len(calls) == 1
+
+    # Second poll on SAME key → short-circuits, no new API call.
+    n2 = poller._poll_thread_once("D-DEAD", "1779000000.000001")
+    assert n2 == 0
+    assert len(calls) == 1  # still 1 — no new hit
+
+    # Different thread on same channel still polls.
+    try:
+        poller._poll_thread_once("D-DEAD", "1779000000.000002")
+    except Exception:
+        pass
+    assert len(calls) == 2
+
+
+def test_history_poller_does_not_blacklist_on_transient_errors(
+    monkeypatch,
+):
+    """Only `thread_not_found` is treated as permanent. Other errors
+    (network, 5xx, rate-limit) should NOT poison the dead-thread set
+    so the next tick retries them."""
+    from app.ceo_brain.history_poller import SlackHistoryPoller
+
+    class _FakeSlack:
+        def conversations_replies(
+            self, *, channel, ts, oldest, inclusive, limit,
+        ):  # noqa: D401
+            raise RuntimeError("ECONNRESET")
+
+    poller = SlackHistoryPoller(
+        slack_client=_FakeSlack(),
+        bot_user_id="UBOT",
+        channels=["D-X"],
+        responder=None,
+    )
+    poller._poll_thread_once("D-X", "1779.000")
+    assert poller._dead_threads == set()

@@ -101,7 +101,12 @@ class SlackHistoryPoller:
     # Maximum age of a thread root after which we stop polling
     # its replies. Threads older than this are unlikely to receive
     # new messages so dropping them keeps the active-set bounded.
-    _THREAD_TTL_SEC = 60 * 60  # 1 hour
+    _THREAD_TTL_SEC = 60 * 60 * 12  # 12 hours — operator-pinned
+    # 2026-05-21: «из каких-то отдельных тредов делает» — bot was
+    # ignoring thread replies started >1h ago because the active
+    # threads scan stopped seeing them. Widen TTL to a full working
+    # day so any thread the operator picks up after lunch is still
+    # caught.
 
     def __init__(
         self,

@@ -1,0 +1,326 @@
+# Operator-pinned 2026-05-21 — canonical list of counterparties for the
+# Humanoid CEO Brain pipeline. Used as the directory in
+# `app/services/summary_canonicalize.py` (FR-CR-05-191) and
+# `resolve_mentions_to_directory` (FR-CR-05-129).
+#
+# Source: operator-pasted Google Sheet snapshot, columns:
+#   Type<TAB>Company<TAB>Contact Info
+#
+# Only Company column is used for the canonical name. Type goes into
+# CounterpartyAttribute.attributes JSON for analytics. Blank rows
+# skipped. Duplicates de-duplicated by name_normalised.
+#
+# Re-run safe: ingestion script is idempotent (ON CONFLICT skip).
+Type	Company	Contact Info
+Financial/VC	Edgewood
+Financial/VC	Moonfare	Steffen Pauls — Founder, Chairman & Co-CEO
+Financial/VC	FOV Ventures	Dave Haynes — Partner / Founding Partner
+Financial/VC	Accenture	amanda.r.mcbride@accenture.com
+Financial/VC, Business Clubs	Keen Venture Partners	Ben Verwaayen
+MENA	SDF (Saudi Development Fund)
+Financial/VC	Rosecliff
+Strategic	M&A
+Financial/VC	Apple
+Financial/VC	Dalma Capital	Zachary Cefaratti
+Financial/VC	David Silver
+Financial/VC	LCFW	Mandy Wang
+Financial/VC	Pledge	Ben Gammon
+Financial/VC	Family Office Exchange (FOX)	Jake Shulman
+Financial/VC	KPMG	Christian Mayo
+Financial/VC	Supernova	Michael Thomas
+Financial/VC	ABB	Silverio Taglione
+Financial/VC	Invus	Benjamin Tsai
+Advisor	Russ Salakhutdinov
+Financial/VC	Key 1 Capital
+Financial/VC	Rockwell Automation	Ryan Gariepy
+Financial/VC	Jabal
+Financial/VC	JAM Capital Partners	Mark Coetzee
+Financial/VC	Abdullah Alabdulhadi
+Business Clubs	World 50 / G100
+Advisor	ElevenLabs	Mati Staniszewski
+Partnerships	Anthropic / Cormac
+Financial/VC	Robostrategy	Jack Pearson
+Partnerships, Financial/VC	Kbw
+Financial/VC, Partnerships	Meta
+Financial/VC	Schwarz	Andreas Strähle
+Financial/VC	Qualcomm	Michel Glezer
+Financial/VC	BYD	Andreas Knipp
+Financial/VC	IST Capital	Furkan Serbetci
+Financial/VC	20VC	Harry Stebbings
+Financial/VC	tether
+Business Clubs	Concordia	Emilia Posada
+Financial/VC	XTX	Gabriele Papievyte
+Financial/VC	Apolonia Capital
+Network	Project Prometheus / Vik Bajaj
+Financial/VC, Network	Cambridge Associates	Nick Rees
+Financial/VC	Amazon
+Financial/VC	I2BF	Ilya Golubovich
+Partnerships	Physical Intelligence	Karol Hausman, Quan Vuong
+Partnerships	DataVolt
+Partnerships	Sumitomo
+Partnerships	ITOCHU
+Partnerships	Blue Origin	David Limp
+Partnerships	Adnoc
+Partnerships	Kuka / Till Reuter
+Network	HELLOFRESH	Dominik Richter
+Financial/VC	Boeing Saudi Arabia	Asaad Al Jomoai
+Financial/VC	Olaf Klug	contact@olafklug.de
+Financial/VC	BMW iVentures
+Financial/VC	Pictet	Harvey Chapel
+Network	Matthew Freud (Freuds)
+Government	Government Sovereign AI Fund	Josephine Kant, James Wise
+Financial/VC	Apple	Baris Yildiz
+Financial/VC	Uziel Zontag
+Банки	DBS
+Strategic	LG Technology Ventures	Youngjun Kong, Gyun Hong Kim
+Financial/VC, Partnerships	Aramco
+Financial/VC	Calm Ventures	Зак Гинсбург
+Financial/VC	DTCP	Lodovico Carini
+Financial/VC	Vest Capital	Raidy Gozali
+Financial/VC	TriplePoint Capital	Aaron Tyler
+Financial/VC	QDB (Qatar Development Bank)	Muhammad Kandil
+Financial/VC	Neuberger	Peter Sterling
+Financial/VC	Olayan Group	Suliman Olayan
+Strategic	Buckingham Palace	King Charles
+Network	Bill Koefoed / Cobot	Bill Koefoed
+Financial/VC	Breakthrough Ventures	Atuwatse Okorodudu
+Financial/VC	Assaf Harlap
+Банки	CBH
+Financial/VC	SBI
+MENA	Maaden / Saudi Arabian Mining	Saud Al-Tamimi
+Intros	Raymond Broomfield
+Financial/VC	Fubon
+Financial/VC	EQT	Po-Yang Hsu
+Financial/VC	Wellness Holding	Edoardo Alessandri
+Financial/VC	DMQ	Daniel Mician
+Financial/VC	Eldridge Capital Management
+Financial/VC	Cherry	Filip Felician Dames
+Partnerships	Mitsui	Kenichi Kogiku
+Partnerships	Generalist AI
+Government	Brent Hoberman
+Financial/VC	Cogito
+Financial/VC	Jimco	Onur A.
+Financial/VC	8vc
+Financial/VC	Craft Ventures
+Business Clubs	Endeavor Global (London Hub)
+Business Clubs	Young Leaders Circle	Jenny Sorin
+Partnerships, Financial/VC	Meta (Aria Glasses Partnership)
+Partnerships	Hyundai CRADLE	Joseph Boadi-Darkwah
+Банки	Softbank	Michal Zalewski, Sumer Juneja, Grong Wang
+Partnerships	Shopify	Mikhail Parakhin
+Network	Entrusted	Stefano Gurciullo, Marco Morisi
+MENA	Al Ghurair	Sumanth Muvvala
+Financial/VC	Lenovo Capital
+Financial/VC	Assembly Ventures
+Financial/VC	Arcapita
+Financial/VC	Millennia	Joe Zhao
+Financial/VC	10D	Yahal Zilka
+Financial/VC	Investcorp	Robin Mansour
+Financial/VC	Capricorn Investment Group	Dipender Saluja
+Financial/VC, Partnerships	Lila Sciences	Geoff von Maltzahn
+Financial/VC	Job&Talent
+Financial/VC	Skild	Deepak Pathak
+Partnerships	Humain
+Partnerships	Microsoft
+MENA	AIQ	Ghanim Hableel
+Financial/VC	Ford	mgjaja@ford.com
+Financial/VC	Stellantis
+Financial/VC	Greg Tkachenko
+Financial/VC	Rapid Pioneers	roman.kirsch@rapid-pioneers.com
+Financial/VC	Paladin Capital	Francois Ruether
+Financial/VC	Giant VC	Grant Allen
+Strategic	Nvidia	Artem Barsukov, Bronson Fikus
+Strategic	POSCO	Taegyeong Kang, Jay Kim, Dr. Kihwan Kim
+Financial/VC	Affinity Partners	Charlton Boyd
+Financial/VC	Object First / Dutchess Management	Ratmir Timashev
+Financial/VC	Scale Venture Partners	Siddharth Ramakrishnan, Rory O'Driscoll
+MENA	Lunate	Amer Al Ameri
+Financial/VC	Sev.en Global Investments
+Financial/VC	Mirae
+Financial/VC	CDIB Capital	Brendan Chen
+Financial/VC	Hinduja Group
+Financial/VC	Northgate
+Financial/VC	Hedosophia	Scott Tully
+Financial/VC	Jean Paul Lemonnier
+Financial/VC	Exor	Umberto Tribuzio
+Partnerships	Rainbow
+Financial/VC	Meridian
+Partnerships	Anthropic	Cami Clark
+Financial/VC	Abdul Latif Jameel Ventures	Mohammad Farhan Abdul Rab
+Financial/VC	Ribbit Capital	Nikolay
+Strategic	Amazon Industrial Fund	John Wong
+Partnerships	Mitsubishi	Хошито Накамура
+Partnerships	Mistral	Arthur Mensch
+Financial/VC	microAGI	Bercan Kilic
+Financial/VC	TWG Global	Amos Hochstein
+Financial/VC	Dara
+Financial/VC	Sextant
+Financial/VC	J.P. Morgan	Paul Szczepaniak
+Partnerships	Nissan
+Partnerships	Adient	Matthew Daly, Roger Simpson
+Financial/VC	Tsugu
+Financial/VC	QIA	Atakan Mete
+Financial/VC	Al Mirqab	Vincenzo Ludovico Maini
+Financial/VC	Al Fardan
+Financial/VC	Tru Arrow Partners	Russell Yue
+Financial/VC	qinvest
+Partnerships	DSIT	Lord Vallance, Lord Stockwood
+Financial/VC	AgiBot
+Financial/VC	Amadeus Capital Partners	Hermann Hausser
+Financial/VC	Mubadala	Terence Kwak
+Financial/VC	Lansdowne Partners	Peter Davies
+Events	Asia Summit 2026	Jenny Sorin (Milken Institute)
+Events	Founders Forum
+Partnerships	Amazon	Pieter Abbeel
+Financial/VC	ADIA	Ahmed Masaood Ahmed Almehairbi
+Банки	Nomura Greentech	Matthew Sculnick, Daniel Muldoon
+Банки	UBS	Artem Tokarenko
+Банки	MUFG Bank
+Strategic	Salesforce	Max Rudman
+Strategic	Nimble Partners	Sumeet Jain, Seth Spalding
+Strategic	Rakuten Capital	Nicole Jang, Mark Heeney, Kendrick Loh
+Strategic	Redwood Materials
+Strategic	Airbus	Karim Mokaddem, Camille Sagues
+Strategic	Accenture Ventures
+Strategic	Dassault Systèmes	Fred Vacher
+Strategic	Salesforce Ventures	Alex Quie
+Strategic	Palantir	Daniel Winston
+Strategic	Tencent	Lu Wei, Ling Ge, Min Hu, Haoyu Liu
+Strategic	UPS Ventures
+Partnerships, Financial/VC	OpenAI	Ian Hathaway
+Partnerships, Financial/VC	Nio Capital
+Partnerships	Al Maktoum
+Partnerships	Battery Ventures
+Partnerships	K5 Global	Bryan Baum
+Partnerships	T-Mobile	Gopalan Srini (MARS)
+Partnerships	Thiel Capital	Jack Selby
+Partnerships	Heex Technologies	Bruno Mendes Da Silva
+Partnerships	RoboStrategy	Jack Pearson
+Network	Sculptor
+Network	Manoj Narender Madnani
+Network	David Blaine
+Network	Виталий Голомб
+Network	HTGF / DTCF
+Network	Setter Capital	George Cameron
+Network	Диана Молдавская
+Network	Borek Solutions Group	Konstantin Borek
+Network	Jolt Capital	Danilo Roncasaglia, Clara Audry
+MENA	e& Capital
+MENA	MGX	Adam van Ommen Larsson, Danny Dweik
+Intros	Nicholas Barclay
+Government	British Embassy Abu Dhabi	Roberta Guglielmo
+Financial/VC, Банки	British Business Bank (BBB)	Louis Taylor
+Financial/VC, Partnerships	AYA Capital
+Financial/VC	Fortuna Investments	Daniel Parker, Vahid Eghtesad
+Financial/VC	Felix Capital	Tessa Jaspers
+Financial/VC	Pirelli	andrea.casaluci@pirelli.com
+Financial/VC	Hugh Campbell
+Financial/VC	Amadeus
+Financial/VC	Prysm Capital
+Financial/VC	Foundry
+Financial/VC	Sequoia Capital	Roelof Botha
+Financial/VC	Digital Space Ventures	Ruslan Gafarov
+Financial/VC	UBS	Artem Tikarenko
+Financial/VC	Google	Amaad Mahmood
+Financial/VC	Speedinvest	Varun Rekhi
+Financial/VC	Grove Ventures	Dov Moran
+Financial/VC	VU Venture Partners	Andy Goldstein, Tim Seears
+Financial/VC	FACEIT	Michele Attisani
+Financial/VC	Lennertz & Co	Erol Ali Dervis
+Financial/VC	Aexodus
+Financial/VC	E Squared	Corey Jones, Stephanie Dorsey
+Financial/VC	Caresyntax	Bjoern von Siemens
+Financial/VC	BGF (British Growth Fund)	Dennis Atkinson
+Financial/VC	Frontier Ventures	Dmitry Alimov
+Financial/VC	Trousdale	David Vennett
+Financial/VC	Emerson Collective
+Financial/VC	Claret Capital Partners	Oskar Herdland
+Financial/VC	Almak Capital	Yerzhan Musin
+Financial/VC	Bain Capital	Noah Savolainen
+Financial/VC	Al Fozan Holding	Ali Mandour
+Financial/VC	Ahoy Capital	Chris Douvos
+Financial/VC	Hassana Investment Company	Hani Al-Jehani
+Financial/VC	Agile Robots	Harry Zhang
+Financial/VC	Walden Catalyst	Nicolas Autret
+Financial/VC	Goldman Sachs Growth Fund	Penny Deans, Nikhil Mittal
+Financial/VC	Ahren Innovation
+Financial/VC	IQ Capital
+Financial/VC	Olimp Capital Partners	Art Balikin
+Financial/VC	Apax	David Su
+Financial/VC	Intrepid Growth Partners	Mark Machin
+Financial/VC	D1 Capital	mtully@d1capital.com
+Financial/VC	Walton Enterprises	Jon Morris-Eppolito
+Financial/VC	Edizione	Mattia Brentari
+Financial/VC	Horizons
+Financial/VC	Walmart
+Financial/VC	Gigafund	Luke Nosek
+Financial/VC	Horizons Ventures	Solina Chau
+Financial/VC	Hummingbird Ventures	Catherine Jones
+Financial/VC	Innovation Endeavors	Dror Berman
+Financial/VC	LocalGlobe / Phoenix Court
+Financial/VC	Mithril Capital Management	Ajay
+Financial/VC	Motive Partners
+Financial/VC	Mousse Partners
+Financial/VC	RedBird Capital Partners	Ed Lawson Johns
+Financial/VC	Notable Capital	Hans Tung
+Financial/VC	Novum Partners	Sebastian A. Jeck
+Financial/VC	Benchmark Capital	Andy Rachleff
+Financial/VC	US Innovative Technology
+Financial/VC	Mayfield	Mark Minevich
+Financial/VC	European Tech Collective	Bruno Vanhoorickx
+Financial/VC	MGX Fund	Danny Dweik
+Financial/VC	Permira
+Financial/VC	Yttrium
+Financial/VC	Cascade
+Financial/VC	Prima Materia	daniel.ek@gmail.com
+Financial/VC	Newlands	jankoum@gmail.com
+Financial/VC	Bezos Expeditions
+Financial/VC	Twaik / Saudi FO	Anna Kondratenko
+Financial/VC	Sentinel Dome Partners	Jamieson Ward, Chip Wadsworth
+Financial/VC	Beyond Earth Ventures	Viktor Shpakovsky
+Financial/VC	AustralianSuper	Andy Chu
+Financial/VC	Desert Technologies	Khaled Sharbatly
+Financial/VC	Infodriver Capital	Kirill Mishanin
+Financial/VC	Breakthrough Energy	Gaetan Bonhomme
+Financial/VC	Kleiner Perkins	Mamoon Hamid, Josh Coyne, Joubin Mirzadegan
+Financial/VC	EDBI	Nathanael Fheng
+Financial/VC	General Atlantic
+Financial/VC	WisdomTree	Blake Heimann, Christopher Gannatti
+Financial/VC	Benchmark	Victor Lazarte
+Financial/VC	Alpha Partners	Steve Brotman
+Financial/VC	Radical Ventures	Daniel Mulet, Rob Toews
+Financial/VC	DBL Partners
+Financial/VC	FIFTHDELTA	Tio Charbaghi
+Financial/VC	Kivuko Capital	Jon Coller
+Financial/VC	Vy Capital	Daniel Schwarz, Manish D'Silva
+Financial/VC	Spark Capital	Alex Finklestein
+Financial/VC	DN Capital	Nenad Marovac
+Financial/VC	Golden Gate
+Financial/VC	Worldline Capital	Daniel Sheng
+Financial/VC	7percent Ventures	Harry Morgan
+Financial/VC	Glynn Capital	Taleha Aftab, Charles Friedland, Sarah Rogers
+Financial/VC	Sylebra
+Financial/VC	Al Thani Family Office	Sheikh Hamad bin Jassim (HBJ)
+Events	London Tech Week
+Events	Deutsche Bank
+Events	AYA Capital LatAm Family Office Soiree
+Events	Stand Together Ventures Summit	Lindsey Fussell Romanowsky
+Business Clubs	Founders Pledge
+Business Clubs	Milken Institute	James Morgon
+Advisor	Daniel Gutenberg
+Advisor	Rhoda AI	Andrew Wooten
+Advisor	Соколин
+Advisor	Sam Christey
+Financial/VC	Aramco Ventures
+Strategic	Faisal (Sharjah Royal Family)
+Financial/VC	K3 Ventures
+Financial/VC	Orchid Asia
+Financial/VC	TA Associates	Andrey Stukov
+Financial/VC	Insignia Ventures Partners
+Financial/VC	Squarepoint
+Financial/VC	Playtime.vc	Razmig
+Financial/VC	Peak XV
+Financial/VC	Granite Asia
+Financial/VC	Sentinel Global
+Financial/VC	Manhattan Venture Partners	David James
+Financial/VC	Bosch

@@ -664,6 +664,33 @@ class ZoomPipeline:
         from app.fireflies.pipeline import _strip_markdown_emphasis
 
         row.detailed_summary = _strip_markdown_emphasis(text)
+        # FR-CR-05-191 — canonicalize person + organization names
+        # against TeamMember + Counterparty directories so the
+        # downstream short_summary, doc export, and Slack post
+        # all use consistent canonical forms.
+        if session is not None:
+            try:
+                from app.services.summary_canonicalize import (
+                    canonicalize_summary_text,
+                )
+                new_text, applied = canonicalize_summary_text(
+                    row.detailed_summary,
+                    session=session, llm_backend=self._llm,
+                    model=self._settings.fireflies_tasks_model,
+                    trace_source="zoom_detailed",
+                    trace_recording_id=row.zoom_id,
+                )
+                if applied:
+                    row.detailed_summary = new_text
+                    log.info(
+                        "zoom_detailed_summary_canonicalized",
+                        zoom_id=row.zoom_id, rewrites=applied,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "zoom_detailed_summary_canonicalize_failed",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
         row.detailed_summarised = True
         row.last_error = None
         return True
@@ -920,6 +947,32 @@ class ZoomPipeline:
         if not text:
             row.last_error = "short summary returned empty"
             return False
+        # FR-CR-05-191 — canonicalize names (TeamMember +
+        # Counterparty directories) before the post-processing chain
+        # so the title-hyperlink line, body, and Slack post all use
+        # consistent canonical forms.
+        try:
+            from app.services.summary_canonicalize import (
+                canonicalize_summary_text,
+            )
+            new_text, applied = canonicalize_summary_text(
+                text,
+                session=session, llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                trace_source="zoom_short",
+                trace_recording_id=row.zoom_id,
+            )
+            if applied:
+                text = new_text
+                log.info(
+                    "zoom_short_summary_canonicalized",
+                    zoom_id=row.zoom_id, rewrites=applied,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "zoom_short_summary_canonicalize_failed",
+                zoom_id=row.zoom_id, error=str(e),
+            )
         # FR-CR-05-157 follow-up — LLM said «содержательная часть
         # отсутствует» (transcript was too thin to summarize, but
         # passed the upstream char/marker guards). Don't post this

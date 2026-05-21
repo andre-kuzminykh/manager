@@ -1325,6 +1325,29 @@ class FirefliesPipeline:
             row.last_error = "detailed summary LLM returned empty"
             return False
         row.detailed_summary = _strip_markdown_emphasis(text)
+        # FR-CR-05-191 — canonicalize names (TeamMember + Counterparty)
+        try:
+            from app.services.summary_canonicalize import (
+                canonicalize_summary_text,
+            )
+            new_text, applied = canonicalize_summary_text(
+                row.detailed_summary,
+                session=session, llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                trace_source="ff_detailed",
+                trace_recording_id=row.fireflies_id,
+            )
+            if applied:
+                row.detailed_summary = new_text
+                log.info(
+                    "fireflies_detailed_summary_canonicalized",
+                    fireflies_id=row.fireflies_id, rewrites=applied,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "fireflies_detailed_summary_canonicalize_failed",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
         row.detailed_summarised = True
         row.last_error = None
         return True
@@ -1992,6 +2015,30 @@ class FirefliesPipeline:
             )
             return False
         body = _truncate(text, limit=3800)
+        # FR-CR-05-191 — canonicalize names against TeamMember +
+        # Counterparty directories before the post-processing chain.
+        try:
+            from app.services.summary_canonicalize import (
+                canonicalize_summary_text,
+            )
+            new_body, applied = canonicalize_summary_text(
+                body,
+                session=session, llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                trace_source="ff_short",
+                trace_recording_id=row.fireflies_id,
+            )
+            if applied:
+                body = new_body
+                log.info(
+                    "fireflies_short_summary_canonicalized",
+                    fireflies_id=row.fireflies_id, rewrites=applied,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "fireflies_short_summary_canonicalize_failed",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
         # FR-CR-05-119 — strip any «To-Do» / «Следующие шаги»
         # block the LLM still emits despite the prompt forbidding
         # it. We rebuild the section deterministically from the

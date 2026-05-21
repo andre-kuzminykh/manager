@@ -49,7 +49,21 @@ from app.services.slack_mirror import (
     _compact_for_slack,
     _to_slack_mrkdwn,
 )
+from app.services.task_direction import DIRECTIONS_IMPORTANT
 from ops._send_helpers import build_parent_raw
+
+
+def _task_direction(t: Task) -> str | None:
+    """Mirror `_build_todo_section`'s lookup: t.extra is JSON, may
+    carry `direction` ∈ DIRECTIONS_IMPORTANT. Tasks without that
+    direction are silently dropped from the rendered thread reply."""
+    try:
+        extra = getattr(t, "extra", None) or {}
+        if isinstance(extra, dict):
+            return extra.get("direction")
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 CYR_RE = re.compile(r"[А-Яа-яЁё]")
@@ -209,33 +223,43 @@ def main() -> int:
                 .order_by(Task.id)
                 .all()
             )
-            n_tasks = len(db_tasks)
+            n_tasks_db = len(db_tasks)
+            # Only tasks whose `extra.direction` is in DIRECTIONS_IMPORTANT
+            # land in the Slack thread reply (FR-CR-05-163 follow-up).
+            filtered_tasks = [
+                t for t in db_tasks
+                if _task_direction(t) in DIRECTIONS_IMPORTANT
+            ]
+            n_tasks_filtered = len(filtered_tasks)
 
             md = r.meeting_date
             default_due_date = md.date()
             default_due_time = dtime(18, 0)
             owner_ok = True
             dl_real = True
-            filt_ok = True  # every task has a non-empty category
             owner_misses: list[str] = []
             dl_misses: list[str] = []
-            filt_misses: list[str] = []
             task_lines: list[str] = []
             for t in db_tasks:
+                direction = _task_direction(t) or ""
+                in_filter = direction in DIRECTIONS_IMPORTANT
                 owner = (t.owner_display_name or "").strip()
-                if not owner or _norm(owner) not in members_by_norm:
-                    owner_ok = False
-                    owner_misses.append(owner or "(none)")
-                is_default_dl = (
-                    t.due_date == default_due_date
-                    and (t.due_time is None or t.due_time == default_due_time)
-                )
-                if t.due_date is None or is_default_dl:
-                    dl_real = False
-                    dl_misses.append((t.title or "")[:40])
-                if not (t.category or "").strip():
-                    filt_ok = False
-                    filt_misses.append((t.title or "")[:40])
+                # Only count owner/deadline misses for tasks that
+                # actually ship to Slack (post-filter).
+                if in_filter:
+                    if not owner or _norm(owner) not in members_by_norm:
+                        owner_ok = False
+                        owner_misses.append(owner or "(none)")
+                    is_default_dl = (
+                        t.due_date == default_due_date
+                        and (
+                            t.due_time is None
+                            or t.due_time == default_due_time
+                        )
+                    )
+                    if t.due_date is None or is_default_dl:
+                        dl_real = False
+                        dl_misses.append((t.title or "")[:40])
                 dl_str = (
                     t.due_date.strftime("%d.%m.%Y")
                     + (
@@ -243,10 +267,11 @@ def main() -> int:
                         if t.due_time else ""
                     )
                 ) if t.due_date else "—"
+                in_filt_mark = "✓" if in_filter else "✗"
                 task_lines.append(
-                    f"        · #{t.id} {(t.title or '')[:55]:<55} | "
-                    f"owner={owner[:24]:<24} | due={dl_str:<16} | "
-                    f"cat={(t.category or '—')[:14]}"
+                    f"        · #{t.id} {(t.title or '')[:50]:<50} | "
+                    f"owner={owner[:22]:<22} | due={dl_str:<16} | "
+                    f"dir={direction[:14]:<14} | filt={in_filt_mark}"
                 )
 
             report.append({
@@ -260,13 +285,15 @@ def main() -> int:
                 "det_ppl": str(n_ppl),
                 "det_cp": str(n_cp),
                 "short": _check(has_short),
-                "tsk": str(n_tasks),
-                "tsk_own": "—" if n_tasks == 0 else _check(owner_ok),
-                "tsk_dl": "—" if n_tasks == 0 else _check(dl_real),
-                "tsk_filt": "—" if n_tasks == 0 else _check(filt_ok),
+                "tsk": str(n_tasks_db),
+                "tsk_filt": (
+                    "—" if n_tasks_db == 0
+                    else f"{n_tasks_filtered}/{n_tasks_db}"
+                ),
+                "tsk_own": "—" if n_tasks_filtered == 0 else _check(owner_ok),
+                "tsk_dl": "—" if n_tasks_filtered == 0 else _check(dl_real),
                 "_owner_miss": owner_misses,
                 "_dl_miss": dl_misses,
-                "_filt_miss": filt_misses,
                 "_task_lines": task_lines,
                 "_first_line": first[:90],
                 "_last_err": (getattr(r, "last_error", None) or "")[:80],
@@ -283,7 +310,7 @@ def main() -> int:
             ("det_cp",   "det_cp",   6),
             ("short",    "short",    5),
             ("tsk",      "tsk",      3),
-            ("tsk_filt", "tsk_filt", 8),
+            ("tsk_filt", "tsk_filt", 6),
             ("tsk_own",  "tsk_own",  7),
             ("tsk_dl",   "tsk_dl",   6),
         ]
@@ -302,10 +329,12 @@ def main() -> int:
         print("  det_ppl  # canonical TeamMember names in detailed_summary")
         print("  det_cp   # canonical Counterparty names in detailed_summary")
         print("  short    short_summary present")
-        print("  tsk      # alive Task rows (deleted_at IS NULL) in DB")
-        print("  tsk_filt every task has a `category` (direction tag)")
-        print("  tsk_own  every task owner_display_name exists in TeamMember")
-        print("  tsk_dl   every task due_date ≠ default meeting_date 18:00")
+        print("  tsk      # alive Task rows in DB (deleted_at IS NULL)")
+        print("  tsk_filt # tasks that survive `extra.direction in")
+        print("           DIRECTIONS_IMPORTANT` filter / # in DB  —  only")
+        print("           filtered ones land in the Slack thread reply")
+        print("  tsk_own  every FILTERED task owner exists in TeamMember")
+        print("  tsk_dl   every FILTERED task due_date ≠ default 18:00")
         print()
 
         print("DETAIL PER RECORD:")
@@ -321,11 +350,9 @@ def main() -> int:
             else:
                 print("      tasks: (none in DB)")
             if rec['tsk_own'] == "✗":
-                print(f"      ⚠ owner not in TM: {', '.join(rec['_owner_miss'])}")
+                print(f"      ⚠ filtered task owner not in TM: {', '.join(rec['_owner_miss'])}")
             if rec['tsk_dl'] == "✗":
-                print(f"      ⚠ tasks with default deadline: {', '.join(rec['_dl_miss'])}")
-            if rec['tsk_filt'] == "✗":
-                print(f"      ⚠ tasks without category: {', '.join(rec['_filt_miss'])}")
+                print(f"      ⚠ filtered tasks with default deadline: {', '.join(rec['_dl_miss'])}")
             if rec['_last_err']:
                 print(f"      last_error: {rec['_last_err']}")
 

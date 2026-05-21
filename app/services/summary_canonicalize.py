@@ -238,6 +238,53 @@ def resolve_organizations_to_counterparties(
     return out
 
 
+def _seed_counterparties_from_orgs(
+    orgs: list[str], session: Session,
+) -> list[str]:
+    """FR-CR-05-191b — auto-populate Counterparty directory from
+    extracted org mentions. Operator-pinned 2026-05-21: «и из
+    остальных ты всегда будешь так делать».
+
+    For each org mention that survives the generic-filter, find or
+    create a Counterparty row keyed by `name_normalised`. Returns
+    the list of newly-created canonical names so the caller can log
+    / trace what got added.
+    """
+    if not orgs:
+        return []
+    try:
+        from app.sync.counterparties import normalise_name
+    except Exception:  # noqa: BLE001
+        return []
+    # Same generic filter as ops/seed_counterparties_from_summaries.py
+    GENERIC = {
+        "humanoid", "humain", "company", "fund", "investor",
+        "investors", "bank", "banks", "government", "ventures",
+        "capital", "partners", "advisors", "team", "office",
+    }
+    added: list[str] = []
+    # Pre-fetch existing norms to avoid one query per org
+    existing_norms = {
+        n for (n,) in session.query(Counterparty.name_normalised).all()
+    }
+    for raw in orgs:
+        if not raw or len(raw.strip()) < 3:
+            continue
+        norm = normalise_name(raw) or ""
+        if not norm or norm in GENERIC or norm in existing_norms:
+            continue
+        cp = Counterparty(name=raw.strip(), name_normalised=norm)
+        session.add(cp)
+        try:
+            session.flush()
+        except Exception:  # noqa: BLE001 — race / dup
+            session.rollback()
+            continue
+        existing_norms.add(norm)
+        added.append(raw.strip())
+    return added
+
+
 def canonicalize_summary_text(
     text: str | None,
     *,
@@ -246,8 +293,11 @@ def canonicalize_summary_text(
     model: str,
     trace_source: str = "summary",
     trace_recording_id: str | None = None,
+    auto_seed_counterparties: bool = True,
 ) -> tuple[str | None, dict[str, str]]:
-    """End-to-end: extract entities → resolve → canonicalize_text.
+    """End-to-end: extract entities → optionally auto-seed
+    Counterparty (FR-CR-05-191b) → resolve people + orgs →
+    canonicalize_text.
 
     Returns ``(new_text, applied_rewrites)``. ``applied_rewrites``
     is empty when nothing changed.
@@ -257,6 +307,16 @@ def canonicalize_summary_text(
     entities = extract_name_entities(
         text, llm_backend=llm_backend, model=model,
     )
+    if auto_seed_counterparties:
+        seeded = _seed_counterparties_from_orgs(
+            entities["organizations"], session,
+        )
+        if seeded:
+            log.info(
+                "summary_canonicalize_counterparty_seeded",
+                source=trace_source, recording_id=trace_recording_id,
+                added=len(seeded), examples=seeded[:5],
+            )
     people_map = resolve_people_to_team_members(
         entities["people"], session,
     )

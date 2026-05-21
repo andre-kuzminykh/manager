@@ -290,3 +290,109 @@ def test_canonicalize_summary_text_llm_extract_failure_is_graceful(session):
     # Graceful: no rewrite, text unchanged
     assert new_text == text
     assert applied == {}
+
+
+# --------------------------------------------------------------------------- #
+# FR-CR-05-191b — auto-seed Counterparty from extracted orgs
+# --------------------------------------------------------------------------- #
+
+
+def test_canonicalize_summary_text_auto_seeds_new_counterparties(session):
+    """Every meeting auto-grows Counterparty: orgs extracted from
+    the summary that aren't already in the directory get find-or-
+    created. Operator: «и из остальных ты всегда будешь так делать»."""
+    # Pre-existing directory has only Bosch
+    session.add(Counterparty(name="Bosch", name_normalised="bosch"))
+    session.flush()
+    text = "Affinity Partners и CDIB Capital обсудили инвестиции."
+    extract_response = json.dumps({
+        "people": [],
+        "organizations": ["Affinity Partners", "CDIB Capital", "Bosch"],
+    })
+    llm = _FakeLLM(extract_response)
+    with patch(
+        "app.services.summary_canonicalize.resolve_mentions_to_directory",
+        return_value={},
+    ):
+        canonicalize_summary_text(
+            text, session=session, llm_backend=llm, model="m",
+        )
+    norms = {n for (n,) in session.query(Counterparty.name_normalised).all()}
+    # Bosch already there; the two new ones were seeded.
+    assert "bosch" in norms
+    assert "affinity partners" in norms
+    assert "cdib capital" in norms
+
+
+def test_canonicalize_summary_text_seed_skips_generic_terms(session):
+    """Bare nouns like «company», «government», «bank» should NOT
+    pollute the Counterparty directory."""
+    text = "На звонке упомянули government и company."
+    extract_response = json.dumps({
+        "people": [],
+        "organizations": ["government", "company", "bank", "team", "fund"],
+    })
+    llm = _FakeLLM(extract_response)
+    with patch(
+        "app.services.summary_canonicalize.resolve_mentions_to_directory",
+        return_value={},
+    ):
+        canonicalize_summary_text(
+            text, session=session, llm_backend=llm, model="m",
+        )
+    norms = {n for (n,) in session.query(Counterparty.name_normalised).all()}
+    # None of the generic terms made it in
+    assert "government" not in norms
+    assert "company" not in norms
+    assert "bank" not in norms
+    assert "team" not in norms
+    assert "fund" not in norms
+
+
+def test_canonicalize_summary_text_seed_skips_already_in_directory(session):
+    """Existing canonical forms are NEVER duplicated — keyed by
+    name_normalised."""
+    session.add(Counterparty(
+        name="Affinity Partners", name_normalised="affinity partners",
+    ))
+    session.flush()
+    text = "Affinity Partners shared feedback."
+    extract_response = json.dumps({
+        "people": [],
+        "organizations": ["Affinity Partners"],
+    })
+    llm = _FakeLLM(extract_response)
+    with patch(
+        "app.services.summary_canonicalize.resolve_mentions_to_directory",
+        return_value={},
+    ):
+        canonicalize_summary_text(
+            text, session=session, llm_backend=llm, model="m",
+        )
+    affinities = (
+        session.query(Counterparty)
+        .filter(Counterparty.name_normalised == "affinity partners")
+        .all()
+    )
+    assert len(affinities) == 1  # no dup
+
+
+def test_canonicalize_summary_text_seed_can_be_disabled(session):
+    """`auto_seed_counterparties=False` keeps the directory pristine
+    — opt-out path for callers that want pure-read canonicalize."""
+    text = "Affinity Partners shared feedback."
+    extract_response = json.dumps({
+        "people": [],
+        "organizations": ["Affinity Partners"],
+    })
+    llm = _FakeLLM(extract_response)
+    with patch(
+        "app.services.summary_canonicalize.resolve_mentions_to_directory",
+        return_value={},
+    ):
+        canonicalize_summary_text(
+            text, session=session, llm_backend=llm, model="m",
+            auto_seed_counterparties=False,
+        )
+    norms = {n for (n,) in session.query(Counterparty.name_normalised).all()}
+    assert "affinity partners" not in norms

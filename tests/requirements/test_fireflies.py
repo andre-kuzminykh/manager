@@ -2804,3 +2804,24 @@ def test_fireflies_pipeline_skips_calendar_attendees_when_no_factory(
 
     block = build_meta_block_for_summary(row)
     assert "Участники: Anna, Boris" in block
+
+
+def test_short_summary_prompt_drops_sut_label_per_fr_cr_05_182():
+    """FR-CR-05-182 — operator-pinned 2026-05-21: «формируем
+    короткое саммери "суть" без слова "суть"». The body paragraph
+    follows «Участники: …» directly with NO «Суть:» (or
+    «Краткое содержание:», «Резюме:», etc.) section label above
+    it. Pins the prompt so a future revert is caught.
+    """
+    from app.fireflies.prompts import SHORT_SUMMARY_SYSTEM
+
+    blob = SHORT_SUMMARY_SYSTEM
+    # The canonical example must NOT contain a «Суть:» line above
+    # the body paragraph. Old example: «Суть: Обсудили...». New
+    # example: just «Обсудили...» on the line after «Участники:».
+    assert "Суть: Обсудили" not in blob
+    # The instruction MUST explicitly forbid the label.
+    lowered = blob.lower()
+    assert "do not prefix the body" in lowered or "без слова" in lowered
+    # FR id must be cited so the rule traces to a SPEC entry.
+    assert "FR-CR-05-182" in blob

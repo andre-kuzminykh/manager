@@ -275,13 +275,16 @@ class ZoomPipeline:
 
         size = os.path.getsize(row.audio_path)
         whisper_max = 24 * 1024 * 1024
-        # FR-CR-05-177 — OpenAI's diarization models cap audio at
-        # 1400 s/chunk. We respect that AS WELL AS the 24 MB byte
-        # cap; chunker picks the stricter of the two splits.
-        whisper_model = self._settings.fireflies_whisper_model or ""
-        is_diarize = "diarize" in whisper_model.lower()
-        max_dur = 1300.0 if is_diarize else None
-        if size <= whisper_max and not is_diarize:
+        # FR-CR-05-177 — OpenAI's gpt-4o-transcribe family
+        # (including -diarize) caps audio at 1400 s/chunk. Only
+        # legacy `whisper-1` has no duration limit. Apply 1300 s
+        # safety cap to anything except whisper-1.
+        whisper_model = (
+            self._settings.fireflies_whisper_model or ""
+        ).strip().lower()
+        needs_dur_cap = whisper_model and whisper_model != "whisper-1"
+        max_dur = 1300.0 if needs_dur_cap else None
+        if size <= whisper_max and not needs_dur_cap:
             audio_paths = [row.audio_path]
         else:
             try:

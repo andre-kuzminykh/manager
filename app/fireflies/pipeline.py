@@ -1057,11 +1057,14 @@ class FirefliesPipeline:
         # прогонять в whisper, а потом склеивать». Chunk via
         # ffmpeg into ≤24 MB pieces, transcribe each, join.
         whisper_max = 24 * 1024 * 1024
-        # FR-CR-05-177 — diarization models cap audio at 1400 s.
-        whisper_model = self._settings.fireflies_whisper_model or ""
-        is_diarize = "diarize" in whisper_model.lower()
-        max_dur = 1300.0 if is_diarize else None
-        if size <= whisper_max and not is_diarize:
+        # FR-CR-05-177 — gpt-4o-transcribe (and -diarize) cap audio
+        # at 1400 s. Only legacy whisper-1 is uncapped.
+        whisper_model = (
+            self._settings.fireflies_whisper_model or ""
+        ).strip().lower()
+        needs_dur_cap = whisper_model and whisper_model != "whisper-1"
+        max_dur = 1300.0 if needs_dur_cap else None
+        if size <= whisper_max and not needs_dur_cap:
             audio_paths = [row.audio_path]
         else:
             try:

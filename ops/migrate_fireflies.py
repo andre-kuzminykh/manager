@@ -107,13 +107,21 @@ def main() -> int:
         )
         return 2
 
-    # Docs factory + TelegramSender for short-summary DMs.
+    # Docs factory + TelegramSender for short-summary DMs +
+    # Calendar factory for FR-CR-05-176 attendees resolution.
     docs_factory = None
     sender = None
+    calendar_factory = None
     try:
-        from app.sync.factories import build_docs_factory
+        from app.sync.factories import (
+            build_calendar_credentials_factory_with_sa_fallback,
+            build_docs_factory,
+        )
 
         docs_factory = build_docs_factory(settings)
+        calendar_factory = (
+            build_calendar_credentials_factory_with_sa_fallback(settings)
+        )
     except Exception as e:  # noqa: BLE001
         log.warning("fireflies_docs_factory_setup_failed", error=str(e))
     if settings.telegram_bot_token:
@@ -127,6 +135,7 @@ def main() -> int:
         llm_backend=backend,
         docs_factory=docs_factory,
         sender=sender,
+        calendar_factory=calendar_factory,
     )
 
     transcripts = client.list_transcripts(limit=args.limit)

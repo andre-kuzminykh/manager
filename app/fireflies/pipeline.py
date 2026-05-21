@@ -846,6 +846,47 @@ def _truncate(text: str | None, *, limit: int) -> str:
     return cut.rstrip() + "…"
 
 
+def build_meta_block_for_summary(row: MeetingRecording) -> str:
+    """FR-CR-05-176 — Fireflies analogue of
+    ``app.zoom.pipeline.build_meta_block_for_summary``. Renders the
+    Заголовок / Дата / Продолжительность / Участники block prepended
+    to the transcript for the detailed-summary LLM call.
+
+    Participant-line precedence:
+      1. ``row.calendar_attendees`` (non-empty) — rendered in event
+         order using each attendee's ``resolved_name``.
+      2. else ``row.participants`` (Fireflies API fallback).
+      3. else the line is omitted.
+    """
+    meta_lines = [
+        f"Заголовок: {row.title or '(без названия)'}",
+        (
+            f"Дата: {row.meeting_date.isoformat()}"
+            if row.meeting_date
+            else "Дата: —"
+        ),
+        (
+            f"Продолжительность: {row.duration_seconds // 60} мин"
+            if row.duration_seconds
+            else "Продолжительность: —"
+        ),
+    ]
+    cal = row.calendar_attendees or []
+    if cal:
+        names = [
+            (a.get("resolved_name") or a.get("display_name")
+             or a.get("email") or "").strip()
+            for a in cal
+            if isinstance(a, dict)
+        ]
+        names = [n for n in names if n]
+        if names:
+            meta_lines.append("Участники: " + ", ".join(names))
+    elif row.participants:
+        meta_lines.append("Участники: " + ", ".join(row.participants))
+    return "\n".join(meta_lines)
+
+
 class FirefliesPipeline:
     """Orchestrator wired with all the dependencies the pipeline
     steps need.
@@ -863,12 +904,19 @@ class FirefliesPipeline:
         llm_backend: Any,
         docs_factory=None,
         sender=None,
+        calendar_factory: Any | None = None,
     ) -> None:
         self._settings = settings
         self._client = client
         self._llm = llm_backend
         self._docs_factory = docs_factory
         self._sender = sender
+        # FR-CR-05-176 — optional callable returning a refreshed
+        # Google Calendar credentials object. When None, the
+        # `_populate_calendar_attendees` step is silently skipped
+        # and the meta block falls back to the raw Fireflies
+        # `participants` list (existing behaviour).
+        self._calendar_factory = calendar_factory
 
     # --- step 0: upsert the row -------------------------------
 
@@ -1036,9 +1084,76 @@ class FirefliesPipeline:
         row.last_error = None
         return True
 
+    # --- step 2.5: calendar-driven attendees (FR-CR-05-176) ---
+
+    def _populate_calendar_attendees(
+        self, row: MeetingRecording, session: Session,
+    ) -> None:
+        """FR-CR-05-176 — Fireflies counterpart of the Zoom
+        FR-CR-05-169 step. Fetches the matching Google Calendar event
+        for ``row.meeting_date`` and resolves its attendees against
+        TeamMember / Employee / Counterparty tables. Persists on
+        ``row.calendar_attendees``.
+
+        No-op when:
+          * ``row.calendar_attendees`` is already set (idempotent);
+          * no Calendar credentials are configured;
+          * ``row.meeting_date`` is missing;
+          * Calendar API returns no events / nothing matches.
+
+        Unlike Zoom there is NO reconcile-with-participants step —
+        Fireflies doesn't expose a join-time participants endpoint.
+        We trust Calendar invitees as-is.
+
+        Never raises: caller wraps in try/except.
+        """
+        if row.calendar_attendees:
+            return
+        if self._calendar_factory is None:
+            log.info(
+                "fireflies_calendar_attendees_skipped_no_factory",
+                fireflies_id=row.fireflies_id,
+            )
+            return
+        if row.meeting_date is None:
+            return
+        from app.services.calendar_attendees import (
+            resolve_calendar_attendees_for_zoom,
+        )
+        from app.services.calendar_match import (
+            fetch_calendar_events_via_api,
+        )
+
+        try:
+            events = fetch_calendar_events_via_api(
+                meeting_dt=row.meeting_date,
+                window_minutes=120,
+                credentials_factory=self._calendar_factory,
+                calendar_id=self._settings.google_calendar_id,
+            ) or []
+        except Exception as e:  # noqa: BLE001
+            log.info(
+                "fireflies_calendar_events_fetch_failed",
+                fireflies_id=row.fireflies_id, error=str(e),
+            )
+            return
+        # `resolve_calendar_attendees_for_zoom` duck-types on the row
+        # (uses getattr for zoom_meeting_id / meeting_date / title);
+        # MeetingRecording has no zoom_meeting_id, so URL match is
+        # skipped and we rely on fuzzy title + time match.
+        resolved = resolve_calendar_attendees_for_zoom(
+            row, session, calendar_events=events,
+        )
+        attendees = (resolved or {}).get("attendees") or []
+        if not attendees:
+            return
+        row.calendar_attendees = attendees
+
     # --- step 3: detailed RU summary --------------------------
 
-    def _step_detailed_summary(self, row: MeetingRecording) -> bool:
+    def _step_detailed_summary(
+        self, row: MeetingRecording, session: Session | None = None,
+    ) -> bool:
         if row.detailed_summarised and row.detailed_summary:
             return True
         if not row.transcript_text:
@@ -1131,17 +1246,25 @@ class FirefliesPipeline:
                     old=row.title, new=derived,
                 )
                 row.title = derived
-        meta_lines = [
-            f"Заголовок: {row.title or '(без названия)'}",
-            f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}",
-            (
-                f"Продолжительность: {row.duration_seconds // 60} мин"
-                if row.duration_seconds
-                else "Продолжительность: —"
-            ),
-            "Участники: " + ", ".join(row.participants or []) or "Участники: —",
-        ]
-        user_prompt = "\n".join(meta_lines) + "\n\nТранскрипт:\n" + row.transcript_text
+        # FR-CR-05-176 — populate calendar_attendees before building
+        # the meta block so the «Участники: …» line resolves real
+        # names from People/Counterparty. Best-effort: failures fall
+        # back to the raw Fireflies participants list. `session` is
+        # threaded down from `process_one`; tests that exercise the
+        # step in isolation can pass None and skip this enrichment.
+        if session is not None:
+            try:
+                self._populate_calendar_attendees(row, session)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "fireflies_calendar_attendees_step_failed",
+                    fireflies_id=row.fireflies_id, error=str(e),
+                )
+        user_prompt = (
+            build_meta_block_for_summary(row)
+            + "\n\nТранскрипт:\n"
+            + row.transcript_text
+        )
         try:
             text = self._llm.complete_text(  # type: ignore[attr-defined]
                 system_prompt=DETAILED_SUMMARY_SYSTEM,
@@ -2658,7 +2781,7 @@ class FirefliesPipeline:
                 return report
         report.transcript_chars = len(row.transcript_text or "")
         with _trace_step("fireflies", "detailed_summary", **ctx):
-            if not self._step_detailed_summary(row):
+            if not self._step_detailed_summary(row, session=session):
                 session.flush()
                 report.errors.append(row.last_error or "detailed_summary_failed")
                 return report

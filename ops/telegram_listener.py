@@ -110,7 +110,10 @@ def main() -> int:
         try:
             from app.fireflies.client import FirefliesClient
             from app.fireflies.pipeline import FirefliesPipeline
-            from app.sync.factories import build_docs_factory
+            from app.sync.factories import (
+                build_calendar_credentials_factory_with_sa_fallback,
+                build_docs_factory,
+            )
 
             ff_client = FirefliesClient(
                 token=settings.fireflies_api_token,
@@ -122,6 +125,15 @@ def main() -> int:
                 llm_backend=backend,
                 docs_factory=build_docs_factory(settings),
                 sender=listener._sender,  # noqa: SLF001 — same process
+                # FR-CR-05-176 — same calendar factory the Zoom path
+                # uses, so Fireflies «Участники» blocks resolve to
+                # real People/Counterparty names from the calendar
+                # invite.
+                calendar_factory=(
+                    build_calendar_credentials_factory_with_sa_fallback(
+                        settings,
+                    )
+                ),
             )
             listener.wire_fireflies(
                 pipeline=ff_pipeline,

@@ -237,14 +237,12 @@ def main() -> int:
 
             r.short_summary_sent = True
             # Operator-pinned 2026-05-21: «задачи в бд не записывать
-            # именно эти для тг, просто выведем в слаке». Tasks были
-            # нужны временно — чтобы _build_todo_section отрендерил
-            # тред-реплику. После успешного поста они в БД лишние
-            # (TG-карточки не шлём — sender=None, но другие
-            # потребители Task-таблицы могли бы их подцепить).
-            # Soft-delete = установить deleted_at; downstream
-            # queries (_build_todo_section, dashboard и т.п.) уже
-            # фильтруют по deleted_at IS NULL.
+            # именно эти». Tasks были нужны временно — чтобы
+            # _build_todo_section отрендерил тред-реплику. После
+            # успешного поста — HARD DELETE, ноль следа в БД. FK
+            # из task_subscriptions / daily_plan / sync / intent /
+            # telegram все на CASCADE или SET NULL, так что DELETE
+            # безопасен.
             sk = (TaskSourceKind.zoom if src == "zoom"
                   else TaskSourceKind.fireflies)
             sid = r.zoom_id if src == "zoom" else r.fireflies_id
@@ -252,16 +250,12 @@ def main() -> int:
                 session.query(Task)
                 .filter(Task.source_kind == sk)
                 .filter(Task.source_conversation_id == sid)
-                .filter(Task.deleted_at.is_(None))
-                .update(
-                    {Task.deleted_at: datetime.now(timezone.utc)},
-                    synchronize_session=False,
-                )
+                .delete(synchronize_session=False)
             )
             session.flush()
             sent += 1
             print(
-                f"    posted ts={parent_ts}    soft-deleted {wiped} tasks"
+                f"    posted ts={parent_ts}    hard-deleted {wiped} tasks"
             )
             time.sleep(args.sleep)
 

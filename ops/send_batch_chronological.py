@@ -58,7 +58,15 @@ def main() -> int:
         "--skip-fireflies", action="store_true",
         help="Only Zoom records.",
     )
+    ap.add_argument(
+        "--exclude-title-contains", action="append", default=[],
+        help=(
+            "Drop records whose title contains this substring "
+            "(case-insensitive). Repeatable."
+        ),
+    )
     args = ap.parse_args()
+    excludes = [s.lower() for s in (args.exclude_title_contains or []) if s]
 
     start = datetime.fromisoformat(args.start).replace(tzinfo=timezone.utc)
     end = datetime.fromisoformat(args.end).replace(tzinfo=timezone.utc)
@@ -75,22 +83,32 @@ def main() -> int:
                     continue
                 if not _ready(r):
                     continue
+                title = r.title or ""
+                if any(e in title.lower() for e in excludes):
+                    continue
                 candidates.append(
-                    (r.meeting_date, "zoom", r.zoom_id, r.title or "")
+                    (r.meeting_date, "zoom", r.zoom_id, title)
                 )
         if not args.skip_fireflies:
             for r in session.query(MeetingRecording).filter(
                 MeetingRecording.meeting_date >= start,
                 MeetingRecording.meeting_date < end,
             ).all():
-                if (r.duration_seconds or 0) < min_secs:
+                # FR-CR-05-188: FF может не заполнять duration_seconds.
+                dur = r.duration_seconds or 0
+                if dur > 0 and dur < min_secs:
+                    continue
+                if dur == 0 and len((r.transcript_text or "").strip()) < 1500:
                     continue
                 if not _ready(r):
+                    continue
+                title = r.title or ""
+                if any(e in title.lower() for e in excludes):
                     continue
                 candidates.append(
                     (
                         r.meeting_date, "fireflies", r.fireflies_id,
-                        r.title or "",
+                        title,
                     )
                 )
 

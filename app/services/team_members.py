@@ -45,6 +45,35 @@ def list_active(session: Session) -> list[TeamMember]:
     )
 
 
+def get_humans_for_matcher(session: Session) -> list[dict]:
+    """FR-CR-05-193d-3 — humans-only filter для Step 2 matcher prompt.
+
+    Включает: active=True, real_name non-empty, не bot.
+    Возвращает list[{tm_id, real_name, role, notes, tg_username, slack_user_id}].
+    """
+    rows = list(
+        session.execute(
+            select(TeamMember).where(TeamMember.active.is_(True))
+        ).scalars().all()
+    )
+    out: list[dict] = []
+    for tm in rows:
+        rn = (tm.real_name or "").strip()
+        if not rn:
+            continue
+        if "bot" in rn.lower() or "linkedin" in rn.lower():
+            continue
+        out.append({
+            "tm_id": tm.id,
+            "real_name": rn,
+            "role": (tm.role or "").strip() or None,
+            "notes": (tm.notes or "").strip() or None,
+            "tg_username": getattr(tm, "telegram_username", None),
+            "slack_user_id": getattr(tm, "slack_user_id", None),
+        })
+    return out
+
+
 def list_all(session: Session) -> list[TeamMember]:
     return list(
         session.execute(select(TeamMember)).scalars().all()

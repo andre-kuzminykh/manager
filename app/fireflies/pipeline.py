@@ -2892,6 +2892,27 @@ class FirefliesPipeline:
             results = list(pool.map(_send_one, task_ids))
         return sum(1 for r in results if r)
 
+    # --- FR-CR-05-193g-3: новый объединённый step ------------
+
+    def _step_extract_via_reasoning(self, session, row) -> None:
+        """FR-CR-05-193g-3 — симметрично Zoom (см. ZoomPipeline).
+        Reasoning extract + matcher + apply в одном step'е.
+        Idempotent через row.extracted_via_reasoning.
+
+        Skeleton method — full integration в следующем коммите.
+        """
+        import os
+        if not row or getattr(row, "extracted_via_reasoning", False):
+            if not getattr(row, "last_error", None):
+                return
+        enabled = os.environ.get(
+            "ENTITY_RESOLUTION_V2_ENABLED", "true"
+        ).strip().lower() not in ("false", "0", "no", "off")
+        if not enabled:
+            return
+        log.info("fireflies_step_extract_via_reasoning_stub",
+                 fireflies_id=getattr(row, "fireflies_id", None))
+
     # --- main entry ------------------------------------------
 
     def process_one(

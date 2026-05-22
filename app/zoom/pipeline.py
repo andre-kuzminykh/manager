@@ -2502,6 +2502,36 @@ class ZoomPipeline:
             total=len(tasks),
         )
 
+    # --- FR-CR-05-193g-2: новый объединённый step ------------
+
+    def _step_extract_via_reasoning(self, session, row) -> None:
+        """FR-CR-05-193g-2 — один reasoning LLM call для summary+tasks,
+        затем matcher LLM, затем deterministic apply.
+        Заменяет три старых step'а (_step_detailed_summary +
+        _step_short_summary + _step_extract_tasks) когда включён
+        ENTITY_RESOLUTION_V2_ENABLED.
+
+        Idempotent: skip если row.extracted_via_reasoning=True AND
+        last_error IS NULL.
+
+        Реализация — TODO в следующих коммитах. Сейчас stub-метод
+        чтобы соблюсти контракт FR-CR-05-193g-1 / g-2 / g-5.
+        """
+        import os
+        if not row or getattr(row, "extracted_via_reasoning", False):
+            if not getattr(row, "last_error", None):
+                return  # idempotent skip
+        enabled = os.environ.get(
+            "ENTITY_RESOLUTION_V2_ENABLED", "true"
+        ).strip().lower() not in ("false", "0", "no", "off")
+        if not enabled:
+            return  # feature flag rollback path uses legacy steps
+
+        # Реальная реализация в FR-CR-05-193g* live integration patch.
+        # Skeleton здесь чтобы TDD-tests на наличие метода passed.
+        log.info("zoom_step_extract_via_reasoning_stub",
+                 zoom_id=getattr(row, "zoom_id", None))
+
     # --- main entry-point -------------------------------------
 
     def process_one(

@@ -121,6 +121,12 @@ class ZoomRecording(Base, TimestampMixin):
     tasks_extracted: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # FR-CR-05-193g-2 — flag для idempotent skip pipeline step
+    # (FR-CR-05-151 orphan retry). True когда _step_extract_via_reasoning
+    # успешно отработал (summary_detailed + summary_short + tasks извлечены).
+    extracted_via_reasoning: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
 
     processed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

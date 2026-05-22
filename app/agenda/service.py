@@ -255,11 +255,18 @@ def open_tasks_for_recordings(
     session: Session,
     *,
     zoom_ids: list[str],
-    limit: int = 30,
+    limit: int = 100,
 ) -> list[Task]:
     """List Tasks whose ``source_kind='zoom'`` AND
     ``source_conversation_id ∈ zoom_ids`` AND status ∉ {done,
     cancelled} AND not soft-deleted.
+
+    FR-CR-05-192aa — фильтр по `extra.direction ∈ DIRECTIONS_IMPORTANT`.
+    Все задачи остаются в БД (storage = unfiltered), но в тред агенды
+    попадают только важные направления (investors / deliverables /
+    budget / design / beta). Тasks с `direction = 'other'` или БЕЗ
+    direction (unclassified) — НЕ попадают. Operator escape-hatch:
+    `AGENDA_TASK_FILTER_DIRECTIONS_DISABLED=true` отключает фильтр.
 
     Ordered by: priority desc (urgent → low), due_date asc nulls
     last, created_at asc. Limited to keep prompt size sane.
@@ -275,6 +282,20 @@ def open_tasks_for_recordings(
         .where(Task.status != TaskStatus.done)
     )
     rows = list(session.execute(stmt).scalars().all())
+
+    # FR-CR-05-192aa direction filter (in-Python to avoid jsonb-cast
+    # SQLAlchemy dialect headaches on json column type)
+    import os
+    filter_disabled = os.environ.get(
+        "AGENDA_TASK_FILTER_DIRECTIONS_DISABLED", ""
+    ).strip().lower() in ("true", "1", "yes", "on")
+    if not filter_disabled:
+        from app.services.task_direction import DIRECTIONS_IMPORTANT
+        rows = [
+            t for t in rows
+            if isinstance(t.extra, dict)
+            and t.extra.get("direction") in DIRECTIONS_IMPORTANT
+        ]
 
     priority_weight = {"urgent": 0, "high": 1, "medium": 2, "low": 3}
 

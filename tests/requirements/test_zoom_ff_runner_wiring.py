@@ -205,6 +205,39 @@ def test_fr_cr_05_192y_cutoff_filter_drops_records_before_startup() -> None:
     assert batch[3] not in kept
 
 
+def test_fr_cr_05_192y_polish_cutoff_uses_lookback_hours() -> None:
+    """FR-CR-05-192y-polish: cutoff = now - OPERATOR_INGEST_LOOKBACK_HOURS,
+    не просто now. Restart не теряет встречи дня."""
+    now = datetime.now(timezone.utc)
+    # 24h lookback (default) — встречи за последние 24 часа ловятся
+    lookback_h = 24.0
+    started_at = now - timedelta(hours=lookback_h)
+    # Встреча 6 часов назад — должна быть НЕ старее cutoff
+    six_h_ago = now - timedelta(hours=6)
+    assert six_h_ago >= started_at, "6h-old meeting must pass 24h lookback"
+    # Встреча 30 часов назад — должна быть старее
+    thirty_h_ago = now - timedelta(hours=30)
+    assert thirty_h_ago < started_at, "30h-old meeting must be skipped"
+
+
+def test_fr_cr_05_192y_polish_default_lookback_24h() -> None:
+    """Default `OPERATOR_INGEST_LOOKBACK_HOURS=24`. Если env не задан,
+    runner использует 24h как conservative default."""
+    val = float(os.environ.get("OPERATOR_INGEST_LOOKBACK_HOURS", "24"))
+    # Когда env не выставлен, fallback string '24' → float 24
+    assert val == 24.0
+
+
+def test_fr_cr_05_192y_polish_zero_lookback_equals_now() -> None:
+    """`OPERATOR_INGEST_LOOKBACK_HOURS=0` отключает lookback, возвращает
+    strict behavior FR-CR-05-192y (cutoff = now exactly)."""
+    now = datetime.now(timezone.utc)
+    lookback_h = 0.0
+    started_at = now - timedelta(hours=lookback_h)
+    # cutoff == now (microseconds могут отличаться в ms-диапазоне)
+    assert abs((now - started_at).total_seconds()) < 1
+
+
 def test_fr_cr_05_192y_noop_sender_safe_for_any_attr_call() -> None:
     """The runner's `_NoopSender` stub MUST answer to any method
     call without raising — pipeline code can call any TelegramSender

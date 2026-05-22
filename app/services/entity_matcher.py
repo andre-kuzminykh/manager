@@ -15,7 +15,7 @@ log = get_logger(__name__)
 
 _SYSTEM_PROMPT = """Ты резолвер сущностей. Тебе дан текст встречи + список
 известных людей (TeamMember) + список известных компаний/контрагентов
-(Counterparty с aliases).
+(Counterparty с aliases) + список участников ЭТОЙ встречи (meeting_participants).
 
 Задача:
   1. Для каждого raw_owner из tasks определи canonical real_name из
@@ -27,9 +27,28 @@ _SYSTEM_PROMPT = """Ты резолвер сущностей. Тебе дан т
      - Дима Дроздов: notes="ВСЕ ЧТО СВЯЗАНО С ФОНДАМИ"
      - Дмитрий Седов: notes="ТОЛЬКО РАБОТА С КОНТРАКТАМИ ОТ ФОНДОВ"
      → если контекст про outreach в фонд = Дроздов, контракты = Седов
+  4. SPEAKER FALLBACK для дейктических местоимений в raw_owner:
+     - Если raw_owner = "я" / "мне" / "мной" / "сама" / "сам" — определи
+       кто это вероятно по контексту task'a (например, в Fundraising daily
+       команды Артем/Алина/Дима/Ирина — кто отвечает за описанную
+       activity).
+     - Используй meeting_participants как whitelist кандидатов.
+     - Если уверенность низкая — поставь null.
+  5. STRICT RULE — task_owners ТОЛЬКО из meeting_participants:
+     - tm_real_name ОБЯЗАН быть из списка meeting_participants. Никогда
+       НЕ назначай tasks на людей которые не были на этой встрече.
+     - Если raw_owner упоминает не-participant (например «Попроси Федю
+       сделать X» — а Федя НЕ участник), резолви на participant который
+       скорее всего реально будет выполнять (часто это автор задачи /
+       координатор / speaker), или null если непонятно.
+     - Reasoning должен указать почему именно этот participant выбран.
 
 ВАЖНО:
-  - task_owners — ТОЛЬКО canonical из known_people. Если raw не в табли — null.
+  - task_owners — ТОЛЬКО из meeting_participants. Если не подходит ни один — null.
+  - summary_replacements_people может включать ЛЮБОГО из known_people
+    (упоминания не обязаны быть participants — например, в саммари
+    может быть упомянут «Федя» как третье лицо, и он резолвится в
+    Fedor Pavlovich для canonical написания).
   - НЕ инвентируй новые сущности.
   - summary_replacements — только реально matched (заменяемые), без unmatched.
 
@@ -54,10 +73,18 @@ def build_matcher_prompt(
     raw_owners: list[str],
     known_people: list[dict],
     known_orgs: list[dict],
+    meeting_participants: list[str] | None = None,
 ) -> str:
-    """Compose user prompt with all context для matcher LLM."""
+    """Compose user prompt with all context для matcher LLM.
+
+    meeting_participants — список real_name участников ЭТОЙ конкретной
+    встречи (для SPEAKER FALLBACK при дейктических 'я'/'мне')."""
     parts: list[str] = []
     parts.append("ТЕКСТ ВСТРЕЧИ:\n" + (text or "(empty)"))
+    if meeting_participants:
+        parts.append("\n\nMEETING_PARTICIPANTS (участники этой встречи):")
+        for p in meeting_participants:
+            parts.append(f"  - {p}")
     if raw_owners:
         parts.append("\n\nRAW OWNER MENTIONS из задач:")
         for r in raw_owners:
@@ -212,8 +239,12 @@ def match_entities(
     known_orgs: list[dict],
     llm_backend: Any,
     model: str,
+    meeting_participants: list[str] | None = None,
 ) -> dict:
-    """Combined: people + orgs в одном LLM call (preferred)."""
+    """Combined: people + orgs в одном LLM call (preferred).
+
+    meeting_participants — для SPEAKER FALLBACK при 'я'/'мне' (FR-CR-05-193b-5+).
+    """
     if not known_people and not known_orgs:
         return {
             "task_owners": [],
@@ -224,6 +255,7 @@ def match_entities(
     prompt = build_matcher_prompt(
         text=text, raw_owners=raw_owners,
         known_people=known_people, known_orgs=known_orgs,
+        meeting_participants=meeting_participants,
     )
     try:
         raw = llm_backend.complete_text(

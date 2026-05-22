@@ -94,11 +94,38 @@ def main() -> int:
                               for t in step1["tasks"])
                           )
         raw_owners = [t["raw_owner_mention"] for t in step1["tasks"]]
+
+        # Meeting participants — для SPEAKER FALLBACK + STRICT rule
+        # task_owners только из этих имён.
+        meeting_participants: list[str] = []
+        if row.calendar_attendees:
+            try:
+                for a in row.calendar_attendees:
+                    if isinstance(a, dict):
+                        name = (a.get("resolved_name")
+                                or a.get("display_name")
+                                or "").strip()
+                        if name and name not in meeting_participants:
+                            meeting_participants.append(name)
+            except Exception:  # noqa: BLE001
+                pass
+        if not meeting_participants and row.participants:
+            try:
+                for p in row.participants:
+                    s = str(p).strip()
+                    if s and s not in meeting_participants:
+                        meeting_participants.append(s)
+            except Exception:  # noqa: BLE001
+                pass
+        print(f"  meeting_participants: {len(meeting_participants)} → "
+              f"{meeting_participants}")
+
         step2 = match_entities(
             text=text_for_match,
             raw_owners=raw_owners,
             known_people=known_people,
             known_orgs=known_orgs,
+            meeting_participants=meeting_participants,
             llm_backend=llm, model=model_matcher,
         )
         print(f"  task_owners resolved: {len(step2['task_owners'])}")

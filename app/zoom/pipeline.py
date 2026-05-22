@@ -48,6 +48,16 @@ from app.zoom.client import ZoomClient, ZoomRecordingMeta
 log = get_logger(__name__)
 
 
+# FR-CR-05-196 — runaway retry cap. After this many failed attempts
+# we mark the row as permanent_failure and stop re-trying on every poll.
+MAX_ATTEMPTS_BEFORE_GIVE_UP = 20
+
+# FR-CR-05-197 — Zoom Phone / continuous-recording sentinel duration.
+# Zoom returns this for sessions that were never actually held (booked
+# room, scheduled meeting that didn't happen). No playable audio.
+ZOOM_PHONE_24H_SENTINEL_SECONDS = 86400
+
+
 def build_meta_block_for_summary(row: ZoomRecording) -> str:
     """FR-CR-05-169 — build the meta block (Заголовок / Дата /
     Продолжительность / Участники) prepended to the transcript when
@@ -2577,6 +2587,32 @@ class ZoomPipeline:
             recording_id=row.id, zoom_id=row.zoom_id, title=row.title,
             errors=[],
         )
+        # FR-CR-05-196 — runaway retry cap. Records that already failed
+        # MAX_ATTEMPTS_BEFORE_GIVE_UP times are skipped permanently.
+        # Operator can reset attempts=0 to retry once the underlying
+        # issue is fixed.
+        if (row.attempts or 0) >= MAX_ATTEMPTS_BEFORE_GIVE_UP:
+            row.last_error = "permanent_failure_attempts_exceeded"
+            report.skipped_reason = "permanent_failure_attempts_exceeded"
+            log.info(
+                "zoom_pipeline_skipped_permanent_failure",
+                zoom_id=row.zoom_id,
+                attempts=row.attempts,
+                cap=MAX_ATTEMPTS_BEFORE_GIVE_UP,
+            )
+            return report
+        # FR-CR-05-197 — Zoom Phone / continuous-recording sentinel.
+        # `duration=86400` (exactly 24h) is Zoom's default for sessions
+        # that were never actually started (booked room, continuous Phone).
+        # These have no playable audio.
+        if (row.duration_seconds or 0) == ZOOM_PHONE_24H_SENTINEL_SECONDS:
+            row.last_error = "zoom_phone_24h_sentinel"
+            report.skipped_reason = "zoom_phone_24h_sentinel"
+            log.info(
+                "zoom_pipeline_skipped_24h_sentinel",
+                zoom_id=row.zoom_id,
+            )
+            return report
         # FR-CR-05-192t — operator-pinned 2026-05-22 min-duration
         # gate. Procedural / aborted-call recordings waste LLM
         # budget. Mirrors fireflies/pipeline.process_one early-skip.

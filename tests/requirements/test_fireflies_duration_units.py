@@ -29,8 +29,10 @@ def test_fr_cr_05_195_duration_multiplied_by_60_at_ingestion() -> None:
             ]
         }
     }
-    client = FirefliesClient(api_key="test")
-    client._request_func = lambda url, headers, body: fake_response
+    client = FirefliesClient(
+        token="test",
+        request_func=lambda url, headers, body: fake_response,
+    )
     rows = client.list_transcripts(limit=10)
     assert len(rows) == 1
     # 58 minutes × 60 = 3480 seconds
@@ -57,8 +59,10 @@ def test_fr_cr_05_195_duration_zero_stays_zero() -> None:
             ]
         }
     }
-    client = FirefliesClient(api_key="test")
-    client._request_func = lambda url, headers, body: fake_response
+    client = FirefliesClient(
+        token="test",
+        request_func=lambda url, headers, body: fake_response,
+    )
     rows = client.list_transcripts(limit=10)
     assert rows[0].duration_seconds == 0
 
@@ -83,8 +87,10 @@ def test_fr_cr_05_195_duration_float_converted_to_int_seconds() -> None:
             ]
         }
     }
-    client = FirefliesClient(api_key="test")
-    client._request_func = lambda url, headers, body: fake_response
+    client = FirefliesClient(
+        token="test",
+        request_func=lambda url, headers, body: fake_response,
+    )
     rows = client.list_transcripts(limit=10)
     # 25.5 × 60 = 1530 seconds
     assert rows[0].duration_seconds == 1530
@@ -109,7 +115,9 @@ def test_fr_cr_05_195_duration_none_passthrough() -> None:
             ]
         }
     }
-    client = FirefliesClient(api_key="test")
-    client._request_func = lambda url, headers, body: fake_response
+    client = FirefliesClient(
+        token="test",
+        request_func=lambda url, headers, body: fake_response,
+    )
     rows = client.list_transcripts(limit=10)
     assert rows[0].duration_seconds is None

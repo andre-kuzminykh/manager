@@ -47,6 +47,10 @@ from app.models import MeetingRecording, Task, TaskSourceKind
 log = get_logger(__name__)
 
 
+# FR-CR-05-196 — runaway retry cap (mirror of zoom.pipeline constant).
+MAX_ATTEMPTS_BEFORE_GIVE_UP = 20
+
+
 def _log_and_trace(
     source: str, recording_id: str | None, event: str, **fields: Any,
 ) -> None:
@@ -2971,6 +2975,17 @@ class FirefliesPipeline:
             and row.tasks_extracted
         ):
             report.skipped_reason = "already_processed"
+            return report
+        # FR-CR-05-196 — runaway retry cap.
+        if (row.attempts or 0) >= MAX_ATTEMPTS_BEFORE_GIVE_UP:
+            row.last_error = "permanent_failure_attempts_exceeded"
+            report.skipped_reason = "permanent_failure_attempts_exceeded"
+            log.info(
+                "fireflies_pipeline_skipped_permanent_failure",
+                fireflies_id=row.fireflies_id,
+                attempts=row.attempts,
+                cap=MAX_ATTEMPTS_BEFORE_GIVE_UP,
+            )
             return report
         # FR-CR-05-192t — operator-pinned 2026-05-22 min-duration
         # gate: skip meetings shorter than `min_meeting_seconds`

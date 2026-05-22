@@ -198,8 +198,12 @@ class FirefliesClient:
                     id=str(tid),
                     title=r.get("title") or None,
                     meeting_date=_coerce_dt(r.get("date")),
+                    # FR-CR-05-195 — Fireflies API `duration` field is in
+                    # MINUTES, not seconds. Multiply by 60 to get the value
+                    # we actually store in `duration_seconds`. A 50-min
+                    # interview comes in as `duration=50.0` → 3000 sec.
                     duration_seconds=(
-                        int(r["duration"])
+                        int(r["duration"] * 60)
                         if isinstance(r.get("duration"), (int, float))
                         else None
                     ),

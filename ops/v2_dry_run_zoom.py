@@ -117,8 +117,22 @@ def main() -> int:
                         meeting_participants.append(s)
             except Exception:  # noqa: BLE001
                 pass
-        print(f"  meeting_participants: {len(meeting_participants)} → "
-              f"{meeting_participants}")
+        print(f"  meeting_participants (raw from calendar): "
+              f"{len(meeting_participants)} → {meeting_participants}")
+
+        # FR-CR-05-193b-7 — нормализовать к canonical TM real_name ЧЕРЕЗ LLM.
+        # Иначе scrub отвергает английские tm_real_name из matcher'а когда
+        # whitelist на русском (или наоборот).
+        from app.services.team_member_canonical import (
+            canonicalize_participants_via_llm,
+        )
+        meeting_participants = canonicalize_participants_via_llm(
+            meeting_participants,
+            known_people=known_people,
+            llm_backend=llm, model=model_matcher,
+        )
+        print(f"  meeting_participants (canonical TM real_name): "
+              f"{len(meeting_participants)} → {meeting_participants}")
 
         step2 = match_entities(
             text=text_for_match,

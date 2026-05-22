@@ -3149,6 +3149,17 @@ class FirefliesPipeline:
                 fireflies_id=row.fireflies_id, error=str(e),
             )
 
+        # FR-CR-05-194 — auto-publish в Slack (env-toggle).
+        if (row.short_summary or "").strip():
+            try:
+                with _trace_step("fireflies", "send_to_slack", **ctx):
+                    self._step_send_to_slack(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "fireflies_send_to_slack_unexpected_error",
+                    fireflies_id=row.fireflies_id, error=str(e),
+                )
+
         row.processed_at = datetime.now(timezone.utc)
         session.flush()
 

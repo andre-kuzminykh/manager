@@ -2755,6 +2755,18 @@ class ZoomPipeline:
                     zoom_id=row.zoom_id, error=str(e),
                 )
 
+        # FR-CR-05-194 — auto-publish в Slack channel (env-toggle).
+        # No-op если AUTO_SEND_TO_SLACK_* env flags не set.
+        if row.detailed_summarised and (row.short_summary or "").strip():
+            try:
+                with _trace_step("zoom", "send_to_slack", **ctx):
+                    self._step_send_to_slack(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "zoom_send_to_slack_unexpected_error",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+
         report.transcript_chars = len(row.transcript_text or "")
         report.detailed_chars = len(row.detailed_summary or "")
         report.short_chars = len(row.short_summary or "")

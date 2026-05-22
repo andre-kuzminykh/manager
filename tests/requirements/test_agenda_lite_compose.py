@@ -185,7 +185,12 @@ def test_fr_cr_05_192u_compose_lite_empty_priors() -> None:
     out = _compose_lite(c)
     assert out is not None
     assert out.previous_recap == []
-    assert out.doc_body_md.startswith("# Повестка")
+    # doc_body_md must NOT duplicate the wrapper's «# Повестка…» H1
+    # — wrapper prepends that and the «## Подробно по прошлой
+    # встрече» block. The body starts at «## На прошлой встрече».
+    assert out.doc_body_md.startswith("## На прошлой встрече")
+    assert "# Повестка" not in out.doc_body_md
+    assert "## Подробно по прошлой встрече" not in out.doc_body_md
     assert "(нет данных по прошлой встрече)" in out.doc_body_md
 
 

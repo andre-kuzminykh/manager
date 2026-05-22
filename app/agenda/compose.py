@@ -212,19 +212,16 @@ def _build_lite_doc_body_md(
     prior_recordings: list[dict[str, Any]],
     open_tasks: list[dict[str, Any]],
 ) -> str:
-    """FR-CR-05-192u — deterministic markdown for the agenda Google
-    Doc, mirroring the LLM-mode template but without re-writes."""
+    """FR-CR-05-192u — deterministic markdown body for the agenda
+    Google Doc. The runner / doc writer wraps this with its own
+    H1 header «# DD/MM — Повестка ко встрече «<title>»» and a
+    «## Подробно по прошлой встрече\\n- DD/MM — <url>» block, so
+    `doc_body_md` MUST start at «## На прошлой встрече» —
+    duplicating the wrapper's preamble would render two H1s in
+    the same doc. The LLM compose path obeys the same contract
+    via its system prompt (see `_AGENDA_SYSTEM_PROMPT` § doc_body_md).
+    """
     out: list[str] = []
-    out.append(f"# Повестка ко встрече «{title}»\n")
-    out.append("## Подробно по прошлой встрече")
-    for r in prior_recordings[:1]:
-        url = (r.get("google_doc_url") or "").strip()
-        date = (r.get("meeting_date") or "")[:10]
-        if url:
-            out.append(f"- {date} — {url}")
-        else:
-            out.append(f"- {date}")
-    out.append("")
     out.append("## На прошлой встрече")
     out.append(recap or "(нет данных по прошлой встрече)")
     out.append("")

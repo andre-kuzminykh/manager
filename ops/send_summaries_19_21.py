@@ -132,6 +132,7 @@ def _extract_important_tasks_ephemeral(
         )
         tm_by_email: dict[str, str] = {}
         tm_by_slack: dict[str, str] = {}
+        tm_by_telegram: dict[str, str] = {}
         tm_real_names: set[str] = set()
         for _m in (
             _sess.query(_TM)
@@ -143,6 +144,8 @@ def _extract_important_tasks_ephemeral(
                 tm_by_email[_m.email.lower().strip()] = _m.real_name
             if _m.slack_user_id:
                 tm_by_slack[_m.slack_user_id] = _m.real_name
+            if _m.telegram_user_id is not None:
+                tm_by_telegram[str(_m.telegram_user_id)] = _m.real_name
             tm_real_names.add(_m.real_name)
     known_table = _render_known_employees_table(known_employees)
     # Build the participants line — same precedence as the pipeline.
@@ -226,10 +229,13 @@ def _extract_important_tasks_ephemeral(
         llm_backend=llm_backend,
         model=settings.fireflies_tasks_model,
     )
-    # FR-CR-05-192k — owner resolver with 3-step lookup:
+    # FR-CR-05-192k — owner resolver with 4-step lookup:
     #   1. slack_user_id (LLM picked U… from the known_employees table)
-    #   2. email (LLM regressed and emitted «@…» despite the prompt)
-    #   3. exact real_name match (LLM did the right thing, no resolve)
+    #   2. telegram_user_id (LLM picked the numeric id when the row
+    #      had no slack_user_id — `as_known_employees` falls back to
+    #      TG numeric so the LLM never sees an empty primary_id cell)
+    #   3. email (LLM regressed and emitted «@…» despite the prompt)
+    #   4. exact real_name match (LLM did the right thing, no resolve)
     # All maps were prefetched above inside `_session_scope`.
     def _resolve_owner(owner_raw: str) -> str:
         if not owner_raw:
@@ -237,6 +243,8 @@ def _extract_important_tasks_ephemeral(
         o = owner_raw.strip()
         if o in tm_by_slack:
             return tm_by_slack[o]
+        if o.isdigit() and o in tm_by_telegram:
+            return tm_by_telegram[o]
         if "@" in o:
             hit = tm_by_email.get(o.lower())
             if hit:

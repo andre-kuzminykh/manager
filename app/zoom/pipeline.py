@@ -1901,6 +1901,7 @@ class ZoomPipeline:
             or "  (нет данных)"
         )
 
+        today = datetime.now(timezone.utc).date()
         prompt_user = (
             f"Заголовок: {row.title or '(без названия)'}\n"
             f"Дата: {row.meeting_date.isoformat() if row.meeting_date else '—'}\n"
@@ -1999,7 +2000,6 @@ class ZoomPipeline:
         created = 0
         from app.persistence.tasks import normalize_task_title
 
-        today = datetime.now(timezone.utc).date()
         for t in tasks:
             if not isinstance(t, dict):
                 continue

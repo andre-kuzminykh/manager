@@ -524,7 +524,20 @@ def build_candidates(
         )
         if len(prior) < max(1, int(min_prior_meetings)):
             continue
-        zoom_ids = [r.zoom_id for r in prior]
+        # FR-CR-05-192ab — open_tasks берём только из LAST prior
+        # recording (operator-pinned 2026-05-22: для Fundraising daily
+        # у нас 29 prior за 90 дней → 469 tasks → confusion). По
+        # умолчанию last-only; для отката set env
+        # `AGENDA_TASKS_FROM_LAST_PRIOR_ONLY=false` → вернётся
+        # aggregate по всем prior.
+        import os as _os
+        _last_only = _os.environ.get(
+            "AGENDA_TASKS_FROM_LAST_PRIOR_ONLY", "true",
+        ).strip().lower() not in ("false", "0", "no", "off")
+        if _last_only and prior:
+            zoom_ids = [prior[0].zoom_id]
+        else:
+            zoom_ids = [r.zoom_id for r in prior]
         open_tasks = open_tasks_for_recordings(
             session, zoom_ids=zoom_ids,
         )

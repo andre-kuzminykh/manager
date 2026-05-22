@@ -331,6 +331,42 @@ def main() -> int:
             session.flush()
             print(f"  row.short_summary updated, sent reset to False")
 
+            # 3. FR-CR-05-163 — classify directions для НОВЫХ V2 tasks.
+            # Без этого `_build_todo_section` отфильтрует ВСЕ tasks
+            # (direction not in DIRECTIONS_IMPORTANT → skip), и Slack
+            # thread reply будет пустым.
+            print(f"\nClassifying directions для V2 tasks...")
+            from app.services.task_direction import classify_directions
+            inserted_tasks = (
+                session.query(Task)
+                .filter(Task.source_kind == source_kind)
+                .filter(Task.source_conversation_id == source_id)
+                .filter(Task.deleted_at.is_(None))
+                .all()
+            )
+            tasks_to_classify = [
+                {"id": t.id, "title": t.title or "",
+                 "description": t.description or ""}
+                for t in inserted_tasks
+            ]
+            mapping = classify_directions(
+                tasks=tasks_to_classify,
+                meeting_context=(row.detailed_summary or "")[:3000] or None,
+                llm_backend=llm, model=model,
+            )
+            for t in inserted_tasks:
+                direction = mapping.get(t.id, "other")
+                extra = dict(t.extra or {})
+                extra["direction"] = direction
+                t.extra = extra
+            session.flush()
+            from app.services.task_direction import DIRECTIONS_IMPORTANT
+            important_count = sum(
+                1 for d in mapping.values() if d in DIRECTIONS_IMPORTANT
+            )
+            print(f"  classified {len(mapping)} tasks, "
+                  f"{important_count} в DIRECTIONS_IMPORTANT (попадут в Slack)")
+
         # 3. Slack publish (для Fireflies — нужен другой path,
         #    publish_zoom_recording_to_slack работает с zoom строкой)
         if not args.no_publish:

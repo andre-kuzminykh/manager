@@ -219,15 +219,19 @@ def main() -> int:
 
         # tasks final — owner через DB lookup (apply_task_owner-like),
         # text (title/description) через LLM rewrite.
-        owner_map = {o.get("raw_owner"): o.get("tm_real_name")
-                     for o in (step2.get("task_owners") or [])}
-        owner_reasoning_map = {o.get("raw_owner"): o.get("reasoning") or ""
-                               for o in (step2.get("task_owners") or [])}
+        # FR-CR-05-193c-4: matcher.task_owners — это LIST в том же порядке
+        # что raw_owners был передан. Мапим по INDEX, не по raw_owner
+        # (несколько задач могут иметь одинаковый raw_owner типа «мы»).
+        task_owners_list = step2.get("task_owners") or []
         print(f"  Rewriting {len(step1['tasks'])} task titles+descriptions...")
         final_tasks = []
-        for t in step1["tasks"]:
+        for idx, t in enumerate(step1["tasks"]):
             raw_o = t["raw_owner_mention"]
-            canonical = owner_map.get(raw_o)
+            owner_info = (
+                task_owners_list[idx] if idx < len(task_owners_list) else {}
+            )
+            canonical = owner_info.get("tm_real_name")
+            reasoning = owner_info.get("reasoning") or ""
             # LLM rewrite для title+description (склонения)
             title_canon = rewrite_with_canonicals(
                 t["title"],
@@ -246,7 +250,7 @@ def main() -> int:
             final_tasks.append({
                 **t,
                 "canonical_owner": canonical,
-                "owner_reasoning": owner_reasoning_map.get(raw_o, ""),
+                "owner_reasoning": reasoning,
                 "title_canonical": title_canon,
                 "description_canonical": desc_canon,
             })

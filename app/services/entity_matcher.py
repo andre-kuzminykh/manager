@@ -34,6 +34,21 @@ _SYSTEM_PROMPT = """Ты резолвер сущностей. Тебе дан т
        activity).
      - Используй meeting_participants как whitelist кандидатов.
      - Если уверенность низкая — поставь null.
+  4b. COLLECTIVE PRONOUN — для «мы» / «we» / «нам» / «us» / «нас»:
+     - Это означает «команда обсуждала и решила». Назначь на наиболее
+       подходящего participant'а ИЗ meeting_participants, выбирая по
+       контексту task'a:
+         (a) если в задаче явно CEO-level решение (стратегия, размер
+             раунда, найм executive) — на host/principal встречи (часто
+             CEO, можно определить по notes='CEO' или 'principal' в
+             known_people)
+         (b) если задача про конкретную область (fundraising / outreach /
+             legal / engineering) — на participant'а у которого notes
+             ближе всего к этой области
+         (c) если ничего не подходит — на host/первого participant'а
+     - Если meeting_participants пуст — null.
+     - Reasoning должен явно сказать «collective pronoun → выбран X
+       потому что …».
   5. STRICT RULE — task_owners ТОЛЬКО из meeting_participants:
      - tm_real_name ОБЯЗАН быть из списка meeting_participants. Никогда
        НЕ назначай tasks на людей которые не были на этой встрече.

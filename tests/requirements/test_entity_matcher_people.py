@@ -224,6 +224,23 @@ def test_fr_cr_05_193b_llm_invalid_json_safe(mock_llm, known_people) -> None:
     assert all(t["tm_real_name"] is None for t in result["task_owners"])
 
 
+# === FR-CR-05-193b-8 — collective pronoun fallback (Rule 4b) ===
+
+
+def test_fr_cr_05_193b_8_prompt_includes_collective_pronoun_rule(known_people) -> None:
+    """build_matcher_prompt + SYSTEM_PROMPT должны содержать Rule 4b
+    для «мы» / «we» / «нам» / «us»."""
+    from app.services.entity_matcher import _SYSTEM_PROMPT, build_matcher_prompt
+    # Сам system prompt
+    assert "COLLECTIVE PRONOUN" in _SYSTEM_PROMPT
+    assert "мы" in _SYSTEM_PROMPT
+    assert "we" in _SYSTEM_PROMPT
+    # Должны быть инструкции про host / principal
+    assert "host" in _SYSTEM_PROMPT or "principal" in _SYSTEM_PROMPT
+    # Указание использовать notes для disambiguation
+    assert "notes" in _SYSTEM_PROMPT.lower()
+
+
 # === FR-CR-05-193b-5 — meeting_participants section in prompt ===
 
 

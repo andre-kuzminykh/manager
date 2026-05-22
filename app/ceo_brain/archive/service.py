@@ -71,7 +71,25 @@ def write_archive(
             )
             pg_row_id = row.id if row is not None else None
         except SQLAlchemyError as e:
-            log.warning("brain_archive_pg_failed", error=str(e))
+            # FR-CR-05-192v polish #2 — when pg_sink.write raises
+            # (UniqueViolation from race with history poller, etc),
+            # the SQLAlchemy session is left in an aborted state.
+            # Subsequent operations on the same session (classify_and_persist,
+            # responder DB queries) will crash with PendingRollbackError.
+            # Rollback HERE so downstream callers receive a usable session.
+            try:
+                pg_session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            log.warning(
+                "brain_archive_pg_failed",
+                error=str(e),
+                hint=(
+                    "session.rollback() applied so downstream code "
+                    "(classify_and_persist, responder) gets a clean "
+                    "transaction"
+                ),
+            )
             jsonl_sink.write_pending(
                 archive_dir=archive_dir,
                 record={

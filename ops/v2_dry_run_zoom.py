@@ -115,19 +115,50 @@ def main() -> int:
         for r in (step2.get("summary_replacements_orgs") or [])[:10]:
             print(f"    {r.get('raw')!r:25s} → {r.get('canonical')!r}")
 
-        # === Step 3: apply ===
-        print(f"\n[Step 3/3] Deterministic apply...")
-        all_repls = ((step2.get("summary_replacements_people") or [])
-                     + (step2.get("summary_replacements_orgs") or []))
+        # === Step 3: apply with detailed trace ===
+        print(f"\n[Step 3/3] Deterministic apply WITH FULL TRACE...")
+        people_repls = step2.get("summary_replacements_people") or []
+        orgs_repls = step2.get("summary_replacements_orgs") or []
+        all_repls = people_repls + orgs_repls
+
+        # Per-replacement trace: count occurrences в каждом фрагменте
+        print(f"\n  PEOPLE replacements ({len(people_repls)}):")
+        for r in people_repls:
+            raw, canon = r.get("raw") or "", r.get("canonical") or ""
+            n_detailed = step1["summary_detailed"].count(raw)
+            n_short = step1["summary_short"].count(raw)
+            n_tasks = sum(
+                (t["title"] + " " + (t.get("description") or "")).count(raw)
+                for t in step1["tasks"]
+            )
+            print(f"    «{raw}» → «{canon}»  "
+                  f"detailed={n_detailed}× short={n_short}× tasks={n_tasks}×")
+
+        print(f"\n  ORGS replacements ({len(orgs_repls)}):")
+        for r in orgs_repls:
+            raw, canon = r.get("raw") or "", r.get("canonical") or ""
+            n_detailed = step1["summary_detailed"].count(raw)
+            n_short = step1["summary_short"].count(raw)
+            n_tasks = sum(
+                (t["title"] + " " + (t.get("description") or "")).count(raw)
+                for t in step1["tasks"]
+            )
+            print(f"    «{raw}» → «{canon}»  "
+                  f"detailed={n_detailed}× short={n_short}× tasks={n_tasks}×")
+
+        # Apply
         final_detailed = apply_text_replacements(
             step1["summary_detailed"], replacements=all_repls,
         )
         final_short = apply_text_replacements(
             step1["summary_short"], replacements=all_repls,
         )
+
         # tasks final
         owner_map = {o.get("raw_owner"): o.get("tm_real_name")
                      for o in (step2.get("task_owners") or [])}
+        owner_reasoning_map = {o.get("raw_owner"): o.get("reasoning") or ""
+                               for o in (step2.get("task_owners") or [])}
         final_tasks = []
         for t in step1["tasks"]:
             raw_o = t["raw_owner_mention"]
@@ -135,10 +166,24 @@ def main() -> int:
             final_tasks.append({
                 **t,
                 "canonical_owner": canonical,
+                "owner_reasoning": owner_reasoning_map.get(raw_o, ""),
                 "title_canonical": apply_text_replacements(
                     t["title"], replacements=all_repls,
                 ),
+                "description_canonical": apply_text_replacements(
+                    t.get("description") or "", replacements=all_repls,
+                ),
             })
+
+        # Diff trace для каждого изменения в short_summary
+        if step1["summary_short"] != final_short:
+            print(f"\n  short_summary diff (line-by-line changes):")
+            old_lines = step1["summary_short"].split("\n")
+            new_lines = final_short.split("\n")
+            for i, (old, new) in enumerate(zip(old_lines, new_lines)):
+                if old != new:
+                    print(f"    L{i+1}: «{old[:80]}»")
+                    print(f"      → «{new[:80]}»")
 
         print(f"\n{'='*70}")
         print("ФИНАЛЬНЫЙ РЕЗУЛЬТАТ V2 (НЕ записано в БД, не отправлено):")
@@ -148,12 +193,20 @@ def main() -> int:
         print(f"\n--- summary_detailed первые 800 chars ---")
         print(final_detailed[:800] + ("..." if len(final_detailed) > 800
                                        else ""))
-        print(f"\n--- tasks ({len(final_tasks)}) ---")
+        print(f"\n--- tasks ({len(final_tasks)}) с owner-trace ---")
         for i, t in enumerate(final_tasks, 1):
+            raw_o = t["raw_owner_mention"]
             owner = t["canonical_owner"] or "(no_match)"
-            print(f"  {i:2d}) {t['title_canonical'][:70]:70s} "
-                  f"— {owner} • {t.get('priority','medium')} "
+            print(f"  {i:2d}) {t['title_canonical'][:80]}")
+            print(f"      raw_owner=«{raw_o}» → «{owner}» • "
+                  f"priority={t.get('priority','medium')} "
                   f"due={t.get('due_date') or '—'}")
+            if t["owner_reasoning"]:
+                print(f"      reasoning: {t['owner_reasoning'][:100]}")
+            if t["title"] != t["title_canonical"]:
+                print(f"      title changed:")
+                print(f"        before: «{t['title'][:80]}»")
+                print(f"        after:  «{t['title_canonical'][:80]}»")
 
         # Compare с legacy результатом (что в БД сейчас)
         from app.models import Task, TaskSourceKind

@@ -433,6 +433,7 @@ def _build_todo_section(
     source_kind: "TaskSourceKind",
     source_conversation_id: str,
     compact: bool = False,
+    filter_by_direction: bool = True,
 ) -> str:
     """FR-CR-05-119 — render the To-Do block from the actual
     `Task` rows extracted for this recording. Items are
@@ -490,7 +491,11 @@ def _build_todo_section(
                 direction = extra.get("direction")
         except Exception:  # noqa: BLE001
             direction = None
-        if direction not in DIRECTIONS_IMPORTANT:
+        # FR-CR-05-199 — фильтр применяется только если flag установлен
+        # (default True для backwards-compat с legacy auto-publish).
+        # V2 publish зовёт с filter_by_direction=False — ВСЕ tasks
+        # попадают в thread reply.
+        if filter_by_direction and direction not in DIRECTIONS_IMPORTANT:
             continue
         idx += 1
         owner = (t.owner_display_name or "").strip()

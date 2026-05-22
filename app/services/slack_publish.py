@@ -54,6 +54,7 @@ def publish_zoom_recording_to_slack(
     no_tasks: bool = False,
     source_kind: Any = None,
     source_conversation_id: str | None = None,
+    all_tasks_in_thread: bool = False,
 ) -> dict:
     """FR-CR-05-194a — Slack publish одной recording (Zoom OR Fireflies).
 
@@ -118,21 +119,41 @@ def publish_zoom_recording_to_slack(
 
     body, reused_todo = _split_short_summary(row.short_summary)
 
-    # Tasks block — теперь используем переданные source_kind + source_id
-    tasks_text = ""
+    # FR-CR-05-199 — два списка задач:
+    #   * parent_tasks_text — для «TODO:» trailer в parent message
+    #     (фильтр: DIRECTIONS_IMPORTANT, как было всегда)
+    #   * thread_tasks_text — для thread reply
+    #     - если all_tasks_in_thread=True (V2 publish): ВСЕ tasks,
+    #       включая direction='other'
+    #     - если False (legacy auto-publish): те же что в parent (filtered)
+    parent_tasks_text = ""
+    thread_tasks_text = ""
     if not no_tasks:
         if use_db_tasks:
-            tasks_text = _build_todo_section(
+            parent_tasks_text = _build_todo_section(
                 session,
                 source_kind=source_kind,
                 source_conversation_id=source_conversation_id,
+                filter_by_direction=True,
             )
+            if all_tasks_in_thread:
+                thread_tasks_text = _build_todo_section(
+                    session,
+                    source_kind=source_kind,
+                    source_conversation_id=source_conversation_id,
+                    filter_by_direction=False,
+                )
+            else:
+                thread_tasks_text = parent_tasks_text
         elif reused_todo:
-            tasks_text = reused_todo
-    if tasks_text:
-        tasks_text = _compact_for_slack(_to_slack_mrkdwn(tasks_text))
+            parent_tasks_text = reused_todo
+            thread_tasks_text = reused_todo
+    if parent_tasks_text:
+        parent_tasks_text = _compact_for_slack(_to_slack_mrkdwn(parent_tasks_text))
+    if thread_tasks_text:
+        thread_tasks_text = _compact_for_slack(_to_slack_mrkdwn(thread_tasks_text))
 
-    parent_raw = build_parent_raw(body, tasks_text)
+    parent_raw = build_parent_raw(body, parent_tasks_text)
     parent_text = _compact_for_slack(_to_slack_mrkdwn(parent_raw))
     chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 
@@ -140,7 +161,9 @@ def publish_zoom_recording_to_slack(
              row_id=row_identifier,
              source_kind=str(source_kind),
              channel=channel, chunks=len(chunks),
-             has_tasks=bool(tasks_text))
+             has_parent_tasks=bool(parent_tasks_text),
+             has_thread_tasks=bool(thread_tasks_text),
+             all_tasks_in_thread=all_tasks_in_thread)
 
     client = WebClient(token=token)
     try:
@@ -155,9 +178,9 @@ def publish_zoom_recording_to_slack(
                 unfurl_links=False, unfurl_media=False,
             )
         tasks_posted = False
-        if tasks_text:
+        if thread_tasks_text:
             client.chat_postMessage(
-                channel=channel, text=tasks_text,
+                channel=channel, text=thread_tasks_text,
                 thread_ts=parent_ts,
                 unfurl_links=False, unfurl_media=False,
             )

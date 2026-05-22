@@ -19,7 +19,7 @@ from app.db import session_scope
 from app.intent.llm_backends import OpenAIBackend
 from app.logging_setup import get_logger, setup_logging
 from app.models import ZoomRecording
-from app.services.entity_apply import apply_text_replacements
+from app.services.entity_rewrite import rewrite_with_canonicals
 from app.services.entity_matcher import match_entities
 from app.services.reasoning_extract import extract_summary_and_tasks
 from app.services.team_members import get_humans_for_matcher
@@ -142,13 +142,16 @@ def main() -> int:
         for r in (step2.get("summary_replacements_orgs") or [])[:10]:
             print(f"    {r.get('raw')!r:25s} → {r.get('canonical')!r}")
 
-        # === Step 3: apply with detailed trace ===
-        print(f"\n[Step 3/3] Deterministic apply WITH FULL TRACE...")
+        # === Step 3: LLM-rewrite (FR-CR-05-193c-3) ===
+        # Заменили regex apply_text_replacements на LLM rewrite — для
+        # правильных русских падежей («Лене» → «Елене Радионовой» вместо
+        # «Радионова Елена»).
+        print(f"\n[Step 3/3] LLM rewrite WITH MAPPINGS (правильные падежи)...")
         people_repls = step2.get("summary_replacements_people") or []
         orgs_repls = step2.get("summary_replacements_orgs") or []
-        all_repls = people_repls + orgs_repls
 
-        # Per-replacement trace: count occurrences в каждом фрагменте
+        # Per-replacement preview: count occurrences в каждом фрагменте
+        # (показывает что именно LLM получит на вход)
         print(f"\n  PEOPLE replacements ({len(people_repls)}):")
         for r in people_repls:
             raw, canon = r.get("raw") or "", r.get("canonical") or ""
@@ -173,33 +176,55 @@ def main() -> int:
             print(f"    «{raw}» → «{canon}»  "
                   f"detailed={n_detailed}× short={n_short}× tasks={n_tasks}×")
 
-        # Apply
-        final_detailed = apply_text_replacements(
-            step1["summary_detailed"], replacements=all_repls,
+        print(f"\n  Rewriting summary_detailed ({len(step1['summary_detailed'])} chars)...")
+        final_detailed = rewrite_with_canonicals(
+            step1["summary_detailed"],
+            people_replacements=people_repls,
+            org_replacements=orgs_repls,
+            llm_backend=llm, model=model_reasoning,
+            reasoning_effort="low",
         )
-        final_short = apply_text_replacements(
-            step1["summary_short"], replacements=all_repls,
+        print(f"  Rewriting summary_short ({len(step1['summary_short'])} chars)...")
+        final_short = rewrite_with_canonicals(
+            step1["summary_short"],
+            people_replacements=people_repls,
+            org_replacements=orgs_repls,
+            llm_backend=llm, model=model_reasoning,
+            reasoning_effort="low",
         )
 
-        # tasks final
+        # tasks final — owner через DB lookup (apply_task_owner-like),
+        # text (title/description) через LLM rewrite.
         owner_map = {o.get("raw_owner"): o.get("tm_real_name")
                      for o in (step2.get("task_owners") or [])}
         owner_reasoning_map = {o.get("raw_owner"): o.get("reasoning") or ""
                                for o in (step2.get("task_owners") or [])}
+        print(f"  Rewriting {len(step1['tasks'])} task titles+descriptions...")
         final_tasks = []
         for t in step1["tasks"]:
             raw_o = t["raw_owner_mention"]
             canonical = owner_map.get(raw_o)
+            # LLM rewrite для title+description (склонения)
+            title_canon = rewrite_with_canonicals(
+                t["title"],
+                people_replacements=people_repls,
+                org_replacements=orgs_repls,
+                llm_backend=llm, model=model_reasoning,
+                reasoning_effort="low",
+            )
+            desc_canon = rewrite_with_canonicals(
+                t.get("description") or "",
+                people_replacements=people_repls,
+                org_replacements=orgs_repls,
+                llm_backend=llm, model=model_reasoning,
+                reasoning_effort="low",
+            )
             final_tasks.append({
                 **t,
                 "canonical_owner": canonical,
                 "owner_reasoning": owner_reasoning_map.get(raw_o, ""),
-                "title_canonical": apply_text_replacements(
-                    t["title"], replacements=all_repls,
-                ),
-                "description_canonical": apply_text_replacements(
-                    t.get("description") or "", replacements=all_repls,
-                ),
+                "title_canonical": title_canon,
+                "description_canonical": desc_canon,
             })
 
         # Diff trace для каждого изменения в short_summary

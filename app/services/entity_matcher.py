@@ -49,6 +49,26 @@ _SYSTEM_PROMPT = """Ты резолвер сущностей. Тебе дан т
      - Если meeting_participants пуст — null.
      - Reasoning должен явно сказать «collective pronoun → выбран X
        потому что …».
+  4c. EXTERNAL OWNER → INTERNAL-ACTION FALLBACK — когда raw_owner это
+     external person (НЕ из known_people, НЕ из meeting_participants —
+     обычно инвестор / кандидат / клиент со стороны другой компании),
+     НО task описывает действие НАШЕЙ стороны:
+       * отправить материалы / deck / contract / documents
+       * обновить data room / shared folder
+       * передать контакты / introductions
+       * организовать call / meeting
+       * отследить committee / decision / follow-up
+       * подготовить memo / аргументы / pitch
+       * сделать email intro
+     В этом случае:
+     - Назначь на наиболее логичного host/principal participant'а
+       из meeting_participants кто реально выполнит этот follow-up
+       (assistant/координатор если есть — по notes='Ассистент'/
+       'координирует follow-ups'; иначе host встречи).
+     - Reasoning явно: «external speaker Arjen, но action internal
+       (отправить deck) → выбран Артем (host) / Irina (assistant)».
+     - НЕ путать: если raw_owner внешний И task реально про ЕГО
+       действие («Fabrizio вернётся с ответом») → tm_real_name=null.
   5. STRICT RULE — task_owners ТОЛЬКО из meeting_participants:
      - tm_real_name ОБЯЗАН быть из списка meeting_participants. Никогда
        НЕ назначай tasks на людей которые не были на этой встрече.

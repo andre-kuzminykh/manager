@@ -169,3 +169,24 @@ def test_fr_cr_05_193a_single_llm_call_per_invocation(mock_llm) -> None:
         duration_seconds=300, llm_backend=mock_llm, model="gpt-5.5",
     )
     assert mock_llm.chat.call_count == 1
+
+
+def test_fr_cr_05_193a_5_prompt_extracts_implicit_internal_followups() -> None:
+    """FR-CR-05-193a-5 — Step 1 prompt должен инструктировать LLM
+    выделять НЕЯВНЫЕ follow-ups для нашей стороны (обновить data room,
+    отправить deck, передать контакты и т.д.), а не только явные
+    «я сделаю X» утверждения. Это критично для investor / vendor /
+    candidate meetings где большинство follow-up действий не
+    проговариваются явно как commitment.
+    """
+    from app.services.reasoning_extract import _SYSTEM_PROMPT
+    # Канонический язык
+    assert "НЕЯВНЫЕ" in _SYSTEM_PROMPT or "implicit" in _SYSTEM_PROMPT.lower()
+    # Примеры стандартных post-meeting follow-up действий
+    assert "data room" in _SYSTEM_PROMPT
+    assert "deck" in _SYSTEM_PROMPT.lower()
+    assert "intro" in _SYSTEM_PROMPT.lower() or "follow-up" in _SYSTEM_PROMPT.lower()
+    # Указание что 2-3 tasks для 30-min meeting = пропуски
+    assert "пропустил" in _SYSTEM_PROMPT or "Excessive" in _SYSTEM_PROMPT or "missed" in _SYSTEM_PROMPT.lower()
+    # Указание использовать «мы» когда нет явного name
+    assert "мы" in _SYSTEM_PROMPT

@@ -224,6 +224,22 @@ def test_fr_cr_05_193b_llm_invalid_json_safe(mock_llm, known_people) -> None:
     assert all(t["tm_real_name"] is None for t in result["task_owners"])
 
 
+# === FR-CR-05-193b-9 — external-owner → internal-action fallback (Rule 4c) ===
+
+
+def test_fr_cr_05_193b_9_prompt_includes_external_internal_action_rule(known_people) -> None:
+    """build_matcher_prompt + SYSTEM_PROMPT должны содержать Rule 4c для
+    EXTERNAL OWNER → INTERNAL ACTION FALLBACK."""
+    from app.services.entity_matcher import _SYSTEM_PROMPT
+    assert "EXTERNAL OWNER" in _SYSTEM_PROMPT
+    assert "INTERNAL-ACTION" in _SYSTEM_PROMPT or "INTERNAL ACTION" in _SYSTEM_PROMPT
+    # Канонические примеры internal-action глаголов
+    assert "обновить data room" in _SYSTEM_PROMPT
+    assert "intro" in _SYSTEM_PROMPT.lower()
+    # Должно быть указано — назначаем на host/assistant если есть
+    assert "host" in _SYSTEM_PROMPT or "Артем" in _SYSTEM_PROMPT
+
+
 # === FR-CR-05-193b-8 — collective pronoun fallback (Rule 4b) ===
 
 

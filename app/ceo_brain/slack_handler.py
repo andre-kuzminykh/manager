@@ -365,6 +365,122 @@ def _attach_handlers(app: Any, settings: Settings) -> None:
     )
     archive_dir = get_archive_dir()
 
+    # FR-CR-05-192w — wire task classification into ceo_brain so DMs
+    # to the CEO Brain bot also create tasks in the unified table.
+    # Operator-pinned 2026-05-22: «CEO Brain — это, другого не надо».
+    # Build the same Services bundle the main slack-bot uses for its
+    # `handle_message` path; we'll call `classify_and_persist` after
+    # the dispatcher's archive step.
+    _classifier_services = None
+    _classifier_sender = None
+    try:
+        from app.intent import IntentClassifier
+        from app.intent.llm_backends import OpenAIBackend
+        from app.services import EmployeeDirectory
+        from app.context.retriever import ContextRetriever
+        from app.orchestrator.service import Orchestrator
+        from app.slack_bot.handlers.shared import Services
+        from app.slack_bot.rate_limiter import RateAwareSlackSender
+        from openai import OpenAI as _OpenAI
+
+        _llm_client = _OpenAI(api_key=settings.openai_api_key)
+        _llm_backend = OpenAIBackend(
+            _llm_client, settings.openai_model,
+        )
+        _classifier_services = Services(
+            slack=slack_client,
+            context_retriever=ContextRetriever(
+                slack_client,
+                window_before=settings.context_window_before,
+            ),
+            classifier=IntentClassifier(backend=_llm_backend),
+            orchestrator=Orchestrator(settings),
+            employees=EmployeeDirectory(
+                client=slack_client, settings=settings,
+            ),
+        )
+        _classifier_sender = RateAwareSlackSender(slack_client)
+        log.info(
+            "ceo_brain_classifier_services_built",
+            model=settings.openai_model,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "ceo_brain_classifier_services_build_failed",
+            error=str(e),
+            hint=(
+                "DMs will still get an agent response, but task "
+                "extraction won't fire. Check OPENAI_API_KEY and "
+                "imports."
+            ),
+        )
+
+    def _maybe_classify_and_persist_task(
+        db, payload: dict[str, Any],
+    ) -> None:
+        """FR-CR-05-192w — if the message looks user-authored and
+        Services were built successfully, run the same
+        classify_and_persist + decide_passive flow the main bot's
+        handle_message uses. Best-effort — any failure logs +
+        returns, never breaks the agent path."""
+        if _classifier_services is None:
+            return
+        # Mirror handle_message's guards.
+        if payload.get("bot_id") or payload.get("user") == bot_user_id:
+            return
+        subtype = payload.get("subtype")
+        if subtype in (
+            "message_changed", "message_deleted",
+            "bot_message", "channel_join",
+        ):
+            return
+        text = payload.get("text") or ""
+        channel = payload.get("channel") or ""
+        ts = payload.get("ts") or ""
+        if not channel or not ts:
+            return
+        if not text.strip():
+            # Audio-only voice notes can be empty-text — let them
+            # through to the main classifier (which handles whisper
+            # transcription).
+            from app.services.transcription import extract_audio_files
+            if not extract_audio_files(payload):
+                return
+        from app.schemas.intent import InvocationType
+        from app.slack_bot.handlers.shared import classify_and_persist
+
+        channel_type = (
+            payload.get("channel_type")
+            or payload.get("channelType")
+            or "im"
+        )
+        kind = "im" if channel_type == "im" else channel_type
+        source_message = {
+            "ts": ts,
+            "thread_ts": payload.get("thread_ts"),
+            "user": payload.get("user"),
+            "subtype": subtype,
+            "text": text,
+        }
+        try:
+            classify_and_persist(
+                db,
+                services=_classifier_services,
+                conversation_id=channel,
+                kind=kind,
+                source_message=source_message,
+                invocation_type=InvocationType.passive,
+                slack_user_id=payload.get("user"),
+                raw_event=payload,
+                transcript=None,
+                has_audio=False,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ceo_brain_classify_and_persist_failed",
+                channel=channel, ts=ts, error=str(e),
+            )
+
     def _handle(payload: dict[str, Any]) -> None:
         try:
             with session_scope() as db:
@@ -374,6 +490,11 @@ def _attach_handlers(app: Any, settings: Settings) -> None:
                     responder=responder,
                     archive_dir=archive_dir,
                 )
+                # FR-CR-05-192w — task classification AFTER archive.
+                # Uses its own session-scope-safe call; if archive
+                # rolled back the session, classify still has a
+                # clean one.
+                _maybe_classify_and_persist_task(db, payload)
         except Exception as e:  # noqa: BLE001
             log.warning("ceo_brain_dispatch_failed", error=str(e))
 

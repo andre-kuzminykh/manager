@@ -149,6 +149,48 @@ def _build_email_to_name_map(session: Session) -> dict[str, str]:
     return out
 
 
+def _is_resource_attendee(item: Any) -> bool:
+    """FR-CR-05-192ac — отсекать переговорные комнаты / ресурсы
+    Google Calendar из списка участников встречи. Признаки ресурса:
+      1) `item['resource'] is True` (Calendar API field);
+      2) email ends with `.resource.calendar.google.com`;
+      3) displayName matches well-known patterns (`Office`, `Room`,
+         `Meeting Room`, `UK-X-`, `(N)` для нумерованных переговорок)."""
+    if isinstance(item, str):
+        s = item.strip().lower()
+        # str-only fallback — пытаемся ловить очевидные переговорки
+        if not s:
+            return False
+        if s.endswith(".resource.calendar.google.com"):
+            return True
+        if any(marker in s for marker in (
+            "humanoid office",
+            "artem's office",
+            " office - ",
+            "meeting room",
+            "переговорная",
+        )):
+            return True
+        return False
+    if not isinstance(item, dict):
+        return False
+    if item.get("resource") is True:
+        return True
+    email = (item.get("email") or "").strip().lower()
+    if email.endswith(".resource.calendar.google.com"):
+        return True
+    label = ((item.get("displayName") or item.get("name") or "").strip().lower())
+    if any(marker in label for marker in (
+        "humanoid office",
+        "artem's office",
+        " office - ",
+        "meeting room",
+        "переговорная",
+    )):
+        return True
+    return False
+
+
 def _resolve_attendee_label(item: Any, email_to_name: dict[str, str]) -> str:
     """Best-effort: turn a Calendar API attendee item into a
     display label. Falls back to displayName → email when no
@@ -187,6 +229,11 @@ def _resolve_attendees(
     seen: set[str] = set()
     out: list[str] = []
     for it in items:
+        # FR-CR-05-192ac — skip Google Calendar resource attendees
+        # (переговорные комнаты типа "Humanoid Office - London",
+        # "UK-5-Artem's Office (1)")
+        if _is_resource_attendee(it):
+            continue
         label = _resolve_attendee_label(it, email_to_name)
         if not label:
             continue

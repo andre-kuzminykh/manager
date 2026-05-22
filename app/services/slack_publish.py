@@ -55,6 +55,9 @@ def publish_zoom_recording_to_slack(
     source_kind: Any = None,
     source_conversation_id: str | None = None,
     all_tasks_in_thread: bool = False,
+    override_short_summary: str | None = None,
+    override_thread_todo_text: str | None = None,
+    skip_db_write: bool = False,
 ) -> dict:
     """FR-CR-05-194a — Slack publish одной recording (Zoom OR Fireflies).
 
@@ -72,7 +75,9 @@ def publish_zoom_recording_to_slack(
         return {"ok": False, "error": "channel empty", "step": "validate"}
     if not token:
         return {"ok": False, "error": "token empty", "step": "validate"}
-    if not (row.short_summary or "").strip():
+    # short_summary может прийти через override (in-memory V2 без DB write)
+    short_summary_text = override_short_summary or row.short_summary or ""
+    if not short_summary_text.strip():
         return {"ok": False, "error": "short_summary empty", "step": "validate"}
 
     # Auto-detect source_kind / id если не передали
@@ -117,19 +122,21 @@ def publish_zoom_recording_to_slack(
     )
     from app.fireflies.pipeline import _build_todo_section
 
-    body, reused_todo = _split_short_summary(row.short_summary)
+    body, reused_todo = _split_short_summary(short_summary_text)
 
     # FR-CR-05-199 — два списка задач:
     #   * parent_tasks_text — для «TODO:» trailer в parent message
     #     (фильтр: DIRECTIONS_IMPORTANT, как было всегда)
     #   * thread_tasks_text — для thread reply
-    #     - если all_tasks_in_thread=True (V2 publish): ВСЕ tasks,
-    #       включая direction='other'
-    #     - если False (legacy auto-publish): те же что в parent (filtered)
     parent_tasks_text = ""
     thread_tasks_text = ""
     if not no_tasks:
-        if use_db_tasks:
+        if override_thread_todo_text is not None:
+            # V2 publish — задачи переданы прямо текстом (в памяти),
+            # БД не читаем. Используется и для parent и для thread.
+            parent_tasks_text = override_thread_todo_text
+            thread_tasks_text = override_thread_todo_text
+        elif use_db_tasks:
             parent_tasks_text = _build_todo_section(
                 session,
                 source_kind=source_kind,
@@ -196,8 +203,9 @@ def publish_zoom_recording_to_slack(
                     row_id=row_identifier, error=err)
         return {"ok": False, "error": err, "step": "post"}
 
-    # Persist post_ts для idempotency
-    if hasattr(row, "slack_post_ts"):
+    # Persist post_ts для idempotency (если не пропущено — V2 publish
+    # в read-only mode не трогает БД).
+    if not skip_db_write and hasattr(row, "slack_post_ts"):
         row.slack_post_ts = parent_ts
         session.flush()
 

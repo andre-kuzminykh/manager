@@ -251,16 +251,61 @@ def _replace_tasks_in_db(
     return deleted, inserted
 
 
+def _format_v2_task_for_todo(v: dict, idx: int) -> str:
+    """Mimic `_build_todo_section` format для V2 in-memory task'и."""
+    from datetime import date as _date, datetime as _dt
+
+    title = (v.get("title") or "").strip()
+    desc = (v.get("description") or "").strip()
+    owner = (v.get("owner_display_name") or "").strip()
+    body = desc or title
+    if len(body) > 350:
+        cut = body.rfind(" ", 0, 350)
+        body = (body[: cut if cut > 200 else 350]).rstrip(",;:- ") + "…"
+    due_str = v.get("due_date") or ""
+    try:
+        due_date = _date.fromisoformat(due_str) if due_str else _date.today()
+    except (ValueError, TypeError):
+        due_date = _date.today()
+    deadline = f"{due_date.strftime('%d.%m.%Y')} 18:00"
+    suffix_parts = []
+    if owner:
+        suffix_parts.append(owner)
+    suffix_parts.append(deadline)
+    suffix = " • ".join(suffix_parts)
+    return f"{idx}) {body} — {suffix}"
+
+
+def _build_todo_text_from_v2(v2_tasks: list[dict], *, filter_important: bool) -> str:
+    """Inline-build TODO block из in-memory V2 tasks. БД не читаем."""
+    from app.services.task_direction import DIRECTIONS_IMPORTANT
+    items: list[str] = []
+    idx = 0
+    for v in v2_tasks:
+        direction = v.get("direction") or "other"
+        if filter_important and direction not in DIRECTIONS_IMPORTANT:
+            continue
+        idx += 1
+        items.append(_format_v2_task_for_todo(v, idx))
+    if not items:
+        return ""
+    return "To-Do:\n\n" + "\n\n".join(items)
+
+
 def main() -> int:
     setup_logging()
     ap = argparse.ArgumentParser()
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--fireflies-id")
     g.add_argument("--zoom-id")
+    ap.add_argument(
+        "--read-only", action="store_true",
+        help="One-off: НЕ писать V2 в БД (задачи уже есть). По умолчанию "
+        "OFF — production behavior — V2 results пишутся в БД (заменяя "
+        "legacy для этого meeting'а).",
+    )
     ap.add_argument("--no-publish", action="store_true",
-                    help="Перезаписать DB но НЕ публиковать в Slack")
-    ap.add_argument("--no-db", action="store_true",
-                    help="Только публикация (не трогать DB) — НЕ ИСПОЛЬЗОВАТЬ без понимания")
+                    help="Только compute V2 (без Slack-публикации)")
     args = ap.parse_args()
 
     s = get_settings()
@@ -294,16 +339,17 @@ def main() -> int:
 
         print(f"\n{'='*70}")
         print(f"V2 PUBLISH для {label}")
-        print(f"title={row.title!r}")
+        write_db = not args.read_only
+        print(f"title={row.title!r}, write_db={write_db}")
         print(f"{'='*70}\n")
 
-        # Run V2
+        # Run V2 — in-memory
         result = _run_v2_pipeline(row=row, session=session, llm=llm, model=model)
         if "error" in result:
             print(f"ERROR V2: {result['error']}", file=sys.stderr)
             return 3
 
-        print(f"\nV2 results:")
+        print(f"\nV2 results (in-memory):")
         print(f"  detailed_summary: {len(result['detailed_summary'])} chars")
         print(f"  short_summary: {len(result['short_summary'])} chars")
         print(f"  tasks: {len(result['tasks'])}")
@@ -314,61 +360,57 @@ def main() -> int:
         for owner, n in sorted(owners_count.items(), key=lambda x: -x[1]):
             print(f"    {n:2d}× {owner}")
 
-        # 1. Replace DB tasks
-        if not args.no_db:
-            print(f"\nReplacing DB tasks (legacy → V2)...")
+        # Classify directions ДЛЯ V2 tasks (in-memory только)
+        from app.services.task_direction import (
+            DIRECTIONS_IMPORTANT, classify_directions,
+        )
+        print(f"\nClassifying directions для V2 tasks (in-memory)...")
+        # Тасуем фейковые id для mapping
+        for i, v in enumerate(result["tasks"]):
+            v["_id"] = i
+        tasks_to_classify = [
+            {"id": v["_id"], "title": v.get("title") or "",
+             "description": v.get("description") or ""}
+            for v in result["tasks"]
+        ]
+        mapping = classify_directions(
+            tasks=tasks_to_classify,
+            meeting_context=result["detailed_summary"][:3000] or None,
+            llm_backend=llm, model=model,
+        )
+        for v in result["tasks"]:
+            v["direction"] = mapping.get(v["_id"], "other")
+        important_count = sum(
+            1 for d in mapping.values() if d in DIRECTIONS_IMPORTANT
+        )
+        print(f"  classified {len(mapping)} tasks, "
+              f"{important_count} в DIRECTIONS_IMPORTANT (попадут в Slack)")
+
+        # OPTIONAL: write to DB (если --write-db)
+        if write_db:
+            print(f"\n[--write-db] Replacing DB tasks (legacy → V2)...")
             deleted, inserted = _replace_tasks_in_db(
                 session=session, source_kind=source_kind,
                 source_conversation_id=source_id, v2_tasks=result["tasks"],
             )
-            print(f"  soft-deleted {deleted} legacy tasks, inserted {inserted} V2 tasks")
-
-            # 2. Overwrite summary fields
+            print(f"  soft-deleted {deleted}, inserted {inserted}")
             row.detailed_summary = result["detailed_summary"]
             row.short_summary = result["short_summary"]
-            # Reset sent flag — заново отправим
-            row.short_summary_sent = False
-            session.flush()
-            print(f"  row.short_summary updated, sent reset to False")
-
-            # 3. FR-CR-05-163 — classify directions для НОВЫХ V2 tasks.
-            # Без этого `_build_todo_section` отфильтрует ВСЕ tasks
-            # (direction not in DIRECTIONS_IMPORTANT → skip), и Slack
-            # thread reply будет пустым.
-            print(f"\nClassifying directions для V2 tasks...")
-            from app.services.task_direction import classify_directions
-            inserted_tasks = (
+            # Save direction'ы в task.extra
+            new_db_tasks = (
                 session.query(Task)
                 .filter(Task.source_kind == source_kind)
                 .filter(Task.source_conversation_id == source_id)
                 .filter(Task.deleted_at.is_(None))
-                .all()
+                .order_by(Task.id.asc()).all()
             )
-            tasks_to_classify = [
-                {"id": t.id, "title": t.title or "",
-                 "description": t.description or ""}
-                for t in inserted_tasks
-            ]
-            mapping = classify_directions(
-                tasks=tasks_to_classify,
-                meeting_context=(row.detailed_summary or "")[:3000] or None,
-                llm_backend=llm, model=model,
-            )
-            for t in inserted_tasks:
-                direction = mapping.get(t.id, "other")
-                extra = dict(t.extra or {})
-                extra["direction"] = direction
-                t.extra = extra
+            for db_t, v in zip(new_db_tasks, result["tasks"]):
+                extra = dict(db_t.extra or {})
+                extra["direction"] = v.get("direction", "other")
+                db_t.extra = extra
             session.flush()
-            from app.services.task_direction import DIRECTIONS_IMPORTANT
-            important_count = sum(
-                1 for d in mapping.values() if d in DIRECTIONS_IMPORTANT
-            )
-            print(f"  classified {len(mapping)} tasks, "
-                  f"{important_count} в DIRECTIONS_IMPORTANT (попадут в Slack)")
 
-        # 3. Slack publish (для Fireflies — нужен другой path,
-        #    publish_zoom_recording_to_slack работает с zoom строкой)
+        # Slack publish — БД не читаем (override_thread_todo_text)
         if not args.no_publish:
             from app.services.slack_publish import (
                 _get_channel, _get_token_key,
@@ -381,32 +423,35 @@ def main() -> int:
                       file=sys.stderr)
                 return 4
 
+            # Build V2 todo block из in-memory tasks (filtered by direction)
+            v2_todo_text = _build_todo_text_from_v2(
+                result["tasks"], filter_important=True,
+            )
+
             print(f"\nPublishing to Slack channel {channel} via {token_key}...")
-            # publish_zoom_recording_to_slack использует zoom_id field.
-            # Для FF row нужно адаптировать — но MeetingRecording тоже
-            # имеет short_summary, и `_build_todo_section` принимает
-            # source_kind=fireflies + source_conversation_id=fireflies_id.
-            # Симметрично работает.
+            print(f"  parent: V2 short_summary ({len(result['short_summary'])} chars)")
+            print(f"  thread: {important_count} important V2 tasks")
             pub_result = publish_zoom_recording_to_slack(
                 session, row,
                 channel=channel, token=token,
-                use_db_tasks=True, no_tasks=False,
-                # FR-CR-05-199 (revised) — БД: ВСЕ V2 tasks (через
-                # _replace_tasks_in_db); Slack thread reply: только
-                # priority direction (DIRECTIONS_IMPORTANT filter — как
-                # в legacy auto-publish). Parent — short_summary с
-                # title+hyperlink + TODO trailer.
-                all_tasks_in_thread=False,
+                no_tasks=False,
+                # FR-CR-05-199 — БД не трогаем, V2 contents in-memory:
+                override_short_summary=result["short_summary"],
+                override_thread_todo_text=v2_todo_text,
+                skip_db_write=not write_db,
             )
             print(f"  publish result: {pub_result}")
-            if pub_result.get("ok"):
-                row.short_summary_sent = True
-                session.flush()
 
-        session.commit()
+        # Commit только если был write_db
+        if write_db:
+            session.commit()
+        else:
+            session.rollback()  # явный rollback — гарантируем БД нетронута
 
         print(f"\n{'='*70}")
         print(f"V2 PUBLISH done для {label}")
+        if not write_db:
+            print("DB НЕ изменена (--write-db не передан).")
         print(f"{'='*70}\n")
 
     return 0

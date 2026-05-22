@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from app.config import get_settings
@@ -239,21 +240,29 @@ def main() -> int:
             row.short_summary_sent = True
             session.flush()
 
-        # FR-CR-05-178 — defensive hard-DELETE of any Task rows
-        # persisted for this zoom_id. Pipeline's deterministic
-        # `_build_todo_section` reads them to render the To-Do, but
-        # operator's contract is «никакие задачи не создавать в бд»
-        # — keep zero footprint after the Slack post. FKs cascade.
-        wiped = (
-            session.query(Task)
-            .filter(Task.source_kind == TaskSourceKind.zoom)
-            .filter(Task.source_conversation_id == row.zoom_id)
-            .delete(synchronize_session=False)
-        )
-        session.flush()
+        # FR-CR-05-194 (override FR-CR-05-178) — operator-pinned 2026-05-22:
+        # «таски в базу заноси». Defensive DELETE отключён по умолчанию —
+        # task'и остаются в БД для (a) коллеги через :5433, (b) следующей
+        # agenda (FR-CR-05-192ab берёт open_tasks из last prior recording).
+        # Для возврата к старому FR-CR-05-178 поведению — env-flag
+        # `KEEP_TASKS_AFTER_SLACK_PUBLISH=false`.
+        keep_tasks = os.environ.get(
+            "KEEP_TASKS_AFTER_SLACK_PUBLISH", "true",
+        ).strip().lower() not in ("false", "0", "no", "off")
+        if not keep_tasks:
+            wiped = (
+                session.query(Task)
+                .filter(Task.source_kind == TaskSourceKind.zoom)
+                .filter(Task.source_conversation_id == row.zoom_id)
+                .delete(synchronize_session=False)
+            )
+            session.flush()
+            if wiped:
+                print(f"      defensive-deleted {wiped} stale Task rows "
+                      f"(KEEP_TASKS_AFTER_SLACK_PUBLISH=false)")
+        else:
+            print("      tasks kept in DB (FR-CR-05-194 default)")
         session.commit()
-        if wiped:
-            print(f"      defensive-deleted {wiped} stale Task rows")
 
     print("\nDone.")
     return 0

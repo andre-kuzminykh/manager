@@ -2892,6 +2892,30 @@ class FirefliesPipeline:
             results = list(pool.map(_send_one, task_ids))
         return sum(1 for r in results if r)
 
+    # --- FR-CR-05-194: auto-Slack-publish step ----------------
+
+    def _step_send_to_slack(self, session, row) -> None:
+        """FR-CR-05-194a — симметрично Zoom (см. ZoomPipeline)."""
+        try:
+            from app.services.slack_publish import maybe_auto_publish
+            result = maybe_auto_publish(session, row, settings=self._settings)
+            if result is None:
+                return
+            if not result.get("ok"):
+                log.warning("fireflies_step_send_to_slack_failed",
+                            fireflies_id=getattr(row, "fireflies_id", None),
+                            error=result.get("error"),
+                            step=result.get("step"))
+            else:
+                log.info("fireflies_step_send_to_slack_done",
+                         fireflies_id=getattr(row, "fireflies_id", None),
+                         parent_ts=result.get("parent_ts"),
+                         tasks_posted=result.get("tasks_posted"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("fireflies_step_send_to_slack_exception",
+                        fireflies_id=getattr(row, "fireflies_id", None),
+                        error=str(e))
+
     # --- FR-CR-05-193g-3: новый объединённый step ------------
 
     def _step_extract_via_reasoning(self, session, row) -> None:

@@ -127,6 +127,11 @@ class ZoomRecording(Base, TimestampMixin):
     extracted_via_reasoning: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    # FR-CR-05-194 — slack_post_ts для idempotent auto-publish.
+    # NULL пока не отправлено, ts когда parent message postnut.
+    slack_post_ts: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
 
     processed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

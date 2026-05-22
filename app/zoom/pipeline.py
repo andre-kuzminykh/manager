@@ -2502,6 +2502,38 @@ class ZoomPipeline:
             total=len(tasks),
         )
 
+    # --- FR-CR-05-194: auto-Slack-publish step ----------------
+
+    def _step_send_to_slack(self, session, row) -> None:
+        """FR-CR-05-194a — auto-publish short_summary + tasks в Slack
+        channel из env `AUTO_SEND_TO_SLACK_CHANNEL`.
+
+        No-op если:
+          - AUTO_SEND_TO_SLACK_ENABLED не true
+          - AUTO_SEND_TO_SLACK_CHANNEL пустой
+          - row.slack_post_ts уже set (idempotent skip)
+          - short_summary пуст
+        """
+        try:
+            from app.services.slack_publish import maybe_auto_publish
+            result = maybe_auto_publish(session, row, settings=self._settings)
+            if result is None:
+                return  # disabled
+            if not result.get("ok"):
+                log.warning("zoom_step_send_to_slack_failed",
+                            zoom_id=getattr(row, "zoom_id", None),
+                            error=result.get("error"),
+                            step=result.get("step"))
+            else:
+                log.info("zoom_step_send_to_slack_done",
+                         zoom_id=getattr(row, "zoom_id", None),
+                         parent_ts=result.get("parent_ts"),
+                         tasks_posted=result.get("tasks_posted"))
+        except Exception as e:  # noqa: BLE001
+            log.warning("zoom_step_send_to_slack_exception",
+                        zoom_id=getattr(row, "zoom_id", None),
+                        error=str(e))
+
     # --- FR-CR-05-193g-2: новый объединённый step ------------
 
     def _step_extract_via_reasoning(self, session, row) -> None:

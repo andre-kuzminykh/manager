@@ -27,7 +27,7 @@ import sys
 
 from app.config import get_settings
 from app.db import session_scope
-from app.fireflies.pipeline import _strip_llm_todo_block
+from app.fireflies.pipeline import _build_todo_section, _strip_llm_todo_block
 from app.intent.llm_backends import OpenAIBackend
 from app.models import Task, TaskSourceKind, ZoomRecording
 from app.services.slack_mirror import (
@@ -76,6 +76,15 @@ def main() -> int:
         help="Run a FRESH ephemeral LLM task extraction at send "
         "time (slow). Useful when row's To-Do is stale or you want "
         "to verify the FR-CR-05-178 ephemeral path.",
+    )
+    ap.add_argument(
+        "--use-db-tasks", action="store_true",
+        help=(
+            "Render the TODO block from existing alive Task rows in DB "
+            "via _build_todo_section (FR-CR-05-119 / -163 filter). "
+            "Bypasses ephemeral LLM extract entirely. Defensive "
+            "DELETE at end still wipes those rows."
+        ),
     )
     ap.add_argument(
         "--token-key", default="ceo_brain_slack_bot_token",
@@ -139,6 +148,17 @@ def main() -> int:
         if args.no_tasks:
             print("\n[1/3] --no-tasks — skipping tasks thread.")
             tasks_text = ""
+        elif args.use_db_tasks:
+            print("\n[1/3] Rendering TODO from DB Task rows…")
+            tasks_text = _build_todo_section(
+                session,
+                source_kind=TaskSourceKind.zoom,
+                source_conversation_id=row.zoom_id,
+            )
+            print(
+                f"      → {tasks_text.count(chr(10) + chr(10))} "
+                f"important task lines"
+            )
         elif args.reuse_todo and reused_todo:
             print(
                 f"\n[2/3] Reusing existing To-Do from row.short_summary "

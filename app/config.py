@@ -496,6 +496,14 @@ class Settings(BaseSettings):
     fireflies_docs_folder_id: str = Field(
         default="", alias="FIREFLIES_DOCS_FOLDER_ID"
     )
+    # FR-CR-05-192t — operator-pinned 2026-05-22: «не обрабатывать
+    # встречи меньше 5 мин». Both Fireflies + Zoom pipelines skip
+    # `process_one` early when `row.duration_seconds < this`, with
+    # `report.skipped_reason="duration_too_short"`. 300s = 5 minutes.
+    min_meeting_seconds: int = Field(
+        default=300, alias="MIN_MEETING_SECONDS",
+    )
+
     # Models — the user can override per cost / quality.
     fireflies_summary_model: str = Field(
         default="gpt-5.5", alias="FIREFLIES_SUMMARY_MODEL"

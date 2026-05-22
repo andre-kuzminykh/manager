@@ -2470,6 +2470,28 @@ class FirefliesPipeline:
                         if llm_owner_raw is None
                         else owner_resolution + "_fallback_no_participants"
                     )
+            # FR-CR-05-192r — apply delegate marker if the resolved
+            # owner carries DELEGATE_TASKS_TO in their TM notes.
+            # Operator-pinned 2026-05-22: «на артема не ставить, на
+            # ирину». The chain is single-hop and gracefully no-ops
+            # when the delegate target isn't in known_employees.
+            from app.services.team_members import apply_delegate_marker
+
+            new_owner_user_id, delegate_name = apply_delegate_marker(
+                owner_user_id, known_employees,
+            )
+            if delegate_name and new_owner_user_id != owner_user_id:
+                log.info(
+                    "fireflies_task_owner_delegated",
+                    fireflies_id=row.fireflies_id,
+                    title=title[:80],
+                    from_owner=owner_user_id,
+                    to_owner=new_owner_user_id,
+                    delegate_real_name=delegate_name,
+                )
+                owner_user_id = new_owner_user_id
+                owner_resolution += f"_delegated_to_{delegate_name}"
+
             log.info(
                 "fireflies_task_owner_resolved",
                 fireflies_id=row.fireflies_id,
@@ -2904,6 +2926,20 @@ class FirefliesPipeline:
             and row.tasks_extracted
         ):
             report.skipped_reason = "already_processed"
+            return report
+        # FR-CR-05-192t — operator-pinned 2026-05-22 min-duration
+        # gate: skip meetings shorter than `min_meeting_seconds`
+        # (default 300 = 5 min). Procedural / aborted-call recordings
+        # waste LLM budget and produce no useful actionables.
+        min_secs = getattr(self._settings, "min_meeting_seconds", 300)
+        if min_secs and (row.duration_seconds or 0) < min_secs:
+            report.skipped_reason = "duration_too_short"
+            log.info(
+                "fireflies_pipeline_skipped_duration_too_short",
+                fireflies_id=row.fireflies_id,
+                duration_seconds=row.duration_seconds,
+                threshold=min_secs,
+            )
             return report
         row.attempts += 1
         # FR-CR-05-122 — every step is wrapped in `_trace_step`

@@ -692,6 +692,57 @@ def _employee_forbids_topic(notes: str, topic_keywords: list[str]) -> bool:
     return False
 
 
+import re as _re
+
+_DELEGATE_MARKER_RE = _re.compile(
+    r"DELEGATE_TASKS_TO:\s*([^.\n]+)", _re.IGNORECASE,
+)
+
+
+def apply_delegate_marker(
+    owner_user_id: str | None,
+    known_employees: list[dict],
+) -> tuple[str | None, str | None]:
+    """FR-CR-05-192r — operator-pinned delegate chain.
+
+    If ``owner_user_id`` resolves to a teammate whose ``notes`` field
+    carries a ``DELEGATE_TASKS_TO: <real_name>`` marker, swap to the
+    delegate's ``slack_user_id``. Single-hop, case-insensitive,
+    silently no-op when the delegate target isn't itself in
+    ``known_employees`` (operator-pinned sanity guard from
+    FR-CR-05-192k: never typo into the void).
+
+    Returns ``(new_owner_user_id, delegate_real_name_or_None)``. The
+    second element lets callers tag their owner-resolution trace
+    with the delegate's name without re-looking-up.
+    """
+    if not owner_user_id or not known_employees:
+        return owner_user_id, None
+    src_employee = None
+    for e in known_employees:
+        if e.get("slack_user_id") == owner_user_id:
+            src_employee = e
+            break
+    if src_employee is None:
+        return owner_user_id, None
+    notes = src_employee.get("notes") or ""
+    m = _DELEGATE_MARKER_RE.search(notes)
+    if not m:
+        return owner_user_id, None
+    delegate_name = m.group(1).strip()
+    delegate_norm = delegate_name.lower()
+    for e2 in known_employees:
+        if (e2.get("real_name") or "").lower() == delegate_norm:
+            new_id = e2.get("slack_user_id")
+            if new_id:
+                return new_id, e2.get("real_name") or delegate_name
+            # Delegate exists but has no slack_user_id — surface still
+            # by name, leave owner_user_id intact for the caller's
+            # fallback chain.
+            return owner_user_id, None
+    return owner_user_id, None
+
+
 def employee_forbids_topic(notes: str, topic_keywords: list[str]) -> bool:
     """Public alias of `_employee_forbids_topic`. Kept stable
     for FR-CR-05-145 — pipeline-level participants post-filter

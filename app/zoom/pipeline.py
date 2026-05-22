@@ -2044,6 +2044,25 @@ class ZoomPipeline:
                 priority = TaskPriority(t.get("priority") or "medium")
             except ValueError:
                 priority = TaskPriority.medium
+            # FR-CR-05-192r — apply delegate marker if the resolved
+            # owner carries DELEGATE_TASKS_TO in their TM notes.
+            # Single-hop, case-insensitive, no-op when delegate target
+            # not in known_employees.
+            from app.services.team_members import apply_delegate_marker
+
+            new_owner_uid, delegate_name = apply_delegate_marker(
+                owner_uid, known_employees,
+            )
+            if delegate_name and new_owner_uid != owner_uid:
+                log.info(
+                    "zoom_task_owner_delegated",
+                    zoom_id=row.zoom_id, title=title[:80],
+                    from_owner=owner_uid, to_owner=new_owner_uid,
+                    delegate_real_name=delegate_name,
+                )
+                owner_uid = new_owner_uid
+                owner_resolution += f"_delegated_to_{delegate_name}"
+
             owner_display_name = None
             if owner_uid and known_employees:
                 for e in known_employees:
@@ -2496,6 +2515,19 @@ class ZoomPipeline:
             recording_id=row.id, zoom_id=row.zoom_id, title=row.title,
             errors=[],
         )
+        # FR-CR-05-192t — operator-pinned 2026-05-22 min-duration
+        # gate. Procedural / aborted-call recordings waste LLM
+        # budget. Mirrors fireflies/pipeline.process_one early-skip.
+        min_secs = getattr(self._settings, "min_meeting_seconds", 300)
+        if min_secs and (row.duration_seconds or 0) < min_secs:
+            report.skipped_reason = "duration_too_short"
+            log.info(
+                "zoom_pipeline_skipped_duration_too_short",
+                zoom_id=row.zoom_id,
+                duration_seconds=row.duration_seconds,
+                threshold=min_secs,
+            )
+            return report
         row.attempts = (row.attempts or 0) + 1
         row.processed_at = datetime.now(timezone.utc)
 

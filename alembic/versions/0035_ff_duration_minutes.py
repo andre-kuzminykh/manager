@@ -20,7 +20,7 @@ either (a) were ingested AFTER the fix was deployed, or (b) were
 manually corrected, or (c) genuinely represent ≥5-min meetings that
 somehow got stored correctly through an earlier code path.
 
-Revision ID: 0035_fireflies_duration_to_seconds
+Revision ID: 0035_ff_duration_minutes
 Revises: 0034_slack_post_ts
 Create Date: 2026-05-22
 """
@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from alembic import op
 
-revision = "0035_fireflies_duration_to_seconds"
+revision = "0035_ff_duration_minutes"
 down_revision = "0034_slack_post_ts"
 branch_labels = None
 depends_on = None

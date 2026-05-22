@@ -371,49 +371,73 @@ def _attach_handlers(app: Any, settings: Settings) -> None:
     # Build the same Services bundle the main slack-bot uses for its
     # `handle_message` path; we'll call `classify_and_persist` after
     # the dispatcher's archive step.
+    #
+    # FR-CR-05-192w polish #2 (op-pinned 2026-05-22, same day): when
+    # operator runs the LEGACY slack-task-slack-ingest stack in
+    # parallel for Slack/TG tasks, CEO Brain's classifier produces
+    # a duplicate draft for every DM. Gate the whole block behind
+    # `CEO_BRAIN_TASK_CLASSIFIER_ENABLED` (default True so existing
+    # deployments keep current behavior; set false when legacy
+    # stack is the source of truth for Slack tasks).
+    import os as _os
+    _ceo_brain_task_classifier_enabled = _os.environ.get(
+        "CEO_BRAIN_TASK_CLASSIFIER_ENABLED", "true"
+    ).strip().lower() not in ("false", "0", "no", "off")
     _classifier_services = None
     _classifier_sender = None
-    try:
-        from app.intent import IntentClassifier
-        from app.intent.llm_backends import OpenAIBackend
-        from app.services import EmployeeDirectory
-        from app.context.retriever import ContextRetriever
-        from app.orchestrator.service import Orchestrator
-        from app.slack_bot.handlers.shared import Services
-        from app.slack_bot.rate_limiter import RateAwareSlackSender
-        from openai import OpenAI as _OpenAI
-
-        _llm_client = _OpenAI(api_key=settings.openai_api_key)
-        _llm_backend = OpenAIBackend(
-            _llm_client, settings.openai_model,
-        )
-        _classifier_services = Services(
-            slack=slack_client,
-            context_retriever=ContextRetriever(
-                slack_client,
-                window_before=settings.context_window_before,
-            ),
-            classifier=IntentClassifier(backend=_llm_backend),
-            orchestrator=Orchestrator(settings),
-            employees=EmployeeDirectory(
-                client=slack_client, settings=settings,
-            ),
-        )
-        _classifier_sender = RateAwareSlackSender(slack_client)
+    if not _ceo_brain_task_classifier_enabled:
         log.info(
-            "ceo_brain_classifier_services_built",
-            model=settings.openai_model,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning(
-            "ceo_brain_classifier_services_build_failed",
-            error=str(e),
+            "ceo_brain_task_classifier_disabled_by_env",
             hint=(
-                "DMs will still get an agent response, but task "
-                "extraction won't fire. Check OPENAI_API_KEY and "
-                "imports."
+                "CEO_BRAIN_TASK_CLASSIFIER_ENABLED=false — DMs to "
+                "this bot will get agent responses but NO task "
+                "drafts. Use this when a separate stack (e.g. "
+                "legacy slack-task-slack-ingest) is the canonical "
+                "source of Slack-derived tasks."
             ),
         )
+    else:
+        try:
+            from app.intent import IntentClassifier
+            from app.intent.llm_backends import OpenAIBackend
+            from app.services import EmployeeDirectory
+            from app.context.retriever import ContextRetriever
+            from app.orchestrator.service import Orchestrator
+            from app.slack_bot.handlers.shared import Services
+            from app.slack_bot.rate_limiter import RateAwareSlackSender
+            from openai import OpenAI as _OpenAI
+
+            _llm_client = _OpenAI(api_key=settings.openai_api_key)
+            _llm_backend = OpenAIBackend(
+                _llm_client, settings.openai_model,
+            )
+            _classifier_services = Services(
+                slack=slack_client,
+                context_retriever=ContextRetriever(
+                    slack_client,
+                    window_before=settings.context_window_before,
+                ),
+                classifier=IntentClassifier(backend=_llm_backend),
+                orchestrator=Orchestrator(settings),
+                employees=EmployeeDirectory(
+                    client=slack_client, settings=settings,
+                ),
+            )
+            _classifier_sender = RateAwareSlackSender(slack_client)
+            log.info(
+                "ceo_brain_classifier_services_built",
+                model=settings.openai_model,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ceo_brain_classifier_services_build_failed",
+                error=str(e),
+                hint=(
+                    "DMs will still get an agent response, but task "
+                    "extraction won't fire. Check OPENAI_API_KEY and "
+                    "imports."
+                ),
+            )
 
     def _maybe_classify_and_persist_task(
         db, payload: dict[str, Any],

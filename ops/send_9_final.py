@@ -26,17 +26,24 @@ from app.db import session_scope
 from app.models import Task, TeamMember
 
 
-# (source, conv_id, has_db_tasks)
-SEND_LIST: list[tuple[str, str, bool]] = [
-    ("fireflies", "01KS0551XQZSNXQ9GGS6DSEMP7", False),  # 19/05 13:00 Object First
-    ("zoom",      "k9We5mXQRsy3aiv5rOOsHg==",   False),  # 20/05 09:56 Weekly TM
-    ("fireflies", "01KS2V4MZ5RXVYXMY0GPK6RKF1", True),   # 20/05 14:05 Joe Millenia
-    ("zoom",      "eQc28t2oR7u7l4ocnk6YLA==",   True),   # 20/05 14:18 Ирина
-    ("zoom",      "8OA3y90MR3+ZCJn57oterw==",   True),   # 21/05 13:03 Алина Ирина
-    ("fireflies", "01KS5HS60Z2V7N1ZZV1FWVEGA1", True),   # 21/05 15:15 Ben Verwaayen
-    ("zoom",      "Y1qagtqRQ0OzJlS77rtHQw==",   True),   # 21/05 15:56 Ирина-аутрич
-    ("fireflies", "01KS5PBJ7EQS4311TCXK5V7QMQ", True),   # 21/05 16:35 Erik Goodman
-    ("zoom",      "jzh/h42zS0WpbI9eGImdQA==",   False),  # 21/05 17:30 Chris Watkins
+# (source, conv_id, mode)
+#   mode = "db"        — render TODO via _build_todo_section from DB
+#                        Task rows (FR-CR-05-119/-163 filter applies),
+#                        no LLM call, ~2 sec per send
+#   mode = "ephemeral" — fresh LLM TASK_EXTRACTION_SYSTEM call with
+#                        the FR-CR-05-192k known_employees table +
+#                        email→real_name resolver. ~60-180 sec per
+#                        send on long transcripts.
+SEND_LIST: list[tuple[str, str, str]] = [
+    ("fireflies", "01KS0551XQZSNXQ9GGS6DSEMP7", "ephemeral"),  # 19/05 13:00 Object First
+    ("zoom",      "k9We5mXQRsy3aiv5rOOsHg==",   "ephemeral"),  # 20/05 09:56 Weekly TM
+    ("fireflies", "01KS2V4MZ5RXVYXMY0GPK6RKF1", "db"),         # 20/05 14:05 Joe Millenia
+    ("zoom",      "eQc28t2oR7u7l4ocnk6YLA==",   "db"),         # 20/05 14:18 Ирина
+    ("zoom",      "8OA3y90MR3+ZCJn57oterw==",   "db"),         # 21/05 13:03 Алина Ирина
+    ("fireflies", "01KS5HS60Z2V7N1ZZV1FWVEGA1", "db"),         # 21/05 15:15 Ben Verwaayen
+    ("zoom",      "Y1qagtqRQ0OzJlS77rtHQw==",   "db"),         # 21/05 15:56 Ирина-аутрич
+    ("fireflies", "01KS5PBJ7EQS4311TCXK5V7QMQ", "db"),         # 21/05 16:35 Erik Goodman
+    ("zoom",      "jzh/h42zS0WpbI9eGImdQA==",   "ephemeral"),  # 21/05 17:30 Chris Watkins
 ]
 CHANNEL = "D0ASY5QF6UX"
 
@@ -71,8 +78,11 @@ def step_a_fix_owners() -> int:
 
 def step_b_send_all() -> None:
     print(f"\n[B] Sending {len(SEND_LIST)} records to {CHANNEL}…")
-    for i, (src, cid, has_tasks) in enumerate(SEND_LIST, start=1):
-        print(f"\n  [{i}/{len(SEND_LIST)}] {src}  {cid[:48]}")
+    for i, (src, cid, mode) in enumerate(SEND_LIST, start=1):
+        print(
+            f"\n  [{i}/{len(SEND_LIST)}] {src}  {cid[:48]}  "
+            f"({mode})"
+        )
         module = (
             "ops.send_one_fireflies"
             if src == "fireflies"
@@ -87,11 +97,20 @@ def step_b_send_all() -> None:
             "--channel", CHANNEL,
             "--no-mark-sent",
         ]
-        if has_tasks:
+        if mode == "db":
             cmd.append("--use-db-tasks")
-        else:
-            cmd.append("--no-tasks")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # mode == "ephemeral" → default flags trigger ephemeral extract
+        # (no --use-db-tasks, no --no-tasks). FR-CR-05-192k resolver
+        # converts email owners to real_name before posting.
+        # Ephemeral can take 60-180 sec on long transcripts.
+        timeout = 360 if mode == "ephemeral" else 60
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"    ❌ TIMEOUT after {timeout}s — skipping")
+            continue
         if result.returncode != 0:
             print(f"    ❌ FAILED  rc={result.returncode}")
             print(result.stdout[-2000:] or "")

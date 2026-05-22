@@ -463,7 +463,7 @@ def _attach_handlers(app: Any, settings: Settings) -> None:
             "text": text,
         }
         try:
-            classify_and_persist(
+            classification, draft, _snapshot = classify_and_persist(
                 db,
                 services=_classifier_services,
                 conversation_id=channel,
@@ -479,6 +479,59 @@ def _attach_handlers(app: Any, settings: Settings) -> None:
             log.warning(
                 "ceo_brain_classify_and_persist_failed",
                 channel=channel, ts=ts, error=str(e),
+            )
+            return
+        # FR-CR-05-192w polish: post the draft card so operator can
+        # confirm → Task row gets created. Mirrors handle_message's
+        # orchestrator.decide_passive + bk.draft_card + sender.send
+        # flow. Best-effort — failure to post card does NOT undo the
+        # persist; the draft sits in `proposed` state and operator
+        # can still confirm via /tasks or future card-post retry.
+        if draft is None:
+            return
+        try:
+            decision = _classifier_services.orchestrator.decide_passive(
+                classification=classification,
+                draft_id=draft.id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ceo_brain_orchestrator_decide_failed",
+                channel=channel, ts=ts, draft_id=draft.id, error=str(e),
+            )
+            return
+        if decision.action == "silent":
+            return
+        try:
+            from app.slack_bot import block_kit as _bk
+            from app.slack_bot.handlers.events import (
+                _draft_missing_fields as _miss,
+            )
+            blocks = _bk.draft_card(
+                classification=classification,
+                draft_id=draft.id,
+                confidence_bucket=(
+                    "high" if classification.confidence >= 0.75
+                    else "low"
+                ),
+                missing_fields=_miss(classification),
+            )
+            if _classifier_sender is not None:
+                _classifier_sender.send(
+                    channel=channel,
+                    thread_ts=payload.get("thread_ts") or ts,
+                    text="Draft action",
+                    blocks=blocks,
+                )
+                log.info(
+                    "ceo_brain_draft_card_posted",
+                    channel=channel, ts=ts, draft_id=draft.id,
+                    intent=str(classification.intent),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "ceo_brain_draft_card_post_failed",
+                channel=channel, ts=ts, draft_id=draft.id, error=str(e),
             )
 
     def _handle(payload: dict[str, Any]) -> None:

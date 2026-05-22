@@ -134,6 +134,14 @@ def _extract_important_tasks_ephemeral(
         tm_by_slack: dict[str, str] = {}
         tm_by_telegram: dict[str, str] = {}
         tm_real_names: set[str] = set()
+        tm_delegate: dict[str, str] = {}  # FR-CR-05-192r: real_name → delegate_real_name
+        import re as _re
+        # Match up to the first period or newline so the trailing
+        # «. Operator-pinned…» context in notes doesn't bleed into
+        # the captured delegate name.
+        delegate_re = _re.compile(
+            r"DELEGATE_TASKS_TO:\s*([^.\n]+)", _re.IGNORECASE,
+        )
         for _m in (
             _sess.query(_TM)
             .filter(_TM.real_name.isnot(None))
@@ -147,6 +155,10 @@ def _extract_important_tasks_ephemeral(
             if _m.telegram_user_id is not None:
                 tm_by_telegram[str(_m.telegram_user_id)] = _m.real_name
             tm_real_names.add(_m.real_name)
+            if _m.notes:
+                _hit = delegate_re.search(_m.notes)
+                if _hit:
+                    tm_delegate[_m.real_name] = _hit.group(1).strip()
     known_table = _render_known_employees_table(known_employees)
     # Build the participants line — same precedence as the pipeline.
     parts: list[str] = []
@@ -241,18 +253,26 @@ def _extract_important_tasks_ephemeral(
         if not owner_raw:
             return ""
         o = owner_raw.strip()
+        resolved: str
         if o in tm_by_slack:
-            return tm_by_slack[o]
-        if o.isdigit() and o in tm_by_telegram:
-            return tm_by_telegram[o]
-        if "@" in o:
-            hit = tm_by_email.get(o.lower())
-            if hit:
-                return hit
-        # Exact real_name passthrough (idempotent).
-        if o in tm_real_names:
-            return o
-        return o
+            resolved = tm_by_slack[o]
+        elif o.isdigit() and o in tm_by_telegram:
+            resolved = tm_by_telegram[o]
+        elif "@" in o and (hit := tm_by_email.get(o.lower())):
+            resolved = hit
+        elif o in tm_real_names:
+            resolved = o
+        else:
+            resolved = o
+        # FR-CR-05-192r — if the resolved owner carries a DELEGATE_TASKS_TO
+        # marker in TM.notes, swap to the delegate. Operator-pinned
+        # 2026-05-22: «на артема вообще задачи не ставить — на ирину».
+        if resolved in tm_delegate:
+            delegate = tm_delegate[resolved]
+            # Sanity: delegate must itself be a known TM real_name.
+            if delegate in tm_real_names:
+                return delegate
+        return resolved
 
     out: list[dict] = []
     for i, t in enumerate(raw_tasks):

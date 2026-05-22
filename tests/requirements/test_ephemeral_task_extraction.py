@@ -355,4 +355,160 @@ def test_fr_cr_05_192k_render_caps_long_description_at_350() -> None:
     assert len(body_text) <= 351  # 350 chars + «…» (1 char)
 
 
+# --------------------------------------------------------------------------- #
+# FR-CR-05-192r — delegate via TM notes
+# --------------------------------------------------------------------------- #
+
+
+def _seed_tm_with_delegate(session) -> None:
+    """Seed Артем + Ирина with the delegate marker on Артем's notes."""
+    session.add_all([
+        TeamMember(
+            real_name="Артем Соколов",
+            email="1@thehumanoid.ai",
+            active=True,
+            notes=(
+                "DELEGATE_TASKS_TO: Ирина Шипилова. "
+                "Operator-pinned 2026-05-22: CEO does not own "
+                "actionable items."
+            ),
+        ),
+        TeamMember(
+            real_name="Ирина Шипилова",
+            active=True,
+            notes="Handles CEO follow-ups.",
+        ),
+    ])
+    session.flush()
+
+
+def test_fr_cr_05_192r_resolver_swaps_delegate_when_notes_marker_present(
+    session, patched_session_scope,
+) -> None:
+    """When the LLM picks Артем as task owner and Артем's TM notes
+    carry DELEGATE_TASKS_TO: Ирина Шипилова, the resolver MUST
+    substitute Ирина."""
+    _seed_tm_with_delegate(session)
+    llm = _llm_with_owners(["Артем Соколов"])
+    with patch(
+        "ops.send_summaries_19_21.classify_directions",
+        return_value={0: "investors"},
+    ):
+        out = _extract_important_tasks_ephemeral(
+            _make_row(),
+            settings=SimpleNamespace(
+                fireflies_tasks_model="gpt-5.5",
+                fireflies_tasks_reasoning_effort=None,
+            ),
+            llm_backend=llm,
+        )
+    assert len(out) == 1
+    assert out[0]["owner"] == "Ирина Шипилова"
+
+
+def test_fr_cr_05_192r_resolver_skips_delegate_when_target_not_in_tm(
+    session, patched_session_scope,
+) -> None:
+    """Sanity guard: if the delegate target isn't a known TM
+    real_name, the resolver keeps the original owner (no silent
+    typo-eating). Operator pinned the «never typo into the void»
+    rule as part of FR-CR-05-192k."""
+    session.add(
+        TeamMember(
+            real_name="Артем Соколов",
+            email="1@thehumanoid.ai",
+            active=True,
+            notes="DELEGATE_TASKS_TO: Nonexistent Person",
+        )
+    )
+    session.flush()
+    llm = _llm_with_owners(["Артем Соколов"])
+    with patch(
+        "ops.send_summaries_19_21.classify_directions",
+        return_value={0: "investors"},
+    ):
+        out = _extract_important_tasks_ephemeral(
+            _make_row(),
+            settings=SimpleNamespace(
+                fireflies_tasks_model="gpt-5.5",
+                fireflies_tasks_reasoning_effort=None,
+            ),
+            llm_backend=llm,
+        )
+    assert len(out) == 1
+    # Delegate target missing → keep canonical Артем
+    assert out[0]["owner"] == "Артем Соколов"
+
+
+def test_fr_cr_05_192r_resolver_no_delegate_when_marker_absent(
+    session, patched_session_scope,
+) -> None:
+    """When the owner has no DELEGATE marker in notes, the resolver
+    leaves the canonical real_name in place (no surprise swaps)."""
+    session.add_all([
+        TeamMember(
+            real_name="Дмитрий Седов",
+            email="dmitry.sedov@thehumanoid.ai",
+            active=True,
+            notes="CFO. No delegate.",
+        ),
+        TeamMember(
+            real_name="Ирина Шипилова",
+            active=True,
+        ),
+    ])
+    session.flush()
+    llm = _llm_with_owners(["Дмитрий Седов"])
+    with patch(
+        "ops.send_summaries_19_21.classify_directions",
+        return_value={0: "budget"},
+    ):
+        out = _extract_important_tasks_ephemeral(
+            _make_row(),
+            settings=SimpleNamespace(
+                fireflies_tasks_model="gpt-5.5",
+                fireflies_tasks_reasoning_effort=None,
+            ),
+            llm_backend=llm,
+        )
+    assert len(out) == 1
+    assert out[0]["owner"] == "Дмитрий Седов"
+
+
+def test_fr_cr_05_192r_delegate_marker_case_insensitive(
+    session, patched_session_scope,
+) -> None:
+    """Marker parsing MUST be case-insensitive so operator can type
+    `delegate_tasks_to:` or `DELEGATE_TASKS_TO:` interchangeably in
+    the Team sheet."""
+    session.add_all([
+        TeamMember(
+            real_name="Артем Соколов",
+            email="1@thehumanoid.ai",
+            active=True,
+            notes="delegate_tasks_to: Ирина Шипилова",  # lowercase
+        ),
+        TeamMember(
+            real_name="Ирина Шипилова",
+            active=True,
+        ),
+    ])
+    session.flush()
+    llm = _llm_with_owners(["Артем Соколов"])
+    with patch(
+        "ops.send_summaries_19_21.classify_directions",
+        return_value={0: "investors"},
+    ):
+        out = _extract_important_tasks_ephemeral(
+            _make_row(),
+            settings=SimpleNamespace(
+                fireflies_tasks_model="gpt-5.5",
+                fireflies_tasks_reasoning_effort=None,
+            ),
+            llm_backend=llm,
+        )
+    assert len(out) == 1
+    assert out[0]["owner"] == "Ирина Шипилова"
+
+
 __all__ = []  # type: ignore[var-annotated]

@@ -219,9 +219,11 @@ def main() -> int:
 
         # tasks final — owner через DB lookup (apply_task_owner-like),
         # text (title/description) через LLM rewrite.
-        # FR-CR-05-193c-4: matcher.task_owners — это LIST в том же порядке
-        # что raw_owners был передан. Мапим по INDEX, не по raw_owner
-        # (несколько задач могут иметь одинаковый raw_owner типа «мы»).
+        # FR-CR-05-193c-4/5: matcher.task_owners — это LIST в том же порядке
+        # что raw_owners был передан. Мапим по INDEX, не по raw_owner.
+        # + apply_task_owner для DELEGATE swap'a (видно если у TeamMember
+        # notes есть DELEGATE_TASKS_TO).
+        from app.services.entity_apply import apply_task_owner
         task_owners_list = step2.get("task_owners") or []
         print(f"  Rewriting {len(step1['tasks'])} task titles+descriptions...")
         final_tasks = []
@@ -232,6 +234,14 @@ def main() -> int:
             )
             canonical = owner_info.get("tm_real_name")
             reasoning = owner_info.get("reasoning") or ""
+            applied = apply_task_owner(
+                {"raw_owner_mention": raw_o, "title": t["title"]},
+                tm_real_name=canonical,
+                session=session,
+                matcher_reasoning=reasoning,
+            )
+            final_owner = applied.get("owner_display_name")
+            delegate_meta = applied.get("matcher_meta") or {}
             # LLM rewrite для title+description (склонения)
             title_canon = rewrite_with_canonicals(
                 t["title"],
@@ -249,7 +259,11 @@ def main() -> int:
             )
             final_tasks.append({
                 **t,
-                "canonical_owner": canonical,
+                "matcher_canonical": canonical,
+                "final_owner": final_owner,
+                "delegate_status": delegate_meta.get("status"),
+                "delegate_original": delegate_meta.get("original_owner"),
+                "canonical_owner": final_owner or canonical,
                 "owner_reasoning": reasoning,
                 "title_canonical": title_canon,
                 "description_canonical": desc_canon,
@@ -276,11 +290,21 @@ def main() -> int:
         print(f"\n--- tasks ({len(final_tasks)}) с owner-trace ---")
         for i, t in enumerate(final_tasks, 1):
             raw_o = t["raw_owner_mention"]
-            owner = t["canonical_owner"] or "(no_match)"
+            matcher_pick = t.get("matcher_canonical")
+            final_o = t.get("final_owner") or t["canonical_owner"]
+            delegate_status = t.get("delegate_status")
+            delegate_original = t.get("delegate_original")
             print(f"  {i:2d}) {t['title_canonical'][:80]}")
-            print(f"      raw_owner=«{raw_o}» → «{owner}» • "
-                  f"priority={t.get('priority','medium')} "
-                  f"due={t.get('due_date') or '—'}")
+            if delegate_status == "delegated" and delegate_original:
+                print(f"      raw_owner=«{raw_o}» → matcher: «{matcher_pick}» "
+                      f"→ delegate: «{final_o}» • "
+                      f"priority={t.get('priority','medium')} "
+                      f"due={t.get('due_date') or '—'}")
+            else:
+                owner = final_o or "(no_match)"
+                print(f"      raw_owner=«{raw_o}» → «{owner}» • "
+                      f"priority={t.get('priority','medium')} "
+                      f"due={t.get('due_date') or '—'}")
             if t["owner_reasoning"]:
                 print(f"      reasoning: {t['owner_reasoning'][:100]}")
             if t["title"] != t["title_canonical"]:

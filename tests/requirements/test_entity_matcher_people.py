@@ -222,3 +222,140 @@ def test_fr_cr_05_193b_llm_invalid_json_safe(mock_llm, known_people) -> None:
     raws = {t["raw_owner"] for t in result["task_owners"]}
     assert raws == {"Дима", "Олег"}
     assert all(t["tm_real_name"] is None for t in result["task_owners"])
+
+
+# === FR-CR-05-193b-5 — meeting_participants section in prompt ===
+
+
+def test_fr_cr_05_193b_5_prompt_lists_meeting_participants(known_people) -> None:
+    """build_matcher_prompt должен включать секцию MEETING_PARTICIPANTS
+    когда список передан — это whitelist для LLM по Rule 5."""
+    from app.services.entity_matcher import build_matcher_prompt
+    prompt = build_matcher_prompt(
+        text="x", raw_owners=["я"],
+        known_people=known_people, known_orgs=[],
+        meeting_participants=["Артем Соколов", "Irina Shipilova"],
+    )
+    assert "MEETING_PARTICIPANTS" in prompt
+    assert "Артем Соколов" in prompt
+    assert "Irina Shipilova" in prompt
+
+
+def test_fr_cr_05_193b_5_prompt_omits_section_when_no_participants(
+    known_people,
+) -> None:
+    """Если meeting_participants пуст / None — секция не появляется
+    (back-compat; SPEAKER FALLBACK выключается)."""
+    from app.services.entity_matcher import build_matcher_prompt
+    prompt = build_matcher_prompt(
+        text="x", raw_owners=["я"],
+        known_people=known_people, known_orgs=[],
+        meeting_participants=None,
+    )
+    assert "MEETING_PARTICIPANTS" not in prompt
+
+
+# === FR-CR-05-193b-6 — Python-level enforcement of STRICT rule ===
+
+
+def test_fr_cr_05_193b_6_scrubs_non_participant_owner(
+    mock_llm, known_people
+) -> None:
+    """Even if LLM ignores Rule 5 and returns a tm_real_name that is
+    NOT in meeting_participants, match_entities() scrubs it to None
+    deterministically (defense in depth)."""
+    from app.services.entity_matcher import match_entities
+    mock_llm.complete_text.return_value = json.dumps({
+        "task_owners": [
+            {"raw_owner": "Дима",
+             "tm_real_name": "Дима Дроздов",  # NOT in participants below
+             "reasoning": "LLM ignored Rule 5"},
+        ],
+        "summary_replacements_people": [],
+        "summary_replacements_orgs": [],
+    })
+    result = match_entities(
+        text="x", raw_owners=["Дима"],
+        known_people=known_people, known_orgs=[],
+        meeting_participants=["Артем Соколов", "Irina Shipilova"],
+        llm_backend=mock_llm, model="gpt-5.5",
+    )
+    owner = result["task_owners"][0]
+    assert owner["tm_real_name"] is None
+    assert "scrubbed" in (owner.get("reasoning") or "").lower()
+
+
+def test_fr_cr_05_193b_6_keeps_participant_owner(
+    mock_llm, known_people
+) -> None:
+    """When LLM returns an owner WHO IS in meeting_participants, the
+    scrubber leaves it untouched."""
+    from app.services.entity_matcher import match_entities
+    mock_llm.complete_text.return_value = json.dumps({
+        "task_owners": [
+            {"raw_owner": "Артем",
+             "tm_real_name": "Артем Соколов",  # IS in participants
+             "reasoning": "exact"},
+        ],
+        "summary_replacements_people": [],
+        "summary_replacements_orgs": [],
+    })
+    result = match_entities(
+        text="x", raw_owners=["Артем"],
+        known_people=known_people, known_orgs=[],
+        meeting_participants=["Артем Соколов", "Irina Shipilova"],
+        llm_backend=mock_llm, model="gpt-5.5",
+    )
+    owner = result["task_owners"][0]
+    assert owner["tm_real_name"] == "Артем Соколов"
+    assert "scrubbed" not in (owner.get("reasoning") or "").lower()
+
+
+def test_fr_cr_05_193b_6_no_participants_no_scrub(
+    mock_llm, known_people
+) -> None:
+    """meeting_participants=None → no scrubbing (back-compat path)."""
+    from app.services.entity_matcher import match_entities
+    mock_llm.complete_text.return_value = json.dumps({
+        "task_owners": [
+            {"raw_owner": "Дима",
+             "tm_real_name": "Дима Дроздов",
+             "reasoning": "no constraint"},
+        ],
+        "summary_replacements_people": [],
+        "summary_replacements_orgs": [],
+    })
+    result = match_entities(
+        text="x", raw_owners=["Дима"],
+        known_people=known_people, known_orgs=[],
+        meeting_participants=None,
+        llm_backend=mock_llm, model="gpt-5.5",
+    )
+    assert result["task_owners"][0]["tm_real_name"] == "Дима Дроздов"
+
+
+def test_fr_cr_05_193b_6_preserves_null_tm_real_name(
+    mock_llm, known_people
+) -> None:
+    """Owners that the LLM already returned as null pass through unchanged
+    (scrubber only touches non-null names that fail the whitelist)."""
+    from app.services.entity_matcher import match_entities
+    mock_llm.complete_text.return_value = json.dumps({
+        "task_owners": [
+            {"raw_owner": "Бианка",
+             "tm_real_name": None,
+             "reasoning": "not in known_people"},
+        ],
+        "summary_replacements_people": [],
+        "summary_replacements_orgs": [],
+    })
+    result = match_entities(
+        text="x", raw_owners=["Бианка"],
+        known_people=known_people, known_orgs=[],
+        meeting_participants=["Артем Соколов"],
+        llm_backend=mock_llm, model="gpt-5.5",
+    )
+    owner = result["task_owners"][0]
+    assert owner["tm_real_name"] is None
+    # Untouched reasoning (no scrub annotation)
+    assert "scrubbed" not in (owner.get("reasoning") or "").lower()

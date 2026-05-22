@@ -273,8 +273,37 @@ def match_entities(
             "summary_replacements_orgs": [],
         }
     parsed = _safe_json_parse(raw) or {}
+    task_owners = parsed.get("task_owners") or []
+
+    # FR-CR-05-193b-6 — deterministic enforcement of Rule 5 (STRICT
+    # meeting_participants). LLM may drift; we scrub at Python level
+    # any tm_real_name that is NOT in meeting_participants whitelist.
+    if meeting_participants:
+        allowed = {p.strip() for p in meeting_participants if p}
+        scrubbed: list[dict] = []
+        for o in task_owners:
+            name = (o.get("tm_real_name") or "").strip()
+            if name and name not in allowed:
+                log.info(
+                    "entity_matcher_strict_scrub",
+                    raw_owner=o.get("raw_owner"),
+                    rejected_name=name,
+                    reason="not in meeting_participants",
+                )
+                scrubbed.append({
+                    "raw_owner": o.get("raw_owner"),
+                    "tm_real_name": None,
+                    "reasoning": (
+                        f"scrubbed: «{name}» not in meeting_participants. "
+                        f"Orig reasoning: {(o.get('reasoning') or '')[:120]}"
+                    ),
+                })
+            else:
+                scrubbed.append(o)
+        task_owners = scrubbed
+
     return {
-        "task_owners": parsed.get("task_owners") or [],
+        "task_owners": task_owners,
         "summary_replacements_people": parsed.get("summary_replacements_people") or [],
         "summary_replacements_orgs": parsed.get("summary_replacements_orgs") or [],
     }

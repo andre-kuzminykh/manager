@@ -79,9 +79,9 @@ def extract_summary_and_tasks(
     )
 
     try:
-        raw = llm_backend.chat(
-            system=_SYSTEM_PROMPT,
-            user=user_prompt,
+        raw = llm_backend.complete_text(
+            system_prompt=_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
             model=model,
             reasoning_effort="high",
         )

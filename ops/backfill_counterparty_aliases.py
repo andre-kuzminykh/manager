@@ -91,9 +91,9 @@ def backfill_aliases(
         listing = "\n".join(f"  {c.id}: {c.name}" for c in batch)
         prompt = _BACKFILL_PROMPT.format(listing=listing)
         try:
-            raw = llm_backend.chat(
-                system="You are a fund/company naming expert.",
-                user=prompt,
+            raw = llm_backend.complete_text(
+                system_prompt="You are a fund/company naming expert.",
+                user_prompt=prompt,
                 model=model,
                 reasoning_effort="low",
             )

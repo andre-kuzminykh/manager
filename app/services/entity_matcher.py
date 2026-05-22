@@ -128,8 +128,8 @@ def match_people(
     log.info("entity_matcher_started",
              raw_owners=len(raw_owners), known_people=len(known_people))
     try:
-        raw = llm_backend.chat(
-            system=_SYSTEM_PROMPT, user=prompt,
+        raw = llm_backend.complete_text(
+            system_prompt=_SYSTEM_PROMPT, user_prompt=prompt,
             model=model, reasoning_effort="medium",
         )
     except Exception as e:  # noqa: BLE001
@@ -181,8 +181,8 @@ def match_orgs(
         text=text, raw_owners=[], known_people=[], known_orgs=known_orgs,
     )
     try:
-        raw = llm_backend.chat(
-            system=_SYSTEM_PROMPT, user=prompt,
+        raw = llm_backend.complete_text(
+            system_prompt=_SYSTEM_PROMPT, user_prompt=prompt,
             model=model, reasoning_effort="medium",
         )
     except Exception as e:  # noqa: BLE001
@@ -226,8 +226,8 @@ def match_entities(
         known_people=known_people, known_orgs=known_orgs,
     )
     try:
-        raw = llm_backend.chat(
-            system=_SYSTEM_PROMPT, user=prompt,
+        raw = llm_backend.complete_text(
+            system_prompt=_SYSTEM_PROMPT, user_prompt=prompt,
             model=model, reasoning_effort="medium",
         )
     except Exception as e:  # noqa: BLE001

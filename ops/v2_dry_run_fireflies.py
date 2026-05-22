@@ -97,21 +97,31 @@ def main() -> int:
 
         # Meeting participants — для SPEAKER FALLBACK + STRICT rule
         # task_owners только из этих имён.
+        # FR-CR-05-192ac — фильтруем resources (переговорки), оставляем
+        # emails (это идентификаторы людей, может резолвить LLM canon).
+        from app.agenda.service import _is_resource_attendee
         meeting_participants: list[str] = []
         if row.calendar_attendees:
             try:
                 for a in row.calendar_attendees:
+                    if _is_resource_attendee(a):
+                        continue
                     if isinstance(a, dict):
                         name = (a.get("resolved_name")
                                 or a.get("display_name")
+                                or a.get("email")
                                 or "").strip()
-                        if name and name not in meeting_participants:
-                            meeting_participants.append(name)
+                    else:
+                        name = str(a).strip()
+                    if name and name not in meeting_participants:
+                        meeting_participants.append(name)
             except Exception:  # noqa: BLE001
                 pass
         if not meeting_participants and row.participants:
             try:
                 for p in row.participants:
+                    if _is_resource_attendee(p):
+                        continue
                     s = str(p).strip()
                     if s and s not in meeting_participants:
                         meeting_participants.append(s)

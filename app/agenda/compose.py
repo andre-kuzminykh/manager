@@ -150,14 +150,173 @@ def _call_llm_json(
     return json.loads(content)
 
 
+def _strip_prior_short_summary_body(short_summary: str) -> str:
+    """FR-CR-05-192u — extract the body paragraph(s) from a stored
+    `short_summary`. Drops the `<a href>` title wrapper on line 1
+    and the «Участники: …» line, returning only the meeting
+    recap text the operator typed last time.
+
+    The stored shape (FR-CR-05-127 + FR-CR-05-156):
+
+        <a href="…">DD/MM - Title</a>
+        ↵
+        Участники: A, B, C
+        ↵
+        Recap body paragraph one.\\nRecap body paragraph two.
+        ↵
+        TODO:                ← if any tasks; optional
+        N) … — Owner • DD.MM.YYYY HH:MM
+
+    We strip the title line (everything up to first `\\n\\n`), the
+    «Участники:» line, and any trailing «TODO:» block — leaving
+    just the recap body. HTML entities (`&lt;` etc.) are decoded.
+    """
+    import html as _html
+    import re as _re
+
+    if not short_summary:
+        return ""
+    text = short_summary
+    # Decode HTML entities the slack mrkdwn would have applied to
+    # the stored form (FR-CR-05-127 wraps + html.escape's the body).
+    if "<a href=" in text or "&lt;" in text or "&amp;" in text:
+        # Strip the <a href="…">…</a> first-line wrapper, then unescape
+        m = _re.match(r'<a href="[^"]*">([^<]+)</a>(.*)', text, _re.DOTALL)
+        if m:
+            # Drop the title line entirely.
+            text = m.group(2)
+        text = _html.unescape(text)
+    # Drop the «Участники: …» line wherever it sits, plus any
+    # preceding/trailing blank lines around it.
+    lines = text.split("\n")
+    kept: list[str] = []
+    for ln in lines:
+        if ln.strip().startswith("Участники:"):
+            continue
+        kept.append(ln)
+    body = "\n".join(kept).strip()
+    # Strip the trailing TODO block — operator wants the recap, not
+    # last week's tasks. Match both «To-Do:» and «TODO:» markers.
+    for marker in ("TODO:", "To-Do:"):
+        idx = body.find("\n" + marker)
+        if idx >= 0:
+            body = body[:idx].rstrip()
+        elif body.startswith(marker):
+            body = ""
+    return body.strip()
+
+
+def _build_lite_doc_body_md(
+    title: str,
+    recap: str,
+    prior_recordings: list[dict[str, Any]],
+    open_tasks: list[dict[str, Any]],
+) -> str:
+    """FR-CR-05-192u — deterministic markdown for the agenda Google
+    Doc, mirroring the LLM-mode template but without re-writes."""
+    out: list[str] = []
+    out.append(f"# Повестка ко встрече «{title}»\n")
+    out.append("## Подробно по прошлой встрече")
+    for r in prior_recordings[:1]:
+        url = (r.get("google_doc_url") or "").strip()
+        date = (r.get("meeting_date") or "")[:10]
+        if url:
+            out.append(f"- {date} — {url}")
+        else:
+            out.append(f"- {date}")
+    out.append("")
+    out.append("## На прошлой встрече")
+    out.append(recap or "(нет данных по прошлой встрече)")
+    out.append("")
+    out.append("## К обсуждению")
+    out.append("| # | Задача | Описание | Статус | Owner | Due |")
+    out.append("|---|--------|----------|--------|-------|-----|")
+    for i, t in enumerate(open_tasks, start=1):
+        title_cell = (t.get("title") or "").replace("|", "\\|")
+        desc_cell = (t.get("description") or "").replace("|", "\\|")
+        status_cell = (t.get("status") or "").replace("|", "\\|")
+        owner_cell = (t.get("owner") or "").replace("|", "\\|")
+        due_cell = (t.get("due") or t.get("due_date") or "").replace("|", "\\|")
+        out.append(
+            f"| {i} | {title_cell} | {desc_cell} | {status_cell} | "
+            f"{owner_cell} | {due_cell} |"
+        )
+    return "\n".join(out)
+
+
+def _compose_lite(candidate: AgendaCandidate) -> AgendaOutput:
+    """FR-CR-05-192u — operator-pinned 2026-05-22 «никакого LLM,
+    просто `На прошлой встрече:` и предыдущее саммари как есть».
+    Returns AgendaOutput built deterministically from the candidate
+    without ANY LLM call:
+
+      - previous_recap: single-element list with the prior recording's
+        stored short_summary body (title line + Участники line
+        stripped). Slack renderer prepends «На прошлой встрече: »
+        once per agenda — see app/agenda/slack_format.py.
+      - open_questions: empty list (operator: «остальное оставим
+        как есть» — agenda doesn't manufacture discussion items).
+      - tasks_checklist: open_tasks passthrough, no rewrites of
+        title/description/owner/due/status.
+      - doc_body_md: deterministic markdown (no LLM compose).
+
+    Total wall time: <50 ms (no network, no LLM). Compare to the
+    LLM compose path which is 30-180 sec on gpt-5.5.
+    """
+    prior = candidate.prior_recordings[0] if candidate.prior_recordings else {}
+    recap = _strip_prior_short_summary_body(prior.get("short_summary") or "")
+    tasks_checklist: list[dict[str, Any]] = []
+    for t in candidate.open_tasks:
+        tasks_checklist.append({
+            "task_id": t.get("task_id") or t.get("id"),
+            "title": t.get("title") or "",
+            "description": t.get("description") or "",
+            "status": t.get("status") or "",
+            "owner": t.get("owner") or t.get("owner_display_name") or "",
+            "due": t.get("due") or t.get("due_date") or "",
+        })
+    return AgendaOutput(
+        previous_recap=[recap] if recap else [],
+        tasks_checklist=tasks_checklist,
+        open_questions=[],
+        doc_body_md=_build_lite_doc_body_md(
+            candidate.title, recap,
+            candidate.prior_recordings, tasks_checklist,
+        ),
+    )
+
+
 def compose_agenda(
     candidate: AgendaCandidate,
     *,
     llm_backend: LLMBackend,
     model: str,
 ) -> AgendaOutput | None:
-    """Run the LLM compose step. Returns None on any failure —
-    runner logs and skips the event."""
+    """FR-CR-05-192u — operator-pinned 2026-05-22 «никакого LLM».
+    Always runs `_compose_lite` — verbatim passthrough of the
+    prior short_summary + open tasks. The `llm_backend` and `model`
+    parameters are kept in the signature for source-compatibility
+    with the existing runner; both are ignored.
+    """
+    try:
+        return _compose_lite(candidate)
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "agenda_compose_lite_failed",
+            calendar_event_id=candidate.calendar_event_id,
+            error=str(e),
+        )
+        return None
+
+
+def _compose_agenda_llm_legacy(
+    candidate: AgendaCandidate,
+    *,
+    llm_backend: LLMBackend,
+    model: str,
+) -> AgendaOutput | None:
+    """Original LLM-driven compose (kept for tests + future toggle).
+    Not called from production — see `compose_agenda` above."""
     messages = [
         {"role": "system", "content": _AGENDA_SYSTEM_PROMPT},
         {"role": "user", "content": _build_user_prompt(candidate)},

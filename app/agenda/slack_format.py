@@ -257,15 +257,12 @@ def render_agenda_text(
 
     items = _collect_discussion_items(output)
     if items:
+        # FR-CR-05-192u (op-pinned 2026-05-22): canonical label is
+        # «Статус задач к обсуждению:» without emoji / count — matches
+        # the original 14/05 reference layout. The task list itself
+        # ships in the thread reply (see `render_agenda_task_thread_replies`).
         lines.append("")
-        word = "пункт" if len(items) == 1 else (
-            "пункта" if 2 <= len(items) % 10 <= 4
-            and not (12 <= len(items) % 100 <= 14)
-            else "пунктов"
-        )
-        lines.append(
-            f"👇 {len(items)} {word} к обсуждению — в треде ниже"
-        )
+        lines.append("Статус задач к обсуждению:")
 
     out = "\n".join(lines)
     if len(out) > _SLACK_TEXT_CAP:

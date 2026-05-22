@@ -20,6 +20,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.agenda.compose import AgendaOutput, compose_agenda
+# FR-CR-05-192u: production compose_agenda is the LLM-free lite
+# path now; the LLM-mode tests below pivot to the kept legacy
+# helper so historical contracts on the LLM call shape, fallback
+# behavior, and OpenAI client wiring still get coverage.
+from app.agenda.compose import (
+    _compose_agenda_llm_legacy as compose_agenda_llm,
+)
 from app.agenda.service import (
     AgendaCandidate,
     AgendaService,
@@ -681,7 +688,7 @@ def test_compose_agenda_happy_path():
         "open_questions": ["согласовать timing pre-seed"],
         "doc_body_md": "## Из прошлого раза\n- обсудили roadmap\n",
     }
-    out = compose_agenda(candidate, llm_backend=llm, model="gpt-test")
+    out = compose_agenda_llm(candidate, llm_backend=llm, model="gpt-test")
     assert isinstance(out, AgendaOutput)
     assert out.previous_recap == ["обсудили roadmap", "договорились про deck"]
     assert len(out.tasks_checklist) == 1
@@ -699,7 +706,7 @@ def test_compose_agenda_returns_none_on_llm_exception():
     )
     llm = MagicMock()
     llm.complete_json.side_effect = RuntimeError("network down")
-    assert compose_agenda(candidate, llm_backend=llm, model="m") is None
+    assert compose_agenda_llm(candidate, llm_backend=llm, model="m") is None
 
 
 def test_compose_agenda_uses_openai_client_fallback():
@@ -757,7 +764,7 @@ def test_compose_agenda_uses_openai_client_fallback():
         '"open_questions": [], "doc_body_md": "## ..."}'
     )
     backend = FakeBackend(json_str)
-    out = compose_agenda(candidate, llm_backend=backend, model="gpt-test")
+    out = compose_agenda_llm(candidate, llm_backend=backend, model="gpt-test")
     assert out is not None
     assert out.previous_recap == ["обсудили план"]
     assert backend.last_call["response_format"] == {"type": "json_object"}
@@ -773,7 +780,7 @@ def test_compose_agenda_returns_none_on_non_dict_output():
     )
     llm = MagicMock()
     llm.complete_json.return_value = "not a dict"
-    assert compose_agenda(candidate, llm_backend=llm, model="m") is None
+    assert compose_agenda_llm(candidate, llm_backend=llm, model="m") is None
 
 
 # -- render_agenda_text --------------------------------------------------------
@@ -842,10 +849,15 @@ def test_render_agenda_text_format_matches_operator_pin():
     assert "Разобрали список инвесторов" in text
     # FR-CR-05-167 polish 2026-05-18: task list moves to the
     # thread reply; top message just points there.
-    assert "Статус задач к обсуждению:" not in text
-    assert "1) Bracket Capital" not in text
+    # FR-CR-05-192u polish 2026-05-22: canonical pointer is
+    # «Статус задач к обсуждению:» (operator's pinned 14/05
+    # reference layout), NOT the «👇 N пунктов к обсуждению — в
+    # треде ниже» form.
+    assert "Статус задач к обсуждению:" in text
+    assert "1) Bracket Capital" not in text  # task list NOT in parent
     assert "ещё" not in text  # no «…ещё N в Google Doc» overflow
-    assert "к обсуждению — в треде ниже" in text
+    assert "к обсуждению — в треде ниже" not in text
+    assert "👇" not in text
 
     # Now check the THREAD reply carries the full list
     replies = render_agenda_task_thread_replies(output=output)

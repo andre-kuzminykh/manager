@@ -391,10 +391,12 @@ def main() -> int:
                 session, row,
                 channel=channel, token=token,
                 use_db_tasks=True, no_tasks=False,
-                # FR-CR-05-199 — V2 publish: ВСЕ tasks в thread reply,
-                # priority direction tasks остаются в parent message
-                # как TODO: trailer
-                all_tasks_in_thread=True,
+                # FR-CR-05-199 (revised) — БД: ВСЕ V2 tasks (через
+                # _replace_tasks_in_db); Slack thread reply: только
+                # priority direction (DIRECTIONS_IMPORTANT filter — как
+                # в legacy auto-publish). Parent — short_summary с
+                # title+hyperlink + TODO trailer.
+                all_tasks_in_thread=False,
             )
             print(f"  publish result: {pub_result}")
             if pub_result.get("ok"):

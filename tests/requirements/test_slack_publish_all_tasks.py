@@ -116,3 +116,32 @@ def test_fr_cr_05_199_backwards_compat_default_filter_only() -> None:
     )
     assert "Investors action" in out
     assert "Other action" not in out
+
+
+def test_fr_cr_05_199_v2_publish_uses_legacy_filter() -> None:
+    """FR-CR-05-199 revised — V2 publish (ops/v2_publish_meeting.py) MUST
+    call publish_zoom_recording_to_slack с all_tasks_in_thread=False
+    (default = legacy filter). Operator-pinned: Slack-формат для V2 =
+    тот же что у legacy auto-publish, только в БД все tasks."""
+    import inspect
+
+    from ops import v2_publish_meeting
+
+    src = inspect.getsource(v2_publish_meeting.main)
+    # Должно быть all_tasks_in_thread=False (или вообще не передаваться)
+    assert "all_tasks_in_thread=True" not in src, (
+        "V2 publish НЕ должен передавать all_tasks_in_thread=True — "
+        "Slack thread фильтруется по DIRECTIONS_IMPORTANT (legacy behavior)"
+    )
+
+
+def test_fr_cr_05_199_publish_default_thread_is_filtered() -> None:
+    """publish_zoom_recording_to_slack(all_tasks_in_thread=False) — default —
+    thread_tasks_text равен parent_tasks_text (оба filtered)."""
+    import inspect
+
+    from app.services.slack_publish import publish_zoom_recording_to_slack
+
+    sig = inspect.signature(publish_zoom_recording_to_slack)
+    # Default — False = legacy filter
+    assert sig.parameters["all_tasks_in_thread"].default is False

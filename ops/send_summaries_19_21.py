@@ -132,10 +132,19 @@ def _extract_important_tasks_ephemeral(
         ("meeting_participants:\n  - " + "\n  - ".join(parts))
         if parts else ""
     )
+    # FR-CR-05-185 — pass today's date so the LLM can resolve relative
+    # deadlines («завтра», «в понедельник», «к концу июня») into
+    # absolute ISO `YYYY-MM-DD` values for the `due_date` field.
+    from datetime import date as _date
+
     user_prompt = (
         "Return JSON: `{\"tasks\": [{\"title\": ..., "
-        "\"description\": ..., \"owner\": ..., \"priority\": ...}, "
-        "...]}`. Empty list ok.\n\n"
+        "\"description\": ..., \"owner\": ..., \"priority\": ..., "
+        "\"due_date\": \"YYYY-MM-DD or null\", "
+        "\"due_time\": \"HH:MM or null\"}, ...]}`. Empty list ok.\n\n"
+        f"today_date: {_date.today().isoformat()}\n"
+        f"meeting_date: "
+        f"{row.meeting_date.date().isoformat() if row.meeting_date else ''}\n"
         f"Заголовок: {row.title or '(без названия)'}\n"
         f"{participants_line}\n\n"
         "ДЕТАЛЬНОЕ САММЕРИ:\n"
@@ -180,6 +189,36 @@ def _extract_important_tasks_ephemeral(
         llm_backend=llm_backend,
         model=settings.fireflies_tasks_model,
     )
+    # FR-CR-05-192k — owner resolver: when LLM emits an email
+    # (e.g. «sots@thehumanoid.ai») we look up TeamMember by email
+    # and substitute the canonical real_name. The pipeline's
+    # _step_extract_tasks does this via slack_user_id round-trip;
+    # ephemeral path now mirrors it for the email case.
+    from app.db import session_scope as _session_scope
+    from app.models import TeamMember as _TM
+
+    tm_by_email: dict[str, str] = {}
+    with _session_scope() as _sess:
+        for _m in (
+            _sess.query(_TM)
+            .filter(_TM.email.isnot(None))
+            .filter(_TM.real_name.isnot(None))
+            .filter(_TM.active.is_(True))
+            .all()
+        ):
+            tm_by_email[(_m.email or "").lower().strip()] = _m.real_name
+
+    def _resolve_owner(owner_raw: str) -> str:
+        if not owner_raw:
+            return ""
+        o = owner_raw.strip()
+        # If owner looks like an email, try TM lookup.
+        if "@" in o:
+            hit = tm_by_email.get(o.lower())
+            if hit:
+                return hit
+        return o
+
     out: list[dict] = []
     for i, t in enumerate(raw_tasks):
         if not isinstance(t, dict):
@@ -189,37 +228,78 @@ def _extract_important_tasks_ephemeral(
             continue
         out.append({
             "title": (t.get("title") or "").strip(),
-            "owner": (t.get("owner") or "").strip(),
+            "description": (t.get("description") or "").strip(),
+            "owner": _resolve_owner(t.get("owner") or ""),
             "direction": d,
+            # Forward the LLM-emitted deadline so the renderer can
+            # use it instead of the fallback «today 18:00».
+            "due_date": (t.get("due_date") or "").strip() or None,
+            "due_time": (t.get("due_time") or "").strip() or None,
         })
     return out
 
 
 def _render_tasks_block(tasks: list[dict]) -> str:
     """FR-CR-05-178 / FR-CR-05-184 — numbered To-Do for the Slack
-    thread reply. Format matches the pipeline's deterministic
-    rendering so operator sees one consistent layout:
+    thread reply. Mirrors `app.fireflies.pipeline._build_todo_section`:
 
-        N) Title — Owner • DD.MM.YYYY HH:MM
+        N) <description (else title)> — <owner> • DD.MM.YYYY HH:MM
 
-    Deadline defaults to today at 18:00 (FR-CR-05-119 convention).
+    FR-CR-05-185 — deadline source order:
+      1. task['due_date'] (LLM-extracted ISO YYYY-MM-DD) +
+         task['due_time'] (HH:MM); time defaults to 18:00 when
+         the LLM emits a date but no time.
+      2. fallback: today 18:00.
     """
     if not tasks:
         return ""
-    from datetime import date, datetime, time, timezone
+    from datetime import date as _date, datetime, time as _time
 
     today_18 = datetime.combine(
-        date.today(), time(18, 0),
+        _date.today(), _time(18, 0),
     ).strftime("%d.%m.%Y %H:%M")
+
+    def _format_deadline(t: dict) -> str:
+        raw_date = (t.get("due_date") or "").strip()
+        raw_time = (t.get("due_time") or "").strip()
+        if not raw_date:
+            return today_18
+        try:
+            d = _date.fromisoformat(raw_date)
+        except ValueError:
+            return today_18
+        if raw_time:
+            try:
+                hh, mm = raw_time.split(":")
+                tt = _time(int(hh), int(mm))
+            except (ValueError, TypeError):
+                tt = _time(18, 0)
+        else:
+            tt = _time(18, 0)
+        return datetime.combine(d, tt).strftime("%d.%m.%Y %H:%M")
+
     lines: list[str] = []
     for i, t in enumerate(tasks, start=1):
-        title = t["title"] or "(без описания)"
-        owner = t["owner"]
-        suffix_parts = []
+        body_text = (
+            (t.get("description") or "").strip()
+            or (t.get("title") or "").strip()
+            or "(без описания)"
+        )
+        # Match _build_todo_section: cap at 350 chars to keep the
+        # Slack reply scannable; soft-cut on the last space before
+        # the boundary.
+        if len(body_text) > 350:
+            cut = body_text.rfind(" ", 0, 350)
+            body_text = (
+                body_text[: cut if cut > 200 else 350].rstrip(",;:- ")
+                + "…"
+            )
+        owner = (t.get("owner") or "").strip()
+        suffix_parts: list[str] = []
         if owner:
             suffix_parts.append(owner)
-        suffix_parts.append(today_18)
-        lines.append(f"{i}) {title} — {' • '.join(suffix_parts)}")
+        suffix_parts.append(_format_deadline(t))
+        lines.append(f"{i}) {body_text} — {' • '.join(suffix_parts)}")
     return "\n\n".join(lines)
 
 

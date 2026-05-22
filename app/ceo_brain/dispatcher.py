@@ -171,14 +171,28 @@ def handle_event(
             result.archived = True
         except Exception as e:  # noqa: BLE001
             result.archive_failed = True
+            # FR-CR-05-192v polish: when write_archive raises
+            # (PermissionError on JSONL, UniqueViolation on PG, …),
+            # the SQLAlchemy session is left in an aborted state
+            # ("transaction has been rolled back due to a previous
+            # exception during flush"). The responder needs a clean
+            # session for its DB queries — rollback so downstream
+            # work doesn't crash with «PendingRollbackError».
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
             from app.logging_setup import get_logger as _gl
             _gl(__name__).warning(
                 "ceo_brain_archive_write_failed",
                 channel_id=channel_id, ts=ts, error=str(e),
                 hint=(
                     "responder will still fire — archive is "
-                    "best-effort. Common causes: permission "
-                    "denied on /app/traces, disk full."
+                    "best-effort. session.rollback() applied so "
+                    "downstream DB work has a clean transaction. "
+                    "Common causes: PermissionError on /app/traces, "
+                    "UniqueViolation on slack_message_archive "
+                    "(history poller race), disk full."
                 ),
             )
 

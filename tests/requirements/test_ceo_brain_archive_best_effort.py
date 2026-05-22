@@ -161,4 +161,48 @@ def test_fr_cr_05_192v_dispatch_result_has_archive_failed_field() -> None:
     assert r.archive_failed is True
 
 
+def test_fr_cr_05_192v_archive_failure_rolls_back_session(session) -> None:
+    """When write_archive raises (e.g. UniqueViolation on
+    slack_message_archive from a race with history_poller), the
+    SQLAlchemy session is left aborted ("transaction has been
+    rolled back due to a previous exception"). The responder
+    needs a clean session for its DB queries — dispatcher MUST
+    call session.rollback() before invoking responder."""
+    responder = MagicMock()
+    rollback_calls = []
+    original_rollback = session.rollback
+
+    def tracking_rollback():
+        rollback_calls.append(True)
+        return original_rollback()
+    session.rollback = tracking_rollback  # type: ignore[method-assign]
+    with (
+        patch(
+            "app.ceo_brain.dispatcher.should_archive_channel",
+            return_value=True,
+        ),
+        patch(
+            "app.ceo_brain.dispatcher.write_archive",
+            side_effect=Exception("UniqueViolation: duplicate key"),
+        ),
+        patch(
+            "app.ceo_brain.dispatcher._is_duplicate_archive",
+            return_value=False,
+        ),
+        patch(
+            "app.config.get_settings",
+            return_value=MagicMock(ceo_brain_allowed_users=""),
+        ),
+    ):
+        handle_event(
+            session, _payload(),
+            bot_user_id="U_BOT",
+            responder=responder,
+        )
+    # Rollback called at least once (best-effort cleanup)
+    assert len(rollback_calls) >= 1
+    # Responder still fired despite session aborted-then-rolled-back
+    responder.assert_called_once()
+
+
 __all__ = []  # type: ignore[var-annotated]

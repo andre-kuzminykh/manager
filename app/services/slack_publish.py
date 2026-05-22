@@ -116,9 +116,10 @@ def publish_zoom_recording_to_slack(
                 "step": "import"}
 
     from ops.send_one_zoom import _split_short_summary
-    from ops._send_helpers import (
+    from ops._send_helpers import build_parent_raw
+    from app.services.slack_mirror import (
         SLACK_TEXT_CHUNK_CHARS, _compact_for_slack,
-        _split_for_slack, _to_slack_mrkdwn, build_parent_raw,
+        _split_for_slack, _to_slack_mrkdwn,
     )
     from app.fireflies.pipeline import _build_todo_section
 

@@ -17,6 +17,41 @@ def test_fr_cr_05_193c_text_replace_word_boundary() -> None:
     assert "Димаху" in result  # substring untouched
 
 
+def test_fr_cr_05_193c_2_no_cascade_when_raw_is_prefix_of_canonical() -> None:
+    """FR-CR-05-193c-2 — обнаруженный prod bug: «Артем»→«Артем Соколов»
+    НЕ должен превращаться в «Артем Соколов Соколов» если применяется вместе
+    с «Артема»→«Артем Соколов»."""
+    from app.services.entity_apply import apply_text_replacements
+    text = "Артем приехал. Артема ждали все."
+    result = apply_text_replacements(
+        text,
+        replacements=[
+            {"raw": "Артем", "canonical": "Артем Соколов"},
+            {"raw": "Артема", "canonical": "Артем Соколов"},
+        ],
+    )
+    # ОБА должны стать «Артем Соколов», но НЕ «Артем Соколов Соколов»
+    assert "Артем Соколов приехал" in result
+    assert "Артем Соколов ждали все" in result
+    assert "Соколов Соколов" not in result
+
+
+def test_fr_cr_05_193c_2_no_cascade_org() -> None:
+    """То же для org: «Schaeffler»→«Schaeffler AG» + «Шаффлер»→«Schaeffler»
+    не должно превращать «Schaeffler» в «Schaeffler AG AG»."""
+    from app.services.entity_apply import apply_text_replacements
+    text = "Звонок с Шаффлер и потом Schaeffler"
+    result = apply_text_replacements(
+        text,
+        replacements=[
+            {"raw": "Шаффлер", "canonical": "Schaeffler"},
+            {"raw": "Schaeffler", "canonical": "Schaeffler AG"},
+        ],
+    )
+    # «Шаффлер» становится «Schaeffler», но НЕ дальше через 2-й replacement
+    assert "Schaeffler AG AG" not in result
+
+
 def test_fr_cr_05_193c_owner_lookup_sets_user_id() -> None:
     """`apply_task_owner(task_data, tm_real_name, session)` находит
     TeamMember и копирует slack_user_id / telegram_user_id."""

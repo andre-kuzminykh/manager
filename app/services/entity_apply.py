@@ -19,35 +19,43 @@ def apply_text_replacements(
     *,
     replacements: list[dict],
 ) -> str:
-    """Regex word-boundary aware replace. Idempotent на already-canonical text.
+    """Word-boundary aware replace in a SINGLE pass.
+
+    FR-CR-05-193c-2 — single-pass combined regex to avoid cascade bug
+    where «Артема»→«Артем Соколов» then «Артем»→«Артем Соколов» would
+    produce «Артем Соколов Соколов» (raw matched inside already-applied
+    canonical).
 
     Args:
       text: source text (summary_detailed / summary_short)
       replacements: list[{"raw": str, "canonical": str}]
     """
-    if not text:
-        return ""
-    if not replacements:
-        return text
-    out = text
-    # Sort by raw length DESC чтобы long mentions replace ПЕРВЫМИ
-    # (избегаем substring сlasses).
-    sorted_repls = sorted(replacements, key=lambda r: -len(r.get("raw") or ""))
-    for r in sorted_repls:
+    if not text or not replacements:
+        return text or ""
+
+    # Sort by raw length DESC: longest alternative matches first
+    # (e.g. «Артема» before «Артем», избегая prefix-collision).
+    pairs: list[tuple[str, str]] = []
+    seen_raw: set[str] = set()
+    for r in replacements:
         raw = (r.get("raw") or "").strip()
         canon = (r.get("canonical") or "").strip()
-        if not raw or not canon or raw == canon:
+        if not raw or not canon or raw == canon or raw in seen_raw:
             continue
-        # Idempotency check — если canonical уже содержит raw, не зацикливаемся
-        # Используем negative lookbehind / lookahead для word boundary
-        # works for cyrillic + latin
-        pattern = re.compile(
-            r"(?<![\wЀ-ӿ])" + re.escape(raw) + r"(?![\wЀ-ӿ])"
-        )
-        # Idempotency: если canonical уже в тексте на месте raw, skip
-        # (regex replace всё равно проверит word boundary)
-        out = pattern.sub(canon, out)
-    return out
+        seen_raw.add(raw)
+        pairs.append((raw, canon))
+    if not pairs:
+        return text
+    pairs.sort(key=lambda x: -len(x[0]))
+
+    repl_map = {raw: canon for raw, canon in pairs}
+    pattern = re.compile(
+        r"(?<![\wЀ-ӿ])("
+        + "|".join(re.escape(raw) for raw, _ in pairs)
+        + r")(?![\wЀ-ӿ])"
+    )
+
+    return pattern.sub(lambda m: repl_map[m.group(1)], text)
 
 
 def apply_task_owner(

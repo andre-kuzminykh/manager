@@ -145,3 +145,30 @@ def test_fr_cr_05_199_publish_default_thread_is_filtered() -> None:
     sig = inspect.signature(publish_zoom_recording_to_slack)
     # Default — False = legacy filter
     assert sig.parameters["all_tasks_in_thread"].default is False
+
+
+# === FR-CR-05-199b — V2 publish parent: DD/MM-Title hyperlink + Участники ===
+
+
+def test_fr_cr_05_199b_v2_publish_includes_title_hyperlink() -> None:
+    """V2 publish должен composить parent message с `<a href=doc_url>DD/MM - Title</a>`
+    на первой строке (как legacy short_summary)."""
+    import inspect
+    from ops import v2_publish_meeting
+
+    src = inspect.getsource(v2_publish_meeting.main)
+    # Использует _wrap_short_summary_with_doc_link для hyperlink
+    assert "_wrap_short_summary_with_doc_link" in src
+    # И _force_meeting_title_first_line для DD/MM-Title
+    assert "_force_meeting_title_first_line" in src
+
+
+def test_fr_cr_05_199b_v2_publish_includes_participants_line() -> None:
+    """V2 publish добавляет «Участники: ...» строку из
+    meeting_participants (canonical TM real_name'ы)."""
+    import inspect
+    from ops import v2_publish_meeting
+
+    src = inspect.getsource(v2_publish_meeting.main)
+    assert "Участники:" in src
+    assert "meeting_participants" in src

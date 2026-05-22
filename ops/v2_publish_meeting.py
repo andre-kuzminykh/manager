@@ -428,15 +428,50 @@ def main() -> int:
                 result["tasks"], filter_important=True,
             )
 
+            # FR-CR-05-199b — header «DD/MM - Title» (HTML hyperlink на Doc)
+            # + «Участники:» строка, как у legacy _step_short_summary.
+            # Compose: placeholder first line + Участники + body, потом
+            # _force_meeting_title_first_line заменит placeholder на
+            # «DD/MM - <row.title>», потом _wrap_short_summary_with_doc_link
+            # обернёт его в <a href=google_doc_url>.
+            from app.fireflies.pipeline import (
+                _force_meeting_title_first_line,
+                _wrap_short_summary_with_doc_link,
+            )
+            participants_names = result.get("meeting_participants") or []
+            participants_line = (
+                "Участники: " + ", ".join(participants_names)
+                if participants_names else ""
+            )
+            placeholder_first = "TITLE_PLACEHOLDER"
+            composed = placeholder_first
+            if participants_line:
+                composed += "\n" + participants_line
+            composed += "\n\n" + result["short_summary"].lstrip()
+            # Apply title (DD/MM - row.title)
+            composed = _force_meeting_title_first_line(
+                composed,
+                row.title or "",
+                row.meeting_date,
+            )
+            # Wrap title в HTML hyperlink (если google_doc_url есть)
+            doc_url = getattr(row, "google_doc_url", None)
+            if doc_url:
+                composed = _wrap_short_summary_with_doc_link(
+                    composed.rstrip(), doc_url,
+                )
+            v2_short_summary_with_header = composed
+
             print(f"\nPublishing to Slack channel {channel} via {token_key}...")
-            print(f"  parent: V2 short_summary ({len(result['short_summary'])} chars)")
+            print(f"  parent: header + Участники ({len(participants_names)}) "
+                  f"+ V2 summary ({len(result['short_summary'])} chars body)")
             print(f"  thread: {important_count} important V2 tasks")
             pub_result = publish_zoom_recording_to_slack(
                 session, row,
                 channel=channel, token=token,
                 no_tasks=False,
                 # FR-CR-05-199 — БД не трогаем, V2 contents in-memory:
-                override_short_summary=result["short_summary"],
+                override_short_summary=v2_short_summary_with_header,
                 override_thread_todo_text=v2_todo_text,
                 skip_db_write=not write_db,
             )

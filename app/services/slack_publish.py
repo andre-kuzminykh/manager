@@ -52,8 +52,16 @@ def publish_zoom_recording_to_slack(
     token: str,
     use_db_tasks: bool = True,
     no_tasks: bool = False,
+    source_kind: Any = None,
+    source_conversation_id: str | None = None,
 ) -> dict:
-    """FR-CR-05-194a — Slack publish одной Zoom recording.
+    """FR-CR-05-194a — Slack publish одной recording (Zoom OR Fireflies).
+
+    Args:
+        source_kind: TaskSourceKind override (default — auto-detect by row).
+            Если row имеет zoom_id — TaskSourceKind.zoom, иначе fireflies.
+        source_conversation_id: ID для tasks lookup (default — auto: zoom_id
+            или fireflies_id у row).
 
     Returns:
         {"ok": True, "parent_ts": str, "tasks_posted": bool}
@@ -66,11 +74,30 @@ def publish_zoom_recording_to_slack(
     if not (row.short_summary or "").strip():
         return {"ok": False, "error": "short_summary empty", "step": "validate"}
 
+    # Auto-detect source_kind / id если не передали
+    from app.models import TaskSourceKind
+    if source_kind is None:
+        source_kind = (
+            TaskSourceKind.zoom
+            if hasattr(row, "zoom_id") and getattr(row, "zoom_id", None)
+            else TaskSourceKind.fireflies
+        )
+    if source_conversation_id is None:
+        source_conversation_id = (
+            getattr(row, "zoom_id", None)
+            or getattr(row, "fireflies_id", None)
+            or ""
+        )
+    row_identifier = (
+        getattr(row, "zoom_id", None)
+        or getattr(row, "fireflies_id", None)
+    )
+
     # Idempotent skip — если уже postnut в этот channel
     existing_ts = getattr(row, "slack_post_ts", None)
     if existing_ts:
         log.info("slack_publish_skipped_already_posted",
-                 zoom_id=getattr(row, "zoom_id", None),
+                 row_id=row_identifier,
                  slack_post_ts=existing_ts)
         return {"ok": True, "parent_ts": existing_ts, "tasks_posted": False,
                 "skipped_reason": "already_posted"}
@@ -88,18 +115,17 @@ def publish_zoom_recording_to_slack(
         _split_for_slack, _to_slack_mrkdwn, build_parent_raw,
     )
     from app.fireflies.pipeline import _build_todo_section
-    from app.models import TaskSourceKind
 
     body, reused_todo = _split_short_summary(row.short_summary)
 
-    # Tasks block
+    # Tasks block — теперь используем переданные source_kind + source_id
     tasks_text = ""
     if not no_tasks:
         if use_db_tasks:
             tasks_text = _build_todo_section(
                 session,
-                source_kind=TaskSourceKind.zoom,
-                source_conversation_id=row.zoom_id,
+                source_kind=source_kind,
+                source_conversation_id=source_conversation_id,
             )
         elif reused_todo:
             tasks_text = reused_todo
@@ -111,7 +137,8 @@ def publish_zoom_recording_to_slack(
     chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
 
     log.info("slack_publish_starting",
-             zoom_id=getattr(row, "zoom_id", None),
+             row_id=row_identifier,
+             source_kind=str(source_kind),
              channel=channel, chunks=len(chunks),
              has_tasks=bool(tasks_text))
 
@@ -143,7 +170,7 @@ def publish_zoom_recording_to_slack(
             else str(e)
         )
         log.warning("slack_publish_api_error",
-                    zoom_id=getattr(row, "zoom_id", None), error=err)
+                    row_id=row_identifier, error=err)
         return {"ok": False, "error": err, "step": "post"}
 
     # Persist post_ts для idempotency
@@ -152,7 +179,7 @@ def publish_zoom_recording_to_slack(
         session.flush()
 
     log.info("slack_publish_done",
-             zoom_id=getattr(row, "zoom_id", None),
+             row_id=row_identifier,
              parent_ts=parent_ts, tasks_posted=tasks_posted)
     return {"ok": True, "parent_ts": parent_ts,
             "tasks_posted": tasks_posted}

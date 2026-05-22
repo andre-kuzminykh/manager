@@ -69,6 +69,7 @@ def _reset_responder_dedup_for_tests() -> None:
 @dataclass
 class DispatchResult:
     archived: bool = False
+    archive_failed: bool = False  # FR-CR-05-192v — best-effort archive
     duplicate: bool = False
     skipped_self: bool = False
     skipped_unsupported: bool = False
@@ -146,20 +147,40 @@ def handle_event(
         channel_name = resolve_channel_name(channel_id) or None
         user_id = payload.get("user") or None
         user_display = resolve_user_display_name(user_id) if user_id else None
-        write_archive(
-            archive_dir=archive_dir,
-            pg_session=session,
-            channel_id=channel_id,
-            channel_name=channel_name,
-            ts=ts,
-            thread_ts=payload.get("thread_ts"),
-            user_id=user_id,
-            user_display_name=user_display,
-            subtype=subtype,
-            text=payload.get("text"),
-            raw_payload=payload,
-        )
-        result.archived = True
+        # FR-CR-05-192v — archive write MUST be best-effort. A
+        # PermissionError / disk-full / other I/O failure on the
+        # JSONL sink had been crashing the whole dispatcher,
+        # which meant the responder never fired and the bot
+        # appeared dead in DMs / threads. Audit trail is not as
+        # important as the live agent — log the failure and
+        # continue.
+        try:
+            write_archive(
+                archive_dir=archive_dir,
+                pg_session=session,
+                channel_id=channel_id,
+                channel_name=channel_name,
+                ts=ts,
+                thread_ts=payload.get("thread_ts"),
+                user_id=user_id,
+                user_display_name=user_display,
+                subtype=subtype,
+                text=payload.get("text"),
+                raw_payload=payload,
+            )
+            result.archived = True
+        except Exception as e:  # noqa: BLE001
+            result.archive_failed = True
+            from app.logging_setup import get_logger as _gl
+            _gl(__name__).warning(
+                "ceo_brain_archive_write_failed",
+                channel_id=channel_id, ts=ts, error=str(e),
+                hint=(
+                    "responder will still fire — archive is "
+                    "best-effort. Common causes: permission "
+                    "denied on /app/traces, disk full."
+                ),
+            )
 
     # Responder dispatch — only on @mention or plain DM. Skip
     # `message.changed`/`message.deleted` (no `subtype` shape

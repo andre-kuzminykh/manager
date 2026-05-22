@@ -110,10 +110,41 @@ def _extract_important_tasks_ephemeral(
     """
     import json as _json
 
+    from app.db import session_scope as _session_scope
+    from app.fireflies.pipeline import _render_known_employees_table
+    from app.models import TeamMember as _TM
+    from app.services.team_members import as_known_employees
+
     transcript = (row.transcript_text or "").strip()
     detailed = (row.detailed_summary or "").strip()
     if not transcript and not detailed:
         return []
+
+    # FR-CR-05-192k — load the same `known_employees` directory the
+    # live `_step_extract_tasks` passes to TASK_EXTRACTION_SYSTEM,
+    # so the LLM can pick a canonical real_name based on Role +
+    # Notes (instead of grabbing the closest «@email» mention from
+    # the transcript). Pre-fetch the resolver maps in the same
+    # session so we don't reopen.
+    with _session_scope() as _sess:
+        known_employees = as_known_employees(
+            _sess, prefer_telegram=False,
+        )
+        tm_by_email: dict[str, str] = {}
+        tm_by_slack: dict[str, str] = {}
+        tm_real_names: set[str] = set()
+        for _m in (
+            _sess.query(_TM)
+            .filter(_TM.real_name.isnot(None))
+            .filter(_TM.active.is_(True))
+            .all()
+        ):
+            if _m.email:
+                tm_by_email[_m.email.lower().strip()] = _m.real_name
+            if _m.slack_user_id:
+                tm_by_slack[_m.slack_user_id] = _m.real_name
+            tm_real_names.add(_m.real_name)
+    known_table = _render_known_employees_table(known_employees)
     # Build the participants line — same precedence as the pipeline.
     parts: list[str] = []
     cal = row.calendar_attendees or []
@@ -135,13 +166,19 @@ def _extract_important_tasks_ephemeral(
     # FR-CR-05-185 — pass today's date so the LLM can resolve relative
     # deadlines («завтра», «в понедельник», «к концу июня») into
     # absolute ISO `YYYY-MM-DD` values for the `due_date` field.
+    # FR-CR-05-192k — known_employees TABLE so LLM picks canonical
+    # owners by Role/Notes (not by «closest email mention»).
     from datetime import date as _date
 
     user_prompt = (
         "Return JSON: `{\"tasks\": [{\"title\": ..., "
-        "\"description\": ..., \"owner\": ..., \"priority\": ..., "
-        "\"due_date\": \"YYYY-MM-DD or null\", "
+        "\"description\": ..., \"owner\": <ONE of: slack_user_id from "
+        "the table OR exact real_name from the table — NEVER a raw "
+        "email>, \"priority\": ..., \"due_date\": \"YYYY-MM-DD or null\", "
         "\"due_time\": \"HH:MM or null\"}, ...]}`. Empty list ok.\n\n"
+        "known_employees (pick owner from this table — use Role + "
+        "Notes to disambiguate, NEVER emit a raw email as owner):\n"
+        f"{known_table}\n\n"
         f"today_date: {_date.today().isoformat()}\n"
         f"meeting_date: "
         f"{row.meeting_date.date().isoformat() if row.meeting_date else ''}\n"
@@ -189,34 +226,24 @@ def _extract_important_tasks_ephemeral(
         llm_backend=llm_backend,
         model=settings.fireflies_tasks_model,
     )
-    # FR-CR-05-192k — owner resolver: when LLM emits an email
-    # (e.g. «sots@thehumanoid.ai») we look up TeamMember by email
-    # and substitute the canonical real_name. The pipeline's
-    # _step_extract_tasks does this via slack_user_id round-trip;
-    # ephemeral path now mirrors it for the email case.
-    from app.db import session_scope as _session_scope
-    from app.models import TeamMember as _TM
-
-    tm_by_email: dict[str, str] = {}
-    with _session_scope() as _sess:
-        for _m in (
-            _sess.query(_TM)
-            .filter(_TM.email.isnot(None))
-            .filter(_TM.real_name.isnot(None))
-            .filter(_TM.active.is_(True))
-            .all()
-        ):
-            tm_by_email[(_m.email or "").lower().strip()] = _m.real_name
-
+    # FR-CR-05-192k — owner resolver with 3-step lookup:
+    #   1. slack_user_id (LLM picked U… from the known_employees table)
+    #   2. email (LLM regressed and emitted «@…» despite the prompt)
+    #   3. exact real_name match (LLM did the right thing, no resolve)
+    # All maps were prefetched above inside `_session_scope`.
     def _resolve_owner(owner_raw: str) -> str:
         if not owner_raw:
             return ""
         o = owner_raw.strip()
-        # If owner looks like an email, try TM lookup.
+        if o in tm_by_slack:
+            return tm_by_slack[o]
         if "@" in o:
             hit = tm_by_email.get(o.lower())
             if hit:
                 return hit
+        # Exact real_name passthrough (idempotent).
+        if o in tm_real_names:
+            return o
         return o
 
     out: list[dict] = []

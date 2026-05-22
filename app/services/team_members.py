@@ -70,6 +70,9 @@ def get_humans_for_matcher(session: Session) -> list[dict]:
             "notes": (tm.notes or "").strip() or None,
             "tg_username": getattr(tm, "telegram_username", None),
             "slack_user_id": getattr(tm, "slack_user_id", None),
+            # FR-CR-05-199c — email для канонизации emails из
+            # Google Calendar attendees (e.g. 1@thehumanoid.ai → Артем)
+            "email": (tm.email or "").strip() or None,
         })
     return out
 

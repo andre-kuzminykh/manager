@@ -97,11 +97,15 @@ def canonical_real_name_rule_based(
 
 _SYSTEM_PROMPT = """Ты резолвер имён. Тебе дан список «raw» имён участников
 встречи (как они пришли из Google Calendar) и список «known_people»
-(canonical TeamMember real_name).
+(canonical TeamMember real_name + опционально email).
 
 Задача: для каждого raw-имени найти canonical real_name из known_people.
 Учитывай:
 
+  * EMAIL → real_name через email match: если raw это email
+    (`user@domain.com`) и в known_people есть TeamMember с этим email —
+    canonical = его real_name. Например `1@thehumanoid.ai` →
+    «Артем Соколов» если у Артема email=1@thehumanoid.ai.
   * транслитерации обе стороны: «Ирина Шипилова» = «Irina Shipilova»
   * порядок частей: «Шипилова Ирина» = «Ирина Шипилова» = «Irina Shipilova»
   * nicknames / краткие формы: «Оля» = «Ольга Пономаренко», «Дима» = «Дмитрий Седов»
@@ -139,12 +143,19 @@ def canonicalize_participants_via_llm(
     if not known_people:
         return list(raw_participants)
 
-    # Compose prompt
+    # Compose prompt — добавляем email для каждого known_person (FR-CR-05-199c)
     raw_block = "\n".join(f"  - {r}" for r in raw_participants)
-    known_block = "\n".join(
-        f"  - {kp.get('real_name')}" for kp in known_people
-        if kp.get("real_name")
-    )
+    known_lines: list[str] = []
+    for kp in known_people:
+        rn = kp.get("real_name")
+        if not rn:
+            continue
+        email = kp.get("email")
+        if email:
+            known_lines.append(f"  - real_name=«{rn}» email=«{email}»")
+        else:
+            known_lines.append(f"  - real_name=«{rn}»")
+    known_block = "\n".join(known_lines)
     user_prompt = (
         f"RAW PARTICIPANTS:\n{raw_block}\n\n"
         f"KNOWN_PEOPLE (canonical TeamMember real_name):\n{known_block}\n\n"

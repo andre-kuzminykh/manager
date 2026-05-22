@@ -93,6 +93,59 @@ def test_fr_cr_05_193b_7_empty_known_people_passthrough() -> None:
     assert llm.complete_text.call_count == 0
 
 
+def test_fr_cr_05_199c_email_resolves_via_known_people() -> None:
+    """FR-CR-05-199c — LLM canonicalizer резолвит email из calendar
+    attendees к canonical real_name через TM.email."""
+    from app.services.team_member_canonical import (
+        canonicalize_participants_via_llm,
+    )
+    known_people = [
+        {"real_name": "Артем Соколов", "email": "1@thehumanoid.ai"},
+        {"real_name": "Irina Shipilova", "email": "irina@thehumanoid.ai"},
+    ]
+    llm = MagicMock()
+    llm.complete_text.return_value = json.dumps({
+        "mappings": [
+            {"raw": "1@thehumanoid.ai", "canonical": "Артем Соколов"},
+        ],
+    })
+    result = canonicalize_participants_via_llm(
+        ["1@thehumanoid.ai"],
+        known_people=known_people,
+        llm_backend=llm, model="gpt-5.5",
+    )
+    assert result == ["Артем Соколов"]
+
+
+def test_fr_cr_05_199c_email_passed_to_llm_prompt() -> None:
+    """FR-CR-05-199c — email из known_people['email'] передаётся в
+    LLM user_prompt, чтобы LLM мог делать email→real_name lookup."""
+    from app.services.team_member_canonical import (
+        canonicalize_participants_via_llm,
+    )
+    known_people = [
+        {"real_name": "Артем Соколов", "email": "1@thehumanoid.ai"},
+    ]
+    captured = {}
+
+    def fake_complete(**kwargs):
+        captured.update(kwargs)
+        return json.dumps({"mappings": []})
+
+    llm = MagicMock()
+    llm.complete_text.side_effect = fake_complete
+
+    canonicalize_participants_via_llm(
+        ["1@thehumanoid.ai"],
+        known_people=known_people,
+        llm_backend=llm, model="gpt-5.5",
+    )
+    # user_prompt должен включать email
+    user = captured.get("user_prompt", "")
+    assert "1@thehumanoid.ai" in user
+    assert "email" in user.lower()
+
+
 def test_fr_cr_05_193b_7_dedupe_preserves_order() -> None:
     """LLM mapped двух разных raw в один canonical → dedupe сохраняя порядок."""
     from app.services.team_member_canonical import (

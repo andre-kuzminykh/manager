@@ -58,10 +58,19 @@ STATUS_DISPLAY: tuple[str, ...] = (
     "Backlog", "To Do", "In Progress", "Blocked", "Done", "Cancelled",
 )
 
-# Category dropdown (spec §20.3) — configurable; this is the default seed set.
+# Category dropdown — operator 2026-05-24: «Category из стратегических фильтров
+# либо other». Mirrors task_direction.DIRECTIONS_IMPORTANT (+ other). Kept as a
+# literal here to keep this module stdlib-only/testable; must stay in sync.
+CATEGORY_NORMALIZED: dict[str, str] = {
+    "investors": "investors",
+    "budget": "budget",
+    "design": "design",
+    "beta": "beta",
+    "deliverables": "deliverables",
+    "other": "other",
+}
 CATEGORY_DISPLAY: tuple[str, ...] = (
-    "Product", "Engineering", "Sales", "Marketing",
-    "Operations", "Research", "Personal",
+    "Investors", "Budget", "Design", "Beta", "Deliverables", "Other",
 )
 
 # Fields included in the payload HASH (change detection). assignee_name and
@@ -100,6 +109,7 @@ __all__ = [
     "STATUS_NORMALIZED",
     "STATUS_DISPLAY",
     "CATEGORY_DISPLAY",
+    "CATEGORY_NORMALIZED",
     "HASHABLE_FIELDS",
     "SIGNATURE_FIELDS",
 ]

@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.sheet_sync.config import (
+    CATEGORY_NORMALIZED,
     HASHABLE_FIELDS,
     PRIORITY_NORMALIZED,
     STATUS_NORMALIZED,
@@ -136,6 +137,11 @@ def validate_task_row(
             errors=errors, warnings=warnings,
         )
 
+    # Category → strategic direction key (or 'other'); empty stays None.
+    category = (
+        CATEGORY_NORMALIZED.get(f["category"].lower(), "other") if f["category"] else None
+    )
+
     payload = {
         "title": title,
         "description": f["description"],
@@ -143,7 +149,7 @@ def validate_task_row(
         "assignee_name": assignee_name,
         "status": status,
         "priority": priority,
-        "category": f["category"],
+        "category": category,
         "start_at": start_at,
         "deadline_at": deadline_at,
         "completed_at": completed_at,

@@ -183,6 +183,15 @@ def test_signature_changes_when_identity_field_changes():
     assert a.signature != b.signature
 
 
+def test_category_normalizes_to_strategic_or_other():
+    r1 = validate_task_row(_row(title="x", status="To Do", priority="Low", category="Investors"), resolve_assignee=_TEAM)
+    assert r1.payload["category"] == "investors"
+    r2 = validate_task_row(_row(title="x", status="To Do", priority="Low", category="Random"), resolve_assignee=_TEAM)
+    assert r2.payload["category"] == "other"
+    r3 = validate_task_row(_row(title="x", status="To Do", priority="Low"), resolve_assignee=_TEAM)
+    assert r3.payload["category"] is None
+
+
 def test_clearing_optional_field_changes_hash():
     full = validate_task_row(
         _row(title="x", status="To Do", priority="Low", comments="note"), resolve_assignee=_TEAM,

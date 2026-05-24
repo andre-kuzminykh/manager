@@ -38,6 +38,7 @@ def _col_letter(n: int) -> str:
     return out
 
 
+_META_KEY = "gs_row_uuid"
 _END_COL = _col_letter(len(TASK_HEADERS))
 # 0-based column index per field (for DeveloperMetadata / data-validation ranges)
 _COL_INDEX: dict[str, int] = {field: i for i, (_, field) in enumerate(TASK_COLUMNS)}
@@ -104,6 +105,61 @@ class TasksSheetClient:
             fields = {FIELD_BY_HEADER[h]: cells[idx] for idx, h in enumerate(TASK_HEADERS)}
             out.append({"row_number": i, "fields": fields})
         return out
+
+    # -- row identity via DeveloperMetadata (spec §20.5) ------------------
+    def read_row_uuids(self) -> dict[int, str]:
+        """Return {sheet_row_number: gs_row_uuid} from row DeveloperMetadata."""
+        gid = self.resolve_tab()
+        resp = (
+            self._svc.spreadsheets().developerMetadata()
+            .search(
+                spreadsheetId=self._sid,
+                body={"dataFilters": [{"developerMetadataLookup": {"metadataKey": _META_KEY}}]},
+            )
+            .execute()
+        )
+        out: dict[int, str] = {}
+        for m in resp.get("matchedDeveloperMetadata", []):
+            dm = m.get("developerMetadata") or {}
+            rng = (dm.get("location") or {}).get("dimensionRange") or {}
+            if rng.get("dimension") == "ROWS" and int(rng.get("sheetId", -1)) == gid:
+                start = rng.get("startIndex")
+                if start is not None and dm.get("metadataValue"):
+                    out[int(start) + 1] = dm["metadataValue"]
+        return out
+
+    def stamp_row_uuid(self, row_number: int, value: str) -> None:
+        """Attach a hidden gs_row_uuid to a sheet row (for new rows)."""
+        gid = self.resolve_tab()
+        self._svc.spreadsheets().batchUpdate(
+            spreadsheetId=self._sid,
+            body={"requests": [{
+                "createDeveloperMetadata": {"developerMetadata": {
+                    "metadataKey": _META_KEY,
+                    "metadataValue": value,
+                    "visibility": "DOCUMENT",
+                    "location": {"dimensionRange": {
+                        "sheetId": gid, "dimension": "ROWS",
+                        "startIndex": row_number - 1, "endIndex": row_number,
+                    }},
+                }}
+            }]},
+        ).execute()
+
+    # -- append rows (DB → Sheet seed/export) -----------------------------
+    def append_rows(self, rows: list[list[str]]) -> int:
+        """Append data rows below the header (USER_ENTERED so dates/dropdowns
+        parse). Each row must be in TASK_HEADERS order."""
+        if not rows:
+            return 0
+        self._svc.spreadsheets().values().append(
+            spreadsheetId=self._sid,
+            range=f"{self._tab}!A:{_END_COL}",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": rows},
+        ).execute()
+        return len(rows)
 
     # -- write structure --------------------------------------------------
     def ensure_structure(self, *, responsible_options: list[str] | None = None) -> dict:

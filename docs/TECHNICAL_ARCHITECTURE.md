@@ -650,8 +650,11 @@ FEATURE: Universal Entity Resolution V2 (FR-CR-05-193)
 ```
 
 **Применение:** каждая Feature в SPEC.md получает блок US + UserFlow +
-≥1 Gherkin Scenario, каждый Scenario мапится на FR-ID(ы) и тест. Полная
-миграция 558 FR — отдельный backlog-эпик.
+≥1 Gherkin Scenario, каждый Scenario мапится на FR-ID(ы) и тест.
+
+**Реализовано:** навигационная BDD-карта по 13 фичам с Gherkin-сценариями —
+[`BDD_SPEC.md`](BDD_SPEC.md). Полная построчная миграция 558 FR — отдельный
+backlog-эпик.
 
 ---
 

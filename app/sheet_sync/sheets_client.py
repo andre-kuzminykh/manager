@@ -122,11 +122,28 @@ class TasksSheetClient:
         for m in resp.get("matchedDeveloperMetadata", []):
             dm = m.get("developerMetadata") or {}
             rng = (dm.get("location") or {}).get("dimensionRange") or {}
-            if rng.get("dimension") == "ROWS" and int(rng.get("sheetId", -1)) == gid:
+            # NB: Google omits sheetId when it's 0 (default-value omission) —
+            # so a missing sheetId means gid 0, not "no match".
+            sid = int(rng.get("sheetId", 0) or 0)
+            if rng.get("dimension") == "ROWS" and sid == gid:
                 start = rng.get("startIndex")
                 if start is not None and dm.get("metadataValue"):
                     out[int(start) + 1] = dm["metadataValue"]
         return out
+
+    def clear_row_uuids(self) -> None:
+        """Delete ALL gs_row_uuid DeveloperMetadata (clean re-init)."""
+        try:
+            self._svc.spreadsheets().batchUpdate(
+                spreadsheetId=self._sid,
+                body={"requests": [{
+                    "deleteDeveloperMetadata": {
+                        "dataFilter": {"developerMetadataLookup": {"metadataKey": _META_KEY}}
+                    }
+                }]},
+            ).execute()
+        except Exception as e:  # noqa: BLE001 — no metadata yet → ignore
+            log.info("sheet_sync_clear_uuids_noop", error=str(e)[:120])
 
     def stamp_row_uuids(self, mapping: dict[int, str]) -> None:
         """Attach hidden gs_row_uuid to many rows in ONE batchUpdate

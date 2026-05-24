@@ -90,6 +90,7 @@ def run_tick(*, spreadsheet_id, tab, tz, interval, trigger, feed, reinit, since_
 
     if reinit:
         client.clear_data_rows()
+        client.clear_row_uuids()
         with session_scope() as s:
             s.query(GsExportedSource).filter(GsExportedSource.integration_id == iid).delete()
             s.commit()

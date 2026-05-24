@@ -11,12 +11,22 @@ The LLM only classifies + rephrases per task (JSON-per-id), so no task can
 be silently dropped: missing ids are re-requested once, and the render is
 fully deterministic.
 
+By default the script ONLY previews (renders the exact Slack-mrkdwn message
+and prints it) — it does NOT post to Slack. Pass --send to actually post;
+that is the flag a cron/timer would use for the morning digest.
+
 Usage:
+    # ПРЕВЬЮ (ничего не отправляется) — проверить, что выведется:
     docker exec manager-zoom-ff-1 python -m ops.strategic_tasks_digest \\
         --since 2025-05-22 --strategic-only
 
+    # РЕАЛЬНАЯ отправка в Slack-бот (для таймера/cron):
     docker exec manager-zoom-ff-1 python -m ops.strategic_tasks_digest \\
-        --since 2025-05-22            # all proposed drafts (no strategic filter)
+        --since 2025-05-22 --strategic-only --send
+
+Slack target: --slack-channel / AUTO_SEND_TO_SLACK_CHANNEL (DM или канал),
+token из settings-поля --slack-token-key / AUTO_SEND_TO_SLACK_TOKEN_KEY
+(default ceo_brain_slack_bot_token — DM CEO Brain бота).
 """
 from __future__ import annotations
 
@@ -208,7 +218,20 @@ def _format_all(tasks: list[dict], *, llm, model) -> dict[int, dict]:
     return result
 
 
-def _render(tasks: list[dict], formatted: dict[int, dict], *, since: str) -> str:
+def _render(
+    tasks: list[dict], formatted: dict[int, dict], *, since: str, flavor: str = "md"
+) -> str:
+    """Render the grouped digest.
+
+    flavor="md"    → markdown (`#`, `##`, `**bold**`) for files/terminal.
+    flavor="slack" → Slack mrkdwn (headers + subjects as `*bold*`), since
+                     Slack does NOT render `##`/`**`.
+    """
+    slack = flavor == "slack"
+    h1 = (lambda s: f"*{s}*") if slack else (lambda s: f"# {s}")
+    h2 = (lambda s: f"*{s}*") if slack else (lambda s: f"## {s}")
+    bold = (lambda s: f"*{s}*") if slack else (lambda s: f"**{s}**")
+
     by_id = {t["id"]: t for t in tasks}
     # Bucket by section, preserving SECTIONS order; drop empty sections.
     buckets: dict[str, list[int]] = {s: [] for s in SECTIONS}
@@ -216,7 +239,7 @@ def _render(tasks: list[dict], formatted: dict[int, dict], *, since: str) -> str
         buckets[formatted[tid]["section"]].append(tid)
 
     out: list[str] = []
-    out.append(f"# Задачи (из системы, proposed, с {since})\n")
+    out.append(h1(f"Задачи (из системы, proposed, с {since})") + "\n")
     total = len(tasks)
     nonempty = [s for s in SECTIONS if buckets[s]]
     counts = " · ".join(f"{s}: {len(buckets[s])}" for s in nonempty)
@@ -227,7 +250,7 @@ def _render(tasks: list[dict], formatted: dict[int, dict], *, since: str) -> str
         ids = buckets[section]
         if not ids:
             continue
-        out.append(f"\n## {section}\n")
+        out.append(f"\n{h2(section)}\n")
         for tid in sorted(ids):
             n += 1
             f = formatted[tid]
@@ -235,12 +258,33 @@ def _render(tasks: list[dict], formatted: dict[int, dict], *, since: str) -> str
             owner = t["owner"] or "—"
             subject = f["subject"] or t["title"][:60]
             action = f["action"] or "уточнить"
-            out.append(f"{n}. **{subject}** — {action} ({owner})")
+            out.append(f"{n}. {bold(subject)} — {action} ({owner})")
+    sep = "" if slack else "\n---"
     out.append(
-        "\n---\n_Ответственный взят из задачи (`owner_display_name`); «—» = "
+        f"\n{sep}\n_Ответственный взят из задачи (owner_display_name); «—» = "
         "не назначен. Статусов пока нет — поле под них добавим позже._"
     )
     return "\n".join(out)
+
+
+def _post_to_slack(text: str, *, channel: str, token: str) -> dict:
+    """Post the digest to Slack: first chunk = parent, rest = thread replies."""
+    from slack_sdk import WebClient
+
+    from app.services.slack_mirror import SLACK_TEXT_CHUNK_CHARS, _split_for_slack
+
+    chunks = _split_for_slack(text, limit=SLACK_TEXT_CHUNK_CHARS)
+    client = WebClient(token=token)
+    resp = client.chat_postMessage(
+        channel=channel, text=chunks[0], unfurl_links=False, unfurl_media=False
+    )
+    parent_ts = (resp.data or {}).get("ts")
+    for c in chunks[1:]:
+        client.chat_postMessage(
+            channel=channel, text=c, thread_ts=parent_ts,
+            unfurl_links=False, unfurl_media=False,
+        )
+    return {"ok": True, "parent_ts": parent_ts, "chunks": len(chunks)}
 
 
 def main() -> int:
@@ -259,6 +303,23 @@ def main() -> int:
     )
     ap.add_argument("--model", default=None, help="OpenAI model override.")
     ap.add_argument("--limit", type=int, default=0, help="Cap for testing.")
+    ap.add_argument(
+        "--send",
+        action="store_true",
+        help="ОТПРАВИТЬ в Slack. По умолчанию OFF — только превью (что "
+        "выведется), в Slack ничего не пишем. Таймер/cron запускает с --send.",
+    )
+    ap.add_argument(
+        "--slack-channel",
+        default=None,
+        help="Канал/DM. Default — env AUTO_SEND_TO_SLACK_CHANNEL.",
+    )
+    ap.add_argument(
+        "--slack-token-key",
+        default=None,
+        help="Имя settings-поля с токеном. Default — env "
+        "AUTO_SEND_TO_SLACK_TOKEN_KEY → ceo_brain_slack_bot_token.",
+    )
     args = ap.parse_args()
 
     try:
@@ -306,13 +367,39 @@ def main() -> int:
 
         print(f"  форматируем {len(tasks)} задач через LLM...")
         formatted = _format_all(tasks, llm=llm, model=model)
-        digest = _render(tasks, formatted, since=args.since)
+        slack_text = _render(tasks, formatted, since=args.since, flavor="slack")
 
         session.rollback()  # explicit: read-only, БД нетронута
 
-    print("\n" + "=" * 70 + "\n")
-    print(digest)
-    print("\n" + "=" * 70)
+    # Resolve Slack target (used for both preview and send).
+    from app.services.slack_publish import _get_channel, _get_token_key
+
+    channel = args.slack_channel or _get_channel()
+    token_key = args.slack_token_key or _get_token_key()
+    token = getattr(s, token_key, "") or ""
+
+    if not args.send:
+        # PREVIEW — ровно то, что уйдёт в Slack (mrkdwn), без отправки.
+        print("\n" + "=" * 70)
+        print(f"PREVIEW (НЕ отправлено). target channel={channel or '(не задан)'}, "
+              f"token_key={token_key}, token={'set' if token else 'EMPTY'}")
+        print("=" * 70 + "\n")
+        print(slack_text)
+        print("\n" + "=" * 70)
+        print("Чтобы реально отправить — добавь флаг --send (это и поставишь в таймер).")
+        return 0
+
+    # SEND
+    if not channel:
+        print("ERROR: канал не задан (--slack-channel или AUTO_SEND_TO_SLACK_CHANNEL)",
+              file=sys.stderr)
+        return 4
+    if not token:
+        print(f"ERROR: settings.{token_key} пуст", file=sys.stderr)
+        return 4
+    print(f"\nОтправляю в Slack channel={channel} (token_key={token_key})...")
+    res = _post_to_slack(slack_text, channel=channel, token=token)
+    print(f"  результат: {res}")
     return 0
 
 

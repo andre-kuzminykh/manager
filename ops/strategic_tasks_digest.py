@@ -1,12 +1,14 @@
 """Render proposed action_drafts as a unified, direction-grouped digest via LLM.
 
-READ-ONLY. Queries `action_drafts` (+ `intent_inferences` for source),
-classifies each task by strategic DIRECTION (investors / budget / design /
-beta / deliverables — the filter categories), optionally keeps only those,
-then asks the LLM — per task — for an entity `group` (Tether / XTX / …) +
-a concise `action`. Python renders the digest as DIRECTION → ENTITY group →
-numbered tasks, appending the responsible person (resolved to a real name
-from team_members, role-suffix stripped; never invented).
+Queries `action_drafts` (+ `intent_inferences` for source). Direction уже
+проставлен на ИНГЕСТЕ (gpt-4o-mini, payload["direction"]) — дайджест читает
+его и фильтрует. Бэклог без direction доклассифицируется gpt-4o-mini и
+сохраняется (один раз). Затем LLM (gpt-5.5) даёт на каждую задачу entity
+`group` (Tether / XTX / …), `function`, `action`, `critical`. Рендер:
+DIRECTION → ENTITY-кластер (≥2) → функциональные под-группы; ответственный
+резолвится в нормальное имя из team_members.
+
+Slack: главное сообщение = критичные задачи, остальное — в тред.
 
 The LLM only classifies + rephrases per task (JSON-per-id), so no task can
 be silently dropped: missing ids are re-requested once, and the render is
@@ -16,14 +18,17 @@ By default the script ONLY previews (renders the exact Slack-mrkdwn message
 and prints it) — it does NOT post to Slack. Pass --send to actually post;
 that is the flag a cron/timer would use for the morning digest.
 
+Фильтр по стратегическим направлениям ВКЛЮЧЁН по умолчанию (--all чтобы
+выключить и показать «other» тоже).
+
 Usage:
     # ПРЕВЬЮ (ничего не отправляется) — проверить, что выведется:
     docker exec manager-zoom-ff-1 python -m ops.strategic_tasks_digest \\
-        --since 2025-05-22 --strategic-only
+        --since 2025-05-22
 
     # РЕАЛЬНАЯ отправка в Slack-бот (для таймера/cron):
     docker exec manager-zoom-ff-1 python -m ops.strategic_tasks_digest \\
-        --since 2025-05-22 --strategic-only --send
+        --since 2025-05-22 --send
 
 Slack target: --slack-channel / AUTO_SEND_TO_SLACK_CHANNEL (DM или канал),
 token из settings-поля --slack-token-key / AUTO_SEND_TO_SLACK_TOKEN_KEY
@@ -143,24 +148,26 @@ def _build_tasks(drafts: list[ActionDraft]) -> list[dict]:
                 "owner": owner,
                 "due_date": (payload.get("due_date") or "").strip(),
                 "priority": (payload.get("priority") or "medium").strip().lower(),
+                # direction уже проставлен на ингесте (gpt-4o-mini). Пусто →
+                # бэклог до этой фичи; дайджест доклассифицирует и сохранит.
+                "direction": (payload.get("direction") or "").strip().lower(),
             }
         )
     return out
 
 
 def _assign_directions(
-    tasks: list[dict], *, llm, model, strategic_only: bool
-) -> list[dict]:
-    """Classify every task by strategic direction (chunked, so the LLM can't
-    silently drop ids on large batches). Sets t["direction"]. When
-    `strategic_only` — keep only DIRECTIONS_IMPORTANT; otherwise keep all
-    (unclassified → «other»).
+    tasks: list[dict], *, llm, classify_model, strategic_only: bool
+) -> tuple[list[dict], dict[int, str]]:
+    """Use the STORED direction (set on ingest). Only tasks без direction
+    (бэклог до фичи) доклассифицируем gpt-4o-mini, маленькими чанками +
+    дозапрос. Возвращает (отфильтрованные_задачи, newly) — newly нужно
+    сохранить в payload драфтов.
     """
-    mapping: dict[int, str] = {}
-    chunk = 50
-    for i in range(0, len(tasks), chunk):
-        batch = tasks[i : i + chunk]
-        part = classify_directions(
+    todo = [t for t in tasks if not t.get("direction")]
+
+    def _classify(batch: list[dict]) -> dict[int, str]:
+        return classify_directions(
             tasks=[
                 {
                     "id": t["id"],
@@ -171,19 +178,38 @@ def _assign_directions(
             ],
             meeting_context=None,
             llm_backend=llm,
-            model=model,
+            model=classify_model,
         )
-        mapping.update(part)
-    for t in tasks:
-        t["direction"] = mapping.get(t["id"], "other")
+
+    mapping: dict[int, str] = {}
+    chunk = 25  # gpt-4o-mini дропает на больших батчах — держим мелко
+    for i in range(0, len(todo), chunk):
+        mapping.update(_classify(todo[i : i + chunk]))
+    miss = [t for t in todo if t["id"] not in mapping]
+    if miss:
+        mapping.update(_classify(miss))
+
+    newly: dict[int, str] = {}
+    for t in todo:
+        d = mapping.get(t["id"])
+        if d:
+            t["direction"] = d
+            newly[t["id"]] = d
+        else:
+            t["direction"] = "other"  # не сохраняем — перепробуем в след. раз
+
+    already = len(tasks) - len(todo)
+    if todo:
+        print(f"  classify: {already} уже классифицированы (из ingest), "
+              f"доклассифицировано gpt-4o-mini {len(newly)}/{len(todo)}")
+    else:
+        print(f"  classify: все {len(tasks)} уже классифицированы — LLM не звали")
+
     if strategic_only:
         kept = [t for t in tasks if t["direction"] in DIRECTIONS_IMPORTANT]
-        print(
-            f"  strategic filter: {len(kept)}/{len(tasks)} прошли "
-            f"(направления: {DIRECTIONS_IMPORTANT})"
-        )
-        return kept
-    return tasks
+        print(f"  фильтр: {len(kept)}/{len(tasks)} в {DIRECTIONS_IMPORTANT}")
+        return kept, newly
+    return tasks, newly
 
 
 def _format_chunk(batch: list[dict], *, llm, model) -> dict[int, dict]:
@@ -395,12 +421,18 @@ def main() -> int:
         help="ISO date (YYYY-MM-DD); drafts created at/after этой даты (UTC).",
     )
     ap.add_argument(
-        "--strategic-only",
+        "--all",
         action="store_true",
-        help="Keep only DIRECTIONS_IMPORTANT (investors/budget/design/beta/"
-        "deliverables). По умолчанию — все proposed.",
+        help="НЕ фильтровать по стратегическим направлениям (включить и "
+        "«other»). По умолчанию фильтр ВКЛЮЧЁН — берём только "
+        "investors/budget/design/beta/deliverables.",
     )
-    ap.add_argument("--model", default=None, help="OpenAI model override.")
+    ap.add_argument("--model", default=None,
+                    help="Модель форматирования (subject/action). Default — "
+                    "fireflies_tasks_model (gpt-5.5).")
+    ap.add_argument("--classify-model", default=None,
+                    help="Модель доклассификации направлений для бэклога. "
+                    "Default — openai_model (gpt-4o-mini в проде).")
     ap.add_argument("--limit", type=int, default=0, help="Cap for testing.")
     ap.add_argument(
         "--send",
@@ -432,6 +464,7 @@ def main() -> int:
         print("ERROR: OPENAI_API_KEY empty", file=sys.stderr)
         return 2
     model = args.model or s.fireflies_tasks_model
+    classify_model = args.classify_model or s.openai_model
     llm = OpenAIBackend(client=OpenAI(api_key=s.openai_api_key), model=model)
 
     with session_scope() as session:
@@ -457,13 +490,24 @@ def main() -> int:
             session.rollback()
             return 0
 
-        print(f"  классифицируем направления ({len(tasks)} задач, {model})...")
-        tasks = _assign_directions(
-            tasks, llm=llm, model=model, strategic_only=args.strategic_only
+        tasks, newly = _assign_directions(
+            tasks, llm=llm, classify_model=classify_model,
+            strategic_only=not args.all,
         )
+        # Persist backfilled directions onto the drafts (one-time для бэклога).
+        if newly:
+            draft_by_id = {d.id: d for d in drafts}
+            for tid, d in newly.items():
+                dr = draft_by_id.get(tid)
+                if dr is None:
+                    continue
+                p = dict(dr.payload or {})
+                p["direction"] = d
+                dr.payload = p
+            session.commit()
+            print(f"  сохранил direction в {len(newly)} драфтов (бэклог)")
         if not tasks:
             print("  стратегических задач не найдено.")
-            session.rollback()
             return 0
 
         # Resolve @handles / strip role suffixes → нормальные имена.
@@ -501,7 +545,7 @@ def main() -> int:
             title="Остальные задачи", flavor="slack", start_n=len(crit_tasks),
         ) if rest_tasks else ""
 
-        session.rollback()  # explicit: read-only, БД нетронута
+        session.rollback()  # backfill direction уже закоммичен выше; здесь — discard прочего
 
     # Resolve Slack target (used for both preview and send).
     from app.services.slack_publish import _get_channel, _get_token_key

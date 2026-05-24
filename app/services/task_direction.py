@@ -182,4 +182,25 @@ __all__ = [
     "DIRECTIONS_IMPORTANT",
     "DIRECTION_BADGES",
     "classify_directions",
+    "classify_one_direction",
 ]
+
+
+def classify_one_direction(
+    *,
+    title: str,
+    description: str,
+    llm_backend: Any,
+    model: str,
+) -> str:
+    """Classify a single task by strategic direction. Thin wrapper over
+    `classify_directions` for the ingest path (one draft at a time → no
+    batch-drop risk). Returns a direction string (∈ DIRECTIONS_IMPORTANT or
+    "other"); "other" on any failure."""
+    mapping = classify_directions(
+        tasks=[{"id": 0, "title": title or "", "description": description or ""}],
+        meeting_context=None,
+        llm_backend=llm_backend,
+        model=model,
+    )
+    return mapping.get(0, "other")

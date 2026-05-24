@@ -14,7 +14,10 @@ from app.models import (
     IntentInference,
 )
 from app.models.intent import IntentType as IntentTypeEnum
+from app.logging_setup import get_logger
 from app.schemas.intent import IntentClassification, IntentType, InvocationType
+
+log = get_logger(__name__)
 
 
 class ConfidenceBucket(str, Enum):
@@ -98,6 +101,12 @@ class Orchestrator:
         slack_message_ts: str | None,
     ) -> ActionDraft:
         payload = classification.draft_payload() or {}
+        # FR-CR-05-163 — classify the draft by strategic direction at
+        # creation (gpt-4o-mini), so it's «уже классифицировано» downstream
+        # (digest just reads payload["direction"]; no re-classification).
+        # Only for task intents; best-effort — never block draft creation.
+        if classification.intent in (IntentType.create_task, IntentType.update_task):
+            self.classify_draft_direction(payload)
         draft = ActionDraft(
             inference_id=inference.id,
             intent=IntentTypeEnum(classification.intent.value),
@@ -109,6 +118,39 @@ class Orchestrator:
         session.add(draft)
         session.flush()
         return draft
+
+    def _classify_backend(self):
+        """Lazy, cached OpenAI backend for direction classification."""
+        be = getattr(self, "_cls_backend", None)
+        if be is None:
+            from openai import OpenAI
+
+            from app.intent.llm_backends import OpenAIBackend
+
+            be = OpenAIBackend(
+                client=OpenAI(api_key=self._settings.openai_api_key),
+                model=self._settings.openai_model,
+            )
+            self._cls_backend = be
+        return be
+
+    def classify_draft_direction(self, payload: dict[str, Any]) -> None:
+        """Set payload["direction"] in-place via gpt-4o-mini. No-op for
+        meeting drafts / missing title / missing API key. Best-effort."""
+        title = (payload.get("title") or "").strip()
+        if not title or not getattr(self._settings, "openai_api_key", ""):
+            return
+        try:
+            from app.services.task_direction import classify_one_direction
+
+            payload["direction"] = classify_one_direction(
+                title=title,
+                description=(payload.get("description") or ""),
+                llm_backend=self._classify_backend(),
+                model=self._settings.openai_model,
+            )
+        except Exception as e:  # noqa: BLE001 — must never break ingest
+            log.warning("draft_direction_classify_failed", error=str(e))
 
     # ---- routing ----------------------------------------------------------
 

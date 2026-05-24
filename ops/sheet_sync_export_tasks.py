@@ -35,10 +35,12 @@ _PRIORITY_DISPLAY = {"low": "Low", "medium": "Medium", "high": "High", "urgent":
 
 def _owner_resolvers(session):
     by_username, by_name = {}, {}
+    valid_names: set[str] = set()
     for h in get_humans_for_matcher(session):
         rn = (h.get("real_name") or "").strip()
         if not rn:
             continue
+        valid_names.add(rn)
         u = (h.get("tg_username") or "").strip().lower()
         if u:
             by_username[u] = rn
@@ -46,12 +48,17 @@ def _owner_resolvers(session):
         first = rn.lower().split()[0] if rn.split() else ""
         if first:
             by_name.setdefault(first, rn)
-    return by_username, by_name
+    return by_username, by_name, valid_names
 
 
-def _resolve_owner(raw, by_username, by_name):
+def _resolve_owner(raw, by_username, by_name, valid_names):
+    """Resolve to a REAL team_members name that exists in the Responsible
+    dropdown list. If it doesn't resolve to a known team member → '' (blank),
+    so every Responsible cell is a valid dropdown value (из таблицы людей)."""
     from ops.strategic_tasks_digest import _normalize_owner
-    return _normalize_owner(raw or "", by_username=by_username, by_name=by_name)
+
+    name = _normalize_owner(raw or "", by_username=by_username, by_name=by_name)
+    return name if name in valid_names else ""
 
 
 def main() -> int:
@@ -75,8 +82,11 @@ def main() -> int:
         return 2
 
     rows: list[list[str]] = []
+    responsible_options: list[str] = []
+    skipped_no_title = 0
     with session_scope() as session:
-        by_username, by_name = _owner_resolvers(session)
+        by_username, by_name, valid_names = _owner_resolvers(session)
+        responsible_options = sorted(valid_names)
         drafts = session.execute(
             select(ActionDraft)
             .where(ActionDraft.state == ActionDraftState.proposed)
@@ -90,8 +100,9 @@ def main() -> int:
                 continue
             title = (p.get("title") or "").strip()
             if not title:
+                skipped_no_title += 1
                 continue
-            owner = _resolve_owner(p.get("owner_display_name"), by_username, by_name)
+            owner = _resolve_owner(p.get("owner_display_name"), by_username, by_name, valid_names)
             priority = _PRIORITY_DISPLAY.get((p.get("priority") or "medium").lower(), "Medium")
             category = direction.capitalize()
             due = (p.get("due_date") or "").strip()
@@ -112,12 +123,14 @@ def main() -> int:
             ])
         session.rollback()  # read-only on the DB
 
-    print(f"strategic-задач к заливке: {len(rows)} (с {args.since}, фильтр {DIRECTIONS_IMPORTANT})")
+    print(f"strategic-задач к заливке: {len(rows)} (с {args.since}, фильтр {DIRECTIONS_IMPORTANT}; "
+          f"пропущено без title: {skipped_no_title})")
     assert len(TASK_HEADERS) == 13
     if args.dry_run:
-        for r in rows[:10]:
-            print("  ", r[:6])
-        print("  ... (--dry-run, в лист не пишу)")
+        print("  #  | Category     | Prio   | Responsible          | Title")
+        for i, r in enumerate(rows, 1):
+            print(f"  {i:3d} | {r[5]:<12} | {r[4]:<6} | {(r[2] or '—'):<20} | {r[0][:70]}")
+        print(f"  (--dry-run, в лист НЕ пишу) — всего {len(rows)}")
         return 0
     if not rows:
         print("нет задач — нечего заливать.")
@@ -126,10 +139,14 @@ def main() -> int:
     client = TasksSheetClient(spreadsheet_id=args.spreadsheet_id, tab_title=args.tab)
     try:
         n = client.append_rows(rows)
+        # Re-apply structure so EVERY row (incl. just-appended) carries the
+        # Status/Priority/Category/Responsible dropdowns → редактируемо списком.
+        client.ensure_structure(responsible_options=responsible_options)
     except SheetTabNotFound as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 3
     print(f"залито строк: {n} в '{client.spreadsheet_title}' / tab '{args.tab}'")
+    print("дропдауны (Status/Priority/Category/Responsible) переприменены на все строки.")
     return 0
 
 

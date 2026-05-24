@@ -69,6 +69,8 @@ def main() -> int:
     ap.add_argument("--tab", default=getattr(s, "sheet_sync_tab_title", "") or "main")
     ap.add_argument("--since", default="2026-05-22")
     ap.add_argument("--status", default="To Do", help="Статус для всех залитых задач.")
+    ap.add_argument("--replace", action="store_true",
+                    help="Очистить строки данных перед заливкой (идемпотентно, без дублей).")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -138,6 +140,9 @@ def main() -> int:
 
     client = TasksSheetClient(spreadsheet_id=args.spreadsheet_id, tab_title=args.tab)
     try:
+        if args.replace:
+            client.clear_data_rows()
+            print("строки данных очищены (--replace).")
         n = client.append_rows(rows)
         # Re-apply structure so EVERY row (incl. just-appended) carries the
         # Status/Priority/Category/Responsible dropdowns → редактируемо списком.

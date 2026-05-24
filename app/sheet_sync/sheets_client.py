@@ -146,6 +146,12 @@ class TasksSheetClient:
             }]},
         ).execute()
 
+    def clear_data_rows(self) -> None:
+        """Clear all data rows (below the header). Header/validation kept."""
+        self._svc.spreadsheets().values().clear(
+            spreadsheetId=self._sid, range=f"{self._tab}!A2:{_END_COL}", body={}
+        ).execute()
+
     # -- append rows (DB → Sheet seed/export) -----------------------------
     def append_rows(self, rows: list[list[str]]) -> int:
         """Append data rows below the header (USER_ENTERED so dates/dropdowns

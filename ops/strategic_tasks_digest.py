@@ -39,7 +39,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, time as dt_time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from openai import OpenAI
 
@@ -427,6 +428,20 @@ def _render(
     return "\n".join(out).rstrip()
 
 
+def _split_critical(
+    tasks: list[dict], formatted: dict[int, dict]
+) -> tuple[list[dict], list[dict]]:
+    """Split into (critical, rest). Critical = LLM `critical` flag OR draft
+    priority ∈ {high, urgent}. Critical → parent message, rest → thread."""
+    crit, rest = [], []
+    for t in tasks:
+        is_crit = bool(formatted[t["id"]].get("critical")) or (
+            t.get("priority") in ("high", "urgent")
+        )
+        (crit if is_crit else rest).append(t)
+    return crit, rest
+
+
 def _post_to_slack(parent_text: str, rest_text: str, *, channel: str, token: str) -> dict:
     """Parent message = critical digest; everything else goes into the thread."""
     from slack_sdk import WebClient
@@ -450,6 +465,38 @@ def _post_to_slack(parent_text: str, rest_text: str, *, channel: str, token: str
     return {"ok": True, "parent_ts": parent_ts, "thread_replies": len(thread_chunks)}
 
 
+_LONDON = ZoneInfo("Europe/London")
+
+
+def _resolve_window(args) -> tuple[datetime | None, datetime | None, str]:
+    """Compute the (since_utc, until_utc, label) draft window.
+
+    --yesterday → вчерашний КАЛЕНДАРНЫЙ день по Europe/London
+    [вчера 00:00, сегодня 00:00); иначе из --since / --until (UTC).
+    Returns (None, None, "") on a bad date (caller exits).
+    """
+    if args.yesterday:
+        today_lon = datetime.now(_LONDON).date()
+        y = today_lon - timedelta(days=1)
+        since = datetime.combine(y, dt_time.min, _LONDON).astimezone(timezone.utc)
+        until = datetime.combine(today_lon, dt_time.min, _LONDON).astimezone(timezone.utc)
+        return since, until, f"за {y.isoformat()} (Europe/London)"
+    try:
+        since = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
+    except ValueError:
+        print(f"ERROR: bad --since {args.since!r} (want YYYY-MM-DD)", file=sys.stderr)
+        return None, None, ""
+    until = None
+    if args.until:
+        try:
+            until = datetime.fromisoformat(args.until).replace(tzinfo=timezone.utc)
+        except ValueError:
+            print(f"ERROR: bad --until {args.until!r} (want YYYY-MM-DD)", file=sys.stderr)
+            return None, None, ""
+    label = f"с {args.since}" + (f" по {args.until}" if args.until else "")
+    return since, until, label
+
+
 def main() -> int:
     setup_logging()
     ap = argparse.ArgumentParser()
@@ -457,6 +504,18 @@ def main() -> int:
         "--since",
         default="2026-05-22",
         help="ISO date (YYYY-MM-DD); drafts created at/after этой даты (UTC).",
+    )
+    ap.add_argument(
+        "--until",
+        default=None,
+        help="ISO date (YYYY-MM-DD); drafts created BEFORE этой даты (UTC). "
+        "Без значения — без верхней границы.",
+    )
+    ap.add_argument(
+        "--yesterday",
+        action="store_true",
+        help="Окно = вчерашний день по Europe/London (для утреннего крона "
+        "в 8:00). Переопределяет --since/--until.",
     )
     ap.add_argument(
         "--all",
@@ -491,10 +550,8 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    try:
-        since_dt = datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc)
-    except ValueError:
-        print(f"ERROR: bad --since {args.since!r} (want YYYY-MM-DD)", file=sys.stderr)
+    since_dt, until_dt, window_label = _resolve_window(args)
+    if since_dt is None:
         return 2
 
     s = get_settings()
@@ -511,14 +568,15 @@ def main() -> int:
             .join(IntentInference, ActionDraft.inference_id == IntentInference.id)
             .filter(ActionDraft.state == ActionDraftState.proposed)
             .filter(ActionDraft.created_at >= since_dt)
-            .order_by(ActionDraft.id.asc())
         )
-        drafts = q.all()
+        if until_dt is not None:
+            q = q.filter(ActionDraft.created_at < until_dt)
+        drafts = q.order_by(ActionDraft.id.asc()).all()
         if args.limit:
             drafts = drafts[: args.limit]
 
         print(f"\n{'='*70}")
-        print(f"DIGEST: proposed drafts с {args.since} (model={model})")
+        print(f"DIGEST: proposed drafts {window_label} (model={model})")
         print(f"{'='*70}")
         print(f"  найдено proposed-драфтов: {len(drafts)}")
 
@@ -575,18 +633,13 @@ def main() -> int:
         formatted = _format_all(tasks, llm=llm, model=model)
 
         # critical = LLM-флаг OR priority high/urgent → главное сообщение
-        crit_tasks, rest_tasks = [], []
-        for t in tasks:
-            is_crit = bool(formatted[t["id"]].get("critical")) or (
-                t.get("priority") in ("high", "urgent")
-            )
-            (crit_tasks if is_crit else rest_tasks).append(t)
+        crit_tasks, rest_tasks = _split_critical(tasks, formatted)
         print(f"  критичных (в главное сообщение): {len(crit_tasks)}, "
               f"в тред: {len(rest_tasks)}")
 
         parent_text = _render(
             crit_tasks, formatted,
-            title="Задачи на сегодня · критичное", flavor="slack",
+            title="Задачи на сегодня", flavor="slack",
         )
         if not crit_tasks:
             parent_text += "\n_Горящего на сегодня нет — полный список в треде._"

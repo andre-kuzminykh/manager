@@ -24,11 +24,11 @@ that is the flag a cron/timer would use for the morning digest.
 Usage:
     # ПРЕВЬЮ (ничего не отправляется) — проверить, что выведется:
     docker exec manager-zoom-ff-1 python -m ops.strategic_tasks_digest \\
-        --since 2025-05-22
+        --since 2026-05-22
 
     # РЕАЛЬНАЯ отправка в Slack-бот (для таймера/cron):
     docker exec manager-zoom-ff-1 python -m ops.strategic_tasks_digest \\
-        --since 2025-05-22 --send
+        --since 2026-05-22 --send
 
 Slack target: --slack-channel / AUTO_SEND_TO_SLACK_CHANNEL (DM или канал),
 token из settings-поля --slack-token-key / AUTO_SEND_TO_SLACK_TOKEN_KEY
@@ -191,7 +191,7 @@ def _assign_directions(
         )
 
     mapping: dict[int, str] = {}
-    chunk = 25  # gpt-4o-mini дропает на больших батчах — держим мелко
+    chunk = 5  # gpt-4o-mini дропает на больших батчах — держим по 5
     for i in range(0, len(todo), chunk):
         mapping.update(_classify(todo[i : i + chunk]))
     miss = [t for t in todo if t["id"] not in mapping]
@@ -445,7 +445,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--since",
-        default="2025-05-22",
+        default="2026-05-22",
         help="ISO date (YYYY-MM-DD); drafts created at/after этой даты (UTC).",
     )
     ap.add_argument(
@@ -458,9 +458,9 @@ def main() -> int:
     ap.add_argument("--model", default=None,
                     help="Модель форматирования (subject/action). Default — "
                     "fireflies_tasks_model (gpt-5.5).")
-    ap.add_argument("--classify-model", default=None,
-                    help="Модель доклассификации направлений для бэклога. "
-                    "Default — openai_model (gpt-4o-mini в проде).")
+    ap.add_argument("--classify-model", default="gpt-4o-mini",
+                    help="Модель доклассификации направлений для бэклога "
+                    "(батчами по 5). Default — gpt-4o-mini.")
     ap.add_argument("--limit", type=int, default=0, help="Cap for testing.")
     ap.add_argument(
         "--send",
@@ -492,7 +492,7 @@ def main() -> int:
         print("ERROR: OPENAI_API_KEY empty", file=sys.stderr)
         return 2
     model = args.model or s.fireflies_tasks_model
-    classify_model = args.classify_model or s.openai_model
+    classify_model = args.classify_model or "gpt-4o-mini"
     llm = OpenAIBackend(client=OpenAI(api_key=s.openai_api_key), model=model)
 
     with session_scope() as session:

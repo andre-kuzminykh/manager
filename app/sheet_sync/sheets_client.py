@@ -216,6 +216,25 @@ class TasksSheetClient:
         if responsible_options:
             requests.append(_dropdown("responsible", responsible_options))
 
+        # Number formats so date/time cells render as dates/times (not serials).
+        def _numfmt(field: str, type_: str, pattern: str) -> dict:
+            col = _COL_INDEX[field]
+            return {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": gid, "startRowIndex": 1,
+                        "startColumnIndex": col, "endColumnIndex": col + 1,
+                    },
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": type_, "pattern": pattern}}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            }
+
+        for fld in ("start_date", "deadline_date", "completed_date"):
+            requests.append(_numfmt(fld, "DATE", "yyyy-mm-dd"))
+        for fld in ("start_time", "deadline_time", "completed_time"):
+            requests.append(_numfmt(fld, "TIME", "HH:mm"))
+
         self._svc.spreadsheets().batchUpdate(
             spreadsheetId=self._sid, body={"requests": requests}
         ).execute()

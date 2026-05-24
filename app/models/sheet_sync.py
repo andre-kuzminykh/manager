@@ -183,8 +183,21 @@ class GsTaskConfig(Base):
     )
 
 
+class GsExportedSource(Base):
+    __tablename__ = "gs_exported_sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    integration_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("gs_sheet_integrations.id", ondelete="CASCADE"), nullable=False
+    )
+    source_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 __all__ = [
     "GsSheetIntegration",
+    "GsExportedSource",
     "GsRecord",
     "GsRecordState",
     "GsSyncRun",

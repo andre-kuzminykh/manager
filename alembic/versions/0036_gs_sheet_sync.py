@@ -153,6 +153,18 @@ def upgrade() -> None:
     )
     op.execute(
         """
+        CREATE TABLE IF NOT EXISTS gs_exported_sources (
+          id TEXT PRIMARY KEY,
+          integration_id TEXT NOT NULL REFERENCES gs_sheet_integrations(id) ON DELETE CASCADE,
+          source_kind TEXT NOT NULL,
+          source_id TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          UNIQUE (integration_id, source_kind, source_id)
+        );
+        """
+    )
+    op.execute(
+        """
         CREATE TABLE IF NOT EXISTS gs_task_configs (
           id TEXT PRIMARY KEY,
           integration_id TEXT NOT NULL REFERENCES gs_sheet_integrations(id) ON DELETE CASCADE,
@@ -171,6 +183,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # Reverse dependency order. Drops ONLY gs_* tables.
     for tbl in (
+        "gs_exported_sources",
         "gs_task_configs",
         "gs_task_row_mappings",
         "gs_sheet_snapshots",

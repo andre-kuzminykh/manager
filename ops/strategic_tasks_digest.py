@@ -72,25 +72,54 @@ DIRECTION_LABELS: dict[str, str] = {
     "other": "Прочее",
 }
 
+# Функциональные под-категории для задач БЕЗ именованного кластера контрагента.
+# Заменяют прежнее «Разное»: распределяем по типу действия.
+FUNCTIONS: tuple[str, ...] = (
+    "Follow-up и напоминания",
+    "Интро и знакомства",
+    "Материалы и документы",
+    "Звонки и встречи",
+    "Аутрич и письма",
+    "Pipeline и операционка",
+    "Ресёрч и контакты",
+    "Прочее",
+)
+_FUNCTION_SET = frozenset(FUNCTIONS)
+_FUNCTION_HINTS: dict[str, str] = {
+    "Follow-up и напоминания": "напомнить, follow-up, на контроль, мониторить статус",
+    "Интро и знакомства": "сделать/запросить интро, познакомить, соединить",
+    "Материалы и документы": "отправить дек/NDA/презентацию, открыть data room, поделиться файлом",
+    "Звонки и встречи": "назначить/провести звонок, созвон, встречу, демо",
+    "Аутрич и письма": "первичный аутрич, написать/отправить письмо контакту",
+    "Pipeline и операционка": "добавить в фолловеры/pipeline, таблицы, колонки, статусы, memo",
+    "Ресёрч и контакты": "проверить тёплые контакты, найти выходы, ресёрч фонда",
+    "Прочее": "не подходит ни под одну категорию выше",
+}
+
 FORMAT_SYSTEM_PROMPT = (
     "Ты — ассистент CEO, собираешь утренний дайджест «Задачи на сегодня» "
     "(в основном fundraising / инвесторы). На КАЖДУЮ задачу верни:\n"
-    "1. group — каноническое короткое имя контрагента/фонда/человека/темы, "
+    "1. group — каноническое короткое имя контрагента/фонда/человека, "
     "о ком задача (1-3 слова: «Tether», «XTX», «20VC», «Robostrategy»). "
     "Для задач про ОДНОГО И ТОГО ЖЕ контрагента используй ОДИНАКОВЫЙ group "
-    "(точно та же строка), чтобы они сгруппировались вместе. Если "
-    "контрагента нет — короткая тема.\n"
-    "2. action — лаконично и ПОНЯТНО, что именно сделать (императив). Если "
+    "(точно та же строка). Если конкретного контрагента нет — пустая строка \"\".\n"
+    "2. function — РОВНО одна из функциональных категорий (тип действия):\n"
+    + "\n".join(f"   - {f}: {_FUNCTION_HINTS[f]}" for f in FUNCTIONS)
+    + "\n3. action — лаконично и ПОНЯТНО, что именно сделать (императив). Если "
     "в данных есть статус/история (даты, что уже делали, ответ контакта) — "
     "кратко добавь, напр. «05/05 ответили — 12/05 напомнили — напомнить "
-    "последний раз».\n\n"
+    "последний раз».\n"
+    "4. critical — true ТОЛЬКО для реально горящего: дедлайн сегодня/просрочен, "
+    "«напомнить последний раз», ждём ответ и нужно толкнуть сегодня, активная "
+    "крупная сделка с действием прямо сейчас. Иначе false.\n\n"
     "ПРАВИЛА:\n"
     "- НЕ включай в action имя ответственного — его подставят отдельно.\n"
     "- НЕ выдумывай даты и факты. Только то, что есть в данных задачи.\n"
     "- Каждой задаче — РОВНО один объект. Ничего не выбрасывай и не "
     "объединяй разные задачи.\n\n"
     "Верни СТРОГО JSON: "
-    '{"items":[{"id":<int>,"group":"<контрагент/тема>","action":"<что сделать>"}]}'
+    '{"items":[{"id":<int>,"group":"<контрагент или \\"\\">",'
+    '"function":"<категория>","action":"<что сделать>","critical":<bool>}]}'
 )
 
 
@@ -113,6 +142,7 @@ def _build_tasks(drafts: list[ActionDraft]) -> list[dict]:
                 "source_text": src_text,
                 "owner": owner,
                 "due_date": (payload.get("due_date") or "").strip(),
+                "priority": (payload.get("priority") or "medium").strip().lower(),
             }
         )
     return out
@@ -199,9 +229,14 @@ def _format_chunk(batch: list[dict], *, llm, model) -> dict[int, dict]:
             tid = int(it.get("id"))
         except (TypeError, ValueError):
             continue
+        func = (it.get("function") or "Прочее").strip()
+        if func not in _FUNCTION_SET:
+            func = "Прочее"
         out[tid] = {
             "group": (it.get("group") or "").strip(),
+            "function": func,
             "action": (it.get("action") or "").strip(),
+            "critical": bool(it.get("critical")),
         }
     return out
 
@@ -221,8 +256,10 @@ def _format_all(tasks: list[dict], *, llm, model) -> dict[int, dict]:
     for tid, t in by_id.items():
         if tid not in result:
             result[tid] = {
-                "group": (t["title"][:40] or "Задача"),
-                "action": "уточнить",
+                "group": "",
+                "function": "Прочее",
+                "action": (t["title"][:60] or "уточнить"),
+                "critical": False,
             }
     return result
 
@@ -243,33 +280,45 @@ def _normalize_owner(owner: str, name_by_username: dict[str, str]) -> str:
 
 
 def _render(
-    tasks: list[dict], formatted: dict[int, dict], *, flavor: str = "md"
+    tasks: list[dict],
+    formatted: dict[int, dict],
+    *,
+    title: str = "Задачи на сегодня",
+    flavor: str = "md",
+    start_n: int = 0,
 ) -> str:
-    """Render the digest: DIRECTION (filter category) → ENTITY sub-group
-    (Tether / XTX / …) → numbered tasks with the responsible in parens.
+    """Render a digest section: DIRECTION (filter category) → ENTITY cluster
+    (Tether / XTX / … — контрагенты с ≥2 задачами) → then the rest split by
+    FUNCTION (Follow-up / Интро / Материалы / …). Each task numbered, with the
+    responsible in parens.
 
-    flavor="md"    → markdown for terminal.
-    flavor="slack" → Slack mrkdwn (`*bold*`; Slack ignores `##`/`**`).
+    flavor="md" → markdown; flavor="slack" → Slack mrkdwn (`*bold*`).
+    `start_n` lets the thread continue numbering after the parent.
     """
     slack = flavor == "slack"
     h1 = (lambda s: f"*{s}*") if slack else (lambda s: f"# {s}")
     h2 = (lambda s: f"*{s}*") if slack else (lambda s: f"## {s}")
     h3 = (lambda s: f"*{s}*") if slack else (lambda s: f"### {s}")
-    bold = (lambda s: f"*{s}*") if slack else (lambda s: f"**{s}**")
 
     by_id = {t["id"]: t for t in tasks}
+    if not by_id:
+        return h1(title)
     dir_buckets: dict[str, list[int]] = {d: [] for d in DIRECTION_ORDER}
     for tid, t in by_id.items():
         dir_buckets.setdefault(t.get("direction") or "other", []).append(tid)
 
     def _grp(tid: int) -> str:
-        return (formatted[tid].get("group") or "").strip() or "Разное"
+        return (formatted[tid].get("group") or "").strip()
+
+    def _func(tid: int) -> str:
+        f = formatted[tid].get("function") or "Прочее"
+        return f if f in _FUNCTION_SET else "Прочее"
 
     def _action(tid: int) -> str:
         return formatted[tid].get("action") or "уточнить"
 
-    out: list[str] = [h1("Задачи на сегодня")]
-    n = 0
+    out: list[str] = [h1(title)]
+    n = start_n
     for d in DIRECTION_ORDER:
         ids = dir_buckets.get(d) or []
         if not ids:
@@ -277,58 +326,64 @@ def _render(
         out.append("")
         out.append(h2(DIRECTION_LABELS.get(d, d)))
 
-        # cluster within direction by entity group
-        groups: dict[str, list[int]] = {}
+        # 1) named entity clusters (counterparty with >=2 tasks)
+        ent: dict[str, list[int]] = {}
         for tid in ids:
-            groups.setdefault(_grp(tid), []).append(tid)
+            g = _grp(tid)
+            if g:
+                ent.setdefault(g, []).append(tid)
         multi = sorted(
-            (g for g, v in groups.items() if len(v) >= 2 and g != "Разное"),
-            key=lambda g: (-len(groups[g]), g.lower()),
+            (g for g, v in ent.items() if len(v) >= 2),
+            key=lambda g: (-len(ent[g]), g.lower()),
         )
-        single_ids = sorted(
-            tid for g, v in groups.items() if g not in multi for tid in v
-        )
-
+        clustered = {tid for g in multi for tid in ent[g]}
         for g in multi:
             out.append("")
             out.append(h3(g))
-            for tid in sorted(groups[g]):
+            for tid in sorted(ent[g]):
                 n += 1
                 out.append(f"{n}. {_action(tid)} ({by_id[tid]['owner'] or '—'})")
 
-        if single_ids:
-            # If the direction has named clusters, file the rest under «Разное»;
-            # otherwise list them directly (no redundant sub-header).
-            if multi:
-                out.append("")
-                out.append(h3("Разное"))
-            for tid in single_ids:
+        # 2) the rest → functional sub-groups (Follow-up / Интро / …)
+        rest = [tid for tid in ids if tid not in clustered]
+        func_buckets: dict[str, list[int]] = {}
+        for tid in rest:
+            func_buckets.setdefault(_func(tid), []).append(tid)
+        for func in FUNCTIONS:
+            fids = func_buckets.get(func) or []
+            if not fids:
+                continue
+            out.append("")
+            out.append(h3(func))
+            for tid in sorted(fids):
                 n += 1
-                out.append(
-                    f"{n}. {bold(_grp(tid))} — {_action(tid)} "
-                    f"({by_id[tid]['owner'] or '—'})"
-                )
+                g = _grp(tid)
+                prefix = f"{g} — " if g else ""
+                out.append(f"{n}. {prefix}{_action(tid)} ({by_id[tid]['owner'] or '—'})")
     return "\n".join(out).rstrip()
 
 
-def _post_to_slack(text: str, *, channel: str, token: str) -> dict:
-    """Post the digest to Slack: first chunk = parent, rest = thread replies."""
+def _post_to_slack(parent_text: str, rest_text: str, *, channel: str, token: str) -> dict:
+    """Parent message = critical digest; everything else goes into the thread."""
     from slack_sdk import WebClient
 
     from app.services.slack_mirror import SLACK_TEXT_CHUNK_CHARS, _split_for_slack
 
-    chunks = _split_for_slack(text, limit=SLACK_TEXT_CHUNK_CHARS)
+    p_chunks = _split_for_slack(parent_text, limit=SLACK_TEXT_CHUNK_CHARS)
+    thread_chunks = list(p_chunks[1:]) + (
+        _split_for_slack(rest_text, limit=SLACK_TEXT_CHUNK_CHARS) if rest_text.strip() else []
+    )
     client = WebClient(token=token)
     resp = client.chat_postMessage(
-        channel=channel, text=chunks[0], unfurl_links=False, unfurl_media=False
+        channel=channel, text=p_chunks[0], unfurl_links=False, unfurl_media=False
     )
     parent_ts = (resp.data or {}).get("ts")
-    for c in chunks[1:]:
+    for c in thread_chunks:
         client.chat_postMessage(
             channel=channel, text=c, thread_ts=parent_ts,
             unfurl_links=False, unfurl_media=False,
         )
-    return {"ok": True, "parent_ts": parent_ts, "chunks": len(chunks)}
+    return {"ok": True, "parent_ts": parent_ts, "thread_replies": len(thread_chunks)}
 
 
 def main() -> int:
@@ -424,7 +479,27 @@ def main() -> int:
 
         print(f"  форматируем {len(tasks)} задач через LLM...")
         formatted = _format_all(tasks, llm=llm, model=model)
-        slack_text = _render(tasks, formatted, flavor="slack")
+
+        # critical = LLM-флаг OR priority high/urgent → главное сообщение
+        crit_tasks, rest_tasks = [], []
+        for t in tasks:
+            is_crit = bool(formatted[t["id"]].get("critical")) or (
+                t.get("priority") in ("high", "urgent")
+            )
+            (crit_tasks if is_crit else rest_tasks).append(t)
+        print(f"  критичных (в главное сообщение): {len(crit_tasks)}, "
+              f"в тред: {len(rest_tasks)}")
+
+        parent_text = _render(
+            crit_tasks, formatted,
+            title="Задачи на сегодня · критичное", flavor="slack",
+        )
+        if not crit_tasks:
+            parent_text += "\n_Горящего на сегодня нет — полный список в треде._"
+        rest_text = _render(
+            rest_tasks, formatted,
+            title="Остальные задачи", flavor="slack", start_n=len(crit_tasks),
+        ) if rest_tasks else ""
 
         session.rollback()  # explicit: read-only, БД нетронута
 
@@ -440,8 +515,11 @@ def main() -> int:
         print("\n" + "=" * 70)
         print(f"PREVIEW (НЕ отправлено). target channel={channel or '(не задан)'}, "
               f"token_key={token_key}, token={'set' if token else 'EMPTY'}")
-        print("=" * 70 + "\n")
-        print(slack_text)
+        print("=" * 70)
+        print("\n----- ГЛАВНОЕ СООБЩЕНИЕ -----\n")
+        print(parent_text)
+        print("\n----- ТРЕД (остальное) -----\n")
+        print(rest_text or "(пусто)")
         print("\n" + "=" * 70)
         print("Чтобы реально отправить — добавь флаг --send (это и поставишь в таймер).")
         return 0
@@ -455,7 +533,7 @@ def main() -> int:
         print(f"ERROR: settings.{token_key} пуст", file=sys.stderr)
         return 4
     print(f"\nОтправляю в Slack channel={channel} (token_key={token_key})...")
-    res = _post_to_slack(slack_text, channel=channel, token=token)
+    res = _post_to_slack(parent_text, rest_text, channel=channel, token=token)
     print(f"  результат: {res}")
     return 0
 

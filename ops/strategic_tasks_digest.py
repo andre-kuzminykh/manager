@@ -299,6 +299,13 @@ def _format_all(tasks: list[dict], *, llm, model) -> dict[int, dict]:
     return result
 
 
+# Ручные оверрайды ответственного (бот-аккаунты / сервисные → живой человек).
+# Ключ — owner_display_name в нижнем регистре.
+OWNER_OVERRIDES: dict[str, str] = {
+    "ceo_office1 bot": "Irina Shipilova",
+}
+
+
 def _normalize_owner(
     owner: str,
     *,
@@ -307,6 +314,7 @@ def _normalize_owner(
 ) -> str:
     """Resolve the responsible to a REAL name from team_members.
 
+    - ручной оверрайд (OWNER_OVERRIDES) — в первую очередь (бот-аккаунты);
     - «@handle» → real_name по telegram_username; если в таблице нет —
       возвращаем сам handle (без @), НИЧЕГО не выдумываем.
     - имя со суффиксом роли («Валентина - PM /аналитик») → сначала режем
@@ -317,6 +325,8 @@ def _normalize_owner(
     o = (owner or "").strip()
     if not o:
         return ""
+    if o.lower() in OWNER_OVERRIDES:
+        return OWNER_OVERRIDES[o.lower()]
     if o.startswith("@"):
         uname = o[1:].strip().lower()
         return by_username.get(uname, o[1:])

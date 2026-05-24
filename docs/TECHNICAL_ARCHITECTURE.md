@@ -583,7 +583,9 @@ docker/alembic операции + gcloud команды в DEPLOY.md.
 
 - **132 файла** в `tests/requirements/`, конвенция `test_<feature>.py`
 - **114 (86%)** ссылаются на ≥1 `FR-CR` ID
-- Нет single-source матрицы FR→test (требуется grep)
+- **Полная FR→test матрица: [`FR_TEST_MATRIX.md`](FR_TEST_MATRIX.md)** (автогенерация).
+  Итог: **218 covered**, **28 в SPEC без теста**, **19 в companion-спеках**,
+  **20 orphan** (в тестах, нигде в спеках — требуют ревизии ID).
 
 ### 9.4 Что НЕ покрыто в старых arch-доках
 

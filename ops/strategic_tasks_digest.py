@@ -1,11 +1,12 @@
 """Render proposed action_drafts as a unified, direction-grouped digest via LLM.
 
 READ-ONLY. Queries `action_drafts` (+ `intent_inferences` for source),
-optionally keeps only strategic directions (DIRECTIONS_IMPORTANT), then asks
-the LLM — for each task — to pick a section and produce a clean
-«subject — action» one-liner. Python renders the final markdown grouped by
-section, numbering tasks and appending the responsible person (taken
-verbatim from the draft's `owner_display_name`, never invented).
+classifies each task by strategic DIRECTION (investors / budget / design /
+beta / deliverables — the filter categories), optionally keeps only those,
+then asks the LLM — per task — for a clean «subject — action» one-liner.
+Python renders the digest GROUPED BY DIRECTION, numbering tasks and
+appending the responsible person (taken verbatim from the draft's
+`owner_display_name`, never invented).
 
 The LLM only classifies + rephrases per task (JSON-per-id), so no task can
 be silently dropped: missing ids are re-requested once, and the render is
@@ -50,39 +51,46 @@ from app.services.task_direction import (
 log = get_logger(__name__)
 
 
-# Fixed section vocabulary — keeps grouping consistent across chunks and
-# mirrors the operator's own mental model. The LLM MUST pick one of these.
-SECTIONS: tuple[str, ...] = (
-    "Планирование встреч",
-    "Напоминания и follow-up",
-    "Бизнес-клубы и конференции",
-    "На контроль",
-    "Доп. вопросы",
-    "Прочее",
+# Группировка идёт по стратегическим НАПРАВЛЕНИЯМ — тем самым, по которым
+# работает фильтр (DIRECTIONS_IMPORTANT из task_direction). «other» нужен
+# только когда запускаемся БЕЗ --strategic-only.
+DIRECTION_ORDER: tuple[str, ...] = (
+    "investors",
+    "budget",
+    "deliverables",
+    "beta",
+    "design",
+    "other",
 )
 
-_SECTION_SET = frozenset(SECTIONS)
+DIRECTION_LABELS: dict[str, str] = {
+    "investors": "💼 Инвесторы / Fundraising",
+    "budget": "💰 Бюджет",
+    "deliverables": "🎯 Ключевые deliverables",
+    "beta": "📌 Бета / Релизы",
+    "design": "🎨 Дизайн",
+    "other": "Прочее",
+}
 
 FORMAT_SYSTEM_PROMPT = (
-    "Ты — ассистент CEO. Тебе дают список задач (в основном fundraising / "
-    "инвесторы и операционные дела). Для КАЖДОЙ задачи верни:\n"
-    "1. section — РОВНО один из разделов:\n"
-    + "\n".join(f"   - {s}" for s in SECTIONS)
-    + "\n2. subject — короткое название контрагента/темы (фонд, компания, "
+    "Ты — ассистент CEO, собираешь утренний дайджест «Задачи на сегодня» "
+    "(в основном fundraising / инвесторы). Группировка по направлениям "
+    "делается отдельно — тебе нужно только аккуратно переформулировать "
+    "КАЖДУЮ задачу. Верни на каждую:\n"
+    "1. subject — короткое название контрагента/темы (фонд, компания, "
     "человек или тема). 1-4 слова.\n"
-    "3. action — одна короткая строка на русском: что нужно сделать "
-    "(например «напомнить последний раз», «отправить презентацию + "
-    "follow-up», «уточнить статус»).\n\n"
+    "2. action — короткая строка на русском: что нужно сделать. ЕСЛИ в "
+    "данных есть статус/история (даты, что уже делали, ответ контакта) — "
+    "кратко включи их, как в примере: «05/05 ответили — 12/05 напомнили — "
+    "сегодня напомнить последний раз».\n\n"
     "ПРАВИЛА:\n"
-    "- НЕ добавляй в action ни статусы, ни даты, ни имя ответственного — "
-    "ответственного подставят отдельно.\n"
-    "- НЕ выдумывай факты. Формулируй строго по данным задачи.\n"
+    "- НЕ добавляй в action имя ответственного — его подставят отдельно.\n"
+    "- НЕ выдумывай даты и факты. Используй ТОЛЬКО то, что есть в данных "
+    "задачи; если истории нет — просто короткое действие.\n"
     "- Каждой задаче — РОВНО один объект. Ничего не выбрасывай и не "
-    "объединяй разные задачи.\n"
-    "- Если непонятно куда отнести — section = «Прочее».\n\n"
+    "объединяй разные задачи.\n\n"
     "Верни СТРОГО JSON: "
-    '{"items":[{"id":<int>,"section":"<раздел>","subject":"<тема>",'
-    '"action":"<действие>"}]}'
+    '{"items":[{"id":<int>,"subject":"<тема>","action":"<действие>"}]}'
 )
 
 
@@ -110,11 +118,13 @@ def _build_tasks(drafts: list[ActionDraft]) -> list[dict]:
     return out
 
 
-def _classify_strategic(tasks: list[dict], *, llm, model) -> list[dict]:
-    """Keep only tasks whose direction ∈ DIRECTIONS_IMPORTANT.
-
-    Chunked to avoid the LLM silently dropping ids on large batches; missing
-    ids default to «other» (excluded).
+def _assign_directions(
+    tasks: list[dict], *, llm, model, strategic_only: bool
+) -> list[dict]:
+    """Classify every task by strategic direction (chunked, so the LLM can't
+    silently drop ids on large batches). Sets t["direction"]. When
+    `strategic_only` — keep only DIRECTIONS_IMPORTANT; otherwise keep all
+    (unclassified → «other»).
     """
     mapping: dict[int, str] = {}
     chunk = 50
@@ -134,23 +144,27 @@ def _classify_strategic(tasks: list[dict], *, llm, model) -> list[dict]:
             model=model,
         )
         mapping.update(part)
-    kept = [t for t in tasks if mapping.get(t["id"], "other") in DIRECTIONS_IMPORTANT]
-    for t in kept:
+    for t in tasks:
         t["direction"] = mapping.get(t["id"], "other")
-    print(
-        f"  strategic filter: {len(kept)}/{len(tasks)} прошли "
-        f"(направления: {DIRECTIONS_IMPORTANT})"
-    )
-    return kept
+    if strategic_only:
+        kept = [t for t in tasks if t["direction"] in DIRECTIONS_IMPORTANT]
+        print(
+            f"  strategic filter: {len(kept)}/{len(tasks)} прошли "
+            f"(направления: {DIRECTIONS_IMPORTANT})"
+        )
+        return kept
+    return tasks
 
 
 def _format_chunk(batch: list[dict], *, llm, model) -> dict[int, dict]:
     """Ask the LLM to section + rephrase one chunk. Returns {id: {...}}."""
     lines = []
     for t in batch:
-        body = t["description"] or t["source_text"][:400] or t["title"]
+        ctx = " | ".join(
+            p for p in (t["description"], t["source_text"]) if p
+        ) or t["title"]
         lines.append(
-            f'id={t["id"]} | title={t["title"][:160]} | контекст={body[:400]}'
+            f'id={t["id"]} | title={t["title"][:160]} | контекст={ctx[:600]}'
         )
     user_prompt = (
         f"ЗАДАЧИ ({len(batch)}):\n" + "\n".join(lines) + "\n\nВерни JSON items."
@@ -185,11 +199,7 @@ def _format_chunk(batch: list[dict], *, llm, model) -> dict[int, dict]:
             tid = int(it.get("id"))
         except (TypeError, ValueError):
             continue
-        section = (it.get("section") or "Прочее").strip()
-        if section not in _SECTION_SET:
-            section = "Прочее"
         out[tid] = {
-            "section": section,
             "subject": (it.get("subject") or "").strip(),
             "action": (it.get("action") or "").strip(),
         }
@@ -207,11 +217,10 @@ def _format_all(tasks: list[dict], *, llm, model) -> dict[int, dict]:
     if missing:
         print(f"  дозапрос {len(missing)} пропущенных...")
         result.update(_format_chunk(missing, llm=llm, model=model))
-    # Final fallback for anything still missing — use raw title, «Прочее».
+    # Final fallback for anything still missing — use the raw title.
     for tid, t in by_id.items():
         if tid not in result:
             result[tid] = {
-                "section": "Прочее",
                 "subject": (t["title"][:60] or "Задача"),
                 "action": "уточнить",
             }
@@ -233,24 +242,28 @@ def _render(
     bold = (lambda s: f"*{s}*") if slack else (lambda s: f"**{s}**")
 
     by_id = {t["id"]: t for t in tasks}
-    # Bucket by section, preserving SECTIONS order; drop empty sections.
-    buckets: dict[str, list[int]] = {s: [] for s in SECTIONS}
-    for tid in by_id:
-        buckets[formatted[tid]["section"]].append(tid)
+    # Bucket by strategic DIRECTION (the filter categories). Any unexpected
+    # value lands in «other».
+    buckets: dict[str, list[int]] = {d: [] for d in DIRECTION_ORDER}
+    for tid, t in by_id.items():
+        d = t.get("direction") or "other"
+        buckets.setdefault(d, []).append(tid)
 
     out: list[str] = []
-    out.append(h1(f"Задачи (из системы, proposed, с {since})") + "\n")
+    out.append(h1(f"Задачи на сегодня (из системы, proposed, с {since})") + "\n")
     total = len(tasks)
-    nonempty = [s for s in SECTIONS if buckets[s]]
-    counts = " · ".join(f"{s}: {len(buckets[s])}" for s in nonempty)
+    nonempty = [d for d in DIRECTION_ORDER if buckets.get(d)]
+    counts = " · ".join(
+        f"{DIRECTION_LABELS.get(d, d)}: {len(buckets[d])}" for d in nonempty
+    )
     out.append(f"_Всего: {total} · {counts}_\n")
 
     n = 0
-    for section in SECTIONS:
-        ids = buckets[section]
+    for d in DIRECTION_ORDER:
+        ids = buckets.get(d) or []
         if not ids:
             continue
-        out.append(f"\n{h2(section)}\n")
+        out.append(f"\n{h2(DIRECTION_LABELS.get(d, d))}\n")
         for tid in sorted(ids):
             n += 1
             f = formatted[tid]
@@ -358,12 +371,14 @@ def main() -> int:
             session.rollback()
             return 0
 
-        if args.strategic_only:
-            tasks = _classify_strategic(tasks, llm=llm, model=model)
-            if not tasks:
-                print("  стратегических задач не найдено.")
-                session.rollback()
-                return 0
+        print(f"  классифицируем направления ({len(tasks)} задач, {model})...")
+        tasks = _assign_directions(
+            tasks, llm=llm, model=model, strategic_only=args.strategic_only
+        )
+        if not tasks:
+            print("  стратегических задач не найдено.")
+            session.rollback()
+            return 0
 
         print(f"  форматируем {len(tasks)} задач через LLM...")
         formatted = _format_all(tasks, llm=llm, model=model)

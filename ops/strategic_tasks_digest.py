@@ -3,10 +3,10 @@
 READ-ONLY. Queries `action_drafts` (+ `intent_inferences` for source),
 classifies each task by strategic DIRECTION (investors / budget / design /
 beta / deliverables — the filter categories), optionally keeps only those,
-then asks the LLM — per task — for a clean «subject — action» one-liner.
-Python renders the digest GROUPED BY DIRECTION, numbering tasks and
-appending the responsible person (taken verbatim from the draft's
-`owner_display_name`, never invented).
+then asks the LLM — per task — for an entity `group` (Tether / XTX / …) +
+a concise `action`. Python renders the digest as DIRECTION → ENTITY group →
+numbered tasks, appending the responsible person (resolved to a real name
+from team_members, role-suffix stripped; never invented).
 
 The LLM only classifies + rephrases per task (JSON-per-id), so no task can
 be silently dropped: missing ids are re-requested once, and the render is
@@ -64,33 +64,33 @@ DIRECTION_ORDER: tuple[str, ...] = (
 )
 
 DIRECTION_LABELS: dict[str, str] = {
-    "investors": "💼 Инвесторы / Fundraising",
-    "budget": "💰 Бюджет",
-    "deliverables": "🎯 Ключевые deliverables",
-    "beta": "📌 Бета / Релизы",
-    "design": "🎨 Дизайн",
+    "investors": "Инвесторы / Fundraising",
+    "budget": "Бюджет",
+    "deliverables": "Ключевые deliverables",
+    "beta": "Бета / Релизы",
+    "design": "Дизайн",
     "other": "Прочее",
 }
 
 FORMAT_SYSTEM_PROMPT = (
     "Ты — ассистент CEO, собираешь утренний дайджест «Задачи на сегодня» "
-    "(в основном fundraising / инвесторы). Группировка по направлениям "
-    "делается отдельно — тебе нужно только аккуратно переформулировать "
-    "КАЖДУЮ задачу. Верни на каждую:\n"
-    "1. subject — короткое название контрагента/темы (фонд, компания, "
-    "человек или тема). 1-4 слова.\n"
-    "2. action — короткая строка на русском: что нужно сделать. ЕСЛИ в "
-    "данных есть статус/история (даты, что уже делали, ответ контакта) — "
-    "кратко включи их, как в примере: «05/05 ответили — 12/05 напомнили — "
-    "сегодня напомнить последний раз».\n\n"
+    "(в основном fundraising / инвесторы). На КАЖДУЮ задачу верни:\n"
+    "1. group — каноническое короткое имя контрагента/фонда/человека/темы, "
+    "о ком задача (1-3 слова: «Tether», «XTX», «20VC», «Robostrategy»). "
+    "Для задач про ОДНОГО И ТОГО ЖЕ контрагента используй ОДИНАКОВЫЙ group "
+    "(точно та же строка), чтобы они сгруппировались вместе. Если "
+    "контрагента нет — короткая тема.\n"
+    "2. action — лаконично и ПОНЯТНО, что именно сделать (императив). Если "
+    "в данных есть статус/история (даты, что уже делали, ответ контакта) — "
+    "кратко добавь, напр. «05/05 ответили — 12/05 напомнили — напомнить "
+    "последний раз».\n\n"
     "ПРАВИЛА:\n"
-    "- НЕ добавляй в action имя ответственного — его подставят отдельно.\n"
-    "- НЕ выдумывай даты и факты. Используй ТОЛЬКО то, что есть в данных "
-    "задачи; если истории нет — просто короткое действие.\n"
+    "- НЕ включай в action имя ответственного — его подставят отдельно.\n"
+    "- НЕ выдумывай даты и факты. Только то, что есть в данных задачи.\n"
     "- Каждой задаче — РОВНО один объект. Ничего не выбрасывай и не "
     "объединяй разные задачи.\n\n"
     "Верни СТРОГО JSON: "
-    '{"items":[{"id":<int>,"subject":"<тема>","action":"<действие>"}]}'
+    '{"items":[{"id":<int>,"group":"<контрагент/тема>","action":"<что сделать>"}]}'
 )
 
 
@@ -200,7 +200,7 @@ def _format_chunk(batch: list[dict], *, llm, model) -> dict[int, dict]:
         except (TypeError, ValueError):
             continue
         out[tid] = {
-            "subject": (it.get("subject") or "").strip(),
+            "group": (it.get("group") or "").strip(),
             "action": (it.get("action") or "").strip(),
         }
     return out
@@ -221,63 +221,94 @@ def _format_all(tasks: list[dict], *, llm, model) -> dict[int, dict]:
     for tid, t in by_id.items():
         if tid not in result:
             result[tid] = {
-                "subject": (t["title"][:60] or "Задача"),
+                "group": (t["title"][:40] or "Задача"),
                 "action": "уточнить",
             }
     return result
 
 
-def _render(
-    tasks: list[dict], formatted: dict[int, dict], *, since: str, flavor: str = "md"
-) -> str:
-    """Render the grouped digest.
+def _normalize_owner(owner: str, name_by_username: dict[str, str]) -> str:
+    """Clean the responsible name: strip role suffix, resolve @handle → real
+    name via team_members. Returns '' if empty."""
+    o = (owner or "").strip()
+    if not o:
+        return ""
+    for sep in (" - ", " — ", " /", " ("):
+        if sep in o:
+            o = o.split(sep, 1)[0].strip()
+    if o.startswith("@"):
+        uname = o[1:].strip().lower()
+        return name_by_username.get(uname, o[1:])
+    return o
 
-    flavor="md"    → markdown (`#`, `##`, `**bold**`) for files/terminal.
-    flavor="slack" → Slack mrkdwn (headers + subjects as `*bold*`), since
-                     Slack does NOT render `##`/`**`.
+
+def _render(
+    tasks: list[dict], formatted: dict[int, dict], *, flavor: str = "md"
+) -> str:
+    """Render the digest: DIRECTION (filter category) → ENTITY sub-group
+    (Tether / XTX / …) → numbered tasks with the responsible in parens.
+
+    flavor="md"    → markdown for terminal.
+    flavor="slack" → Slack mrkdwn (`*bold*`; Slack ignores `##`/`**`).
     """
     slack = flavor == "slack"
     h1 = (lambda s: f"*{s}*") if slack else (lambda s: f"# {s}")
     h2 = (lambda s: f"*{s}*") if slack else (lambda s: f"## {s}")
+    h3 = (lambda s: f"*{s}*") if slack else (lambda s: f"### {s}")
     bold = (lambda s: f"*{s}*") if slack else (lambda s: f"**{s}**")
 
     by_id = {t["id"]: t for t in tasks}
-    # Bucket by strategic DIRECTION (the filter categories). Any unexpected
-    # value lands in «other».
-    buckets: dict[str, list[int]] = {d: [] for d in DIRECTION_ORDER}
+    dir_buckets: dict[str, list[int]] = {d: [] for d in DIRECTION_ORDER}
     for tid, t in by_id.items():
-        d = t.get("direction") or "other"
-        buckets.setdefault(d, []).append(tid)
+        dir_buckets.setdefault(t.get("direction") or "other", []).append(tid)
 
-    out: list[str] = []
-    out.append(h1(f"Задачи на сегодня (из системы, proposed, с {since})") + "\n")
-    total = len(tasks)
-    nonempty = [d for d in DIRECTION_ORDER if buckets.get(d)]
-    counts = " · ".join(
-        f"{DIRECTION_LABELS.get(d, d)}: {len(buckets[d])}" for d in nonempty
-    )
-    out.append(f"_Всего: {total} · {counts}_\n")
+    def _grp(tid: int) -> str:
+        return (formatted[tid].get("group") or "").strip() or "Разное"
 
+    def _action(tid: int) -> str:
+        return formatted[tid].get("action") or "уточнить"
+
+    out: list[str] = [h1("Задачи на сегодня")]
     n = 0
     for d in DIRECTION_ORDER:
-        ids = buckets.get(d) or []
+        ids = dir_buckets.get(d) or []
         if not ids:
             continue
-        out.append(f"\n{h2(DIRECTION_LABELS.get(d, d))}\n")
-        for tid in sorted(ids):
-            n += 1
-            f = formatted[tid]
-            t = by_id[tid]
-            owner = t["owner"] or "—"
-            subject = f["subject"] or t["title"][:60]
-            action = f["action"] or "уточнить"
-            out.append(f"{n}. {bold(subject)} — {action} ({owner})")
-    sep = "" if slack else "\n---"
-    out.append(
-        f"\n{sep}\n_Ответственный взят из задачи (owner_display_name); «—» = "
-        "не назначен. Статусов пока нет — поле под них добавим позже._"
-    )
-    return "\n".join(out)
+        out.append("")
+        out.append(h2(DIRECTION_LABELS.get(d, d)))
+
+        # cluster within direction by entity group
+        groups: dict[str, list[int]] = {}
+        for tid in ids:
+            groups.setdefault(_grp(tid), []).append(tid)
+        multi = sorted(
+            (g for g, v in groups.items() if len(v) >= 2 and g != "Разное"),
+            key=lambda g: (-len(groups[g]), g.lower()),
+        )
+        single_ids = sorted(
+            tid for g, v in groups.items() if g not in multi for tid in v
+        )
+
+        for g in multi:
+            out.append("")
+            out.append(h3(g))
+            for tid in sorted(groups[g]):
+                n += 1
+                out.append(f"{n}. {_action(tid)} ({by_id[tid]['owner'] or '—'})")
+
+        if single_ids:
+            # If the direction has named clusters, file the rest under «Разное»;
+            # otherwise list them directly (no redundant sub-header).
+            if multi:
+                out.append("")
+                out.append(h3("Разное"))
+            for tid in single_ids:
+                n += 1
+                out.append(
+                    f"{n}. {bold(_grp(tid))} — {_action(tid)} "
+                    f"({by_id[tid]['owner'] or '—'})"
+                )
+    return "\n".join(out).rstrip()
 
 
 def _post_to_slack(text: str, *, channel: str, token: str) -> dict:
@@ -380,9 +411,20 @@ def main() -> int:
             session.rollback()
             return 0
 
+        # Resolve @handles / strip role suffixes → нормальные имена.
+        from app.services.team_members import get_humans_for_matcher
+
+        name_by_username = {
+            h["tg_username"].lower(): h["real_name"]
+            for h in get_humans_for_matcher(session)
+            if h.get("tg_username") and h.get("real_name")
+        }
+        for t in tasks:
+            t["owner"] = _normalize_owner(t["owner"], name_by_username)
+
         print(f"  форматируем {len(tasks)} задач через LLM...")
         formatted = _format_all(tasks, llm=llm, model=model)
-        slack_text = _render(tasks, formatted, since=args.since, flavor="slack")
+        slack_text = _render(tasks, formatted, flavor="slack")
 
         session.rollback()  # explicit: read-only, БД нетронута
 

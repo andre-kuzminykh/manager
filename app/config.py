@@ -388,6 +388,27 @@ class Settings(BaseSettings):
     google_team_sheets_tab_name: str = Field(
         default="Team", alias="GOOGLE_TEAM_SHEETS_TAB_NAME"
     )
+    # FR-GS-* / FR-TASK-* — Google Sheets Versioned Sync (ISOLATED feature).
+    # Off by default; runs in its own container. Never touches the existing
+    # `tasks` sync (GoogleSheetsSync) — a SEPARATE spreadsheet + gs_* tables.
+    sheet_sync_enabled: bool = Field(
+        default=False, alias="SHEET_SYNC_ENABLED"
+    )
+    sheet_sync_spreadsheet_id: str = Field(
+        default="", alias="SHEET_SYNC_SPREADSHEET_ID"
+    )
+    sheet_sync_tab_title: str = Field(
+        default="ceo_brain_tasks", alias="SHEET_SYNC_TAB_TITLE"
+    )
+    sheet_sync_interval_seconds: int = Field(
+        default=300, alias="SHEET_SYNC_INTERVAL_SECONDS"
+    )
+    sheet_sync_timezone: str = Field(
+        default="Europe/London", alias="SHEET_SYNC_TIMEZONE"
+    )
+    sheet_sync_max_rows_per_tab: int = Field(
+        default=5000, alias="SHEET_SYNC_MAX_ROWS_PER_TAB"
+    )
     # FR-CR-05-124 — counterparties directory pulled from two
     # Google Sheets, wipe-and-reload semantics. Source A is the
     # «Status outreach» tab on the investor master sheet (name

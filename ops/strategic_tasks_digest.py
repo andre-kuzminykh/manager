@@ -110,16 +110,25 @@ FORMAT_SYSTEM_PROMPT = (
     "(точно та же строка). Если конкретного контрагента нет — пустая строка \"\".\n"
     "2. function — РОВНО одна из функциональных категорий (тип действия):\n"
     + "\n".join(f"   - {f}: {_FUNCTION_HINTS[f]}" for f in FUNCTIONS)
-    + "\n3. action — лаконично и ПОНЯТНО, что именно сделать (императив). Если "
-    "в данных есть статус/история (даты, что уже делали, ответ контакта) — "
-    "кратко добавь, напр. «05/05 ответили — 12/05 напомнили — напомнить "
-    "последний раз».\n"
+    + "\n3. action — ПОЛНАЯ, самодостаточная формулировка задачи: ЧТО "
+    "сделать + КОМУ / С КЕМ / ЧТО ИМЕННО (получатель, контрагент, предмет: "
+    "какой дек/NDA/презентация/письмо). Читатель должен понять задачу БЕЗ "
+    "доп. контекста. Извлекай получателя и предмет ИЗ ДАННЫХ задачи.\n"
+    "   Плохо: «Отправить NDA и дек». Хорошо: «Отправить NDA и инвест-дек "
+    "Series A контакту Михаилу из фонда X».\n"
+    "   Если в данных есть статус/история (даты, что уже делали, ответ "
+    "контакта) — кратко добавь: «05/05 ответили — 12/05 напомнили — "
+    "напомнить последний раз».\n"
     "4. critical — true ТОЛЬКО для реально горящего: дедлайн сегодня/просрочен, "
     "«напомнить последний раз», ждём ответ и нужно толкнуть сегодня, активная "
     "крупная сделка с действием прямо сейчас. Иначе false.\n\n"
     "ПРАВИЛА:\n"
-    "- НЕ включай в action имя ответственного — его подставят отдельно.\n"
-    "- НЕ выдумывай даты и факты. Только то, что есть в данных задачи.\n"
+    "- НЕ включай в action имя ответственного (исполнителя) — его подставят "
+    "отдельно. Но ПОЛУЧАТЕЛЯ/контакт, КОМУ адресована задача, — включай.\n"
+    "- НЕ выдумывай даты, имена и факты. Только то, что есть в данных задачи; "
+    "если получатель в данных не указан — не придумывай, но сохрани максимум "
+    "конкретики (предмет, фонд, цель), чтобы задача была понятной.\n"
+    "- Лучше полная понятная формулировка, чем короткая, но невнятная.\n"
     "- Каждой задаче — РОВНО один объект. Ничего не выбрасывай и не "
     "объединяй разные задачи.\n\n"
     "Верни СТРОГО JSON: "
@@ -290,19 +299,38 @@ def _format_all(tasks: list[dict], *, llm, model) -> dict[int, dict]:
     return result
 
 
-def _normalize_owner(owner: str, name_by_username: dict[str, str]) -> str:
-    """Clean the responsible name: strip role suffix, resolve @handle → real
-    name via team_members. Returns '' if empty."""
+def _normalize_owner(
+    owner: str,
+    *,
+    by_username: dict[str, str],
+    by_name: dict[str, str],
+) -> str:
+    """Resolve the responsible to a REAL name from team_members.
+
+    - «@handle» → real_name по telegram_username; если в таблице нет —
+      возвращаем сам handle (без @), НИЧЕГО не выдумываем.
+    - имя со суффиксом роли («Валентина - PM /аналитик») → сначала режем
+      суффикс, потом матчим по таблице (полное имя или первое слово) →
+      канон real_name; если не нашли — оставляем как есть.
+    Возвращает '' если owner пуст.
+    """
     o = (owner or "").strip()
     if not o:
         return ""
-    for sep in (" - ", " — ", " /", " ("):
-        if sep in o:
-            o = o.split(sep, 1)[0].strip()
     if o.startswith("@"):
         uname = o[1:].strip().lower()
-        return name_by_username.get(uname, o[1:])
-    return o
+        return by_username.get(uname, o[1:])
+    base = o
+    for sep in (" - ", " — ", " /", " ("):
+        if sep in base:
+            base = base.split(sep, 1)[0].strip()
+    key = base.lower()
+    if key in by_name:
+        return by_name[key]
+    first = key.split()[0] if key.split() else key
+    if first in by_name:
+        return by_name[first]
+    return base
 
 
 def _render(
@@ -510,16 +538,28 @@ def main() -> int:
             print("  стратегических задач не найдено.")
             return 0
 
-        # Resolve @handles / strip role suffixes → нормальные имена.
+        # Резолвим ответственного в РЕАЛЬНОЕ имя из team_members
+        # (мэтч по telegram_username и по имени). Без выдумок.
         from app.services.team_members import get_humans_for_matcher
 
-        name_by_username = {
-            h["tg_username"].lower(): h["real_name"]
-            for h in get_humans_for_matcher(session)
-            if h.get("tg_username") and h.get("real_name")
-        }
+        humans = get_humans_for_matcher(session)
+        by_username: dict[str, str] = {}
+        by_name: dict[str, str] = {}
+        for h in humans:
+            rn = (h.get("real_name") or "").strip()
+            if not rn:
+                continue
+            u = (h.get("tg_username") or "").strip().lower()
+            if u:
+                by_username[u] = rn
+            by_name.setdefault(rn.lower(), rn)
+            first = rn.lower().split()[0] if rn.split() else ""
+            if first:
+                by_name.setdefault(first, rn)
         for t in tasks:
-            t["owner"] = _normalize_owner(t["owner"], name_by_username)
+            t["owner"] = _normalize_owner(
+                t["owner"], by_username=by_username, by_name=by_name
+            )
 
         print(f"  форматируем {len(tasks)} задач через LLM...")
         formatted = _format_all(tasks, llm=llm, model=model)

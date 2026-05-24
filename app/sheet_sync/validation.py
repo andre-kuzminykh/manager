@@ -103,10 +103,14 @@ def validate_task_row(
                 f"Responsible {f['responsible']!r} is not in the team",
             ))
         elif st == "ambiguous":
-            errors.append(_err(
+            # Duplicate display name in team_members — не блокируем задачу:
+            # оставляем имя, assignee_id пустой, помечаем warning.
+            warnings.append(_err(
                 "ambiguous_responsible",
-                f"Responsible {f['responsible']!r} matches multiple team members",
+                f"Responsible {f['responsible']!r} matches multiple team members "
+                "— assignee not resolved",
             ))
+            assignee_name = f["responsible"]
         else:
             assignee_id = aid
             assignee_name = f["responsible"]

@@ -136,12 +136,14 @@ def test_unknown_responsible_rejected():
     assert r.payload is None
 
 
-def test_ambiguous_responsible_rejected():
+def test_ambiguous_responsible_is_warning_not_blocking():
     r = validate_task_row(
         _row(title="x", status="To Do", priority="Low", responsible="Dup Name"),
         resolve_assignee=_TEAM,
     )
-    assert any(e["error_type"] == "ambiguous_responsible" for e in r.errors)
+    assert r.ok  # duplicate display name must NOT drop the task
+    assert any(w["error_type"] == "ambiguous_responsible" for w in r.warnings)
+    assert r.payload["assignee_id"] is None and r.payload["assignee_name"] == "Dup Name"
 
 
 def test_time_without_date_is_error():

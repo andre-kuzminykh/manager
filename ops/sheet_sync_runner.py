@@ -137,8 +137,8 @@ def run_tick(*, spreadsheet_id, tab, tz, interval, trigger, feed, reinit, since_
             "deleted": stats.deleted, "unchanged": stats.unchanged, "errors": stats.errors,
         }
 
-    for row_number, new_uuid in writebacks:
-        client.stamp_row_uuid(row_number, new_uuid)
+    # One batchUpdate for ALL new-row stamps (avoids Sheets write quota).
+    client.stamp_row_uuids({rn: u for rn, u in writebacks})
     return result
 
 

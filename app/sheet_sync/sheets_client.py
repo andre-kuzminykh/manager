@@ -128,23 +128,30 @@ class TasksSheetClient:
                     out[int(start) + 1] = dm["metadataValue"]
         return out
 
-    def stamp_row_uuid(self, row_number: int, value: str) -> None:
-        """Attach a hidden gs_row_uuid to a sheet row (for new rows)."""
+    def stamp_row_uuids(self, mapping: dict[int, str]) -> None:
+        """Attach hidden gs_row_uuid to many rows in ONE batchUpdate
+        (1 write request — avoids the Sheets write-per-minute quota)."""
+        if not mapping:
+            return
         gid = self.resolve_tab()
+        reqs = [
+            {"createDeveloperMetadata": {"developerMetadata": {
+                "metadataKey": _META_KEY,
+                "metadataValue": value,
+                "visibility": "DOCUMENT",
+                "location": {"dimensionRange": {
+                    "sheetId": gid, "dimension": "ROWS",
+                    "startIndex": row_number - 1, "endIndex": row_number,
+                }},
+            }}}
+            for row_number, value in sorted(mapping.items())
+        ]
         self._svc.spreadsheets().batchUpdate(
-            spreadsheetId=self._sid,
-            body={"requests": [{
-                "createDeveloperMetadata": {"developerMetadata": {
-                    "metadataKey": _META_KEY,
-                    "metadataValue": value,
-                    "visibility": "DOCUMENT",
-                    "location": {"dimensionRange": {
-                        "sheetId": gid, "dimension": "ROWS",
-                        "startIndex": row_number - 1, "endIndex": row_number,
-                    }},
-                }}
-            }]},
+            spreadsheetId=self._sid, body={"requests": reqs}
         ).execute()
+
+    def stamp_row_uuid(self, row_number: int, value: str) -> None:
+        self.stamp_row_uuids({row_number: value})
 
     def clear_data_rows(self) -> None:
         """Clear all data rows (below the header). Header/validation kept."""

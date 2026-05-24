@@ -1,5 +1,10 @@
 # Arch.md — Slack/Telegram Task Manager
 
+> ⚠️ **DEPRECATED — заменён на [`TECHNICAL_ARCHITECTURE.md`](TECHNICAL_ARCHITECTURE.md)**
+> (2026-05-24). Сохранён для истории. Не содержит Entity Resolution V2
+> (FR-193*), CEO Brain ecosystem, retry-cap/sentinels (FR-196/197),
+> auto-Slack-publish (FR-194). Source of truth — TECHNICAL_ARCHITECTURE.md.
+
 Detailed architecture across four levels (infrastructure
 deliberately out of scope — see `docker-compose.yml` for that).
 

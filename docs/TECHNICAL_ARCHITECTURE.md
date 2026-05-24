@@ -88,6 +88,219 @@ graph TB
 
 ---
 
+## 2. UX / каналы взаимодействия
+
+> Связанные FR: FR-CR-02 (Slack card buttons), FR-CR-05-34 (confirm
+> keyboard), FR-CR-05-119 (To-Do block), FR-CR-05-199 (Slack publish format).
+
+| Канал | Роль | Что видит пользователь |
+|---|---|---|
+| **Slack каналы** (напр. D0ASY5QF6UX) | доставка summary + tasks | parent: `DD/MM - Title` (hyperlink на Google Doc) + Участники + суть + «TODO:» trailer; thread reply: важные tasks |
+| **Slack DM (бот)** | интерактив | per-task карточки с кнопками `[Ignore][Edit][Confirm]`, модалки создания/редактирования |
+| **Telegram DM** | подтверждение drafts | 🟡-карточки `title / 📝 desc / 👤 owner / 📅 due` с inline-кнопками Confirm/Edit/Ignore |
+| **Google Docs** | полный отчёт | detailed summary встречи, ссылка из Slack-заголовка |
+| **Google Sheets / Tasks** | зеркало задач | confirmed tasks синкаются (FR-CR-6) |
+
+```mermaid
+journey
+    title Путь задачи от встречи до подтверждения
+    section Встреча
+      Zoom/FF запись: 5: Система
+      Транскрипт (Whisper): 4: Система
+    section Извлечение
+      Detailed summary: 5: LLM
+      Entity resolution: 4: LLM
+      Tasks + owners: 5: LLM
+    section Доставка
+      Google Doc: 5: Система
+      Slack parent+thread: 5: Оператор
+      TG draft-карточка: 4: Оператор
+    section Подтверждение
+      Confirm в TG/Slack: 5: Оператор
+      Task в БД + Google Sheets: 5: Система
+```
+
+---
+
+## 3. API / entry-points
+
+> Связанные FR: FR-CR-05-35 (listener realtime), FR-CR-05-151 (auto-retry),
+> FR-CR-05-160 (webhook), FR-CR-05-194 (auto-publish).
+
+### 3.1 Входящие (откуда система получает данные)
+
+| Entry-point | Файл | Триггер |
+|---|---|---|
+| Slack bot — mention | `app/slack_bot/app.py:120` `@app.event("app_mention")` | упоминание в канале |
+| Slack bot — message | `app/slack_bot/app.py:132` `@app.event("message")` | сообщение |
+| Slack bot — shortcuts | `app/slack_bot/app.py:145` `@app.shortcut(...)` | create task/meeting |
+| Slack bot — actions | `app/slack_bot/app.py:154-280` `@app.action(...)` | кнопки Confirm/Edit/Ignore |
+| Slack bot — modals | `app/slack_bot/app.py:174-225` `@app.view(...)` | submit модалок |
+| Slack ingest | `app/slack_ingest/listener.py:120` `@app.event("message")` | Socket Mode message ingest |
+| Telegram listener | `app/telegram_bot/listener.py:1018` `TelegramListener.tick()` | poll TG source view |
+| Telegram bot handlers | `app/telegram_bot/handlers.py` | start/done/cancel/delete/subscribe + LLM-edit |
+| CEO Brain poller | `app/ceo_brain/...SlackHistoryPoller.start()` | фоновый poll Slack history |
+| Zoom/FF runner | `ops/zoom_fireflies_runner.py:169` `main()` | poll Zoom Cloud + Fireflies API |
+
+### 3.2 Исходящие (внешние API)
+
+| API | Куда | Назначение |
+|---|---|---|
+| Fireflies GraphQL | api.fireflies.ai | list transcripts, fetch sentences |
+| Zoom REST | zoom.us | list recordings, download audio |
+| Google Docs/Sheets/Tasks/Calendar | googleapis.com | docs, task mirror, agenda source |
+| n8n webhook | `app/services/meeting_webhook.py:22` | POST meeting summary |
+| OpenAI / Anthropic | api.openai.com / anthropic | LLM (см. §5) |
+
+### 3.3 Ops-runner процессы (long-running)
+
+- `ops/slack_listener.py:30` — Slack ingest (Socket Mode)
+- `ops/telegram_listener.py:42` — Telegram poll loop
+- `ops/zoom_fireflies_runner.py:169` — Zoom + Fireflies pipeline (2 потока)
+- `python -m app.main` — Slack bot + CEO Brain standalone (manager-bot-1)
+
+---
+
+## 4. Services layer
+
+> `app/services/` — 38 модулей. Каждый FR ссылается сюда `→ ARCH §4`.
+
+| Модуль | FR | Назначение |
+|---|---|---|
+| reasoning_extract | 193a | Step 1: transcript → summary + raw tasks (LLM) |
+| entity_matcher | 193b | Step 2: raw→canonical, STRICT scrub, speaker fallback (LLM) |
+| entity_apply | 193c | Step 3: single-pass replace (regex) |
+| entity_rewrite | 193c-3 | Step 3 alt: LLM-rewrite с падежами |
+| entity_resolution_cache | 193e | cache key/get/set (TTL 7d) |
+| team_member_canonical | 193b-7 | canonicalize participant names (LLM + email-resolve) |
+| team_member_notes_dsl | 192r | DSL: DELEGATE_TASKS_TO / DO_NOT_CALL |
+| counterparty_match | 125 | match org mentions → directory (LLM) |
+| counterparty_aliases | 193d | aliases satellite |
+| counterparty_enrollment(+batch) | 133/138 | enroll new mentions + widget |
+| task_direction | 163 | classify direction (beta/budget/design/investors/deliverables) |
+| task_due | — | parse due dates |
+| task_dedup | 128 | near-dup soft-delete |
+| transitions | — | task status transitions |
+| slack_publish | 194 | reusable Slack publish (parent+thread) |
+| slack_mirror | 137/141 | TG→Slack mirror + chunk/mrkdwn helpers |
+| card_sync | — | sync in-channel card ↔ DM |
+| meeting_webhook | 160 | n8n webhook POST |
+| digest / admin_digest | 6 | daily/weekly/deadline дайджесты |
+| notifications / subscriber_updates | 5/02 | подписчики |
+| transcription | — | Whisper orchestration |
+| bilingual_restorer | CB2-3.39 | bilingual transcript restore (Zoom) |
+| calendar_attendees / calendar_match | 169/136 | calendar resolution + recording↔event match |
+| zoom_participants | — | match Zoom participants → roster (LLM) |
+| employees | — | Slack users.info sync |
+| owners / workload | — | owner resolve + workload analysis |
+| daily_plan / weekly_plan | — | планирование |
+| thread_reminders / followup | — | reminders + draft follow-up |
+
+---
+
+## 5. AI-services + промпты
+
+> ⚠️ **GAP: промпты в 4 разных местах** (см. §10.1). Рекомендуется
+> консолидация в `app/prompts/`.
+
+### 5.1 Карта LLM-вызовов
+
+```mermaid
+graph LR
+    subgraph OpenAI["OpenAI (OPENAI_API_KEY → humanoid-smkenm)"]
+        RE[reasoning_extract<br/>gpt-5.5]
+        EM[entity_matcher ×3<br/>gpt-5.5]
+        ER[entity_rewrite<br/>gpt-5.5]
+        CM[counterparty_match ×4]
+        FFP[fireflies/zoom pipeline ×6<br/>detailed/short/tasks/verify]
+        AG[agenda/compose]
+        CB[counterparty_briefs/extract ×2]
+        INT[intent ×5<br/>detect/date/owner/title/main]
+        MISC[task_direction, zoom_participants,<br/>team_member_canonical, summary_canonicalize]
+    end
+    subgraph Anthropic["Anthropic (CEO_BRAIN_ANTHROPIC_API_KEY)"]
+        RESP[ceo_brain/responder<br/>claude-sonnet-4-6 + MCP]
+        PLAN[ceo_brain/planner]
+        GATHER[ceo_brain/parallel_gather<br/>6 MCP servers]
+        RESEARCH[counterparty_briefs/research<br/>web search]
+    end
+```
+
+### 5.2 Где живут промпты (4 локации — техдолг)
+
+| Локация | Промпты | Тип |
+|---|---|---|
+| **inline `_SYSTEM_PROMPT`** в services | reasoning_extract, entity_matcher, entity_rewrite, counterparty_match, task_direction, agenda/compose, counterparty_briefs/extract+research | Python-константы в коде |
+| **`app/intent/*_prompt.py`** | prompts.py (main), date_prompt, owner_prompt, title_prompt, detect_prompt | Python-модули |
+| **`app/fireflies/prompts.py`** | DETAILED_SUMMARY_SYSTEM, SHORT_SUMMARY_SYSTEM, TASK_EXTRACTION_SYSTEM, TASK_VERIFICATION_SYSTEM (reused Zoom'ом) | Python-модуль |
+| **`app/*/prompts/*.md`** | agenda/prompts/agenda.md; counterparty_briefs/prompts/{extract,extract_beneficiaries,research_org,research_person}.md | Markdown |
+| **`docs/prompts/*.md`** (16 файлов) | зеркала/документация промптов (canonicalize_tasks, task_extraction, intent_*, и т.д.) | Markdown-документация (не всегда live source) |
+
+### 5.3 Модели по env-var
+
+| Env var | Модель | Используется |
+|---|---|---|
+| OPENAI_MODEL | gpt-4o / gpt-5.5 | intent, entity-resolution V2, counterparty |
+| FIREFLIES_SUMMARY_MODEL / _TASKS_MODEL | gpt-5.5 | pipeline summaries + tasks |
+| FIREFLIES_WHISPER_MODEL | gpt-4o-transcribe | транскрипция |
+| OPENAI_DATE_MODEL / _DEDUP_MODEL | gpt-5.4 | date parse / dedup |
+| CEO_BRAIN_MODEL | claude-sonnet-4-6 | CEO Brain responder/planner/gather |
+| COUNTERPARTY_BRIEFS_RESEARCH_MODEL | o4-mini-deep-research | брифы (web search) |
+
+---
+
+## 6. Потоки данных (pipelines)
+
+> Связанные FR: FR-CR-05-122 (trace per step), FR-CR-05-151 (auto-retry),
+> FR-CR-05-193g (V2 wiring), FR-CR-05-196/197 (cap/sentinel).
+
+### 6.1 Zoom pipeline — `process_one()` (app/zoom/pipeline.py:2579)
+
+```
+[gate] attempts≥20 → permanent_failure (FR-196)
+[gate] duration==86400 → 24h sentinel skip (FR-197)
+[gate] duration<300 → too_short skip
+  ↓
+download_audio → transcribe(Whisper, +bilingual restore) → detailed_summary
+  → match_counterparties → enroll_unresolved → extract_tasks → verify_tasks
+  → canonicalize_task_names → consolidate_tasks → dedupe → classify_directions
+  → doc_export → short_summary → post_task_cards → send_to_slack (FR-194)
+```
+> `_step_extract_via_reasoning` (V2, FR-193g) — присутствует, но **stub/не
+> в основном flow**; V2 гоняется через `ops/v2_publish_meeting.py`.
+
+### 6.2 Fireflies pipeline — `process_one()` (app/fireflies/pipeline.py:2951)
+
+Симметрично Zoom + `match_calendar_title` + `send_short_summary`.
+FF `duration` хранится ×60 (минуты→секунды, FR-195).
+
+### 6.3 Slack/TG message → task
+
+```mermaid
+graph LR
+    MSG[Slack/TG message] --> INTENT[intent classify<br/>detect/date/owner/title]
+    INTENT --> INF[(intent_inferences)]
+    INF --> DRAFT[(action_drafts<br/>state=proposed)]
+    DRAFT --> CARD[карточка в DM]
+    CARD -->|Confirm| TASK[(tasks)]
+    TASK --> SHEET[Google Sheets/Tasks sync]
+    CARD -->|Ignore| EXP[state=ignored]
+```
+> 921 proposed-draft из telegram на момент аудита; в `tasks` идут только
+> confirmed.
+
+### 6.4 Listener tick (poll-loop, 60s)
+
+```
+zoom_fireflies_runner: 2 потока (zoom + ff) → list recent → per-meta
+  process_one (idempotent, FR-151 self-heal) → 60s sleep
+telegram_listener: view poll (seen=500) → intent → drafts → DM widgets → 30s
+slack_ingest: Socket Mode → on message → intent → draft
+manager-bot: Socket Mode (×2: main + CEO Brain) → on event → responder
+```
+
+---
+
 ## 7. Модель данных (ER)
 
 > Связанные FR: FR-CR-01 (task schema), FR-CR-05-193d (entity cache),
@@ -397,6 +610,54 @@ auto-Slack-publish (FR-194), email-canonicalize (FR-199c). Этот докуме
 
 ---
 
-<!-- СЕКЦИИ §2 (UX/каналы), §3 (API/entry-points), §4 (Services),
-     §5 (AI-services + промпты), §6 (Data flows) — заполняются после
-     завершения services-mapping агента. -->
+## 11. Framework: Feature → US → Use Case (Gherkin) → FR/NFR → test
+
+> SPEC.md сейчас — 558 плоских FR. Целевая BDD-иерархия (для будущей
+> миграции). Образец на Entity Resolution V2 (FR-CR-05-193*):
+
+```
+FEATURE: Universal Entity Resolution V2 (FR-CR-05-193)
+  USER STORY: Как оператор, я хочу чтобы имена/компании в саммари и
+    задачах были canonical и задачи назначались на реальных участников,
+    чтобы не путать Дмитрия Седова и Диму Дроздова.
+
+  USER FLOW: transcript → Step1 extract → Step2 match → Step3 rewrite →
+    owner apply → publish
+
+  USE CASE 1 (Gherkin):
+    Scenario: Resolve raw owner to meeting participant
+      Given транскрипт с задачей "Дима подготовит deck"
+        And Дима Дроздов НЕ участник встречи
+        And Дмитрий Седов участник встречи
+      When matcher резолвит raw_owner="Дима"
+      Then tm_real_name = "Дмитрий Седов"
+        And reasoning указывает на participant-context
+    → FR-CR-05-193b (matcher), FR-CR-05-193b-6 (STRICT scrub)
+    → test_entity_matcher_people.py::test_fr_cr_05_193b_6_scrubs_non_participant_owner
+
+  USE CASE 2 (Gherkin):
+    Scenario: Collective pronoun → host
+      Given задача с raw_owner="мы" (CEO-level)
+      When matcher применяет Rule 4b
+      Then owner = host/principal участник
+    → FR-CR-05-193b-8
+    → test_entity_matcher_people.py::test_fr_cr_05_193b_8_*
+
+  NFR: Step 1-3 идемпотентны; fallback на пустой LLM-ответ; rewrite
+    откатывается если длина <50% или >200% исходника (anti-hallucination).
+```
+
+**Применение:** каждая Feature в SPEC.md получает блок US + UserFlow +
+≥1 Gherkin Scenario, каждый Scenario мапится на FR-ID(ы) и тест. Полная
+миграция 558 FR — отдельный backlog-эпик.
+
+---
+
+## 12. Ссылки
+
+- Функциональные требования: **SPEC.md** (558× FR-CR-*)
+- Companion-спеки: SPEC_{NOTE_TAKER,TASK_TRACKER,TASK_EXTRACTOR,
+  CEO_BRAIN_BOT,COUNTERPARTY_BRIEFS,MEETING_AGENDA}_v0.1.md
+- Deploy: DEPLOY.md
+- Traces: docs/TRACES.md
+- **Устаревшие** (заменены этим документом): docs/ARCHITECTURE.md, docs/Arch.md

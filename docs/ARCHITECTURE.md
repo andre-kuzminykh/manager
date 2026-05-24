@@ -1,5 +1,10 @@
 # Architecture diagrams
 
+> ⚠️ **DEPRECATED — заменён на [`TECHNICAL_ARCHITECTURE.md`](TECHNICAL_ARCHITECTURE.md)**
+> (2026-05-24). Этот файл устарел: не содержит Entity Resolution V2,
+> CEO Brain, Counterparty Briefs, Meeting Agenda, retry-cap/sentinels,
+> auto-Slack-publish. Используй TECHNICAL_ARCHITECTURE.md как source of truth.
+
 Mermaid renderings of the manager bot's architecture. Each section
 covers one layer; combined they document the live system. Update
 when you add a pipeline step / model / integration / system prompt.

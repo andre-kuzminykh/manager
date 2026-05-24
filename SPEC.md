@@ -2,6 +2,15 @@
 
 Version: 5 (Base + CR-01 + CR-02 + CR-03 refined + CR-04)
 
+> 🏛️ **Техническая архитектура вынесена в [`docs/TECHNICAL_ARCHITECTURE.md`](docs/TECHNICAL_ARCHITECTURE.md)**
+> (authoritative). Этот документ (SPEC.md) — функциональные требования
+> (558× `FR-CR-*`). Связь: FR ссылаются на арх-якоря вида `→ ARCH §N`
+> (§2 UX, §3 API/entry-points, §4 Services, §5 AI-services+промпты,
+> §6 Data flows, §7 ER, §8 Infra). Целевая BDD-иерархия
+> (Feature→User Story→User Flow→Use Case Gherkin→FR/NFR→test) —
+> framework и образец в ARCH §11; полная миграция 558 FR — отдельный эпик.
+> Старые `docs/ARCHITECTURE.md` + `docs/Arch.md` — **устарели**, заменены.
+
 This document consolidates:
 
 - **Base SPEC** — initial product spec (passive detection, explicit mention,

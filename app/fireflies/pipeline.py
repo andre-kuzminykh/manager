@@ -2981,6 +2981,21 @@ class FirefliesPipeline:
         ):
             report.skipped_reason = "already_processed"
             return report
+        # FR-CR-05-198 — Fireflies hasn't published the audio yet: no
+        # audio_url and nothing downloaded before. Transient not-ready
+        # state, NOT a failure — return early WITHOUT incrementing attempts
+        # so polling never burns the retry cap waiting for the recording.
+        already_have_audio = bool(
+            row.audio_downloaded and row.audio_path and os.path.exists(row.audio_path)
+        )
+        if not row.audio_url and not already_have_audio:
+            report.skipped_reason = "waiting_for_audio"
+            log.info(
+                "fireflies_pipeline_waiting_for_audio",
+                fireflies_id=row.fireflies_id,
+                attempts=row.attempts or 0,
+            )
+            return report
         # FR-CR-05-196 — runaway retry cap.
         if (row.attempts or 0) >= MAX_ATTEMPTS_BEFORE_GIVE_UP:
             row.last_error = "permanent_failure_attempts_exceeded"

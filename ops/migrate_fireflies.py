@@ -194,6 +194,7 @@ def main() -> int:
                 r.tasks_extracted_count = None
                 r.last_error = None
                 r.processed_at = None
+                r.attempts = 0
             log.info(
                 "fireflies_rerun_reset",
                 count=len(rows),

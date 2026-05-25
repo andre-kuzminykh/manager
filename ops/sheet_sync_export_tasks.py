@@ -111,6 +111,7 @@ def main() -> int:
             # TASK_HEADERS order: title, description, responsible, status, priority,
             # category, start_date, start_time, deadline_date, deadline_time,
             # completed_date, completed_time, comments
+            added = d.created_at.strftime("%Y-%m-%d %H:%M") if d.created_at else ""
             rows.append([
                 title,
                 (p.get("description") or "").strip(),
@@ -122,12 +123,13 @@ def main() -> int:
                 due, "",         # deadline date/time
                 "", "",          # completion date/time
                 "",              # comments
+                added,           # Added at
             ])
         session.rollback()  # read-only on the DB
 
     print(f"strategic-задач к заливке: {len(rows)} (с {args.since}, фильтр {DIRECTIONS_IMPORTANT}; "
           f"пропущено без title: {skipped_no_title})")
-    assert len(TASK_HEADERS) == 13
+    assert len(TASK_HEADERS) == 14
     if args.dry_run:
         print("  #  | Category     | Prio   | Responsible          | Title")
         for i, r in enumerate(rows, 1):

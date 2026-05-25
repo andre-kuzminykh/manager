@@ -258,6 +258,7 @@ class TasksSheetClient:
             requests.append(_numfmt(fld, "DATE", "yyyy-mm-dd"))
         for fld in ("start_time", "deadline_time", "completed_time"):
             requests.append(_numfmt(fld, "TIME", "HH:mm"))
+        requests.append(_numfmt("added_at", "DATE_TIME", "yyyy-mm-dd hh:mm"))
 
         self._svc.spreadsheets().batchUpdate(
             spreadsheetId=self._sid, body={"requests": requests}

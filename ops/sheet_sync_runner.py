@@ -98,8 +98,18 @@ def run_tick(*, spreadsheet_id, tab, tz, interval, trigger, feed, reinit, since_
 
     fed = 0
     if feed:
+        # LLM only for backfilling direction on un-classified Slack/TG drafts.
+        s_ = get_settings()
+        llm = None
+        if s_.openai_api_key:
+            from openai import OpenAI
+            from app.intent.llm_backends import OpenAIBackend
+            llm = OpenAIBackend(client=OpenAI(api_key=s_.openai_api_key), model=s_.openai_model)
         with session_scope() as s:
-            fed = feed_new_strategic(s, client, integration_id=iid, since_dt=since_dt)
+            fed = feed_new_strategic(
+                s, client, integration_id=iid, since_dt=since_dt,
+                llm=llm, classify_model=s_.openai_model,
+            )
             s.commit()
 
     rows = client.read_rows()

@@ -26,6 +26,7 @@ TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Completion date", "completed_date"),
     ("Completion time", "completed_time"),
     ("Comments", "comments"),
+    ("Added at", "added_at"),
 )
 
 TASK_HEADERS: tuple[str, ...] = tuple(h for h, _ in TASK_COLUMNS)
@@ -57,6 +58,14 @@ STATUS_NORMALIZED: dict[str, str] = {
 STATUS_DISPLAY: tuple[str, ...] = (
     "Backlog", "To Do", "In Progress", "Blocked", "Done", "Cancelled",
 )
+# Reverse: normalized status/priority key → Sheet display (DB → Sheet feed).
+STATUS_DISPLAY_BY_KEY: dict[str, str] = {
+    "backlog": "Backlog", "todo": "To Do", "in_progress": "In Progress",
+    "blocked": "Blocked", "done": "Done", "cancelled": "Cancelled",
+}
+PRIORITY_DISPLAY_BY_KEY: dict[str, str] = {
+    "low": "Low", "medium": "Medium", "high": "High", "urgent": "High",
+}
 
 # Category dropdown — operator 2026-05-24: «Category из стратегических фильтров
 # либо other». Mirrors task_direction.DIRECTIONS_IMPORTANT (+ other). Kept as a

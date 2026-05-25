@@ -2587,6 +2587,22 @@ class ZoomPipeline:
             recording_id=row.id, zoom_id=row.zoom_id, title=row.title,
             errors=[],
         )
+        # FR-CR-05-198 — Zoom cloud recording not finished processing yet:
+        # no audio_url is published and we haven't downloaded audio before.
+        # This is a transient not-ready state, NOT a failure — return early
+        # WITHOUT incrementing attempts so polling never burns the retry cap.
+        # The poll loop simply re-checks each tick until the audio appears.
+        already_have_audio = bool(
+            row.audio_downloaded and row.audio_path and os.path.exists(row.audio_path)
+        )
+        if not row.audio_url and not already_have_audio:
+            report.skipped_reason = "waiting_for_audio"
+            log.info(
+                "zoom_pipeline_waiting_for_audio",
+                zoom_id=row.zoom_id,
+                attempts=row.attempts or 0,
+            )
+            return report
         # FR-CR-05-196 — runaway retry cap. Records that already failed
         # MAX_ATTEMPTS_BEFORE_GIVE_UP times are skipped permanently.
         # Operator can reset attempts=0 to retry once the underlying

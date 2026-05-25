@@ -24,7 +24,10 @@ from dataclasses import asdict
 from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import get_logger, setup_logging
-from app.sync.factories import build_docs_factory
+from app.sync.factories import (
+    build_calendar_credentials_factory_with_sa_fallback,
+    build_docs_factory,
+)
 from app.zoom.client import ZoomClient
 from app.zoom.pipeline import ZoomPipeline
 from ops.telegram_ingest import _build_llm_backend
@@ -128,6 +131,11 @@ def main() -> int:
 
     llm = _build_llm_backend()
     docs_factory = build_docs_factory(settings)
+    try:
+        calendar_factory = build_calendar_credentials_factory_with_sa_fallback(settings)
+    except Exception as e:  # noqa: BLE001
+        log.warning("zoom_calendar_factory_setup_failed", error=str(e))
+        calendar_factory = None
 
     sender = None
     if settings.telegram_bot_token:
@@ -141,6 +149,7 @@ def main() -> int:
         llm_backend=llm,
         docs_factory=docs_factory,
         sender=sender,
+        calendar_factory=calendar_factory,
     )
 
     # FR-CR-05-143 — when `--zoom-id` is given we keep paging

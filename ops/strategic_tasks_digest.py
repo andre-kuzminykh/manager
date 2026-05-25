@@ -472,9 +472,17 @@ def _resolve_window(args) -> tuple[datetime | None, datetime | None, str]:
     """Compute the (since_utc, until_utc, label) draft window.
 
     --yesterday → вчерашний КАЛЕНДАРНЫЙ день по Europe/London
-    [вчера 00:00, сегодня 00:00); иначе из --since / --until (UTC).
-    Returns (None, None, "") on a bad date (caller exits).
+    --morning   → утреннее окно: понедельник = пт+сб+вс (3 дня назад),
+                  остальные будни = вчера (для крона Mon-Fri 8:00).
+    иначе из --since / --until (UTC). (None, None, "") на плохой дате.
     """
+    if getattr(args, "morning", False):
+        today_lon = datetime.now(_LONDON).date()
+        back = 3 if today_lon.weekday() == 0 else 1  # Mon → Fri..Sun, else вчера
+        since_d = today_lon - timedelta(days=back)
+        since = datetime.combine(since_d, dt_time.min, _LONDON).astimezone(timezone.utc)
+        until = datetime.combine(today_lon, dt_time.min, _LONDON).astimezone(timezone.utc)
+        return since, until, f"за {since_d.isoformat()}..{(today_lon - timedelta(days=1)).isoformat()} (утро, Europe/London)"
     if args.yesterday:
         today_lon = datetime.now(_LONDON).date()
         y = today_lon - timedelta(days=1)
@@ -516,6 +524,12 @@ def main() -> int:
         action="store_true",
         help="Окно = вчерашний день по Europe/London (для утреннего крона "
         "в 8:00). Переопределяет --since/--until.",
+    )
+    ap.add_argument(
+        "--morning",
+        action="store_true",
+        help="Умное утреннее окно (Europe/London): понедельник = пт+сб+вс, "
+        "остальные будни = вчера. Для крона Mon-Fri 8:00.",
     )
     ap.add_argument(
         "--all",

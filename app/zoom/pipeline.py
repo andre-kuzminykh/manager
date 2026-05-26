@@ -173,7 +173,13 @@ class ZoomPipeline:
                 row.title = m.title
             if m.meeting_date and not row.meeting_date:
                 row.meeting_date = m.meeting_date
-            if m.audio_url and not row.audio_url:
+            # FR-CR-05-199 — REFRESH the download_url every poll. Zoom's
+            # `/rec/download/` URLs embed a short-lived token; a URL stored
+            # hours ago returns 404. The previous `not row.audio_url` guard
+            # pinned the first (now-stale) URL forever → permanent 404 on
+            # download. Each list_recordings call returns a fresh URL, so
+            # replace whenever it changed.
+            if m.audio_url and m.audio_url != row.audio_url:
                 row.audio_url = m.audio_url
             if m.share_url and not row.zoom_share_url:
                 row.zoom_share_url = m.share_url

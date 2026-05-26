@@ -1987,6 +1987,26 @@ class FirefliesPipeline:
             effective_participants = cal_attendees_names
         else:
             effective_participants = list(row.participants or [])
+        # FR-CR-05-200 — нормализуем участников: резолвим email-адреса в имена
+        # тиммейтов и дедупим. Сырой Fireflies-список часто несёт и display-name,
+        # и account-email одного человека (напр. «Артем Соколов» + «1@thehumanoid.ai»).
+        from app.agenda.service import _build_email_to_name_map
+
+        _e2n = _build_email_to_name_map(session)
+        _seen: set[str] = set()
+        _norm: list[str] = []
+        for p in effective_participants:
+            pp = (p or "").strip()
+            if not pp:
+                continue
+            if "@" in pp:
+                pp = _e2n.get(pp.lower(), pp)
+            key = pp.lower()
+            if key in _seen:
+                continue
+            _seen.add(key)
+            _norm.append(pp)
+        effective_participants = _norm
         participants_block = "\n".join(
             f"  - {p}" for p in effective_participants if p
         ) or "  (нет данных)"

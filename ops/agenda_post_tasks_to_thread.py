@@ -100,6 +100,10 @@ def main() -> int:
                 lookback_days=s.agenda_lookback_days,
                 min_prior_meetings=s.agenda_min_prior_meetings,
                 organizer_email=None,  # таргетим конкретное событие — org-фильтр не нужен
+                # FR — «последняя prior» должна быть как НА МОМЕНТ постинга агенды
+                # (до самой встречи), иначе после прошедшей встречи last-prior
+                # смещается на неё (0 задач). Берём момент создания агенды.
+                now=snapshot["posted_at"] or snapshot["scheduled_start_at"],
             )
         if not cands:
             print(

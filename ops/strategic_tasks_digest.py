@@ -166,6 +166,34 @@ def _build_tasks(drafts: list[ActionDraft]) -> list[dict]:
     return out
 
 
+def _norm_title(title: str) -> str:
+    return " ".join((title or "").lower().split())
+
+
+def _dedupe_tasks(tasks: list[dict]) -> tuple[list[dict], int]:
+    """Схлопнуть РОВНО одинаковые задачи по нормализованному заголовку
+    (lower + collapse whitespace), оставляя первое вхождение.
+
+    Источник иногда постит один и тот же список напоминаний в TG-чат
+    несколькими сообщениями → одинаковые задачи. Дедуп идёт по исходному
+    title драфта (до LLM-переформулирования), поэтому ловит повторы, даже
+    если LLM позже перефразирует их по-разному."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    dropped = 0
+    for t in tasks:
+        key = _norm_title(t.get("title") or "")
+        if not key:
+            out.append(t)
+            continue
+        if key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        out.append(t)
+    return out, dropped
+
+
 def _assign_directions(
     tasks: list[dict], *, llm, classify_model, strategic_only: bool
 ) -> tuple[list[dict], dict[int, str]]:
@@ -599,6 +627,10 @@ def main() -> int:
             print("  нет задач — выходим.")
             session.rollback()
             return 0
+
+        tasks, dups = _dedupe_tasks(tasks)
+        if dups:
+            print(f"  дедуп: схлопнул {dups} точных дублей по заголовку → осталось {len(tasks)}")
 
         tasks, newly = _assign_directions(
             tasks, llm=llm, classify_model=classify_model,

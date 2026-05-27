@@ -336,8 +336,11 @@ class Settings(BaseSettings):
     # Override via OPENAI_MODEL=gpt-4o if the key doesn't
     # have access yet.
     openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
-    openai_date_model: str = Field(default="gpt-5.5", alias="OPENAI_DATE_MODEL")
-    openai_dedup_model: str = Field(default="gpt-5.5", alias="OPENAI_DEDUP_MODEL")
+    # FR-CR-05-204 — cost: date parse doesn't need gpt-5.5 reasoning → gpt-4o.
+    openai_date_model: str = Field(default="gpt-4o", alias="OPENAI_DATE_MODEL")
+    # FR-CR-05-204 — cost: dedup is semantic; gpt-4o-mini misses near-dups
+    # (FR-CR-05-102), so gpt-4o (NOT mini) — still much cheaper than gpt-5.5.
+    openai_dedup_model: str = Field(default="gpt-4o", alias="OPENAI_DEDUP_MODEL")
     # FR-CR-05-110 — narrow Python safety net under the LLM
     # dedup gate: when candidate's normalized title +
     # owner-key set overlaps an existing item, mark
@@ -532,6 +535,9 @@ class Settings(BaseSettings):
     # FR-CR-05-104 — bumped to gpt-5.5 alongside the main
     # model for accuracy on Russian transcript summarisation
     # + task extraction.
+    # FR-CR-05-204 — short summary остаётся gpt-5.5 (качество RU-фразы), но
+    # БЕЗ reasoning: call-site `complete_text` НЕ передаёт reasoning_effort,
+    # поэтому reasoning-токены не тратятся.
     fireflies_short_summary_model: str = Field(
         default="gpt-5.5", alias="FIREFLIES_SHORT_SUMMARY_MODEL"
     )

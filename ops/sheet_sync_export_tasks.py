@@ -32,6 +32,49 @@ log = get_logger(__name__)
 
 _PRIORITY_DISPLAY = {"low": "Low", "medium": "Medium", "high": "High", "urgent": "High"}
 
+# FR-CR-05-205 — display name per source channel for the «Источник» column.
+_SOURCE_DISPLAY = {
+    "zoom": "Zoom", "fireflies": "Fireflies",
+    "slack": "Slack", "telegram": "Telegram",
+}
+
+
+def _source_and_link(session, task_id) -> tuple[str, str]:
+    """FR-CR-05-205 — («Источник», «Ссылка») for an action-draft's task.
+
+    Source = channel (Zoom/Fireflies/Slack/Telegram). Link = the meeting's
+    Google Doc REPORT for zoom/ff (joined from the recording by
+    `source_conversation_id`; falls back to `source_permalink`), or the
+    message permalink for slack/telegram. Defensive — any error → ("","")."""
+    if not task_id:
+        return "", ""
+    try:
+        from app.models import MeetingRecording, Task, ZoomRecording
+
+        t = session.get(Task, task_id)
+        if t is None:
+            return "", ""
+        kind = t.source_kind.value if t.source_kind else "slack"
+        src = _SOURCE_DISPLAY.get(kind, kind.capitalize())
+        link = t.source_permalink or ""
+        cid = t.source_conversation_id
+        if cid and kind == "zoom":
+            doc = session.query(ZoomRecording.google_doc_url).filter(
+                ZoomRecording.zoom_id == cid
+            ).scalar()
+            if doc:
+                link = doc
+        elif cid and kind == "fireflies":
+            doc = session.query(MeetingRecording.google_doc_url).filter(
+                MeetingRecording.fireflies_id == cid
+            ).scalar()
+            if doc:
+                link = doc
+        return src, link
+    except Exception as e:  # noqa: BLE001
+        log.warning("export_source_link_failed", task_id=task_id, error=str(e))
+        return "", ""
+
 
 def _owner_resolvers(session):
     by_username, by_name = {}, {}
@@ -112,6 +155,8 @@ def main() -> int:
             # category, start_date, start_time, deadline_date, deadline_time,
             # completed_date, completed_time, comments
             added = d.created_at.strftime("%Y-%m-%d %H:%M") if d.created_at else ""
+            # FR-CR-05-205 — источник + ссылка на отчёт (по task_id).
+            source_disp, source_link = _source_and_link(session, d.task_id)
             rows.append([
                 title,
                 (p.get("description") or "").strip(),
@@ -124,12 +169,14 @@ def main() -> int:
                 "", "",          # completion date/time
                 "",              # comments
                 added,           # Added at
+                source_disp,     # FR-CR-05-205 Источник
+                source_link,     # FR-CR-05-205 Ссылка (на отчёт)
             ])
         session.rollback()  # read-only on the DB
 
     print(f"strategic-задач к заливке: {len(rows)} (с {args.since}, фильтр {DIRECTIONS_IMPORTANT}; "
           f"пропущено без title: {skipped_no_title})")
-    assert len(TASK_HEADERS) == 14
+    assert len(TASK_HEADERS) == 16  # FR-CR-05-205: +Источник +Ссылка
     if args.dry_run:
         print("  #  | Category     | Prio   | Responsible          | Title")
         for i, r in enumerate(rows, 1):

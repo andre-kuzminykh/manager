@@ -27,6 +27,12 @@ TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("Completion time", "completed_time"),
     ("Comments", "comments"),
     ("Added at", "added_at"),
+    # FR-CR-05-205 — read-only / export-only context columns. The export
+    # (ops/sheet_sync_export_tasks.py) fills these from the task's source;
+    # the (currently disabled) bidirectional sync must NOT pull them back
+    # into Task — they are display-only.
+    ("Источник", "source"),
+    ("Ссылка", "source_link"),
 )
 
 TASK_HEADERS: tuple[str, ...] = tuple(h for h, _ in TASK_COLUMNS)

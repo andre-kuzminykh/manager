@@ -194,9 +194,16 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
             "\n\nJIRA-ЗАДАЧИ: для любых вопросов про статусы, количество "
             "или списки задач Jira («сколько задач в on hold», «что в "
             "работе») используй инструмент `jira_search` с JQL — НЕ "
-            "Teamwork-Graph. Примеры JQL: `status = \"On Hold\"`, "
-            "`project = \"CEO Brain\" AND status = \"On Hold\"`. Поле "
-            "`total` в ответе — точное число совпадений."
+            "Teamwork-Graph. «CEO Brain» (а также «CEO», «мозг CEO») в "
+            "Jira — это проект CEO Office, ключ `BA`; используй "
+            "`project = BA`. Статусы пишутся как в Jira, в т.ч. по-"
+            "английски в русскоязычном инстансе: `\"On Hold\"`, "
+            "`Done`/«Готово», «К выполнению». Пример: "
+            "`project = BA AND status = \"On Hold\"`. Если jira_search "
+            "вернул поле `error` или ошибку про несуществующее значение "
+            "поля — НЕ выдумывай «0» и не говори «нет доступа»: покажи "
+            "текст ошибки и повтори запрос с исправленным полем. Поле "
+            "`total` в ответе — число найденных задач."
         )
     return prompt
 

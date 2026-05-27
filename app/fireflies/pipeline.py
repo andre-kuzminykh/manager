@@ -3050,6 +3050,23 @@ class FirefliesPipeline:
                 cap=MAX_ATTEMPTS_BEFORE_GIVE_UP,
             )
             return report
+        # FR-CR-05-203 — cross-source Zoom↔Fireflies dedup (symmetric to
+        # Zoom). If the same meeting was already posted by the other source
+        # (Zoom cloud or another FF row), skip this capture entirely —
+        # don't download / transcribe / post. First-to-post wins.
+        from app.services import meeting_dedup
+
+        _dup = meeting_dedup.find_cross_source_duplicate(
+            session, title=row.title, meeting_date=row.meeting_date,
+            self_kind="fireflies", self_id=row.fireflies_id,
+        )
+        if _dup:
+            report.skipped_reason = "duplicate_other_source"
+            log.info(
+                "fireflies_pipeline_skipped_duplicate_other_source",
+                fireflies_id=row.fireflies_id, dup_kind=_dup[0], dup_id=_dup[1],
+            )
+            return report
         # FR-CR-05-192t — operator-pinned 2026-05-22 min-duration
         # gate: skip meetings shorter than `min_meeting_seconds`
         # (default 300 = 5 min). Procedural / aborted-call recordings

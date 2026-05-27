@@ -2670,6 +2670,24 @@ class ZoomPipeline:
                 cap=MAX_ATTEMPTS_BEFORE_GIVE_UP,
             )
             return report
+        # FR-CR-05-203 — cross-source Zoom↔Fireflies dedup. The same
+        # meeting is often captured by BOTH Zoom Cloud AND the Fireflies
+        # bot → two independent rows → duplicate Slack posts. If the other
+        # source already posted this meeting, skip the second capture
+        # entirely (no download / transcribe / post). First-to-post wins.
+        from app.services import meeting_dedup
+
+        _dup = meeting_dedup.find_cross_source_duplicate(
+            session, title=row.title, meeting_date=row.meeting_date,
+            self_kind="zoom", self_id=row.zoom_id,
+        )
+        if _dup:
+            report.skipped_reason = "duplicate_other_source"
+            log.info(
+                "zoom_pipeline_skipped_duplicate_other_source",
+                zoom_id=row.zoom_id, dup_kind=_dup[0], dup_id=_dup[1],
+            )
+            return report
         # FR-CR-05-197 — Zoom Phone / continuous-recording sentinel.
         # `duration=86400` (exactly 24h) is Zoom's default for sessions
         # that were never actually started (booked room, continuous Phone).

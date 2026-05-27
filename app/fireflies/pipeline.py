@@ -989,7 +989,17 @@ class FirefliesPipeline:
                 row.title = t.title
             if t.meeting_date and not row.meeting_date:
                 row.meeting_date = t.meeting_date
-            if t.audio_url and not row.audio_url:
+            # Refresh a stale/expired audio_url. Fireflies signs the
+            # download URL with a short-lived token; re-using the
+            # stored one 404s on retry, so the record burns attempts
+            # until permanent_failure. Mirror the Zoom fix: take the
+            # fresh URL whenever it changed and we haven't downloaded
+            # yet (a downloaded row skips the step, so no need then).
+            if (
+                t.audio_url
+                and not row.audio_downloaded
+                and t.audio_url != row.audio_url
+            ):
                 row.audio_url = t.audio_url
             if t.share_url and not row.fireflies_share_url:
                 row.fireflies_share_url = t.share_url

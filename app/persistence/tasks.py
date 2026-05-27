@@ -406,6 +406,14 @@ def create_task_from_draft(
     extra: dict[str, Any] = {}
     if owner_assumed:
         extra["owner_assumed"] = True
+    # FR-CR-05-206 — carry the strategic direction classified at draft
+    # creation (FR-CR-05-200) into the Task, so digests and the sheet
+    # export filter by direction without re-classifying. Meeting tasks
+    # already get this in-pipeline (FR-CR-05-163); this closes the
+    # Slack/Telegram draft → Task path.
+    _direction = (payload.get("direction") or "").strip().lower()
+    if _direction:
+        extra["direction"] = _direction
 
     task = Task(
         title=title,

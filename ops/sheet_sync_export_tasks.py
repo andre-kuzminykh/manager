@@ -128,6 +128,38 @@ def _resolve_owner(raw, by_username, by_name, valid_names):
     return name if name in valid_names else ""
 
 
+def _classifier_backend(settings):
+    """FR-CR-05-206 — gpt-4o-mini backend to backfill `direction` on rows
+    that were never classified (mostly Slack tasks). None when there's no
+    OpenAI key so the export still runs read-only. Defensive."""
+    if not getattr(settings, "openai_api_key", ""):
+        return None
+    try:
+        from openai import OpenAI
+
+        from app.intent.llm_backends import OpenAIBackend
+
+        return OpenAIBackend(client=OpenAI(api_key=settings.openai_api_key), model="gpt-4o-mini")
+    except Exception as e:  # noqa: BLE001
+        log.warning("export_classifier_backend_failed", error=str(e))
+        return None
+
+
+def _classify_missing(backend, model, *, title, description) -> str:
+    """One strategic-direction classification (∈ DIRECTIONS_IMPORTANT or
+    'other'); '' on any failure so the caller leaves direction unset."""
+    from app.services.task_direction import classify_one_direction
+
+    try:
+        return classify_one_direction(
+            title=title or "", description=description or "",
+            llm_backend=backend, model=model,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("export_classify_missing_failed", error=str(e))
+        return ""
+
+
 def main() -> int:
     setup_logging()
     s = get_settings()
@@ -139,6 +171,11 @@ def main() -> int:
     ap.add_argument("--replace", action="store_true",
                     help="Очистить строки данных перед заливкой (идемпотентно, без дублей).")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--classify-model", default="gpt-4o-mini",
+                    help="Модель доклассификации direction у задач без метки.")
+    ap.add_argument("--no-classify", dest="classify_missing", action="store_false",
+                    help="Не доклассифицировать (чисто read-only, без записи в БД).")
+    ap.set_defaults(classify_missing=True)
     args = ap.parse_args()
 
     if not args.spreadsheet_id:
@@ -153,9 +190,13 @@ def main() -> int:
     rows: list[list[str]] = []
     responsible_options: list[str] = []
     skipped_no_title = 0
+    classified = 0
     with session_scope() as session:
         by_username, by_name, valid_names = _owner_resolvers(session)
         responsible_options = sorted(valid_names)
+        # FR-CR-05-206 — backfill direction on rows that were never
+        # classified (mostly Slack tasks) so they pass the strategic filter.
+        clf_backend = _classifier_backend(s) if args.classify_missing else None
         drafts = session.execute(
             select(ActionDraft)
             .where(ActionDraft.state == ActionDraftState.proposed)
@@ -164,10 +205,19 @@ def main() -> int:
         ).scalars().all()
         for d in drafts:
             p = d.payload or {}
+            title = (p.get("title") or "").strip()
             direction = (p.get("direction") or "").strip().lower()
+            if not direction and title and clf_backend is not None:
+                direction = _classify_missing(
+                    clf_backend, args.classify_model,
+                    title=title, description=p.get("description"),
+                )
+                if direction:
+                    p = {**p, "direction": direction}
+                    d.payload = p
+                    classified += 1
             if direction not in DIRECTIONS_IMPORTANT:
                 continue
-            title = (p.get("title") or "").strip()
             if not title:
                 skipped_no_title += 1
                 continue
@@ -210,10 +260,18 @@ def main() -> int:
             .order_by(Task.id.asc())
         ).scalars().all()
         for t in tasks:
+            title = (t.title or "").strip()
             direction = ((t.extra or {}).get("direction") or "").strip().lower()
+            if not direction and title and clf_backend is not None:
+                direction = _classify_missing(
+                    clf_backend, args.classify_model,
+                    title=title, description=t.description,
+                )
+                if direction:
+                    t.extra = {**(t.extra or {}), "direction": direction}
+                    classified += 1
             if direction not in DIRECTIONS_IMPORTANT:
                 continue
-            title = (t.title or "").strip()
             if not title:
                 skipped_no_title += 1
                 continue
@@ -243,10 +301,18 @@ def main() -> int:
                 source_disp,     # FR-CR-05-205 Источник
                 source_link,     # FR-CR-05-205 Ссылка (на отчёт)
             ])
-        session.rollback()  # read-only on the DB
+        # Persist ONLY the backfilled directions (no other writes here).
+        # Dry-run never writes; --no-classify keeps it fully read-only.
+        if classified and not args.dry_run:
+            session.commit()
+        else:
+            session.rollback()
 
     print(f"strategic-задач к заливке: {len(rows)} (с {args.since}, фильтр {DIRECTIONS_IMPORTANT}; "
           f"пропущено без title: {skipped_no_title})")
+    if classified:
+        saved = "НЕ сохранено (dry-run)" if args.dry_run else "сохранено в БД"
+        print(f"доклассифицировано direction (gpt-4o-mini) у {classified} задач без метки — {saved}.")
     assert len(TASK_HEADERS) == 16  # FR-CR-05-205: +Источник +Ссылка
     if args.dry_run:
         print("  #  | Source     | Category     | Prio   | Responsible          | Title | Link")

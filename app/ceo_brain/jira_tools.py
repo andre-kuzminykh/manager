@@ -168,8 +168,10 @@ def build_jira_executors(
         return _ok({"error": msg})
 
     def jira_search(inp: dict) -> str:
+        log.info("ceo_brain_jira_search_call", inp=inp)
         jql = (inp.get("jql") or "").strip()
         if not jql:
+            log.warning("ceo_brain_jira_search_no_jql", inp=inp)
             return _err("jira_search requires `jql`")
         max_results = min(max(int(inp.get("max_results") or 50), 1), 50)
         try:
@@ -184,9 +186,13 @@ def build_jira_executors(
                 timeout=30,
             )
         except Exception as e:  # noqa: BLE001
-            log.warning("ceo_brain_jira_search_failed", error=str(e))
+            log.warning("ceo_brain_jira_search_failed", jql=jql, error=str(e))
             return _err(f"jira_search_request_failed: {e}")
         if r.status_code != 200:
+            log.warning(
+                "ceo_brain_jira_search_http_error",
+                status=r.status_code, jql=jql, body=r.text[:500],
+            )
             return _err(
                 f"jira_search_http_{r.status_code}: {_truncate(r.text, 500)}"
             )
@@ -195,6 +201,11 @@ def build_jira_executors(
         except Exception as e:  # noqa: BLE001
             return _err(f"jira_search_bad_json: {e}")
         issues = data.get("issues") or []
+        log.info(
+            "ceo_brain_jira_search_result",
+            jql=jql, returned=len(issues),
+            keys=[i.get("key") for i in issues],
+        )
         return _ok({
             "jql": jql,
             "total": data.get("total", len(issues)),

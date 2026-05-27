@@ -194,6 +194,61 @@ def _dedupe_tasks(tasks: list[dict]) -> tuple[list[dict], int]:
     return out, dropped
 
 
+def _fuzzy_dedupe_tasks(tasks: list[dict], *, llm, model: str) -> tuple[list[dict], int]:
+    """LLM-дедуп почти-дубликатов: задачи с ОДНИМ действием в отношении ОДНОГО
+    человека/контрагента, отличающиеся лишь формулировкой (повторные посты в
+    TG, перефразировки). Консервативно: при сомнении НЕ группирует. Из группы
+    оставляет самую подробную формулировку (title+description). На ошибке LLM —
+    no-op (возвращает вход)."""
+    import json
+
+    if llm is None or len(tasks) < 2:
+        return tasks, 0
+    items = [
+        {"id": t["id"], "title": (t.get("title") or "")[:200],
+         "desc": (t.get("description") or "")[:200]}
+        for t in tasks
+    ]
+    system = (
+        "Ты дедуплицируешь список задач. Найди ГРУППЫ ДУБЛИКАТОВ — задачи с "
+        "ОДНИМ И ТЕМ ЖЕ действием в отношении ОДНОГО И ТОГО ЖЕ человека или "
+        "контрагента, отличающиеся ТОЛЬКО формулировкой. НЕ группируй задачи "
+        "с разными людьми/контрагентами или разными действиями. Если "
+        "сомневаешься — оставляй раздельно (лучше не схлопнуть, чем склеить разное)."
+    )
+    user = (
+        "Верни СТРОГО JSON: {\"groups\": [[id, id, ...], ...]} — только группы "
+        "из 2+ дубликатов (id из списка ниже). Без пояснений.\nЗадачи:\n"
+        + json.dumps(items, ensure_ascii=False)
+    )
+    try:
+        raw = llm.complete_text(
+            system_prompt=system, user_prompt=user, model=model,
+            response_format={"type": "json_object"},
+        ) or ""
+        groups = (json.loads(raw) or {}).get("groups") or []
+    except Exception as e:  # noqa: BLE001
+        log.warning("fuzzy_dedup_failed", error=str(e))
+        return tasks, 0
+    by_id = {t["id"]: t for t in tasks}
+    drop: set = set()
+    for g in groups:
+        ids = [i for i in g if i in by_id]
+        if len(ids) < 2:
+            continue
+        keep = max(
+            ids,
+            key=lambda i: len(by_id[i].get("title") or "")
+            + len(by_id[i].get("description") or ""),
+        )
+        for i in ids:
+            if i != keep:
+                drop.add(i)
+    if not drop:
+        return tasks, 0
+    return [t for t in tasks if t["id"] not in drop], len(drop)
+
+
 def _assign_directions(
     tasks: list[dict], *, llm, classify_model, strategic_only: bool
 ) -> tuple[list[dict], dict[int, str]]:
@@ -574,6 +629,10 @@ def main() -> int:
                     "(батчами по 5). Default — gpt-4o-mini.")
     ap.add_argument("--limit", type=int, default=0, help="Cap for testing.")
     ap.add_argument(
+        "--no-fuzzy-dedup", action="store_true",
+        help="Отключить LLM-дедуп почти-дубликатов (по умолчанию включён).",
+    )
+    ap.add_argument(
         "--send",
         action="store_true",
         help="ОТПРАВИТЬ в Slack. По умолчанию OFF — только превью (что "
@@ -651,6 +710,11 @@ def main() -> int:
         if not tasks:
             print("  стратегических задач не найдено.")
             return 0
+
+        if not args.no_fuzzy_dedup:
+            tasks, fdups = _fuzzy_dedupe_tasks(tasks, llm=llm, model=classify_model)
+            if fdups:
+                print(f"  фаззи-дедуп: схлопнул {fdups} near-дублей → осталось {len(tasks)}")
 
         # Резолвим ответственного в РЕАЛЬНОЕ имя из team_members
         # (мэтч по telegram_username и по имени). Без выдумок.

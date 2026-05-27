@@ -1,8 +1,9 @@
 # CEO Brain — Product Requirements Document (AS-IS)
 
-> **Версия:** 1.0 · **Тип:** AS-IS (реверс-инжиниринг из кода, не roadmap)
-> **Дата сборки:** 2026-05-27 · **Источник истины:** ветка `claude/intelligent-ritchie-6R1zn` (HEAD `97ae418`)
-> **Метод:** документ собран продуктовым аналитиком из фактического кода репозитория `manager` (177 Python-модулей, 36 миграций), а не из деклараций. Каждое требование привязано к строке кода (`файл:строка`) и к «родному» ID требования из комментариев в коде (`Trace`).
+> **Версия:** 1.1 · **Тип:** AS-IS (реверс-инжиниринг из кода, не roadmap)
+> **Дата сборки:** 2026-05-27 · **Источник истины:** код репозитория `manager` (HEAD `97ae418`, 177 Python-модулей, 36 миграций)
+> **Метод:** документ собран продуктовым аналитиком из фактического кода, а не из деклараций. Каждое требование привязано к строке кода (`файл:строка`) и к «родному» ID требования из комментариев в коде (`Trace`).
+> **v1.1:** структура переразбита на **7 продуктовых фич по типу объекта** — Memory · Tasks · Calendar · Notes · Docs · Tables · Reports. Прежние пайплайн-фичи (CEO Brain Bot / Note Taker / Task Extractor / Task Tracker / Agenda / Briefs / Platform) сохранены как **линия происхождения** требований (§2.2) и в префиксах ID. Ни одно требование не потеряно — см. карты §2.2 (US) и §2.3 (backbone).
 
 ---
 
@@ -29,14 +30,24 @@
 
 ### 0.2 Схема идентификаторов
 
-| Префикс | Сущность |
-|---------|----------|
+Структура — **7 фич по типу объекта**. Идентификаторы требований **сохраняют префикс фичи-происхождения** (это и есть AS-IS-трассировка к коду), поэтому внутри одной новой фичи могут встречаться разные префиксы (например, в **Tasks** есть `FR-TX-*`, `FR-TT-*`, `FR-NT-012`, `FR-PL-006`).
+
+| Префикс ID | Происхождение (старый пайплайн) |
+|------------|----------------------------------|
+| `*-CB-*` | CEO Brain Bot |
+| `*-NT-*` | Note Taker |
+| `*-TX-*` | Task Extractor |
+| `*-TT-*` | Task Tracker |
+| `*-AG-*` | Pre-Meeting Agenda |
+| `*-BR-*` | Counterparty Briefs |
+| `*-PL-*` | Platform / Data Backbone |
+
+| Тип ID | Сущность |
+|--------|----------|
 | `US-<F>-<n>` | User Story |
 | `UC-<F>-<n>.<m>` | Use Case (Given-When-Then), декомпозиция US |
 | `FR-<F>-<nnn>` | Functional Requirement |
 | `NFR-<F>-<nnn>` | Non-Functional Requirement |
-
-Коды фич `<F>`: **CB** (CEO Brain Bot), **NT** (Note Taker), **TX** (Task Extractor), **TT** (Task Tracker), **AG** (Pre-Meeting Agenda), **BR** (Counterparty Briefs), **PL** (Platform / data backbone).
 
 `Trace:` в каждом требовании ссылается на «родной» ID из комментариев кода (`FR-CR-04-*`, `FR-CR-05-*`, `FR-CB2-*`, `FR-GS-*`) и файл — это и есть доказательство AS-IS.
 
@@ -47,6 +58,8 @@
 ### 1.1 Что такое CEO Brain
 
 **CEO Brain** — это «второй мозг» руководителя: монолитный сервис (Python + Postgres), который слушает рабочие каналы компании (Slack, Telegram, Zoom, Fireflies), превращает разговоры и встречи в структурированные **задачи**, **саммари** и **брифы**, отслеживает их жизненный цикл, зеркалит всё в Google (Sheets / Tasks / Docs / Calendar) и отвечает на вопросы руководителя в чате, имея доступ к его реальным данным.
+
+В этом документе те же возможности сгруппированы по **типу объекта, который получает Артем**: его **Memory** (диалоговый доступ ко всему контексту), **Tasks** (полный жизненный цикл задач), **Calendar** (подготовка к встречам по расписанию), **Notes** (саммари встреч), **Docs** (Google-документы), **Tables** (Google Sheets/Tasks + директории) и **Reports** (дайджесты и брифы). Бэкенд-«движок» (ingest из 4 каналов, entity-resolution, шифрование токенов, кросс-канальная доставка) не вынесен в отдельную фичу, а прикреплён к фиче-потребителю и помечен как backbone (см. §2.3).
 
 Один процесс (`app/main.py:run`) поднимает: основной Slack-бот (Socket Mode) + диспетчер кросс-канальной рассылки подписчикам + единоразовую синхронизацию сотрудников + демоны Agenda и Counterparty Briefs + standalone-листенер CEO Brain Bot. Тяжёлые пайплайны встреч и ingest'ы запускаются отдельными процессами `ops/*`.
 
@@ -72,15 +85,15 @@
 
 ## 2. Карта фич
 
-| # | Фича | Что делает | Статус | Флаг активации |
-|---|------|------------|--------|----------------|
-| A | **CEO Brain Bot** | Диалоговый ассистент в Slack: архивирует каналы + отвечает на @упоминания/DM, подтягивая данные через MCP-коннекторы. | 🟡 FLAG | `CEO_BRAIN_ENABLED` |
-| B | **Note Taker** | Авто-захват Zoom/Fireflies встреч → транскрипт → саммари → задачи → Google Doc → Slack/Telegram/webhook. | 🟡🔵 FLAG+JOB | `ZOOM_REALTIME_ENABLED` / `FIREFLIES_REALTIME_ENABLED` (`ops/zoom_fireflies_runner.py`) |
-| C | **Task Extractor** | Сообщения из Slack/Telegram → черновики задач (LLM-классификация + извлечение). | 🟢🟡 LIVE+FLAG | Slack passive/@mention — LIVE; TG-view и Slack-ingest — флаги |
-| D | **Task Tracker** | Жизненный цикл задачи: интерактивные карточки (TG+Slack), статусы, дайджесты, напоминания, подписки. | 🟢 LIVE | — (часть джобов гейтятся по admin-id) |
-| E | **Pre-Meeting Agenda** | Перед повторяющейся встречей — DM с повесткой (что было в прошлый раз + открытые задачи) + Google Doc. | 🟡 FLAG | `AGENDA_ENABLED` |
-| F | **Counterparty Briefs** | Перед встречей с внешней компанией — deep-research брифы на компанию и людей + Google Docs + сгруппированный DM. | 🟡 FLAG | `COUNTERPARTY_BRIEFS_ENABLED` |
-| G | **Platform / Data Backbone** | Модель данных, двусторонняя синхронизация Google, директории, entity-resolution, шифрование секретов. | 🟢🟡 LIVE+FLAG | разные (см. §9) |
+| # | Фича | Что получает Артем | Статус | Главные флаги |
+|---|------|--------------------|--------|---------------|
+| 1 | **Memory** | Диалоговый ассистент в Slack: пассивно архивирует весь контекст и отвечает на @упоминания/DM, подтягивая данные через MCP. | 🟡 FLAG | `CEO_BRAIN_ENABLED` |
+| 2 | **Tasks** | Полный жизненный цикл задачи: извлечение из чатов/встреч, карточки (TG+Slack), статусы, напоминания, подписки, дедуп, резолв людей. | 🟢🟡 LIVE+FLAG | LIVE + ingest-флаги |
+| 3 | **Calendar** | Подготовка к встрече по расписанию: повестка перед повторяющейся встречей + калибровка названия встречи по календарю. | 🟡 FLAG | `AGENDA_ENABLED`, `CALENDAR_MATCH_ENABLED` |
+| 4 | **Notes** | Авто-саммари встреч: Zoom/Fireflies → транскрипт → короткое саммари в Slack/TG + участники/контрагенты. | 🟡🔵 FLAG+JOB | `ZOOM_REALTIME_ENABLED` / `FIREFLIES_REALTIME_ENABLED` |
+| 5 | **Docs** | Полные документы в Google Docs: отчёт встречи, повестка, брифы — единая поверхность рендеринга. | 🟡 FLAG | `*_DOCS_FOLDER_ID` |
+| 6 | **Tables** | Google Sheets/Tasks как операционный вид: двусторонняя синка задач, директории, версионная история; хранилище секретов. | 🟢🟡 LIVE+FLAG | разные (см. фичу) |
+| 7 | **Reports** | Сводки и брифы: утренние/вечерние/недельные дайджесты, watch-list + deep-research брифы контрагентов перед встречей. | 🟢🟡 LIVE+FLAG | `COUNTERPARTY_BRIEFS_ENABLED` + admin-id |
 
 ### 2.1 Верхнеуровневая архитектура (AS-IS)
 
@@ -91,66 +104,105 @@ flowchart TD
         TG["Telegram (Supabase read-only view)"]
         ZM["Zoom Cloud Recordings"]
         FF["Fireflies транскрипты"]
-        GC["Google Calendar"]
+        GC["Google Calendar (read-only)"]
     end
 
     subgraph CORE["Монолит (Python + Postgres)"]
-        EXT["Task Extractor (LangGraph)"]
-        NTK["Note Taker pipeline"]
-        TRK["Task Tracker (lifecycle)"]
-        AGN["Agenda runner"]
-        BRF["Briefs runner"]
-        BOT["CEO Brain Bot"]
+        MEM["Memory (CEO Brain Bot)"]
+        TSK["Tasks (extract + lifecycle)"]
+        CAL["Calendar (agenda + naming)"]
+        NOTE["Notes (meeting pipeline)"]
+        REP["Reports (digests + briefs)"]
         DB[("Postgres — source of truth")]
     end
 
     subgraph OUT["Поверхности вывода"]
         SLO["Slack карточки / DM / треды"]
         TGO["Telegram карточки / дайджесты"]
-        GS["Google Sheets (Tasks + Team)"]
-        GT["Google Tasks"]
-        GD["Google Docs"]
+        DOC["Docs (Google Docs)"]
+        TBL["Tables (Sheets + Google Tasks)"]
         WH["n8n webhook"]
     end
 
-    SL --> EXT
-    TG --> EXT
-    ZM --> NTK
-    FF --> NTK
-    GC --> AGN
-    GC --> BRF
+    SL --> MEM
+    SL --> TSK
+    TG --> TSK
+    ZM --> NOTE
+    FF --> NOTE
+    GC --> CAL
+    GC --> REP
 
-    EXT --> DB
-    NTK --> DB
-    AGN --> DB
-    BRF --> DB
-    BOT --> DB
+    MEM --> DB
+    TSK --> DB
+    CAL --> DB
+    NOTE --> DB
+    REP --> DB
 
-    DB --> TRK
-    TRK --> SLO
-    TRK --> TGO
-    TRK --> GS
-    TRK --> GT
-    NTK --> GD
-    NTK --> WH
-    AGN --> SLO
-    AGN --> GD
-    BRF --> SLO
-    BRF --> GD
-    BOT --> SLO
+    DB --> TSK
+    TSK --> SLO
+    TSK --> TGO
+    TSK --> TBL
+    NOTE --> DOC
+    NOTE --> WH
+    CAL --> DOC
+    REP --> DOC
+    REP --> SLO
+    REP --> TGO
+    MEM --> SLO
 
     LLM["LLM: OpenAI gpt-5.5 / Anthropic claude-sonnet-4-6"]
-    EXT -.-> LLM
-    NTK -.-> LLM
-    BOT -.-> LLM
-    BRF -.-> LLM
+    MEM -.-> LLM
+    TSK -.-> LLM
+    NOTE -.-> LLM
+    REP -.-> LLM
 ```
+
+### 2.2 Карта происхождения (старый пайплайн → новая фича)
+
+Доказательство, что при перенарезке **ничего не потеряно**: каждая User Story прежней структуры имеет дом в новой.
+
+| Старый пайплайн | User Stories | → Новая фича |
+|-----------------|--------------|--------------|
+| **CEO Brain Bot** | US-CB-1, US-CB-2, US-CB-3, US-CB-4 | **Memory** (целиком) |
+| **Note Taker** | US-NT-1, US-NT-2, US-NT-3, US-NT-5 | **Notes** |
+| | US-NT-4 (полный отчёт-Doc) | **Docs** |
+| | US-NT-6 (задачи из встречи) | **Tasks** |
+| | US-NT-7 (имя встречи по календарю) | **Calendar** |
+| **Task Extractor** | US-TX-1 … US-TX-5 | **Tasks** (целиком) |
+| **Task Tracker** | US-TT-1 (кнопки), US-TT-5 (напоминания), US-TT-6 (подписки) | **Tasks** |
+| | US-TT-2, US-TT-3, US-TT-4, US-TT-8 (дайджесты/watch-list) | **Reports** |
+| | US-TT-7 (правки в Sheets/Tasks) | **Tables** |
+| **Pre-Meeting Agenda** | US-AG-1, US-AG-2, US-AG-3 | **Calendar** (целиком) |
+| **Counterparty Briefs** | US-BR-1, US-BR-2, US-BR-3 | **Reports** (целиком) |
+| **Platform** | US-PL-1, US-PL-2, US-PL-3, US-PL-6 (Sheets/Tasks/директории/версии) | **Tables** |
+| | US-PL-5 (Fernet-шифрование) | **Tables** |
+| | US-PL-4 (entity-resolution движок) | **Tasks** (кросс-реф Notes/Reports/Calendar) |
+
+### 2.3 Распределение backbone (строго по 7 фичам, без отдельного слоя)
+
+Сквозные модули прикреплены к фиче-«дому» и помечены кросс-ссылками на потребителей — так «строго 7» не теряет движок.
+
+| Backbone-модуль | Дом | Кросс-реф (кто ещё пользуется) |
+|-----------------|-----|--------------------------------|
+| Slack-листенер + пассивный архив (`slack_bot/app.py`, `ceo_brain/archive/*`) | **Memory** | Tasks (сообщение→задача) |
+| Zoom + Fireflies ingest (`app/zoom/*`, `app/fireflies/*`) | **Notes** | Tasks (NT-6), Calendar (NT-7) |
+| Telegram ingest (`app/telegram_ingest/*`, read-only вью) | **Tasks** | — |
+| Calendar read (`services/calendar_match.py`, `calendar_attendees.py`) | **Calendar** | Reports (триггер брифов), Notes (участники) |
+| Entity-движок + кэш (`services/entity_matcher.py`, `entity_apply.py`, `team_member_canonical.py`, `entity_resolution_cache.py`) | **Tasks** | Notes (участники/контрагенты), Reports (орг для брифов), Calendar (имена attendee) |
+| Резолв/директория контрагентов (`services/counterparty_match.py`, `sync/counterparties.py`) | **Tables** (директория) + **Reports** (резолв для брифов) | Notes (NT-11) |
+| Кросс-канальная доставка (`services/subscriber_updates.py`, `subscriptions.py`, `slack_mirror.py`) | **Tasks** | Notes (саммари), Reports (дайджесты) |
+| Google token-vault, Fernet (`sync/google_auth.py`) | **Tables** | Calendar / Docs / Notes (любой Google-вызов) |
+| Построитель дайджестов (`services/digest.py`, `admin_digest.py`, `daily_plan.py`, `weekly_plan.py`) | **Reports** | Tasks (per-task напоминания) |
+| Google Docs writer (`sync/docs.py`) | **Docs** | Notes / Calendar / Reports |
 
 ---
 
-# Фича A — CEO Brain Bot 🟡 FLAG
+# Фича 1 — Memory 🟡 FLAG
+*(происхождение: CEO Brain Bot · `app/ceo_brain/*`)*
 
-**Назначение.** Диалоговый Slack-ассистент лично для Артема. С одного потока Slack-событий делает две вещи: (1) **молча архивирует** каждое сообщение в подписанных каналах в JSONL-файлы + зеркало в Postgres; (2) на **@упоминание или DM** — отвечает через Anthropic API, подтягивая реальные данные Артема (транскрипты Zoom, Telegram, Google Drive, CRM, сам Slack) через MCP-коннекторы (n8n по HTTP JSON-RPC) и 8 локальных Slack-инструментов. Бонусом: каждый DM прогоняется через классификатор задач и может породить черновик задачи.
+**Назначение.** Диалоговый Slack-ассистент лично для Артема. С одного потока Slack-событий делает две вещи: (1) **молча архивирует** каждое сообщение в подписанных каналах в JSONL-файлы + зеркало в Postgres; (2) на **@упоминание или DM** — отвечает через Anthropic API, подтягивая реальные данные Артема (транскрипты Zoom, Telegram, Google Drive, CRM, сам Slack) через MCP-коннекторы (n8n по HTTP JSON-RPC) и 8 локальных Slack-инструментов. Бонусом: каждый DM прогоняется через классификатор задач и может породить черновик задачи (передаётся в фичу **Tasks**).
+
+**Backbone здесь.** Slack-листенер (Socket Mode) и пассивный архив контекста живут в этой фиче; тот же поток событий слушает **Tasks** (классификация сообщение→задача).
 
 **Активация.** `CEO_BRAIN_ENABLED=true` + `CEO_BRAIN_ANTHROPIC_API_KEY` (без ключа — только архив). Поднимается в `app/main.py:198` через `start_standalone_ceo_brain_bot`. Транспорт — Socket Mode (свои токены `CEO_BRAIN_SLACK_*` или fallback на основные). Модель по умолчанию `claude-sonnet-4-6` (`CEO_BRAIN_MODEL`).
 
@@ -184,7 +236,7 @@ flowchart TD
   - **NFR-CB-002:** Сбор данных параллелится; авторизационные заголовки MCP вычищаются из сохраняемого payload. *Trace: NFR-CB2-S.3 · `responder.py:325`,`parallel_gather.py:353`.*
 
 - **UC-CB-1.3 — DM-вопрос + молчаливый черновик задачи.**
-  *Given* Артем пишет боту в DM (top-level), *When* сообщение получено, *Then* бот отвечает как в синтетическом треде на его сообщение **и** дополнительно прогоняет текст через классификатор задач, создавая черновик-карточку.
+  *Given* Артем пишет боту в DM (top-level), *When* сообщение получено, *Then* бот отвечает как в синтетическом треде на его сообщение **и** дополнительно прогоняет текст через классификатор задач, создавая черновик-карточку (фича **Tasks**).
   - **FR-CB-003:** Каждый DM responder'у при `CEO_BRAIN_TASK_CLASSIFIER_ENABLED` дополнительно проходит intent-классификатор и может породить task-draft. *Trace: FR-CR-05-192w · `app/ceo_brain/slack_handler.py:442-559`.*
   - **NFR-CB-003:** Стоимость одного прогона ограничена: `max_tokens` выводится из `CEO_BRAIN_MAX_RUN_COST_USD` ($1.0) при $15/Mtok, потолок 16000 токенов. *Trace: NFR-CB2-C.2 · `responder.py:226`.*
 
@@ -260,168 +312,22 @@ flowchart TD
 
 ---
 
-# Фича B — Note Taker 🟡🔵 FLAG+JOB
+# Фича 2 — Tasks 🟢🟡 LIVE+FLAG
+*(происхождение: Task Extractor + Task Tracker (lifecycle) + Note Taker (US-NT-6) + Platform (US-PL-4) · `app/intent/*`, `app/orchestrator/*`, `app/telegram_bot/*`, `app/slack_bot/handlers/*`, `app/services/*`)*
 
-**Назначение.** Два независимых поллера (Zoom Cloud Recordings и Fireflies) забирают записи встреч и прогоняют каждую через почти идентичный ~18-шаговый пайплайн: фильтр → скачивание аудио → транскрипция (Whisper) → детальное саммари → извлечение задач → разрешение участников и контрагентов → канонизация названия → экспорт в Google Doc → доставка коротким саммари в Telegram/Slack + n8n webhook. Состояние — в `zoom_recordings`/`meeting_recordings` с булевыми флагами по шагам, поэтому при перезапуске пайплайн идемпотентно продолжается.
+**Назначение.** Полный жизненный цикл задачи — от извлечения до закрытия. **Извлечение:** чат-сообщение классифицируется LLM-детектором «это задача?»; если да — три параллельных под-экстрактора (заголовок/описание/приоритет, владелец, дедлайн) строят `TaskDraft` → `ActionDraft` → `Task`; уверенность детектора маппится в UX-действие (карточка-черновик / тишина / авто-создание). Задачи также приходят из встреч (фича **Notes**, US-NT-6). **Жизненный цикл:** интерактивные карточки в Telegram и Slack, переходы статусов кнопками, напоминания, подписки с кросс-канальным fan-out.
 
-**Активация.** Поллеры запускаются скриптом `ops/zoom_fireflies_runner.py` и стартуют поток только при `ZOOM_REALTIME_ENABLED=true` / `FIREFLIES_REALTIME_ENABLED=true` (оба по умолчанию false) и наличии кредов.
+**Backbone здесь.** Telegram ingest (read-only Supabase-вью), entity-движок канонизации людей/организаций (+ кэш), дедуп задач и кросс-канальный диспетчер доставки подписчикам. Entity-движок переиспользуют **Notes** (участники/контрагенты), **Reports** (организации брифов) и **Calendar** (имена attendee). Правки задач, прилетающие из Google Sheets/Tasks обратно, описаны в фиче **Tables** (US-TT-7).
 
-**Ключевые флаги:** `ZOOM_REALTIME_ENABLED`/`FIREFLIES_REALTIME_ENABLED` (false), `*_POLL_INTERVAL_SECONDS` (60), batch (Zoom 10 / FF 20), `MIN_MEETING_SECONDS` (300), `ZOOM_REQUIRED_EMAIL` ("") + `ZOOM_REQUIRED_EMAIL_STRICT_HOST` (false), модели (`FIREFLIES_WHISPER_MODEL`=gpt-4o-transcribe-diarize, summary/short/tasks=gpt-5.5, `FIREFLIES_TASKS_REASONING_EFFORT`=high), `ZOOM_BILINGUAL_RESTORATION_ENABLED` (false), `CALENDAR_MATCH_ENABLED` (false), `SLACK_MEETING_CHANNEL_ID`/`MEETING_WEBHOOK_URL`, `*_DOCS_FOLDER_ID`, `COUNTERPARTY_RESOLVE_BATCH_SIZE` (20)/`_MAX_WORKERS` (5).
+**Активация.** Slack passive (`message`-события) и `@упоминание` — **LIVE** в основном Bolt-приложении; message-шорткаты — LIVE. Жизненный цикл — LIVE (часть джобов гейтятся по admin-id). Slack Socket-ingest — `SLACK_INGEST_ENABLED` (false). Telegram realtime view-poll — `VIEW_REALTIME_ENABLED` (false). Telegram historical migration — вручную (`ops/migrate_telegram_history.py`).
 
-```mermaid
-flowchart TD
-    P["Поллер: список записей Zoom/Fireflies"] --> F{"host-email gate / lookback 24ч / уже обработано?"}
-    F -- отсеять --> X["Пропустить"]
-    F -- ок --> G{"ранние гейты:<br/>waiting_for_audio / attempts≥20 / 24ч-sentinel / короче MIN_MEETING_SECONDS"}
-    G -- стоп --> X
-    G -- ок --> D["Скачать аудио (magic-byte, cap 200MB)"]
-    D --> T["Транскрипция (gpt-4o-transcribe-diarize),<br/>VTT/alt-model fallback, опц. bilingual"]
-    T --> S1["Детальное саммари (gpt-5.5) + канонизация"]
-    S1 --> CP["Извлечь + разрешить контрагентов (батчи 20×5)"]
-    CP --> TK["Извлечь задачи (gpt-5.5, reasoning=high) → verify → canon → consolidate → dedupe → directions"]
-    TK --> DOC["Экспорт в Google Doc"]
-    DOC --> SS["Короткое саммари: host/operator-present gate,<br/>To-Do (важные), первая строка «DD/MM - Title», ссылка на Doc"]
-    SS --> OUT["Доставка: Telegram DM админам + Slack mirror + n8n webhook"]
-    OUT --> CARDS["Карточки задач по DM (≤10 параллельно, timeout 120с)"]
-```
+**Статусы:** `backlog → todo → in_progress → done` (статус `review` упразднён). Soft-delete — через `deleted_at` (статус сохраняется). Переходы — почти полный граф с обратными рёбрами; `apply()` отвергает same-status и запрещённые рёбра, штампует `started_at`/`completed_at`, пишет `TaskStatusHistory`, запускает fan-out.
 
-## US-NT-1 — Артем может ничего не делать: встреча в Zoom/Fireflies сама попадает в обработку
+**Кнопки карточки:** Start (только владелец на backlog/todo; в Slack — и для бесхозной), Mark done (владелец/админ на in_progress), Edit + Delete (владелец/админ, не на done), Cancel (владелец/админ, маршрутизирует), Subscribe/Unsubscribe (любой кроме владельца). **Нет** Delegate/Snooze/Refresh.
 
-**Use Cases**
+**Ключевые флаги:** *извлечение* — `INTENT_CONFIDENCE_HIGH` (0.75), `INTENT_CONFIDENCE_LOW` (0.40), `CONTEXT_WINDOW_BEFORE` (10), `LLM_PROVIDER` (auto), `OPENAI_MODEL` (gpt-5.5), `DEDUP_FAST_PATH` (true), `SLACK_INGEST_ENABLED` (false), `VIEW_REALTIME_ENABLED` (false) / `VIEW_POLL_INTERVAL_SECONDS` (30) / `VIEW_POLL_BATCH_SIZE` (500), `TELEGRAM_SOURCE_DATABASE_URL` (""); *жизненный цикл* — `TELEGRAM_ADMIN_USER_IDS` (""), `ADMIN_SLACK_USER_IDS` (""), `WORKLOAD_MINUTES_PER_DAY` (360) / `WORKLOAD_DEFAULT_TASK_MINUTES` (120, оценщик не подключён).
 
-- **UC-NT-1.1 — Авто-захват записи.**
-  *Given* `*_REALTIME_ENABLED=true` и есть креды, *When* поллер тикает каждые 60с, *Then* он берёт новые записи и для каждой запускает идемпотентный `process_one`.
-  - **FR-NT-001:** Поллеры Zoom (`/accounts/me/recordings`) и Fireflies (`list_transcripts`) периодически забирают записи и прогоняют через единый пайплайн. *Trace: FR-CR-05-116/-39 · `app/zoom/pipeline.py:2585`, `app/fireflies/pipeline.py:2971`, `ops/zoom_fireflies_runner.py`.*
-  - **NFR-NT-001:** Идемпотентность: уже обработанные (`tasks_extracted=true AND last_error IS NULL`) пропускаются; падение на шаге пишет `last_error` и ретраится на следующем поле. *Trace: FR-CR-05-196 · `runner.py:153`, `pipeline.py:2616`.*
-
-- **UC-NT-1.2 — Фильтр «только мои встречи».**
-  *Given* задан `ZOOM_REQUIRED_EMAIL`, *When* в списке запись, где Артем не хост, *Then* при `STRICT_HOST=true` она отсеивается сразу; иначе допускается, если email есть среди участников.
-  - **FR-NT-002:** Запись принимается, только если `host_email` совпадает с `ZOOM_REQUIRED_EMAIL` (strict) или email есть в участниках (legacy). *Trace: FR-CR-05-143/-167 · `app/zoom/client.py:259-290`.*
-  - **NFR-NT-002:** Пустой `ZOOM_REQUIRED_EMAIL` = принимать все (legacy-поведение). *Trace: `config.py:628`.*
-
-- **UC-NT-1.3 — Гейты мусора.**
-  *Given* запись короче `MIN_MEETING_SECONDS` (300), или это телефонный 24-часовой sentinel, или аудио ещё не готово, *When* `process_one`, *Then* запись пропускается с явной причиной (`duration_too_short` / `zoom_phone_24h_sentinel` / `waiting_for_audio`).
-  - **FR-NT-003:** Ранние гейты отбрасывают слишком короткие/служебные/неготовые записи без обработки. *Trace: FR-CR-05-192t/-197/-198 · `pipeline.py:2604`,`2630`,`2641`.*
-  - **NFR-NT-003:** После 20 неудачных попыток запись помечается `permanent_failure_attempts_exceeded` (не зацикливается). *Trace: `pipeline.py:2616`.*
-
-```mermaid
-flowchart TD
-    A["Новая запись в облаке"] --> B{"host == ZOOM_REQUIRED_EMAIL<br/>(или участник)?"}
-    B -- нет --> X1["Отсеять"]
-    B -- да --> C{"duration ≥ 300с? не 24ч-sentinel? аудио готово?"}
-    C -- нет --> X2["Пропустить с причиной"]
-    C -- да --> D["В пайплайн"]
-```
-
-## US-NT-2 — Артем может получить корректный транскрипт даже для шумной/двуязычной записи
-
-**Use Cases**
-
-- **UC-NT-2.1 — Транскрипция с bias-промптом.**
-  *Given* аудио скачано, *When* идёт STT, *Then* строится bias-промпт из имён команды и контрагентов (+ бренд «Humanoid»), аудио чанкуется при >24MB/>1300с, используется `gpt-4o-transcribe-diarize`.
-  - **FR-NT-004:** STT использует bias-промпт из директорий и чанкование длинного аудио. *Trace: FR-CR-05-127/-164/-115/-177 · `app/services/transcription.py:418`,`114`.*
-  - **NFR-NT-004:** Diarize-модели сериализуются в 1 воркер и используют `chunking_strategy="auto"`. *Trace: `transcription.py:114-133`.*
-
-- **UC-NT-2.2 — Защита от галлюцинаций STT.**
-  *Given* вывод Whisper выглядит как галлюцинация (повторы/субтитры/низкое разнообразие), *When* это детектится, *Then* срабатывает fallback на VTT-транскрипт, затем на alt-модель `whisper-1`.
-  - **FR-NT-005:** При детекте галлюцинации STT — каскад fallback'ов (VTT → alt-модель), результат принимается, только если сам не галлюцинирует. *Trace: FR-CR-05-148/-186 · `pipeline.py:361`,`418`.*
-  - **NFR-NT-005:** Двуязычная реставрация (второй проход `language=en` + LLM-реконсиляция) доступна, но по умолчанию выключена (`ZOOM_BILINGUAL_RESTORATION_ENABLED=false`). *Trace: FR-CR-05-170 · `pipeline.py:517`.*
-
-## US-NT-3 — Артем может получить короткое саммари встречи в Slack и Telegram
-
-```mermaid
-flowchart TD
-    A["Детальное саммари готово"] --> B{"оператор реально присутствовал?<br/>(Zoom: attendees/speaker-tags)"}
-    B -- нет --> X["Не публиковать, пометить sent"]
-    B -- да --> C["LLM короткое саммари (gpt-5.5) + канонизация"]
-    C --> D{"саммари «без содержания»?"}
-    D -- да --> X
-    D -- нет --> E["Первая строка «DD/MM - Title», детерминированный To-Do (важные), HTML-ссылка на Doc"]
-    E --> F["TG DM админам (чанки 4096)"]
-    E --> G["Slack mirror в канал (>3500 → треды)"]
-    E --> H["n8n webhook (тот же payload)"]
-```
-
-**Use Cases**
-
-- **UC-NT-3.1 — Короткое саммари в Slack-канал.**
-  *Given* саммари содержательно, *When* публикуется, *Then* в `SLACK_MEETING_CHANNEL_ID` уходит сообщение: первая строка — кликабельная `DD/MM - Title` (ссылка на Google Doc), затем Участники + Суть + To-Do (только важные направления); длинное (>3500) разбивается на тред-реплаи.
-  - **FR-NT-006:** Короткое саммари публикуется в Slack-канал с гиперссылкой-заголовком на Doc, секцией участников/сути и To-Do по важным направлениям; длинный текст уходит в тред. *Trace: FR-CR-05-137/-141/-147/-156/-119 · `app/services/slack_mirror.py:286`, `pipeline.py:843`.*
-  - **NFR-NT-006:** Нумерованные задачи компактуются в один блок для Slack. *Trace: FR-CR-05-150 · `slack_mirror.py`.*
-
-- **UC-NT-3.2 — Доставка в Telegram и webhook.**
-  *Given* саммари готово, *When* идёт рассылка, *Then* тот же текст уходит DM каждому `TELEGRAM_ADMIN_USER_IDS` (HTML, разбивка по 4096) и POST'ом на `MEETING_WEBHOOK_URL`.
-  - **FR-NT-007:** Саммари дублируется в Telegram DM админам и на n8n webhook. *Trace: FR-CR-05-160 · `pipeline.py:1058`, `app/services/meeting_webhook.py:43`.*
-  - **NFR-NT-007:** Webhook — fire-and-forget: при non-2xx/пустом теле логируется без ретрая. *Trace: `meeting_webhook.py:81`.*
-
-- **UC-NT-3.3 — Гейт присутствия оператора (Zoom).**
-  *Given* запись хостил Артем, но его нет среди участников/спикеров, *When* формируется короткое саммари, *Then* публикация пропускается (помечается sent).
-  - **FR-NT-008:** Короткое саммари не публикуется, если оператор фактически не присутствовал на встрече. *Trace: `pipeline.py:778`,`883`.*
-  - **NFR-NT-008:** Пустые/бессодержательные саммари не публикуются (анти-спам): детектор «содержательная часть отсутствует» → пометить done, не слать. *Trace: FR-CR-05-157 · `transcription.py:175`.*
-
-## US-NT-4 — Артем может открыть полный отчёт встречи в Google Doc
-
-**Use Cases**
-
-- **UC-NT-4.1 — Экспорт Doc.**
-  *Given* детальное саммари и задачи готовы, *When* шаг экспорта, *Then* создаётся Google Doc с полным саммари + секцией контрагентов (🔗) + секцией задач (📌, дословные описания, владелец, дедлайн, приоритет) в папке `*_DOCS_FOLDER_ID`.
-  - **FR-NT-009:** Полный отчёт экспортируется в Google Doc (саммари + контрагенты + задачи). *Trace: FR-CR-05-43 · `pipeline.py:716`, `app/sync/docs.py:29`.*
-  - **NFR-NT-009:** Doc шарится по ссылке (anyone-with-link writer); ссылка встраивается в Slack/TG саммари. *Trace: FR-CR-05-55/-56/-59.*
-
-## US-NT-5 — Артем может рассчитывать на корректные участники и контрагенты в саммари
-
-**Use Cases**
-
-- **UC-NT-5.1 — Разрешение участников.**
-  *Given* есть транскрипт и календарное событие, *When* идёт шаг участников, *Then* список «Участники» формируется из календарных attendees + участников Zoom, канонизированных к реальным именам команды.
-  - **FR-NT-010:** «Участники» — авторитетно из календаря/участников Zoom с канонизацией имён. *Trace: FR-CR-05-130/-169/-172/-174/-181/-183 · `app/services/zoom_participants.py`, `calendar_attendees.py`.*
-
-- **UC-NT-5.2 — Разрешение контрагентов.**
-  *Given* в директории контрагентов есть записи, *When* шаг контрагентов, *Then* упоминания извлекаются (1 LLM-проход) и резолвятся к директории батчами (20×5 параллельно); нерезолвленные выносятся в TG-виджет enrollment.
-  - **FR-NT-011:** Контрагенты извлекаются и резолвятся к директории с батч-параллелизмом; нерезолвленные предлагаются к занесению. *Trace: FR-CR-05-125/-129/-131/-133 · `pipeline.py:1158`,`1291`.*
-  - **NFR-NT-011:** Пустая директория контрагентов → шаг пропускается (0 совпадений), не ломает пайплайн. *Trace: `pipeline.py:1176`.*
-
-## US-NT-6 — Артем может получить из встречи готовые задачи (с владельцами и дедлайнами)
-
-```mermaid
-flowchart TD
-    A["Транскрипт + саммари"] --> B["LLM извлечение задач (gpt-5.5, reasoning=high)"]
-    B --> C["Резолв владельца → fallback (не админ) → DELEGATE-маркер"]
-    C --> D["Дедлайн (default сегодня 18:00)"]
-    D --> E["Verify (2-й LLM) → канон имён → консолидация → fuzzy-dedupe → directions"]
-    E --> F["Запись Task (source_kind=zoom/fireflies)"]
-    F --> G["Карточки задач в DM"]
-```
-
-**Use Cases**
-
-- **UC-NT-6.1 — Извлечение и обогащение задач.**
-  *Given* саммари готово, *When* шаг задач, *Then* LLM извлекает задачи, резолвит владельца (галлюцинированный uid обнуляется → fallback, никогда не админ), применяет DELEGATE-маркер из заметок, ставит дедлайн (по умолчанию сегодня 18:00).
-  - **FR-NT-012:** Из встречи извлекаются задачи с владельцем и дедлайном; владелец-галлюцинация отбраковывается, применяется делегирование одним хопом. *Trace: FR-CR-05-185 · `pipeline.py:1863`,`2031`,`2069`.*
-  - **NFR-NT-012:** Дедуп почти-дублей задач — fuzzy SequenceMatcher (topic-prefix + ratio≥0.55 / ≥0.90 без префикса) перед записью. *Trace: FR-CR-05-128 · `app/fireflies/pipeline.py:649`.*
-
-- **UC-NT-6.2 — Классификация направлений.**
-  *Given* задачи извлечены, *When* шаг directions, *Then* каждой проставляется стратегическое направление (beta/budget/design/investors/deliverables/other), используемое для фильтра To-Do.
-  - **FR-NT-013:** Задачам присваивается направление, влияющее на отбор «важных» в To-Do саммари. *Trace: FR-CR-05-163 · `app/services/task_direction.py`, `pipeline.py:2476`.*
-
-## US-NT-7 — Артем может получать встречи с корректными человекочитаемыми названиями
-
-**Use Cases**
-
-- **UC-NT-7.1 — Калибровка названия по Calendar (Fireflies).**
-  *Given* `CALENDAR_MATCH_ENABLED=true`, *When* у Fireflies-встречи авто-штамп вместо имени, *Then* в окне ±N минут ищется событие календаря, LLM выбирает лучшее совпадение, название переписывается в `DD/MM - <calendar title>` и пушится обратно в Fireflies UI.
-  - **FR-NT-014:** Название встречи калибруется по Google Calendar и переписывается в формат `DD/MM - Title` (для Fireflies — с обратным пушем в UI). *Trace: FR-CR-05-136/-144/-154 · `app/fireflies/pipeline.py:1401`.*
-  - **NFR-NT-014:** По умолчанию выключено (`CALENDAR_MATCH_ENABLED=false`); Zoom-пайплайн не переименовывает (только тянет attendees). *Trace: `config.py:304`.*
-
----
-
-# Фича C — Task Extractor 🟢🟡 LIVE+FLAG
-
-**Назначение.** Превращает чат-сообщения в структурированные черновики задач. Сообщение классифицируется LLM-детектором «это задача?»; если да — три параллельных под-экстрактора (заголовок/описание/приоритет, владелец, дедлайн) строят один или несколько `TaskDraft` → `ActionDraft` → `Task`. Работает по нескольким каналам ingest'а; уверенность детектора маппится в UX-действие (карточка-черновик / мягкий вопрос / тишина).
-
-**Активация.** Slack passive (`message`-события) и `@упоминание` — **LIVE** в основном Bolt-приложении. Slack message-шорткаты — LIVE. Slack Socket-ingest — `SLACK_INGEST_ENABLED` (false). Telegram realtime view-poll — `VIEW_REALTIME_ENABLED` (false). Telegram historical migration — запускается вручную (`ops/migrate_telegram_history.py`).
-
-**Ключевые флаги:** `INTENT_CONFIDENCE_HIGH` (0.75), `INTENT_CONFIDENCE_LOW` (0.40), `CONTEXT_WINDOW_BEFORE` (10), `LLM_PROVIDER` (auto), `OPENAI_MODEL` (gpt-5.5), `DEDUP_FAST_PATH` (true), `SLACK_INGEST_ENABLED` (false), `VIEW_REALTIME_ENABLED` (false) / `VIEW_POLL_INTERVAL_SECONDS` (30) / `VIEW_POLL_BATCH_SIZE` (500), `TELEGRAM_SOURCE_DATABASE_URL` ("" = TG-канал выключен).
+## US-TX-1 — Артем может видеть, как бот сам предлагает завести задачу из переписки (пассивный режим)
 
 ```mermaid
 flowchart TD
@@ -437,8 +343,6 @@ flowchart TD
     G -- "ниже 0.40 / no_action" --> I["silent + лог inference"]
     G -- "@mention" --> J["авто-создание задачи"]
 ```
-
-## US-TX-1 — Артем может видеть, как бот сам предлагает завести задачу из переписки (пассивный режим)
 
 **Use Cases**
 
@@ -520,19 +424,29 @@ flowchart TD
   - **FR-TX-009:** Детерминированный fast-path дедуп (exact title+owner / description-similarity) отсекает дубли до LLM. *Trace: FR-CR-05-110/-111 · `app/services/task_dedup.py`.*
   - **NFR-TX-009:** Иначе — LLM-дедуп по последним 10 открытым задачам/черновикам; отключается `DEDUP_FAST_PATH=0`. *Trace: `config.py:348`.*
 
----
+## US-NT-6 — Артем может получить из встречи готовые задачи (с владельцами и дедлайнами)
+*(источник сигнала — пайплайн встреч фичи **Notes**; результат — задачи в этой фиче)*
 
-# Фича D — Task Tracker 🟢 LIVE
+```mermaid
+flowchart TD
+    A["Транскрипт + саммари"] --> B["LLM извлечение задач (gpt-5.5, reasoning=high)"]
+    B --> C["Резолв владельца → fallback (не админ) → DELEGATE-маркер"]
+    C --> D["Дедлайн (default сегодня 18:00)"]
+    D --> E["Verify (2-й LLM) → канон имён → консолидация → fuzzy-dedupe → directions"]
+    E --> F["Запись Task (source_kind=zoom/fireflies)"]
+    F --> G["Карточки задач в DM"]
+```
 
-**Назначение.** Управляет всем пост-созданием жизненного цикла задачи в **Telegram и Slack**: интерактивные карточки (DM автору+владельцу+админам в TG; в канал + DM владельцу в Slack), переходы статусов кнопками, синхронизация каждого изменения в Google Sheets + Google Tasks. Вокруг — расписанные джобы: утренние карточки/дайджест, вечерний статус + план на завтра, воскресный недельный план, напоминания о дедлайнах и «пора начинать», тред-напоминания, админский watch-list. Кросс-канальная рассылка подписчикам. БД (`tasks`) — источник истины; карточки best-effort.
+**Use Cases**
 
-**Активация.** LIVE в основном процессе. Часть джобов гейтятся непустыми `ADMIN_SLACK_USER_IDS`/`TELEGRAM_ADMIN_USER_IDS`.
+- **UC-NT-6.1 — Извлечение и обогащение задач.**
+  *Given* саммари готово, *When* шаг задач, *Then* LLM извлекает задачи, резолвит владельца (галлюцинированный uid обнуляется → fallback, никогда не админ), применяет DELEGATE-маркер из заметок, ставит дедлайн (по умолчанию сегодня 18:00).
+  - **FR-NT-012:** Из встречи извлекаются задачи с владельцем и дедлайном; владелец-галлюцинация отбраковывается, применяется делегирование одним хопом. *Trace: FR-CR-05-185 · `pipeline.py:1863`,`2031`,`2069`.*
+  - **NFR-NT-012:** Дедуп почти-дублей задач — fuzzy SequenceMatcher (topic-prefix + ratio≥0.55 / ≥0.90 без префикса) перед записью. *Trace: FR-CR-05-128 · `app/fireflies/pipeline.py:649`.*
 
-**Статусы:** `backlog → todo → in_progress → done` (статус `review` упразднён). Soft-delete — через `deleted_at` (статус сохраняется). Переходы — почти полный граф с обратными рёбрами; `apply()` отвергает same-status и запрещённые рёбра, штампует `started_at`/`completed_at`, пишет `TaskStatusHistory`, запускает fan-out.
-
-**Кнопки карточки:** Start (только владелец на backlog/todo; в Slack — и для бесхозной), Mark done (владелец/админ на in_progress), Edit + Delete (владелец/админ, не на done), Cancel (владелец/админ, маршрутизирует), Subscribe/Unsubscribe (любой кроме владельца). **Нет** Delegate/Snooze/Refresh.
-
-**Ключевые флаги:** `TELEGRAM_ADMIN_USER_IDS` (""), `ADMIN_SLACK_USER_IDS` ("" → админ-дайджесты no-op), `SHEET_POLL_INTERVAL_SECONDS` (60, 0=выкл), `GOOGLE_TASKS_PULL_INTERVAL_SECONDS` (60), `WORKLOAD_MINUTES_PER_DAY` (360)/`WORKLOAD_DEFAULT_TASK_MINUTES` (120, оценщик не подключён).
+- **UC-NT-6.2 — Классификация направлений.**
+  *Given* задачи извлечены, *When* шаг directions, *Then* каждой проставляется стратегическое направление (beta/budget/design/investors/deliverables/other), используемое для фильтра To-Do короткого саммари (фича **Notes**).
+  - **FR-NT-013:** Задачам присваивается направление, влияющее на отбор «важных» в To-Do саммари. *Trace: FR-CR-05-163 · `app/services/task_direction.py`, `pipeline.py:2476`.*
 
 ## US-TT-1 — Артем может управлять задачей кнопками на карточке (Start/Done/Cancel/Edit/Delete)
 
@@ -568,57 +482,6 @@ flowchart TD
 - **UC-TT-1.4 — Cancel маршрутизирует, Delete мягко удаляет.**
   *Given* активная задача, *When* Cancel, *Then* она уходит в `todo` (если дедлайн на этой неделе) или `backlog`; *When* Delete — ставится `deleted_at`, рисуется tombstone, строка в Sheets помечается «deleted».
   - **FR-TT-004:** Cancel маршрутизирует по дедлайну; Delete — soft-delete с tombstone и ресинком. *Trace: FR-CR-04-20 · `task_actions.py`, `_route_on_cancel`.*
-
-## US-TT-2 — Артем может получать утренние карточки задач на сегодня и «что изменилось» (как админ)
-
-```mermaid
-flowchart TD
-    A["Утренний крон"] --> B["Удалить вчерашние карточки"]
-    B --> C["Для каждой задачи due-today → карточка владельцу/подписчику (кто /started бота)"]
-    C --> D["Интро-DM: «задач на сегодня: N, просрочено: M»"]
-    D --> E["Админу — diff «что изменилось со вчера»"]
-```
-
-**Use Cases**
-
-- **UC-TT-2.1 — Утренние карточки.**
-  *Given* наступило утро, *When* крон запускается, *Then* удаляются вчерашние карточки и каждому владельцу/подписчику, кто запускал TG-бота, постится по карточке на задачу due-today.
-  - **FR-TT-005:** Утренний прогон чистит вчерашние карточки и доставляет карточки задач на сегодня получателям, активировавшим бота. *Trace: FR-CR-05-84 · `app/telegram_bot/morning_cards.py:450`.*
-  - **NFR-TT-005:** Идемпотентность per (user, day): повторный запуск — no-op; получатели без `/start` отсеиваются. *Trace: `morning_cards.py:464-561`.*
-
-- **UC-TT-2.2 — Админский diff.**
-  *Given* Артем — админ, *When* идёт утренний прогон, *Then* он получает DM с дифом «что изменилось по людям со вчера».
-  - **FR-TT-006:** Админу доставляется утренний diff-дайджест по изменениям. *Trace: FR-CR-05-91 · `morning_cards.py`.*
-
-## US-TT-3 — Артем может получать вечерний статус-отчёт и план на завтра
-
-**Use Cases**
-
-- **UC-TT-3.1 — Вечерний нарратив.**
-  *Given* наступил вечер, *When* крон, *Then* приходит отчёт: Сделано-сегодня / В работе / To-do / Подписки, и вторым сообщением — план на завтра.
-  - **FR-TT-007:** Вечерний прогон шлёт статус-нарратив (3+ секции) и отдельное сообщение «план на завтра». *Trace: FR-CR-05-04/-40/-83 · `app/telegram_bot/evening_status.py`.*
-  - **NFR-TT-007:** Для админа план на завтра группируется по людям; добавляется watch-list (stale in_progress ≥`stale_threshold_days`, дефолт 2). *Trace: `app/services/admin_digest.py`.*
-
-- **UC-TT-3.2 — Slack daily plan с подтверждением.**
-  *Given* вечерний крон в Slack, *When* формируется план, *Then* персистятся `DailyPlanItem` + DM со Skip/Approve; если утром не было Approve — план уходит «как есть» с авто-approve в аудит.
-  - **FR-TT-008:** Slack daily-plan персистит элементы и допускает опциональное подтверждение (auto-approve при отсутствии). *Trace: FR-CR-04-25 · `app/services/daily_plan.py:243`.*
-
-## US-TT-4 — Артем может получать воскресный недельный план и принимать задачи на неделю
-
-```mermaid
-flowchart TD
-    A["Воскресный крон"] --> B["Собрать backlog с дедлайном на след. Пн–Вс"]
-    B --> C["DM с задачами"]
-    C --> D{"кнопка"}
-    D -- "Accept" --> E["backlog → todo, is_current_week=true, history"]
-    D -- "Later" --> F["is_current_week=false, только audit"]
-```
-
-**Use Cases**
-
-- **UC-TT-4.1 — Недельный план.**
-  *Given* воскресенье, *When* крон, *Then* приходит DM с backlog-задачами, дедлайн которых на следующую неделю; «Accept» переводит в todo (текущая неделя), «Later» — только аудит, без смены статуса.
-  - **FR-TT-009:** Воскресный недельный план предлагает задачи на неделю с действиями Accept/Later. *Trace: `app/services/weekly_plan.py`, `app/slack_bot/handlers/weekly_plan.py:27`.*
 
 ## US-TT-5 — Артем может полагаться на напоминания о дедлайнах и старте задач
 
@@ -659,36 +522,30 @@ flowchart TD
   - **FR-TT-014:** Изменение статуса рассылается подписчикам кросс-канально (TG+Slack) с маршрутизацией по id и идемпотентностью. *Trace: FR-CR-05-02 · `app/services/subscriber_updates.py:88`,`165`, `app/main.py:113`.*
   - **NFR-TT-014:** Рассылка по **редактированию** задачи в Telegram намеренно подавлена (анти-шум); рассылка по статусу — активна. *Trace: FR-CR-05-43 · `handlers.py:948`.*
 
-## US-TT-7 — Артем может редактировать задачи прямо в Google Sheets/Tasks, и это вернётся в систему
+## US-PL-4 — Артем может рассчитывать на единые имена людей и компаний во всех каналах
+*(entity-движок; дом — здесь, потребители — Notes / Reports / Calendar)*
 
 **Use Cases**
 
-- **UC-TT-7.1 — Pull правок из Sheets.**
-  *Given* оператор поправил строку задачи в Google Sheets, *When* листенер поллит каждые `SHEET_POLL_INTERVAL_SECONDS` (60), *Then* БД обновляется по полям, смена статуса проходит через `TransitionService`, TG-карточка перерисовывается (Sheet-wins).
-  - **FR-TT-015:** Правки в Sheets подтягиваются в БД (Sheet-wins) и обновляют карточку; имена владельцев резолвятся к uid. *Trace: FR-CR-05-28/-11 · `app/sync/sheets.py:489`,`523`.*
-
-- **UC-TT-7.2 — Pull правок из Google Tasks.**
-  *Given* задача изменена/удалена/завершена в Google Tasks UI, *When* pull-цикл (60с), *Then* БД синхронизируется (done+history, soft-delete отсутствующих), карточка обновляется; незаданные поля (`notes`/`due`) не затираются.
-  - **FR-TT-016:** Pull из Google Tasks применяет правки/удаления/завершения в БД, не затирая отсутствующие поля. *Trace: FR-CR-05-61/-64 · `app/sync/tasks_pull.py:99`,`217`.*
-
-## US-TT-8 — Артем (как админ) может видеть watch-list по команде
-
-**Use Cases**
-
-- **UC-TT-8.1 — Админ-дайджесты.**
-  *Given* `ADMIN_SLACK_USER_IDS` непуст, *When* идут утренний/вечерний прогоны, *Then* админ получает watch-list (in_progress + просрочки утром; завтрашние + застрявшие in_progress вечером).
-  - **FR-TT-017:** Админу доставляются watch-list дайджесты (in-progress/overdue/stale). *Trace: `app/services/admin_digest.py:96`.*
-  - **NFR-TT-017:** При пустом списке админов админ-дайджесты — no-op (ничего не шлётся). *Trace: `admin_digest.py:97`.*
+- **UC-PL-4.1 — Entity resolution.**
+  *Given* в транскрипте/задаче есть «сырые» владельцы и упоминания, *When* работает матчер, *Then* они резолвятся к `team_members`/`counterparties` (LLM-first + rule fallback); владельцы вне списка участников встречи строго обнуляются; результат кэшируется в `entity_resolution_cache` (TTL ~7 дней).
+  - **FR-PL-006:** LLM-слой канонизирует людей и организации между Slack/Telegram/Zoom/Calendar; владельцы-не-участники отбраковываются. *Trace: FR-CR-05-193b/c/d/e · `app/services/entity_matcher.py:269`,`316`, `team_member_canonical.py:121`.*
+  - **NFR-PL-006:** Идентичные входы матчера → результат из кэша (если `expires_at>now`), `hits_count` инкрементится — экономия LLM-вызовов. *Trace: `app/services/entity_resolution_cache.py:35`,`81`.*
 
 ---
 
-# Фича E — Pre-Meeting Agenda 🟡 FLAG
+# Фича 3 — Calendar 🟡 FLAG
+*(происхождение: Pre-Meeting Agenda + Note Taker (US-NT-7) · `app/agenda/*`, `app/services/calendar_match.py`, `calendar_attendees.py`)*
 
-**Назначение.** Демон, который незадолго до **повторяющейся** встречи присылает Артему DM с напоминанием: что обсуждали в прошлый раз + ещё открытые задачи из той встречи + ссылка на Google Doc. «Повторяющаяся» = нормализованное название встречи совпадает с ≥`AGENDA_MIN_PRIOR_MEETINGS` прошлыми записями из `zoom_recordings`. В проде сборка повестки **детерминированная, без LLM** (`_compose_lite` — проброс сохранённого короткого саммари прошлой встречи + открытые задачи); legacy LLM-путь существует, но не вызывается.
+**Назначение.** Подготовка к встрече, управляемая Google-календарём (read-only). Две возможности: (1) **Pre-Meeting Agenda** — незадолго до **повторяющейся** встречи DM с напоминанием (что обсуждали в прошлый раз + открытые задачи из той встречи + ссылка на Google Doc); (2) **Калибровка названия встречи** — по событию календаря название записи переписывается в `DD/MM - <calendar title>` и (для Fireflies) пушится обратно в UI. Везде паттерн «**календарь-первичен, эвристика — фолбэк**».
 
-**Активация.** `AGENDA_ENABLED=true` + непустой `AGENDA_SLACK_TARGET_CHANNEL_ID`. Демон стартует в `app/main.py:156`.
+**Backbone здесь.** Чтение Google Calendar (`events().list`, мульти-календарь через запятую с исключением личного; резолв attendees к именам). Тот же календарный сигнал использует **Reports** как триггер брифов; имена attendee переиспользует **Notes**.
 
-**Ключевые флаги:** `AGENDA_ENABLED` (false), `AGENDA_SLACK_TARGET_CHANNEL_ID` (""), `AGENDA_SOURCE` (calendar | zoom_pattern), `AGENDA_LEAD_TIME_MINUTES` (10), `AGENDA_WINDOW_MINUTES` (1), `AGENDA_LOOKBACK_DAYS` (90), `AGENDA_MIN_PRIOR_MEETINGS` (2), `AGENDA_TICK_INTERVAL_SECONDS` (60). Общие: `GOOGLE_CALENDAR_*`, `CALENDAR_APPS_SCRIPT_URL`, `ZOOM_REQUIRED_EMAIL` (organizer-gate).
+**«Повторяющаяся»** = нормализованное название встречи совпадает с ≥`AGENDA_MIN_PRIOR_MEETINGS` прошлыми записями из `zoom_recordings`. В проде сборка повестки **детерминированная, без LLM** (`_compose_lite`); legacy LLM-путь существует, но не вызывается.
+
+**Активация.** Agenda: `AGENDA_ENABLED=true` + непустой `AGENDA_SLACK_TARGET_CHANNEL_ID` (демон `app/main.py:156`). Калибровка названия: `CALENDAR_MATCH_ENABLED=true` (шаг в пайплайне встреч).
+
+**Ключевые флаги:** `AGENDA_ENABLED` (false), `AGENDA_SLACK_TARGET_CHANNEL_ID` (""), `AGENDA_SOURCE` (calendar | zoom_pattern), `AGENDA_LEAD_TIME_MINUTES` (10), `AGENDA_WINDOW_MINUTES` (1), `AGENDA_LOOKBACK_DAYS` (90), `AGENDA_MIN_PRIOR_MEETINGS` (2), `AGENDA_TICK_INTERVAL_SECONDS` (60), `CALENDAR_MATCH_ENABLED` (false). Общие: `GOOGLE_CALENDAR_*`, `CALENDAR_APPS_SCRIPT_URL`, `ZOOM_REQUIRED_EMAIL` (organizer-gate).
 
 ```mermaid
 flowchart TD
@@ -743,74 +600,165 @@ flowchart TD
   - **FR-AG-006:** Альтернативный источник предстоящих встреч — эвристика по каденции прошлых Zoom-записей (без Calendar API). *Trace: FR-CR-05-166 · `app/agenda/zoom_pattern.py:254`.*
   - **NFR-AG-006:** Демон отказоустойчив: ошибка Calendar API → fallback на Apps Script; падение одного кандидата логируется, цикл продолжается. *Trace: NFR-MA-R.1 · `runner.py:211`,`286`.*
 
+## US-NT-7 — Артем может получать встречи с корректными человекочитаемыми названиями
+
+**Use Cases**
+
+- **UC-NT-7.1 — Калибровка названия по Calendar (Fireflies).**
+  *Given* `CALENDAR_MATCH_ENABLED=true`, *When* у Fireflies-встречи авто-штамп вместо имени, *Then* в окне ±N минут ищется событие календаря, LLM выбирает лучшее совпадение, название переписывается в `DD/MM - <calendar title>` и пушится обратно в Fireflies UI (`updateMeetingTitle`). Фолбэк без календаря — тема выводится из транскрипта (этот шаг описан в **Notes**).
+  - **FR-NT-014:** Название встречи калибруется по Google Calendar и переписывается в формат `DD/MM - Title` (для Fireflies — с обратным пушем в UI). *Trace: FR-CR-05-136/-144/-154 · `app/fireflies/pipeline.py:1401`, `app/fireflies/client.py:308`.*
+  - **NFR-NT-014:** По умолчанию выключено (`CALENDAR_MATCH_ENABLED=false`); Zoom-пайплайн не переименовывает (только тянет attendees). *Trace: `config.py:304`.*
+
 ---
 
-# Фича F — Counterparty Briefs 🟡 FLAG
+# Фича 4 — Notes 🟡🔵 FLAG+JOB
+*(происхождение: Note Taker (захват/транскрипт/саммари/участники) · `app/zoom/*`, `app/fireflies/*`, `app/services/{transcription,slack_mirror,meeting_webhook,zoom_participants}.py`)*
 
-**Назначение.** Демон, который для предстоящих встреч с **внешней компанией** проводит OpenAI deep-research по организации и её ключевым людям, пишет по одному Google Doc на контрагента и постит один сгруппированный Slack DM (топ-сообщение про компанию + по тред-реплаю на каждого человека). Требуется именно компания: одинокий человек без организации пропускается. Research кэшируется по контрагенту (TTL 180 дней) и ограничен бюджетом на событие.
+**Назначение.** Два независимых поллера (Zoom Cloud Recordings и Fireflies) забирают записи встреч и прогоняют каждую через почти идентичный ~18-шаговый пайплайн: фильтр → скачивание аудио → транскрипция (Whisper) → детальное саммари → разрешение участников и контрагентов → короткое саммари в Telegram/Slack + n8n webhook. Состояние — в `zoom_recordings`/`meeting_recordings` с булевыми флагами по шагам, поэтому при перезапуске пайплайн идемпотентно продолжается.
 
-**Активация.** `COUNTERPARTY_BRIEFS_ENABLED=true` + непустой `COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID`. Демон стартует в `app/main.py:179`.
+**Backbone здесь.** Ingest записей Zoom/Fireflies и транскрипция. Один и тот же пайплайн питает соседние фичи: извлечённые **задачи → Tasks** (US-NT-6), **полный отчёт → Docs** (US-NT-4), **калибровка имени по календарю → Calendar** (US-NT-7), доставка переиспользует кросс-канальный диспетчер из **Tasks**. Резолв участников/контрагентов опирается на entity-движок (**Tasks**, US-PL-4).
 
-**Ключевые флаги:** `COUNTERPARTY_BRIEFS_ENABLED` (false), `_SLACK_TARGET_CHANNEL_ID` (""), `_LOOKAHEAD_DAYS` (7), `_TICK_INTERVAL_SECONDS` (1800), `_LLM_BUDGET_USD` (2.0), `_CACHE_TTL_DAYS` (180), `_MAX_BENEFICIARIES` (5), `_RESEARCH_MODEL` (o4-mini-deep-research), `_EXTRACT_MODEL` (""→openai_model). Общие: `GOOGLE_CALENDAR_*`, `ZOOM_REQUIRED_EMAIL`.
+**Активация.** Поллеры запускаются скриптом `ops/zoom_fireflies_runner.py` и стартуют поток только при `ZOOM_REALTIME_ENABLED=true` / `FIREFLIES_REALTIME_ENABLED=true` (оба по умолчанию false) и наличии кредов.
+
+**Ключевые флаги:** `ZOOM_REALTIME_ENABLED`/`FIREFLIES_REALTIME_ENABLED` (false), `*_POLL_INTERVAL_SECONDS` (60), batch (Zoom 10 / FF 20), `MIN_MEETING_SECONDS` (300), `ZOOM_REQUIRED_EMAIL` ("") + `ZOOM_REQUIRED_EMAIL_STRICT_HOST` (false), модели (`FIREFLIES_WHISPER_MODEL`=gpt-4o-transcribe-diarize, summary/short/tasks=gpt-5.5, `FIREFLIES_TASKS_REASONING_EFFORT`=high), `ZOOM_BILINGUAL_RESTORATION_ENABLED` (false), `SLACK_MEETING_CHANNEL_ID`/`MEETING_WEBHOOK_URL`, `COUNTERPARTY_RESOLVE_BATCH_SIZE` (20)/`_MAX_WORKERS` (5).
 
 ```mermaid
 flowchart TD
-    A["Тик каждые 30 мин"] --> B["События [now, now+7д] через Calendar API"]
-    B --> C{"host-gate / уже обработано?"}
-    C -- стоп --> X["Пропустить"]
-    C -- ок --> D["Stage 0: извлечь контрагентов (убрать @thehumanoid.ai, внутренние)"]
-    D --> E{"есть внешняя компания?"}
-    E -- нет --> X2["Пропустить (no_external / org_required)"]
-    E -- да --> F["Stage 1: research_org (кэш ≤180д → o4-mini-deep-research)"]
-    F --> G["Stage 2: бенефициары (attendees + лидеры, ≤5)"]
-    G --> H["Stage 3: research_person по каждому (бюджет $)"]
-    H --> I["Google Docs (org + люди)"]
-    I --> J["Сгруппированный DM: топ про org + тред-реплаи про людей"]
-    J --> K["Persist (calendar_event_id UNIQUE)"]
+    P["Поллер: список записей Zoom/Fireflies"] --> F{"host-email gate / lookback 24ч / уже обработано?"}
+    F -- отсеять --> X["Пропустить"]
+    F -- ок --> G{"ранние гейты:<br/>waiting_for_audio / attempts≥20 / 24ч-sentinel / короче MIN_MEETING_SECONDS"}
+    G -- стоп --> X
+    G -- ок --> D["Скачать аудио (magic-byte, cap 200MB)"]
+    D --> T["Транскрипция (gpt-4o-transcribe-diarize),<br/>VTT/alt-model fallback, опц. bilingual"]
+    T --> S1["Детальное саммари (gpt-5.5) + канонизация"]
+    S1 --> CP["Извлечь + разрешить контрагентов (батчи 20×5)"]
+    CP --> TK["Извлечь задачи → Tasks (US-NT-6)"]
+    TK --> DOC["Экспорт в Google Doc → Docs (US-NT-4)"]
+    DOC --> SS["Короткое саммари: host/operator-present gate,<br/>To-Do (важные), первая строка «DD/MM - Title», ссылка на Doc"]
+    SS --> OUT["Доставка: Telegram DM админам + Slack mirror + n8n webhook"]
 ```
 
-## US-BR-1 — Артем может получить бриф на компанию-контрагента перед встречей
+## US-NT-1 — Артем может ничего не делать: встреча в Zoom/Fireflies сама попадает в обработку
 
 **Use Cases**
 
-- **UC-BR-1.1 — Discovery и сборка брифа.**
-  *Given* в окне [now, now+7д] есть событие с внешней компанией, *When* демон обрабатывает событие, *Then* он извлекает контрагентов, ресёрчит организацию (deep-research или кэш) и постит топ-сообщение DM: «Новая встреча DD/MM HH:MM: Title» + ссылка на Doc компании + однострочный gist (цитаты переписаны в кликабельные ссылки).
-  - **FR-BR-001:** Для встречи с внешней компанией доставляется сгруппированный DM с брифом организации и ссылкой на Doc. *Trace: FR-CR-05-168 · `app/counterparty_briefs/runner.py:338`, `slack_format.py:286`.*
-  - **NFR-BR-001:** Брифы приходят в окне дневного поллинга (за дни до встречи), а не по узкому lead-time. *Trace: `config.py:62`.*
+- **UC-NT-1.1 — Авто-захват записи.**
+  *Given* `*_REALTIME_ENABLED=true` и есть креды, *When* поллер тикает каждые 60с, *Then* он берёт новые записи и для каждой запускает идемпотентный `process_one`.
+  - **FR-NT-001:** Поллеры Zoom (`/accounts/me/recordings`) и Fireflies (`list_transcripts`) периодически забирают записи и прогоняют через единый пайплайн. *Trace: FR-CR-05-116/-39 · `app/zoom/pipeline.py:2585`, `app/fireflies/pipeline.py:2971`, `ops/zoom_fireflies_runner.py`.*
+  - **NFR-NT-001:** Идемпотентность: уже обработанные (`tasks_extracted=true AND last_error IS NULL`) пропускаются; падение на шаге пишет `last_error` и ретраится на следующем поле. *Trace: FR-CR-05-196 · `runner.py:153`, `pipeline.py:2616`.*
 
-- **UC-BR-1.2 — Гейт «нужна компания».**
-  *Given* во встрече только внешние люди без организации (или всё внутреннее `@thehumanoid.ai`), *When* Stage 0, *Then* событие пропускается (`brief_org_required_skip` / `brief_no_external_counterparty`).
-  - **FR-BR-002:** Бриф формируется только при наличии внешней организации; чисто внутренние/безорг-встречи пропускаются. *Trace: FR-CB-2.6 · `runner.py:365-375`.*
+- **UC-NT-1.2 — Фильтр «только мои встречи».**
+  *Given* задан `ZOOM_REQUIRED_EMAIL`, *When* в списке запись, где Артем не хост, *Then* при `STRICT_HOST=true` она отсеивается сразу; иначе допускается, если email есть среди участников.
+  - **FR-NT-002:** Запись принимается, только если `host_email` совпадает с `ZOOM_REQUIRED_EMAIL` (strict) или email есть в участниках (legacy). *Trace: FR-CR-05-143/-167 · `app/zoom/client.py:259-290`.*
+  - **NFR-NT-002:** Пустой `ZOOM_REQUIRED_EMAIL` = принимать все (legacy-поведение). *Trace: `config.py:628`.*
 
-## US-BR-2 — Артем может получить досье на конкретных людей (бенефициаров) со встречи
+- **UC-NT-1.3 — Гейты мусора.**
+  *Given* запись короче `MIN_MEETING_SECONDS` (300), или это телефонный 24-часовой sentinel, или аудио ещё не готово, *When* `process_one`, *Then* запись пропускается с явной причиной (`duration_too_short` / `zoom_phone_24h_sentinel` / `waiting_for_audio`).
+  - **FR-NT-003:** Ранние гейты отбрасывают слишком короткие/служебные/неготовые записи без обработки. *Trace: FR-CR-05-192t/-197/-198 · `pipeline.py:2604`,`2630`,`2641`.*
+  - **NFR-NT-003:** После 20 неудачных попыток запись помечается `permanent_failure_attempts_exceeded` (не зацикливается). *Trace: `pipeline.py:2616`.*
+
+```mermaid
+flowchart TD
+    A["Новая запись в облаке"] --> B{"host == ZOOM_REQUIRED_EMAIL<br/>(или участник)?"}
+    B -- нет --> X1["Отсеять"]
+    B -- да --> C{"duration ≥ 300с? не 24ч-sentinel? аудио готово?"}
+    C -- нет --> X2["Пропустить с причиной"]
+    C -- да --> D["В пайплайн"]
+```
+
+## US-NT-2 — Артем может получить корректный транскрипт даже для шумной/двуязычной записи
 
 **Use Cases**
 
-- **UC-BR-2.1 — Бенефициары и их досье.**
-  *Given* организация определена, *When* Stage 2–3, *Then* набор людей сидится из внешних участников + дополняется лидерами компании (LLM, ≤`MAX_BENEFICIARIES`=5), по каждому проводится `research_person` и пишется персональный Doc (фото, Personal Info, DD/MM Саммари, To-Do, позиции, инвестиции и т.д.); в DM каждый человек — тред-реплай.
-  - **FR-BR-003:** По ключевым людям компании формируются персональные Docs и тред-реплаи (имя — роль + gist). *Trace: FR-CR-05-171 · `app/counterparty_briefs/extract.py:220`, `doc.py:415`, `slack_format.py:325`.*
-  - **NFR-BR-003:** Люди с проваленным research помечаются и **исключаются** из треда перед отправкой. *Trace: FR-CB-4.8 · `runner.py:695-704`.*
+- **UC-NT-2.1 — Транскрипция с bias-промптом.**
+  *Given* аудио скачано, *When* идёт STT, *Then* строится bias-промпт из имён команды и контрагентов (+ бренд «Humanoid»), аудио чанкуется при >24MB/>1300с, используется `gpt-4o-transcribe-diarize`.
+  - **FR-NT-004:** STT использует bias-промпт из директорий и чанкование длинного аудио. *Trace: FR-CR-05-127/-164/-115/-177 · `app/services/transcription.py:418`,`114`.*
+  - **NFR-NT-004:** Diarize-модели сериализуются в 1 воркер и используют `chunking_strategy="auto"`. *Trace: `transcription.py:114-133`.*
 
-## US-BR-3 — Артем может полагаться на кэш и бюджет (без лишних трат)
+- **UC-NT-2.2 — Защита от галлюцинаций STT.**
+  *Given* вывод Whisper выглядит как галлюцинация (повторы/субтитры/низкое разнообразие), *When* это детектится, *Then* срабатывает fallback на VTT-транскрипт, затем на alt-модель `whisper-1`.
+  - **FR-NT-005:** При детекте галлюцинации STT — каскад fallback'ов (VTT → alt-модель), результат принимается, только если сам не галлюцинирует. *Trace: FR-CR-05-148/-186 · `pipeline.py:361`,`418`.*
+  - **NFR-NT-005:** Двуязычная реставрация (второй проход `language=en` + LLM-реконсиляция) доступна, но по умолчанию выключена (`ZOOM_BILINGUAL_RESTORATION_ENABLED=false`). *Trace: FR-CR-05-170 · `pipeline.py:517`.*
+
+## US-NT-3 — Артем может получить короткое саммари встречи в Slack и Telegram
+
+```mermaid
+flowchart TD
+    A["Детальное саммари готово"] --> B{"оператор реально присутствовал?<br/>(Zoom: attendees/speaker-tags)"}
+    B -- нет --> X["Не публиковать, пометить sent"]
+    B -- да --> C["LLM короткое саммари (gpt-5.5) + канонизация"]
+    C --> D{"саммари «без содержания»?"}
+    D -- да --> X
+    D -- нет --> E["Первая строка «DD/MM - Title», детерминированный To-Do (важные), HTML-ссылка на Doc"]
+    E --> F["TG DM админам (чанки 4096)"]
+    E --> G["Slack mirror в канал (>3500 → треды)"]
+    E --> H["n8n webhook (тот же payload)"]
+```
 
 **Use Cases**
 
-- **UC-BR-3.1 — TTL-кэш.**
-  *Given* организацию ресёрчили в последние 180 дней, *When* обработка события, *Then* используется кэш (готовый Doc), новый research и трата не происходят.
-  - **FR-BR-004:** Research контрагента кэшируется с TTL 180 дней (переиспользование Doc). *Trace: FR-CB-7.3 · `runner.py:387-417`, `research.py:133`.*
+- **UC-NT-3.1 — Короткое саммари в Slack-канал.**
+  *Given* саммари содержательно, *When* публикуется, *Then* в `SLACK_MEETING_CHANNEL_ID` уходит сообщение: первая строка — кликабельная `DD/MM - Title` (ссылка на Google Doc), затем Участники + Суть + To-Do (только важные направления); длинное (>3500) разбивается на тред-реплаи.
+  - **FR-NT-006:** Короткое саммари публикуется в Slack-канал с гиперссылкой-заголовком на Doc, секцией участников/сути и To-Do по важным направлениям; длинный текст уходит в тред. *Trace: FR-CR-05-137/-141/-147/-156/-119 · `app/services/slack_mirror.py:286`, `pipeline.py:843`.*
+  - **NFR-NT-006:** Нумерованные задачи компактуются в один блок для Slack. *Trace: FR-CR-05-150 · `slack_mirror.py`.*
 
-- **UC-BR-3.2 — Бюджет на событие.**
-  *Given* суммарная оценка стоимости вот-вот превысит `LLM_BUDGET_USD`, *When* идёт ресёрч людей, *Then* оставшимся проставляется пометка `research_budget_exhausted`, но организация и уже обработанные люди всё равно постятся.
-  - **FR-BR-005:** На событие действует денежный бюджет; при исчерпании остальные люди помечаются, а не роняют весь бриф. *Trace: FR-CB-4.5 · `runner.py:533-545`.*
-  - **NFR-BR-005:** Идемпотентность по `calendar_event_id` UNIQUE + `counterparty_key` UNIQUE; повторный тик по обработанному событию пропускается; падение экспорта Doc не теряет персист брифа. *Trace: `runner.py:354`,`805`.*
+- **UC-NT-3.2 — Доставка в Telegram и webhook.**
+  *Given* саммари готово, *When* идёт рассылка, *Then* тот же текст уходит DM каждому `TELEGRAM_ADMIN_USER_IDS` (HTML, разбивка по 4096) и POST'ом на `MEETING_WEBHOOK_URL`.
+  - **FR-NT-007:** Саммари дублируется в Telegram DM админам и на n8n webhook. *Trace: FR-CR-05-160 · `pipeline.py:1058`, `app/services/meeting_webhook.py:43`.*
+  - **NFR-NT-007:** Webhook — fire-and-forget: при non-2xx/пустом теле логируется без ретрая. *Trace: `meeting_webhook.py:81`.*
+
+- **UC-NT-3.3 — Гейт присутствия оператора (Zoom).**
+  *Given* запись хостил Артем, но его нет среди участников/спикеров, *When* формируется короткое саммари, *Then* публикация пропускается (помечается sent).
+  - **FR-NT-008:** Короткое саммари не публикуется, если оператор фактически не присутствовал на встрече. *Trace: `pipeline.py:778`,`883`.*
+  - **NFR-NT-008:** Пустые/бессодержательные саммари не публикуются (анти-спам): детектор «содержательная часть отсутствует» → пометить done, не слать. *Trace: FR-CR-05-157 · `transcription.py:175`.*
+
+## US-NT-5 — Артем может рассчитывать на корректные участники и контрагенты в саммари
+
+**Use Cases**
+
+- **UC-NT-5.1 — Разрешение участников.**
+  *Given* есть транскрипт и календарное событие, *When* идёт шаг участников, *Then* список «Участники» формируется из календарных attendees + участников Zoom, канонизированных к реальным именам команды (entity-движок, фича **Tasks**).
+  - **FR-NT-010:** «Участники» — авторитетно из календаря/участников Zoom с канонизацией имён. *Trace: FR-CR-05-130/-169/-172/-174/-181/-183 · `app/services/zoom_participants.py`, `calendar_attendees.py`.*
+
+- **UC-NT-5.2 — Разрешение контрагентов.**
+  *Given* в директории контрагентов есть записи, *When* шаг контрагентов, *Then* упоминания извлекаются (1 LLM-проход) и резолвятся к директории батчами (20×5 параллельно); нерезолвленные выносятся в TG-виджет enrollment. Директория ведётся в фиче **Tables** (US-PL-3).
+  - **FR-NT-011:** Контрагенты извлекаются и резолвятся к директории с батч-параллелизмом; нерезолвленные предлагаются к занесению. *Trace: FR-CR-05-125/-129/-131/-133 · `pipeline.py:1158`,`1291`.*
+  - **NFR-NT-011:** Пустая директория контрагентов → шаг пропускается (0 совпадений), не ломает пайплайн. *Trace: `pipeline.py:1176`.*
 
 ---
 
-# Платформа G — Data Backbone & Integrations 🟢🟡 LIVE+FLAG
+# Фича 5 — Docs 🟡 FLAG
+*(поверхность рендеринга Google Docs · `app/sync/docs.py`; источники — Notes / Calendar / Reports)*
 
-**Назначение.** Postgres-монолит (SQLAlchemy + Alembic, 36 миграций) принимает сигналы из 4 каналов (Slack, Telegram, Fireflies, Zoom), нормализует в `tasks`/`meetings`/`counterparties` и зеркалит наружу в Google (Sheets/Tasks/Docs/Calendar). OAuth-токены шифруются Fernet'ом. Центральный `TaskSyncer` пушит каждое изменение задачи в Sheets+Tasks; тик TG-листенера крутит периодические pull'ы. Отдельная изолированная «версионная sheet-синхронизация» (`gs_*` таблицы) ведёт append-only историю. LLM-слой канонизирует людей и организации.
+**Назначение.** Единая поверхность полных документов в Google Docs. Это **сток**, наполняемый тремя фичами: полный отчёт встречи (**Notes**, US-NT-4 — основной владелец FR этой фичи), документ повестки (**Calendar**, бандл FR-AG-001) и документы брифов на контрагентов/людей (**Reports**, бандл FR-BR-001/-003). Общий writer `app/sync/docs.py` создаёт документ, шарит по ссылке и встраивает ссылку в соответствующее Slack/TG-сообщение. Доступ к Google идёт через token-vault фичи **Tables** (US-PL-5).
 
-## Модель данных (по фичам)
+## US-NT-4 — Артем может открыть полный отчёт встречи в Google Doc
+
+**Use Cases**
+
+- **UC-NT-4.1 — Экспорт Doc.**
+  *Given* детальное саммари и задачи готовы, *When* шаг экспорта, *Then* создаётся Google Doc с полным саммари + секцией контрагентов (🔗) + секцией задач (📌, дословные описания, владелец, дедлайн, приоритет) в папке `*_DOCS_FOLDER_ID`.
+  - **FR-NT-009:** Полный отчёт экспортируется в Google Doc (саммари + контрагенты + задачи). *Trace: FR-CR-05-43 · `pipeline.py:716`, `app/sync/docs.py:29`.*
+  - **NFR-NT-009:** Doc шарится по ссылке (anyone-with-link writer); ссылка встраивается в Slack/TG саммари. *Trace: FR-CR-05-55/-56/-59.*
+
+> **Другие документы на этой поверхности (кросс-реф, без отдельных FR):**
+> - **Повестка** — Google Doc создаётся в рамках FR-AG-001 (фича **Calendar**): заголовок-ссылка `DD/MM - Агенда к <title>` + Участники + recap.
+> - **Брифы** — по одному Doc на организацию и на каждого человека, в рамках FR-BR-001/FR-BR-003 (фича **Reports**); кэшируются по контрагенту (TTL 180 дней, US-BR-3).
+
+---
+
+# Фича 6 — Tables 🟢🟡 LIVE+FLAG
+*(происхождение: Platform (Sheets/Tasks/директории/версии/секреты) + Task Tracker (US-TT-7) · `app/sync/*`, `app/sheet_sync/*`, `app/services/{team_*,counterparty_*}.py`, `app/models/*`)*
+
+**Назначение.** Google Sheets и Google Tasks как операционный вид над источником истины (Postgres). Центральный `TaskSyncer` пушит каждое изменение задачи в Sheets+Tasks; листенер крутит обратные pull'ы (Sheet-wins). Здесь же — директории (команда, контрагенты), изолированная **версионная** append-only синхронизация (`gs_*`), и **хранилище секретов** (Fernet-шифрование OAuth-токенов), которым пользуются все Google-поверхности.
+
+**Backbone здесь.** Google token-vault (`sync/google_auth.py`, Fernet) — дом для Google-кредов; используется фичами **Calendar**, **Docs**, **Notes** при любом Google-вызове. Директория контрагентов (`sync/counterparties.py`) питает резолв в **Notes** и **Reports**.
+
+**Активация.** Основной task-sync — LIVE. Версионная `sheet_sync` — отдельный контейнер `ops/sheet_sync_runner.py` под `SHEET_SYNC_ENABLED` (default off).
+
+**Ключевые флаги:** `SHEET_POLL_INTERVAL_SECONDS` (60, 0=выкл), `GOOGLE_TASKS_PULL_INTERVAL_SECONDS` (60), `COUNTERPARTIES_POLL_INTERVAL_SECONDS` (300), `SHEET_SYNC_ENABLED` (false), `SECRETS_ENCRYPTION_KEY` (обязателен для Google). Общие: `GOOGLE_*` креды, Service Account.
+
+## Модель данных (сквозная)
 
 | Группа | Таблицы |
 |--------|---------|
@@ -855,6 +803,19 @@ flowchart TD
   *Given* задача изменена/завершена/удалена в Google Tasks UI, *When* pull-цикл каждые `GOOGLE_TASKS_PULL_INTERVAL_SECONDS`, *Then* БД синхронизируется (done+history; отсутствующие — soft-delete), TG-карточка обновляется; незаданные `notes`/`due` не затираются.
   - **FR-PL-004:** Двусторонняя синхронизация с Google Tasks (pull правок/завершений/удалений, без затирания пустых полей). *Trace: FR-CR-05-61/-64 · `app/sync/tasks_pull.py:99`,`217`,`245`.*
 
+## US-TT-7 — Артем может редактировать задачи прямо в Google Sheets/Tasks, и это вернётся в систему
+*(пользовательский взгляд на pull-механику US-PL-1.2 / US-PL-2; здесь — с фокусом на UX задачи)*
+
+**Use Cases**
+
+- **UC-TT-7.1 — Pull правок из Sheets.**
+  *Given* оператор поправил строку задачи в Google Sheets, *When* листенер поллит каждые `SHEET_POLL_INTERVAL_SECONDS` (60), *Then* БД обновляется по полям, смена статуса проходит через `TransitionService`, TG-карточка перерисовывается (Sheet-wins).
+  - **FR-TT-015:** Правки в Sheets подтягиваются в БД (Sheet-wins) и обновляют карточку; имена владельцев резолвятся к uid. *Trace: FR-CR-05-28/-11 · `app/sync/sheets.py:489`,`523`.*
+
+- **UC-TT-7.2 — Pull правок из Google Tasks.**
+  *Given* задача изменена/удалена/завершена в Google Tasks UI, *When* pull-цикл (60с), *Then* БД синхронизируется (done+history, soft-delete отсутствующих), карточка обновляется; незаданные поля (`notes`/`due`) не затираются.
+  - **FR-TT-016:** Pull из Google Tasks применяет правки/удаления/завершения в БД, не затирая отсутствующие поля. *Trace: FR-CR-05-61/-64 · `app/sync/tasks_pull.py:99`,`217`.*
+
 ## US-PL-3 — Артем может вести директорию контрагентов из нескольких Google-таблиц
 
 **Use Cases**
@@ -862,15 +823,6 @@ flowchart TD
 - **UC-PL-3.1 — Wipe-and-reload директории.**
   *Given* изменилась одна из таблиц-источников контрагентов, *When* поллинг каждые `COUNTERPARTIES_POLL_INTERVAL_SECONDS` (300), *Then* директория полностью перезаписывается (wipe + reload), дедуп по `name_normalised`; если все источники пусты/недоступны — wipe пропускается.
   - **FR-PL-005:** Директория контрагентов собирается из нескольких таблиц/вкладок по семантике wipe-and-reload. *Trace: FR-CR-05-124/-128/-132 · `app/sync/counterparties.py:225`,`243`.*
-
-## US-PL-4 — Артем может рассчитывать на единые имена людей и компаний во всех каналах
-
-**Use Cases**
-
-- **UC-PL-4.1 — Entity resolution.**
-  *Given* в транскрипте/задаче есть «сырые» владельцы и упоминания, *When* работает матчер, *Then* они резолвятся к `team_members`/`counterparties` (LLM-first + rule fallback); владельцы вне списка участников встречи строго обнуляются; результат кэшируется в `entity_resolution_cache` (TTL ~7 дней).
-  - **FR-PL-006:** LLM-слой канонизирует людей и организации между Slack/Telegram/Zoom/Calendar; владельцы-не-участники отбраковываются. *Trace: FR-CR-05-193b/c/d/e · `app/services/entity_matcher.py:269`,`316`, `team_member_canonical.py:121`.*
-  - **NFR-PL-006:** Идентичные входы матчера → результат из кэша (если `expires_at>now`), `hits_count` инкрементится — экономия LLM-вызовов. *Trace: `app/services/entity_resolution_cache.py:35`,`81`.*
 
 ## US-PL-5 — Артем может хранить интеграционные токены безопасно
 
@@ -892,188 +844,310 @@ flowchart TD
 
 ---
 
-## 10. Сводный реестр FR
+# Фича 7 — Reports 🟢🟡 LIVE+FLAG
+*(происхождение: Task Tracker (дайджесты/watch-list) + Counterparty Briefs · `app/services/{digest,admin_digest,daily_plan,weekly_plan}.py`, `app/counterparty_briefs/*`)*
 
-| ID | Кратко | Trace (код) |
-|----|--------|-------------|
-| FR-CB-001 | Ответ на @mention/DM как тред-реплай | FR-CB2-3.1 |
-| FR-CB-002 | Данные через n8n MCP (HTTP) + локальные Slack-tools | FR-CB2-3.31 |
-| FR-CB-003 | DM → доп. черновик задачи | FR-CR-05-192w |
-| FR-CB-004 | Backoff + деградация MCP при ошибках | FR-CB2-3.x |
-| FR-CB-005 | Контекст треда (N реплик) | FR-CB2-3.x |
-| FR-CB-006 | Архив сообщений JSONL + PG | FR-CB2-2.1/2.2 |
-| FR-CB-007 | Pending-очередь при сбое PG | FR-CB2-2.6 |
-| FR-CB-008 | History-poller как backstop | FR-CB2-1.6 |
-| FR-CB-009 | Allow-list пользователей | FR-CB2-3.36 |
-| FR-NT-001 | Поллеры Zoom/Fireflies + единый пайплайн | FR-CR-05-116/-39 |
-| FR-NT-002 | Host-email фильтр записей | FR-CR-05-143/-167 |
-| FR-NT-003 | Гейты мусора (duration/sentinel/audio) | FR-CR-05-192t/-197/-198 |
-| FR-NT-004 | STT с bias-промптом + чанкование | FR-CR-05-127/-115 |
-| FR-NT-005 | Fallback при галлюцинации STT | FR-CR-05-148/-186 |
-| FR-NT-006 | Короткое саммари в Slack (ссылка+To-Do) | FR-CR-05-137/-156/-119 |
-| FR-NT-007 | Доставка в TG DM + webhook | FR-CR-05-160 |
-| FR-NT-008 | Гейт присутствия оператора | — |
-| FR-NT-009 | Экспорт полного отчёта в Google Doc | FR-CR-05-43 |
-| FR-NT-010 | Участники из календаря/Zoom + канон | FR-CR-05-130/-169 |
-| FR-NT-011 | Извлечение/резолв контрагентов | FR-CR-05-125/-129 |
-| FR-NT-012 | Извлечение задач с владельцем/дедлайном | FR-CR-05-185 |
-| FR-NT-013 | Классификация направлений задач | FR-CR-05-163 |
-| FR-NT-014 | Калибровка названия по Calendar | FR-CR-05-136/-154 |
-| FR-TX-001 | LangGraph-пайплайн + мультизадача | FR-CR-05-05/-108 |
-| FR-TX-002 | Passive: soft_prompt ≥0.40, иначе silent | FR-CR-04-* |
-| FR-TX-003 | @mention → авто-создание | — |
-| FR-TX-004 | «Принять» → персист + DM владельцу | FR-CR-04-32 |
-| FR-TX-005 | Дозаполнение полей в треде | — |
-| FR-TX-006 | Резолв владельца/даты + дефолт 18:00 | FR-CR-05-63/-112 |
-| FR-TX-007 | TG realtime-поллинг read-only вью | FR-CR-05-35/-36 |
-| FR-TX-008 | Slack Socket-ingest | FR-CR-05-162 |
-| FR-TX-009 | Fast-path дедуп без LLM | FR-CR-05-110/-111 |
-| FR-TT-001 | Mark done + ресинк + уведомление | FR-CR-05-37 |
-| FR-TT-002 | Контроль прав на действия | — |
-| FR-TT-003 | Start штампует started_at | FR-CR-05-69 |
-| FR-TT-004 | Cancel-маршрутизация / soft-delete | FR-CR-04-20 |
-| FR-TT-005 | Утренние карточки + чистка вчерашних | FR-CR-05-84 |
-| FR-TT-006 | Админский утренний diff | FR-CR-05-91 |
-| FR-TT-007 | Вечерний статус + план на завтра | FR-CR-05-04/-40/-83 |
-| FR-TT-008 | Slack daily-plan + approve | FR-CR-04-25 |
-| FR-TT-009 | Недельный план (Accept/Later) | — |
-| FR-TT-010 | Напоминания о дедлайнах | FR-CR-05-49 |
-| FR-TT-011 | Напоминания «пора начинать» | FR-CR-05-03 |
-| FR-TT-012 | Тред-напоминания | — |
-| FR-TT-013 | Подписки на задачу | — |
-| FR-TT-014 | Кросс-канальный fan-out статусов | FR-CR-05-02 |
-| FR-TT-015 | Pull правок из Sheets | FR-CR-05-28/-11 |
-| FR-TT-016 | Pull правок из Google Tasks | FR-CR-05-61/-64 |
-| FR-TT-017 | Админ watch-list дайджесты | — |
-| FR-AG-001 | DM-повестка + задачи тред-реплаями | FR-CR-05-165/-167 |
-| FR-AG-002 | Идемпотентность повестки | — |
-| FR-AG-003 | Подавление пустой повестки | — |
-| FR-AG-004 | Гейт организатора+создателя | FR-CR-05-167 |
-| FR-AG-005 | Порог повторяемости (≥2) | — |
-| FR-AG-006 | Источник zoom_pattern (без Calendar) | FR-CR-05-166 |
-| FR-BR-001 | Сгруппированный DM-бриф компании | FR-CR-05-168 |
-| FR-BR-002 | Гейт «нужна внешняя компания» | FR-CB-2.6 |
-| FR-BR-003 | Персональные досье бенефициаров | FR-CR-05-171 |
-| FR-BR-004 | TTL-кэш research (180д) | FR-CB-7.3 |
-| FR-BR-005 | Денежный бюджет на событие | FR-CB-4.5 |
-| FR-PL-001 | Push задач в Sheets+Tasks | FR-CR-04-23/-26 |
-| FR-PL-002 | Pull из Sheets (Sheet-wins) | FR-CR-05-11/-28 |
-| FR-PL-003 | Team-таб append-only sync | FR-CR-05-10/-27 |
-| FR-PL-004 | Двусторонний Google Tasks sync | FR-CR-05-61/-64 |
-| FR-PL-005 | Директория контрагентов wipe-reload | FR-CR-05-124/-132 |
-| FR-PL-006 | Entity resolution (люди/орг) | FR-CR-05-193b-e |
-| FR-PL-007 | Fernet-шифрование токенов | FR-CR-05-144/-175 |
-| FR-PL-008 | Версионная append-only sync (gs_*) | FR-GS-019/020/021 |
+**Назначение.** Сводки и брифы для Артема. **Дайджесты задач:** утренние карточки + diff «что изменилось», вечерний статус-нарратив + план на завтра, воскресный недельный план, админский watch-list (in-progress/overdue/stale). **Брифы контрагентов:** для предстоящих встреч с внешней компанией — OpenAI deep-research по организации и её ключевым людям, по одному Google Doc на контрагента и один сгруппированный Slack DM.
 
-## 11. Сводный реестр NFR
+**Backbone здесь.** Построитель дайджестов (`services/digest.py`, `admin_digest.py`, `daily_plan.py`, `weekly_plan.py`); резолв организаций/контрагентов для брифов (`counterparty_match.py`, `counterparty_briefs/lookup.py`). Доставка переиспользует кросс-канальный диспетчер из **Tasks**; брифы триггерятся календарным сигналом из **Calendar**; документы рендерятся в **Docs**; директория контрагентов ведётся в **Tables**.
 
-| ID | Кратко |
-|----|--------|
-| NFR-CB-001 | Мгновенный плейсхолдер + фазы статуса |
-| NFR-CB-002 | Параллельный сбор + вычистка MCP-авторизации из payload |
-| NFR-CB-003 | Денежный потолок прогона ($, → max_tokens) |
-| NFR-CB-004 | Гарантированная доставка ответа при rate-limit |
-| NFR-CB-005 | Ограниченный объём контекста треда |
-| NFR-CB-006 | Архивация best-effort, не блокирует responder |
-| NFR-CB-007 | Дедуп Socket vs poller (60с) |
-| NFR-CB-009 | Пустой allow-list = без ограничений |
-| NFR-NT-001 | Идемпотентность пайплайна (флаги шагов) |
-| NFR-NT-002 | Пустой host-email = принимать все |
-| NFR-NT-003 | Потолок 20 попыток → permanent fail |
-| NFR-NT-004 | Diarize: 1 воркер, auto-chunking |
-| NFR-NT-005 | Bilingual restoration off by default |
-| NFR-NT-006 | Компактизация нумерованных задач для Slack |
-| NFR-NT-007 | Webhook fire-and-forget |
-| NFR-NT-008 | Анти-спам: пустые саммари не публикуются |
-| NFR-NT-009 | Doc anyone-with-link + встроенная ссылка |
-| NFR-NT-011 | Пустая директория не ломает пайплайн |
-| NFR-NT-012 | Fuzzy-дедуп задач до записи |
-| NFR-NT-014 | Calendar-match off by default |
-| NFR-TX-001 | Prefilter не гейтит LLM (страховка) |
-| NFR-TX-002 | no_action всегда молчит, inference логируется |
-| NFR-TX-003 | Meetings вне зоны охвата |
-| NFR-TX-005 | Пустое описание → черновик отбрасывается |
-| NFR-TX-006 | due ≤7д → todo, иначе backlog |
-| NFR-TX-007 | TG-вью строго read-only |
-| NFR-TX-009 | LLM-дедуп по последним 10 (если fast-path off) |
-| NFR-TT-001 | Идемпотентность действий по audit_logs |
-| NFR-TT-002 | Запрещённый переход → no-op + warning |
-| NFR-TT-005 | Идемпотентность утреннего прогона per (user,day) |
-| NFR-TT-007 | Админский план группируется по людям + stale |
-| NFR-TT-014 | TG edit-fanout подавлен (анти-шум) |
-| NFR-TT-017 | Нет админов → дайджесты no-op |
-| NFR-AG-001 | Сборка повестки без LLM (compose_lite) |
-| NFR-AG-002 | Идемпотентность переживает рестарт |
-| NFR-AG-004 | Resource-attendees вычищаются, email→имя |
-| NFR-AG-006 | Отказоустойчивость демона + Apps Script fallback |
-| NFR-BR-001 | Окно дневного поллинга (дни, не минуты) |
-| NFR-BR-003 | Проваленный research исключается из треда |
-| NFR-BR-005 | Идемпотентность по event/counterparty ключам |
-| NFR-PL-001 | Сбой синка не откатывает персист |
-| NFR-PL-006 | Кэш entity-resolution (TTL, hits) |
-| NFR-PL-007 | SA обходит OAuth; Calendar read-only |
-| NFR-PL-008 | Идемпотентность по payload-hash, атомарность |
+**Активация.** Дайджесты — LIVE, часть гейтится непустыми `ADMIN_SLACK_USER_IDS`/`TELEGRAM_ADMIN_USER_IDS`. Брифы — `COUNTERPARTY_BRIEFS_ENABLED=true` + непустой `COUNTERPARTY_BRIEFS_SLACK_TARGET_CHANNEL_ID` (демон `app/main.py:179`).
+
+**Ключевые флаги:** *брифы* — `COUNTERPARTY_BRIEFS_ENABLED` (false), `_SLACK_TARGET_CHANNEL_ID` (""), `_LOOKAHEAD_DAYS` (7), `_TICK_INTERVAL_SECONDS` (1800), `_LLM_BUDGET_USD` (2.0), `_CACHE_TTL_DAYS` (180), `_MAX_BENEFICIARIES` (5), `_RESEARCH_MODEL` (o4-mini-deep-research), `_EXTRACT_MODEL` (""→openai_model); *дайджесты* — `ADMIN_SLACK_USER_IDS`/`TELEGRAM_ADMIN_USER_IDS`, `stale_threshold_days` (2). Общие: `GOOGLE_CALENDAR_*`, `ZOOM_REQUIRED_EMAIL`.
+
+## US-TT-2 — Артем может получать утренние карточки задач на сегодня и «что изменилось» (как админ)
+
+```mermaid
+flowchart TD
+    A["Утренний крон"] --> B["Удалить вчерашние карточки"]
+    B --> C["Для каждой задачи due-today → карточка владельцу/подписчику (кто /started бота)"]
+    C --> D["Интро-DM: «задач на сегодня: N, просрочено: M»"]
+    D --> E["Админу — diff «что изменилось со вчера»"]
+```
+
+**Use Cases**
+
+- **UC-TT-2.1 — Утренние карточки.**
+  *Given* наступило утро, *When* крон запускается, *Then* удаляются вчерашние карточки и каждому владельцу/подписчику, кто запускал TG-бота, постится по карточке на задачу due-today.
+  - **FR-TT-005:** Утренний прогон чистит вчерашние карточки и доставляет карточки задач на сегодня получателям, активировавшим бота. *Trace: FR-CR-05-84 · `app/telegram_bot/morning_cards.py:450`.*
+  - **NFR-TT-005:** Идемпотентность per (user, day): повторный запуск — no-op; получатели без `/start` отсеиваются. *Trace: `morning_cards.py:464-561`.*
+
+- **UC-TT-2.2 — Админский diff.**
+  *Given* Артем — админ, *When* идёт утренний прогон, *Then* он получает DM с дифом «что изменилось по людям со вчера».
+  - **FR-TT-006:** Админу доставляется утренний diff-дайджест по изменениям. *Trace: FR-CR-05-91 · `morning_cards.py`.*
+
+## US-TT-3 — Артем может получать вечерний статус-отчёт и план на завтра
+
+**Use Cases**
+
+- **UC-TT-3.1 — Вечерний нарратив.**
+  *Given* наступил вечер, *When* крон, *Then* приходит отчёт: Сделано-сегодня / В работе / To-do / Подписки, и вторым сообщением — план на завтра.
+  - **FR-TT-007:** Вечерний прогон шлёт статус-нарратив (3+ секции) и отдельное сообщение «план на завтра». *Trace: FR-CR-05-04/-40/-83 · `app/telegram_bot/evening_status.py`.*
+  - **NFR-TT-007:** Для админа план на завтра группируется по людям; добавляется watch-list (stale in_progress ≥`stale_threshold_days`, дефолт 2). *Trace: `app/services/admin_digest.py`.*
+
+- **UC-TT-3.2 — Slack daily plan с подтверждением.**
+  *Given* вечерний крон в Slack, *When* формируется план, *Then* персистятся `DailyPlanItem` + DM со Skip/Approve; если утром не было Approve — план уходит «как есть» с авто-approve в аудит.
+  - **FR-TT-008:** Slack daily-plan персистит элементы и допускает опциональное подтверждение (auto-approve при отсутствии). *Trace: FR-CR-04-25 · `app/services/daily_plan.py:243`.*
+
+## US-TT-4 — Артем может получать воскресный недельный план и принимать задачи на неделю
+
+```mermaid
+flowchart TD
+    A["Воскресный крон"] --> B["Собрать backlog с дедлайном на след. Пн–Вс"]
+    B --> C["DM с задачами"]
+    C --> D{"кнопка"}
+    D -- "Accept" --> E["backlog → todo, is_current_week=true, history"]
+    D -- "Later" --> F["is_current_week=false, только audit"]
+```
+
+**Use Cases**
+
+- **UC-TT-4.1 — Недельный план.**
+  *Given* воскресенье, *When* крон, *Then* приходит DM с backlog-задачами, дедлайн которых на следующую неделю; «Accept» переводит в todo (текущая неделя), «Later» — только аудит, без смены статуса.
+  - **FR-TT-009:** Воскресный недельный план предлагает задачи на неделю с действиями Accept/Later. *Trace: `app/services/weekly_plan.py`, `app/slack_bot/handlers/weekly_plan.py:27`.*
+
+## US-TT-8 — Артем (как админ) может видеть watch-list по команде
+
+**Use Cases**
+
+- **UC-TT-8.1 — Админ-дайджесты.**
+  *Given* `ADMIN_SLACK_USER_IDS` непуст, *When* идут утренний/вечерний прогоны, *Then* админ получает watch-list (in_progress + просрочки утром; завтрашние + застрявшие in_progress вечером).
+  - **FR-TT-017:** Админу доставляются watch-list дайджесты (in-progress/overdue/stale). *Trace: `app/services/admin_digest.py:96`.*
+  - **NFR-TT-017:** При пустом списке админов админ-дайджесты — no-op (ничего не шлётся). *Trace: `admin_digest.py:97`.*
+
+## US-BR-1 — Артем может получить бриф на компанию-контрагента перед встречей
+
+```mermaid
+flowchart TD
+    A["Тик каждые 30 мин"] --> B["События [now, now+7д] через Calendar API"]
+    B --> C{"host-gate / уже обработано?"}
+    C -- стоп --> X["Пропустить"]
+    C -- ок --> D["Stage 0: извлечь контрагентов (убрать @thehumanoid.ai, внутренние)"]
+    D --> E{"есть внешняя компания?"}
+    E -- нет --> X2["Пропустить (no_external / org_required)"]
+    E -- да --> F["Stage 1: research_org (кэш ≤180д → o4-mini-deep-research)"]
+    F --> G["Stage 2: бенефициары (attendees + лидеры, ≤5)"]
+    G --> H["Stage 3: research_person по каждому (бюджет $)"]
+    H --> I["Google Docs (org + люди)"]
+    I --> J["Сгруппированный DM: топ про org + тред-реплаи про людей"]
+    J --> K["Persist (calendar_event_id UNIQUE)"]
+```
+
+**Use Cases**
+
+- **UC-BR-1.1 — Discovery и сборка брифа.**
+  *Given* в окне [now, now+7д] есть событие с внешней компанией, *When* демон обрабатывает событие, *Then* он извлекает контрагентов, ресёрчит организацию (deep-research или кэш) и постит топ-сообщение DM: «Новая встреча DD/MM HH:MM: Title» + ссылка на Doc компании + однострочный gist (цитаты переписаны в кликабельные ссылки).
+  - **FR-BR-001:** Для встречи с внешней компанией доставляется сгруппированный DM с брифом организации и ссылкой на Doc. *Trace: FR-CR-05-168 · `app/counterparty_briefs/runner.py:338`, `slack_format.py:286`.*
+  - **NFR-BR-001:** Брифы приходят в окне дневного поллинга (за дни до встречи), а не по узкому lead-time. *Trace: `config.py:62`.*
+
+- **UC-BR-1.2 — Гейт «нужна компания».**
+  *Given* во встрече только внешние люди без организации (или всё внутреннее `@thehumanoid.ai`), *When* Stage 0, *Then* событие пропускается (`brief_org_required_skip` / `brief_no_external_counterparty`).
+  - **FR-BR-002:** Бриф формируется только при наличии внешней организации; чисто внутренние/безорг-встречи пропускаются. *Trace: FR-CB-2.6 · `runner.py:365-375`.*
+
+## US-BR-2 — Артем может получить досье на конкретных людей (бенефициаров) со встречи
+
+**Use Cases**
+
+- **UC-BR-2.1 — Бенефициары и их досье.**
+  *Given* организация определена, *When* Stage 2–3, *Then* набор людей сидится из внешних участников + дополняется лидерами компании (LLM, ≤`MAX_BENEFICIARIES`=5), по каждому проводится `research_person` и пишется персональный Doc (фото, Personal Info, DD/MM Саммари, To-Do, позиции, инвестиции и т.д.); в DM каждый человек — тред-реплай.
+  - **FR-BR-003:** По ключевым людям компании формируются персональные Docs и тред-реплаи (имя — роль + gist). *Trace: FR-CR-05-171 · `app/counterparty_briefs/extract.py:220`, `doc.py:415`, `slack_format.py:325`.*
+  - **NFR-BR-003:** Люди с проваленным research помечаются и **исключаются** из треда перед отправкой. *Trace: FR-CB-4.8 · `runner.py:695-704`.*
+
+## US-BR-3 — Артем может полагаться на кэш и бюджет (без лишних трат)
+
+**Use Cases**
+
+- **UC-BR-3.1 — TTL-кэш.**
+  *Given* организацию ресёрчили в последние 180 дней, *When* обработка события, *Then* используется кэш (готовый Doc), новый research и трата не происходят.
+  - **FR-BR-004:** Research контрагента кэшируется с TTL 180 дней (переиспользование Doc). *Trace: FR-CB-7.3 · `runner.py:387-417`, `research.py:133`.*
+
+- **UC-BR-3.2 — Бюджет на событие.**
+  *Given* суммарная оценка стоимости вот-вот превысит `LLM_BUDGET_USD`, *When* идёт ресёрч людей, *Then* оставшимся проставляется пометка `research_budget_exhausted`, но организация и уже обработанные люди всё равно постятся.
+  - **FR-BR-005:** На событие действует денежный бюджет; при исчерпании остальные люди помечаются, а не роняют весь бриф. *Trace: FR-CB-4.5 · `runner.py:533-545`.*
+  - **NFR-BR-005:** Идемпотентность по `calendar_event_id` UNIQUE + `counterparty_key` UNIQUE; повторный тик по обработанному событию пропускается; падение экспорта Doc не теряет персист брифа. *Trace: `runner.py:354`,`805`.*
 
 ---
 
-## 12. Traceability и точки кода
+## 10. Сводный реестр FR
+
+| ID | Кратко | Фича | Trace (код) |
+|----|--------|------|-------------|
+| FR-CB-001 | Ответ на @mention/DM как тред-реплай | Memory | FR-CB2-3.1 |
+| FR-CB-002 | Данные через n8n MCP (HTTP) + локальные Slack-tools | Memory | FR-CB2-3.31 |
+| FR-CB-003 | DM → доп. черновик задачи | Memory→Tasks | FR-CR-05-192w |
+| FR-CB-004 | Backoff + деградация MCP при ошибках | Memory | FR-CB2-3.x |
+| FR-CB-005 | Контекст треда (N реплик) | Memory | FR-CB2-3.x |
+| FR-CB-006 | Архив сообщений JSONL + PG | Memory | FR-CB2-2.1/2.2 |
+| FR-CB-007 | Pending-очередь при сбое PG | Memory | FR-CB2-2.6 |
+| FR-CB-008 | History-poller как backstop | Memory | FR-CB2-1.6 |
+| FR-CB-009 | Allow-list пользователей | Memory | FR-CB2-3.36 |
+| FR-NT-001 | Поллеры Zoom/Fireflies + единый пайплайн | Notes | FR-CR-05-116/-39 |
+| FR-NT-002 | Host-email фильтр записей | Notes | FR-CR-05-143/-167 |
+| FR-NT-003 | Гейты мусора (duration/sentinel/audio) | Notes | FR-CR-05-192t/-197/-198 |
+| FR-NT-004 | STT с bias-промптом + чанкование | Notes | FR-CR-05-127/-115 |
+| FR-NT-005 | Fallback при галлюцинации STT | Notes | FR-CR-05-148/-186 |
+| FR-NT-006 | Короткое саммари в Slack (ссылка+To-Do) | Notes | FR-CR-05-137/-156/-119 |
+| FR-NT-007 | Доставка в TG DM + webhook | Notes | FR-CR-05-160 |
+| FR-NT-008 | Гейт присутствия оператора | Notes | — |
+| FR-NT-009 | Экспорт полного отчёта в Google Doc | Docs | FR-CR-05-43 |
+| FR-NT-010 | Участники из календаря/Zoom + канон | Notes | FR-CR-05-130/-169 |
+| FR-NT-011 | Извлечение/резолв контрагентов | Notes | FR-CR-05-125/-129 |
+| FR-NT-012 | Извлечение задач с владельцем/дедлайном | Tasks | FR-CR-05-185 |
+| FR-NT-013 | Классификация направлений задач | Tasks | FR-CR-05-163 |
+| FR-NT-014 | Калибровка названия по Calendar | Calendar | FR-CR-05-136/-154 |
+| FR-TX-001 | LangGraph-пайплайн + мультизадача | Tasks | FR-CR-05-05/-108 |
+| FR-TX-002 | Passive: soft_prompt ≥0.40, иначе silent | Tasks | FR-CR-04-* |
+| FR-TX-003 | @mention → авто-создание | Tasks | — |
+| FR-TX-004 | «Принять» → персист + DM владельцу | Tasks | FR-CR-04-32 |
+| FR-TX-005 | Дозаполнение полей в треде | Tasks | — |
+| FR-TX-006 | Резолв владельца/даты + дефолт 18:00 | Tasks | FR-CR-05-63/-112 |
+| FR-TX-007 | TG realtime-поллинг read-only вью | Tasks | FR-CR-05-35/-36 |
+| FR-TX-008 | Slack Socket-ingest | Tasks | FR-CR-05-162 |
+| FR-TX-009 | Fast-path дедуп без LLM | Tasks | FR-CR-05-110/-111 |
+| FR-TT-001 | Mark done + ресинк + уведомление | Tasks | FR-CR-05-37 |
+| FR-TT-002 | Контроль прав на действия | Tasks | — |
+| FR-TT-003 | Start штампует started_at | Tasks | FR-CR-05-69 |
+| FR-TT-004 | Cancel-маршрутизация / soft-delete | Tasks | FR-CR-04-20 |
+| FR-TT-005 | Утренние карточки + чистка вчерашних | Reports | FR-CR-05-84 |
+| FR-TT-006 | Админский утренний diff | Reports | FR-CR-05-91 |
+| FR-TT-007 | Вечерний статус + план на завтра | Reports | FR-CR-05-04/-40/-83 |
+| FR-TT-008 | Slack daily-plan + approve | Reports | FR-CR-04-25 |
+| FR-TT-009 | Недельный план (Accept/Later) | Reports | — |
+| FR-TT-010 | Напоминания о дедлайнах | Tasks | FR-CR-05-49 |
+| FR-TT-011 | Напоминания «пора начинать» | Tasks | FR-CR-05-03 |
+| FR-TT-012 | Тред-напоминания | Tasks | — |
+| FR-TT-013 | Подписки на задачу | Tasks | — |
+| FR-TT-014 | Кросс-канальный fan-out статусов | Tasks | FR-CR-05-02 |
+| FR-TT-015 | Pull правок из Sheets | Tables | FR-CR-05-28/-11 |
+| FR-TT-016 | Pull правок из Google Tasks | Tables | FR-CR-05-61/-64 |
+| FR-TT-017 | Админ watch-list дайджесты | Reports | — |
+| FR-AG-001 | DM-повестка + задачи тред-реплаями | Calendar | FR-CR-05-165/-167 |
+| FR-AG-002 | Идемпотентность повестки | Calendar | — |
+| FR-AG-003 | Подавление пустой повестки | Calendar | — |
+| FR-AG-004 | Гейт организатора+создателя | Calendar | FR-CR-05-167 |
+| FR-AG-005 | Порог повторяемости (≥2) | Calendar | — |
+| FR-AG-006 | Источник zoom_pattern (без Calendar) | Calendar | FR-CR-05-166 |
+| FR-BR-001 | Сгруппированный DM-бриф компании | Reports | FR-CR-05-168 |
+| FR-BR-002 | Гейт «нужна внешняя компания» | Reports | FR-CB-2.6 |
+| FR-BR-003 | Персональные досье бенефициаров | Reports | FR-CR-05-171 |
+| FR-BR-004 | TTL-кэш research (180д) | Reports | FR-CB-7.3 |
+| FR-BR-005 | Денежный бюджет на событие | Reports | FR-CB-4.5 |
+| FR-PL-001 | Push задач в Sheets+Tasks | Tables | FR-CR-04-23/-26 |
+| FR-PL-002 | Pull из Sheets (Sheet-wins) | Tables | FR-CR-05-11/-28 |
+| FR-PL-003 | Team-таб append-only sync | Tables | FR-CR-05-10/-27 |
+| FR-PL-004 | Двусторонний Google Tasks sync | Tables | FR-CR-05-61/-64 |
+| FR-PL-005 | Директория контрагентов wipe-reload | Tables | FR-CR-05-124/-132 |
+| FR-PL-006 | Entity resolution (люди/орг) | Tasks | FR-CR-05-193b-e |
+| FR-PL-007 | Fernet-шифрование токенов | Tables | FR-CR-05-144/-175 |
+| FR-PL-008 | Версионная append-only sync (gs_*) | Tables | FR-GS-019/020/021 |
+
+## 11. Сводный реестр NFR
+
+| ID | Кратко | Фича |
+|----|--------|------|
+| NFR-CB-001 | Мгновенный плейсхолдер + фазы статуса | Memory |
+| NFR-CB-002 | Параллельный сбор + вычистка MCP-авторизации из payload | Memory |
+| NFR-CB-003 | Денежный потолок прогона ($, → max_tokens) | Memory |
+| NFR-CB-004 | Гарантированная доставка ответа при rate-limit | Memory |
+| NFR-CB-005 | Ограниченный объём контекста треда | Memory |
+| NFR-CB-006 | Архивация best-effort, не блокирует responder | Memory |
+| NFR-CB-007 | Дедуп Socket vs poller (60с) | Memory |
+| NFR-CB-009 | Пустой allow-list = без ограничений | Memory |
+| NFR-NT-001 | Идемпотентность пайплайна (флаги шагов) | Notes |
+| NFR-NT-002 | Пустой host-email = принимать все | Notes |
+| NFR-NT-003 | Потолок 20 попыток → permanent fail | Notes |
+| NFR-NT-004 | Diarize: 1 воркер, auto-chunking | Notes |
+| NFR-NT-005 | Bilingual restoration off by default | Notes |
+| NFR-NT-006 | Компактизация нумерованных задач для Slack | Notes |
+| NFR-NT-007 | Webhook fire-and-forget | Notes |
+| NFR-NT-008 | Анти-спам: пустые саммари не публикуются | Notes |
+| NFR-NT-009 | Doc anyone-with-link + встроенная ссылка | Docs |
+| NFR-NT-011 | Пустая директория не ломает пайплайн | Notes |
+| NFR-NT-012 | Fuzzy-дедуп задач до записи | Tasks |
+| NFR-NT-014 | Calendar-match off by default | Calendar |
+| NFR-TX-001 | Prefilter не гейтит LLM (страховка) | Tasks |
+| NFR-TX-002 | no_action всегда молчит, inference логируется | Tasks |
+| NFR-TX-003 | Meetings вне зоны охвата | Tasks |
+| NFR-TX-005 | Пустое описание → черновик отбрасывается | Tasks |
+| NFR-TX-006 | due ≤7д → todo, иначе backlog | Tasks |
+| NFR-TX-007 | TG-вью строго read-only | Tasks |
+| NFR-TX-009 | LLM-дедуп по последним 10 (если fast-path off) | Tasks |
+| NFR-TT-001 | Идемпотентность действий по audit_logs | Tasks |
+| NFR-TT-002 | Запрещённый переход → no-op + warning | Tasks |
+| NFR-TT-005 | Идемпотентность утреннего прогона per (user,day) | Reports |
+| NFR-TT-007 | Админский план группируется по людям + stale | Reports |
+| NFR-TT-014 | TG edit-fanout подавлен (анти-шум) | Tasks |
+| NFR-TT-017 | Нет админов → дайджесты no-op | Reports |
+| NFR-AG-001 | Сборка повестки без LLM (compose_lite) | Calendar |
+| NFR-AG-002 | Идемпотентность переживает рестарт | Calendar |
+| NFR-AG-004 | Resource-attendees вычищаются, email→имя | Calendar |
+| NFR-AG-006 | Отказоустойчивость демона + Apps Script fallback | Calendar |
+| NFR-BR-001 | Окно дневного поллинга (дни, не минуты) | Reports |
+| NFR-BR-003 | Проваленный research исключается из треда | Reports |
+| NFR-BR-005 | Идемпотентность по event/counterparty ключам | Reports |
+| NFR-PL-001 | Сбой синка не откатывает персист | Tables |
+| NFR-PL-006 | Кэш entity-resolution (TTL, hits) | Tasks |
+| NFR-PL-007 | SA обходит OAuth; Calendar read-only | Tables |
+| NFR-PL-008 | Идемпотентность по payload-hash, атомарность | Tables |
+
+---
+
+## 12. Traceability и точки кода (по 7 фичам)
 
 | Фича | Главные модули | «Родной» ID-неймспейс |
 |------|----------------|------------------------|
-| CEO Brain Bot | `app/ceo_brain/*` | `FR-CB2-200`, `FR-CB2-{1,2,3,4,5}.x` |
-| Note Taker | `app/zoom/*`, `app/fireflies/*`, `app/services/{transcription,slack_mirror,meeting_webhook,zoom_participants,summary_canonicalize,bilingual_restorer}.py`, `ops/zoom_fireflies_runner.py` | `FR-CR-05-39/-116` + многие `-1xx` |
-| Task Extractor | `app/intent/*`, `app/orchestrator/*`, `app/context/retriever.py`, `app/slack_ingest/*`, `app/telegram_ingest/*` | `FR-CR-04-*`, `FR-CR-05-05/-35/-108..-112` |
-| Task Tracker | `app/telegram_bot/*`, `app/slack_bot/handlers/*`, `app/services/{transitions,digest,admin_digest,daily_plan,weekly_plan,thread_reminders,subscriber_updates}.py` | `FR-CR-04-20..-32`, `FR-CR-05-02/-03/-40/-43/-69/-84` |
-| Agenda | `app/agenda/*` | `FR-CR-05-165/-166/-167/-192{u,aa,ab,ac}` |
-| Briefs | `app/counterparty_briefs/*` | `FR-CR-05-168/-171` |
-| Platform | `app/sync/*`, `app/sheet_sync/*`, `app/services/{entity_*,team_*,counterparty_*}.py`, `app/models/*`, `alembic/versions/*` | `FR-CR-05-10/-11/-27/-28/-61/-64/-124/-144`, `FR-GS-*` |
+| Memory | `app/ceo_brain/*` (responder, archive, dispatcher, history_poller, mcp_client) | `FR-CB2-200`, `FR-CB2-{1,2,3,4,5}.x` |
+| Tasks | `app/intent/*`, `app/orchestrator/*`, `app/context/retriever.py`, `app/slack_ingest/*`, `app/telegram_ingest/*`, `app/telegram_bot/*`, `app/slack_bot/handlers/{task_actions,events}.py`, `app/services/{transitions,subscriber_updates,subscriptions,task_dedup,task_direction,entity_matcher,entity_apply,team_member_canonical,entity_resolution_cache}.py` | `FR-CR-04-*`, `FR-CR-05-05/-35/-108..-112/-185/-193b-e`, `FR-CR-04-20..-32` |
+| Calendar | `app/agenda/*`, `app/services/{calendar_match,calendar_attendees}.py`, шаг `_step_match_calendar_title` в `app/fireflies/pipeline.py` | `FR-CR-05-165/-166/-167/-136/-144/-154/-192{u,aa,ab,ac}` |
+| Notes | `app/zoom/*`, `app/fireflies/*`, `app/services/{transcription,slack_mirror,meeting_webhook,zoom_participants,summary_canonicalize,bilingual_restorer}.py`, `ops/zoom_fireflies_runner.py` | `FR-CR-05-39/-116` + многие `-1xx` |
+| Docs | `app/sync/docs.py` (+ doc-билдеры в `app/agenda/*` и `app/counterparty_briefs/doc.py`) | `FR-CR-05-43/-55/-56/-59` |
+| Tables | `app/sync/*`, `app/sheet_sync/*`, `app/services/{team_*,counterparty_*}.py`, `app/models/*`, `alembic/versions/*`, `app/sync/google_auth.py` | `FR-CR-05-10/-11/-27/-28/-61/-64/-124/-144`, `FR-GS-*` |
+| Reports | `app/services/{digest,admin_digest,daily_plan,weekly_plan,thread_reminders}.py`, `app/telegram_bot/{morning_cards,evening_status}.py`, `app/slack_bot/handlers/{daily_plan,weekly_plan}.py`, `app/counterparty_briefs/*` | `FR-CR-05-02/-03/-40/-49/-83/-84/-91/-168/-171` |
 
 ---
 
 ## 13. Известные расхождения «спека vs код» (AS-IS honesty)
 
-Эти пункты включены, чтобы PRD честно отражал реальность, а не старые спеки. **В работающие требования выше они НЕ включены.**
+Эти пункты включены, чтобы PRD честно отражал реальность, а не старые спеки. **В работающие требования выше они НЕ включены.** Сгруппированы по новым фичам.
 
-**CEO Brain Bot**
+**Memory** *(CEO Brain Bot)*
 - Архивная правка/удаление сообщений (`FR-CB2-2.4/2.5`) — функции есть в `pg_sink`, но **рантайм-вызывателя нет**; subtyped-события не обрабатываются.
 - Ops-CLI экспорта/бэкфилла, метрики Prometheus, archive-lag health (`FR-CB2-6.x`) — **не реализованы**.
 - Основной ответ — **не стриминговый** (`messages.create`), хотя `FR-CB2-3.8`/`NFR-P.3` описывали стриминг; стрим остался только в recovery-пути.
 - Блок «Sources» заменён на инлайновые гиперссылки.
 - Потолок стоимости: спека `$5`, дефолт в коде `$1.0`.
 
-**Note Taker**
+**Notes** *(Note Taker)*
 - Дефолт батча поллинга: спека 50, код — 20 (Fireflies) / 10 (Zoom).
 - Per-participant Slack DM (член команды получает саммари по `slack_user_id`) — **не реализовано**; доставка = TG-админам + один Slack-канал.
 - Entity-resolution-v2 (`_step_extract_via_reasoning`, `FR-CR-05-193g`) — **заглушка**, несмотря на дефолт флага `true`; работают legacy-шаги.
 - GMeet / ручная загрузка / голосовой ввод — **spec-only**.
 - DB-вью `meeting_summaries_published` — spec/DDL-only.
 
-**Task Extractor**
+**Tasks** *(Task Extractor + Task Tracker lifecycle)*
 - Спека `FR-TX-*` описывает Telegram-Bot-API (`getUpdates` / `/setup_chat` / favorites) — **код так не работает**: ingest идёт через read-only Supabase-вью + Slack Socket Mode.
 - README/спека «high confidence → draft card» — в коде понижено до `soft_prompt`; **пассив никогда не создаёт задачу сам** (только `@mention`).
 - Intent-энум: схема знает 5 интентов, граф эмитит только `create_task`/`no_action`.
 - Лимит заголовка: 80 (код), не 60 (спека); fuzzy-дедуп 0.70, не 0.85.
 - Докстринги промптов упоминают gpt-4o/4o-mini, дефолты конфига — gpt-5.5.
-
-**Task Tracker**
 - Кнопок **Delegate/Snooze/Refresh нет** (вопреки `FR-TT-7.1/7.4`, `US-TT-2`).
 - `WorkloadEstimator.propose_due_date` реализован, но **не подключён** (мёртвый код); флаги `WORKLOAD_*` ни на что не влияют.
-- Отдельного «стратегического дайджеста с дедупом» как модуля **нет** — классификация направлений происходит на ingest'е, дедуп — на создании.
 - TG-рассылка по **редактированию** задачи намеренно подавлена.
-- Спека помечает дайджесты/напоминания/подписки/Google-Tasks-sync как TODO — **в коде они уже реализованы** (под `FR-CR-05-*`).
-- Админский reject ревью-карточки делает **hard delete** (в отличие от user-Delete = soft-delete).
 
-**Agenda**
+**Calendar** *(Agenda)*
 - Прод-сборка повестки **без LLM** (`_compose_lite`); LLM-категория (`FR-MA-4.x`, `NFR-MA-P.2`) — legacy/spec-only; `AGENDA_COMPOSE_MODEL` игнорируется.
 - Slack-формат в спеке устарел (эмодзи-секции 📋/✅/🎯, чекбоксы) — код шлёт другой формат, задачи тред-реплаями.
 - `min_prior_meetings`: спека 1, код — 2.
 
-**Briefs**
-- Бюджет: код `$2.0`, спека `$5.0`. Lookahead: код 7 дней, спека 14.
+**Reports** *(Task Tracker digests + Briefs)*
+- Отдельного «стратегического дайджеста с дедупом» как модуля **нет** — классификация направлений происходит на ingest'е (Tasks), дедуп — на создании.
+- Спека помечает дайджесты/напоминания/подписки/Google-Tasks-sync как TODO — **в коде они уже реализованы** (под `FR-CR-05-*`).
+- Админский reject ревью-карточки делает **hard delete** (в отличие от user-Delete = soft-delete).
+- Брифы: бюджет код `$2.0`, спека `$5.0`; lookahead код 7 дней, спека 14.
 - Deep-research таймаут в коде 30 мин против `NFR-CB-P.2 ≤20с`.
 - Cache-aware обёртка `research_org_with_cache` обойдена в демоне (`if False`); кэш обрабатывается инлайн.
 
-**Platform**
+**Tables** *(Platform)*
 - Версионная `sheet_sync` (`FR-GS-*`) полностью реализована и тестируема, но **не подключена к live-листенеру** — только через `ops/sheet_sync_runner.py` под `SHEET_SYNC_ENABLED` (default off).
 - Комментарий конфига про «type в колонке A» устарел — `type` вынесен в сателлит `counterparty_attrs`.
 - Google Tasks pull для удалённой задачи пишет history `to_status=done` (семантика «cancelled», но в enum хранится `done`).
@@ -1087,12 +1161,13 @@ flowchart TD
 | **Источник истины** | Postgres-БД. Slack/Telegram — ввод + UI подтверждения; Google Sheets — операционный вид; Google Tasks — поверхность исполнения. |
 | **source_kind** | Дискриминатор происхождения задачи: `slack` / `telegram` / `fireflies` / `zoom`. |
 | **soft-delete** | Удаление через `deleted_at` с сохранением последнего статуса (не отдельный статус). |
-| **MCP** | Model Context Protocol — коннекторы к данным (n8n) для CEO Brain Bot, вызываются по HTTP JSON-RPC. |
+| **MCP** | Model Context Protocol — коннекторы к данным (n8n) для фичи Memory, вызываются по HTTP JSON-RPC. |
 | **Подписчик (subscriber)** | Не-владелец, подписанный на задачу; получает однострочные апдейты статуса в свой канал. |
-| **organizer-gate** | Фильтр Agenda/Briefs: встреча учитывается, только если организатор/создатель — оператор (`ZOOM_REQUIRED_EMAIL`). |
+| **organizer-gate** | Фильтр Calendar/Reports: встреча учитывается, только если организатор/создатель — оператор (`ZOOM_REQUIRED_EMAIL`). |
 | **beneficiary** | Конкретный человек со стороны контрагента, по которому формируется персональный бриф. |
 | **canonical name** | Единое имя человека/организации после entity-resolution, используемое во всех каналах. |
+| **backbone** | Сквозной модуль (ingest, entity-resolution, доставка, token-vault), прикреплённый к фиче-«дому» и переиспользуемый соседними фичами (см. §2.3). |
 
 ---
 
-*Документ AS-IS: реверс-инжиниринг из кода `manager` @ `97ae418`. Все требования прослеживаются до строк кода (см. `Trace`). Roadmap-разделы (should/could-have) из исходных спек не включены — здесь только то, что реально работает.*
+*Документ AS-IS: реверс-инжиниринг из кода `manager` @ `97ae418`. Все требования прослеживаются до строк кода (см. `Trace`). v1.1 переразбит на 7 фич по типу объекта — соответствие старой структуре в §2.2, распределение backbone в §2.3. Roadmap-разделы (should/could-have) из исходных спек не включены — здесь только то, что реально работает.*

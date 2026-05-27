@@ -801,15 +801,23 @@ class ZoomPipeline:
         ).strip().lower()
         if not required:
             return True
-        # 1. Calendar attendees — strongest signal we have.
+        op_tokens = ("artem", "артем", "артём", "artyom")
+        # 1. Calendar attendees — strongest signal we have. Match by
+        # email == operator OR by resolved/display name carrying the
+        # operator-name tokens. FR-CR-05-173b: the operator often joins
+        # under a different account/email (e.g. jpog@ vs 1@thehumanoid.ai)
+        # but resolves to «Артем Соколов» — email-only match falsely
+        # flagged him absent (Genia weekly fundraising sync).
         for a in (row.calendar_attendees or []):
             if not isinstance(a, dict):
                 continue
             email = (a.get("email") or "").strip().lower()
             if email == required:
                 return True
+            nm = (a.get("resolved_name") or a.get("display_name") or "").lower()
+            if nm and any(t in nm for t in op_tokens):
+                return True
         # 2. LLM-extracted participants from transcript.
-        op_tokens = ("artem", "артем", "артём", "artyom")
         for p in (row.participants or []):
             if isinstance(p, str) and any(
                 t in p.lower() for t in op_tokens

@@ -194,6 +194,37 @@ def _dedupe_tasks(tasks: list[dict]) -> tuple[list[dict], int]:
     return out, dropped
 
 
+def _seqmatch_dedupe_tasks(tasks: list[dict], *, threshold: float = 0.80) -> tuple[list[dict], int]:
+    """Детерминированный дедуп почти-идентичных задач по схожести заголовка
+    (difflib ratio ≥ threshold). Ловит near-дословные повторы, которые LLM
+    иногда пропускает (напр. Mistral ×2). Оставляет самую подробную
+    формулировку (title+description)."""
+    from difflib import SequenceMatcher
+
+    def _detail_len(t: dict) -> int:
+        return len(t.get("title") or "") + len(t.get("description") or "")
+
+    out: list[dict] = []
+    dropped = 0
+    for t in tasks:
+        tn = _norm_title(t.get("title") or "")
+        if not tn:
+            out.append(t)
+            continue
+        hit = None
+        for kept in out:
+            if SequenceMatcher(None, tn, _norm_title(kept.get("title") or "")).ratio() >= threshold:
+                hit = kept
+                break
+        if hit is None:
+            out.append(t)
+            continue
+        dropped += 1
+        if _detail_len(t) > _detail_len(hit):
+            out[out.index(hit)] = t  # keep the more detailed formulation
+    return out, dropped
+
+
 def _fuzzy_dedupe_tasks(tasks: list[dict], *, llm, model: str) -> tuple[list[dict], int]:
     """LLM-дедуп почти-дубликатов: задачи с ОДНИМ действием в отношении ОДНОГО
     человека/контрагента, отличающиеся лишь формулировкой (повторные посты в
@@ -717,9 +748,12 @@ def main() -> int:
             return 0
 
         if not args.no_fuzzy_dedup:
+            tasks, sdups = _seqmatch_dedupe_tasks(tasks)
+            if sdups:
+                print(f"  seqmatch-дедуп: схлопнул {sdups} почти-идентичных → осталось {len(tasks)}")
             tasks, fdups = _fuzzy_dedupe_tasks(tasks, llm=llm, model=classify_model)
             if fdups:
-                print(f"  фаззи-дедуп: схлопнул {fdups} near-дублей → осталось {len(tasks)}")
+                print(f"  фаззи-дедуп (LLM): схлопнул {fdups} near-дублей → осталось {len(tasks)}")
 
         # Резолвим ответственного в РЕАЛЬНОЕ имя из team_members
         # (мэтч по telegram_username и по имени). Без выдумок.

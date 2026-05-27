@@ -183,6 +183,21 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
             f"параметр cloudId ОБЯЗАТЕЛЕН — всегда передавай cloudId='{_atl}'. "
             "Без него запрос к Atlassian падает с ошибкой Cloud ID."
         )
+    # FR-CB2-4.7 — when Jira REST creds are set, the bot has local
+    # `jira_search`/`jira_get_issue` tools. Rovo MCP's Teamwork-Graph
+    # tools can't search by status; JQL can — so steer status/count
+    # questions to jira_search.
+    if _os.environ.get("ATLASSIAN_EMAIL") and _os.environ.get(
+        "ATLASSIAN_API_TOKEN"
+    ):
+        prompt += (
+            "\n\nJIRA-ЗАДАЧИ: для любых вопросов про статусы, количество "
+            "или списки задач Jira («сколько задач в on hold», «что в "
+            "работе») используй инструмент `jira_search` с JQL — НЕ "
+            "Teamwork-Graph. Примеры JQL: `status = \"On Hold\"`, "
+            "`project = \"CEO Brain\" AND status = \"On Hold\"`. Поле "
+            "`total` в ответе — точное число совпадений."
+        )
     return prompt
 
 
@@ -827,6 +842,18 @@ def run_responder(
         )
         local_tool_schemas = list(SLACK_TOOL_SCHEMAS)
 
+    # FR-CB2-4.7 — local Jira tools. The Atlassian Rovo MCP endpoint
+    # with an API token only exposes the 2 Teamwork-Graph tools (no
+    # JQL search), so status questions can't be answered via MCP. The
+    # same token works against the Jira Cloud REST API, so we expose
+    # `jira_search` / `jira_get_issue` as local tools when creds are set.
+    from app.ceo_brain.jira_tools import build_jira_executors_from_env
+
+    _jira_execs, _jira_schemas = build_jira_executors_from_env()
+    if _jira_execs:
+        tool_executors = {**tool_executors, **_jira_execs}
+        local_tool_schemas = list(local_tool_schemas) + _jira_schemas
+
     request = build_anthropic_request(
         thread_history=thread_history, today=today,
         tools=local_tool_schemas,
@@ -890,6 +917,16 @@ def run_responder(
                 "url": SLACK_SELF_URL,
                 "type": "url",
             })
+        # FR-CB2-4.7 — virtual `jira_self` MCP so the classifier/planner
+        # can route Jira status questions to the local REST tools.
+        if _jira_execs and not any(
+            s.get("name") == "jira_self" for s in servers_with_self
+        ):
+            servers_with_self.append({
+                "name": "jira_self",
+                "url": "local://jira",
+                "type": "url",
+            })
         # Re-classify with slack_self in the mix.
         picked2 = select_mcps_for_question(
             question=last_user_q,
@@ -932,6 +969,10 @@ def run_responder(
                 # Local tools — catalog comes from SLACK_TOOL_SCHEMAS,
                 # not an HTTP roundtrip.
                 tools_by_mcp[name] = list(SLACK_TOOL_SCHEMAS)
+                continue
+            if name == "jira_self":
+                from app.ceo_brain.jira_tools import JIRA_TOOL_SCHEMAS
+                tools_by_mcp[name] = list(JIRA_TOOL_SCHEMAS)
                 continue
             if not url:
                 continue

@@ -392,10 +392,10 @@ def gather_via_direct_http(
         args = call.get("args") or {}
         # Unique label per planned call to avoid bucket collision.
         label = f"{mcp_name}::{tool_name}#{idx}"
-        # FR-CB2-3.32 — virtual `slack_self` MCP dispatches to local
-        # Python executor (slack_tools.build_executors output), no
-        # HTTP roundtrip.
-        if mcp_name == "slack_self":
+        # FR-CB2-3.32 / FR-CB2-4.7 — virtual `slack_self` / `jira_self`
+        # MCPs dispatch to a local Python executor (build_executors
+        # output), no HTTP roundtrip.
+        if mcp_name in ("slack_self", "jira_self"):
             execs = local_tool_executors or {}
             executor = execs.get(tool_name)
             if executor is None:

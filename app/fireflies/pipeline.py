@@ -2950,6 +2950,19 @@ class FirefliesPipeline:
                          fireflies_id=getattr(row, "fireflies_id", None),
                          parent_ts=result.get("parent_ts"),
                          tasks_posted=result.get("tasks_posted"))
+                # Persist slack_post_ts NOW — the Slack post is an
+                # irreversible side-effect, but the row commits only on
+                # session_scope exit. A restart in between rolls back
+                # slack_post_ts while the message stays in Slack → next
+                # run re-posts (duplicate). Commit immediately.
+                if result.get("parent_ts") and not result.get("skipped_reason"):
+                    try:
+                        session.commit()
+                    except Exception as ce:  # noqa: BLE001
+                        session.rollback()
+                        log.warning("fireflies_send_to_slack_commit_failed",
+                                    fireflies_id=getattr(row, "fireflies_id", None),
+                                    error=str(ce))
         except Exception as e:  # noqa: BLE001
             log.warning("fireflies_step_send_to_slack_exception",
                         fireflies_id=getattr(row, "fireflies_id", None),

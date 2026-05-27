@@ -2578,6 +2578,20 @@ class ZoomPipeline:
                          zoom_id=getattr(row, "zoom_id", None),
                          parent_ts=result.get("parent_ts"),
                          tasks_posted=result.get("tasks_posted"))
+                # Persist slack_post_ts NOW. The Slack post is an
+                # irreversible side-effect, but the row is otherwise
+                # committed only when the runner's session_scope exits.
+                # A restart in between rolls back slack_post_ts while the
+                # message stays in Slack → next run re-posts the same
+                # meeting (duplicate). Commit immediately to close that.
+                if result.get("parent_ts") and not result.get("skipped_reason"):
+                    try:
+                        session.commit()
+                    except Exception as ce:  # noqa: BLE001
+                        session.rollback()
+                        log.warning("zoom_send_to_slack_commit_failed",
+                                    zoom_id=getattr(row, "zoom_id", None),
+                                    error=str(ce))
         except Exception as e:  # noqa: BLE001
             log.warning("zoom_step_send_to_slack_exception",
                         zoom_id=getattr(row, "zoom_id", None),

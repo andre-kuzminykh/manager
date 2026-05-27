@@ -183,6 +183,7 @@ __all__ = [
     "DIRECTION_BADGES",
     "classify_directions",
     "classify_one_direction",
+    "ensure_direction",
 ]
 
 
@@ -204,3 +205,25 @@ def classify_one_direction(
         model=model,
     )
     return mapping.get(0, "other")
+
+
+def ensure_direction(payload: dict[str, Any], *, llm_backend: Any, model: str) -> bool:
+    """FR-CR-05-206 — set `payload["direction"]` IN PLACE if it's missing and
+    the row has a title. One classification (`classify_one_direction`). Returns
+    True iff it set a direction. No-op when a direction is already present or
+    there's no title. Used at the task-creation chokepoint (`finalize_draft`)
+    so NEW Slack tasks created via paths that skip ingest classification (e.g.
+    the modal) still carry a strategic direction into the sheet."""
+    title = (payload.get("title") or "").strip()
+    if not title or (payload.get("direction") or "").strip():
+        return False
+    direction = classify_one_direction(
+        title=title,
+        description=(payload.get("description") or ""),
+        llm_backend=llm_backend,
+        model=model,
+    )
+    if direction:
+        payload["direction"] = direction
+        return True
+    return False

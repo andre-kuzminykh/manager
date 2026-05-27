@@ -63,6 +63,11 @@ class FinalizeService:
             fallback_author = source_metadata.get("source_user_id")
 
             if draft.intent in (IntentTypeEnum.create_task, IntentTypeEnum.update_task):
+                # FR-CR-05-206 — classify the strategic direction here if it
+                # wasn't set at ingest (modal-created Slack tasks skip the
+                # FR-CR-05-200 classification). One gpt-4o-mini call per NEW
+                # task; create_task_from_draft then carries it into extra.
+                self._ensure_direction(session, draft)
                 task = create_task_from_draft(
                     session,
                     draft=draft,
@@ -120,6 +125,30 @@ class FinalizeService:
             )
 
         return entity_type, entity_id, summary
+
+    def _ensure_direction(self, session, draft) -> None:
+        """Backfill the draft's strategic direction at finalize-time (one
+        gpt-4o-mini call) when ingest didn't set it. Best-effort — gated on an
+        API key, never blocks task creation."""
+        payload = dict(draft.payload or {})
+        if (payload.get("direction") or "").strip() or not (payload.get("title") or "").strip():
+            return
+        if not getattr(self._settings, "openai_api_key", ""):
+            return
+        try:
+            from openai import OpenAI
+
+            from app.intent.llm_backends import OpenAIBackend
+            from app.services.task_direction import ensure_direction
+
+            backend = OpenAIBackend(
+                client=OpenAI(api_key=self._settings.openai_api_key), model="gpt-4o-mini"
+            )
+            if ensure_direction(payload, llm_backend=backend, model="gpt-4o-mini"):
+                draft.payload = payload
+                session.flush()
+        except Exception as e:  # noqa: BLE001 — must never block task creation
+            log.warning("finalize_direction_classify_failed", error=str(e))
 
     def _morph_widget_into_task_card(
         self,

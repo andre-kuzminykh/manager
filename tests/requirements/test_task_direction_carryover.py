@@ -70,3 +70,43 @@ def test_fr_cr_05_206_no_direction_leaves_extra_unset(session):
         fallback_author_slack_id="99",
     )
     assert "direction" not in (t.extra or {})
+
+
+# --- FR-CR-05-206 — classify direction at finalize for NEW unclassified tasks ---
+
+
+class _StubBackend:
+    """Minimal llm backend: returns a fixed classify JSON for complete_text."""
+
+    def __init__(self, direction: str) -> None:
+        self._direction = direction
+
+    def complete_text(self, *, system_prompt, user_prompt, model, temperature):
+        return '{"items": [{"task_id": 0, "direction": "%s"}]}' % self._direction
+
+
+def test_fr_cr_05_206_ensure_direction_sets_when_missing():
+    from app.services.task_direction import ensure_direction
+
+    payload = {"title": "Prep deck for investors", "description": ""}
+    changed = ensure_direction(payload, llm_backend=_StubBackend("investors"), model="gpt-4o-mini")
+    assert changed is True
+    assert payload["direction"] == "investors"
+
+
+def test_fr_cr_05_206_ensure_direction_noop_when_present():
+    from app.services.task_direction import ensure_direction
+
+    payload = {"title": "x", "direction": "budget"}
+    changed = ensure_direction(payload, llm_backend=_StubBackend("investors"), model="gpt-4o-mini")
+    assert changed is False
+    assert payload["direction"] == "budget"
+
+
+def test_fr_cr_05_206_ensure_direction_noop_without_title():
+    from app.services.task_direction import ensure_direction
+
+    payload = {"description": "no title here"}
+    changed = ensure_direction(payload, llm_backend=_StubBackend("investors"), model="gpt-4o-mini")
+    assert changed is False
+    assert "direction" not in payload

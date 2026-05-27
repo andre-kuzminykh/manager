@@ -147,33 +147,3 @@ def test_fr_cr_05_206_task_no_recording_falls_back_to_permalink() -> None:
     src, link = _source_and_link_for_task(sess, task)
     assert src == "Zoom"
     assert link == "https://zoom.us/rec/share/fallback"
-
-
-# --- FR-CR-05-206 — backfill `direction` on rows that were never classified ---
-
-
-class _StubBackend:
-    """Minimal llm backend: returns a fixed classify JSON for complete_text."""
-
-    def __init__(self, direction: str) -> None:
-        self._direction = direction
-
-    def complete_text(self, *, system_prompt, user_prompt, model, temperature):
-        return '{"items": [{"task_id": 0, "direction": "%s"}]}' % self._direction
-
-
-def test_fr_cr_05_206_classify_missing_returns_direction() -> None:
-    from ops.sheet_sync_export_tasks import _classify_missing
-
-    out = _classify_missing(
-        _StubBackend("investors"), "gpt-4o-mini",
-        title="Provide use case for Cargill", description="",
-    )
-    assert out == "investors"
-
-
-def test_fr_cr_05_206_classifier_backend_none_without_key() -> None:
-    """No OpenAI key → no backend, so the export stays read-only."""
-    from ops.sheet_sync_export_tasks import _classifier_backend
-
-    assert _classifier_backend(SimpleNamespace(openai_api_key="")) is None

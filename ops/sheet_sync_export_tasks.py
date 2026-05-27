@@ -23,9 +23,10 @@ from app.config import get_settings
 from app.db import session_scope
 from app.logging_setup import get_logger, setup_logging
 from app.models.intent import ActionDraft, ActionDraftState
+from app.models.task import Task, TaskSourceKind
 from app.services.task_direction import DIRECTIONS_IMPORTANT
 from app.services.team_members import get_humans_for_matcher
-from app.sheet_sync.config import TASK_HEADERS
+from app.sheet_sync.config import STATUS_DISPLAY_BY_KEY, TASK_HEADERS
 from app.sheet_sync.sheets_client import SheetTabNotFound, TasksSheetClient
 
 log = get_logger(__name__)
@@ -67,6 +68,35 @@ def _source_and_link(session, payload) -> tuple[str, str]:
                 link = doc
         except Exception as e:  # noqa: BLE001
             log.warning("export_source_link_doc_failed", error=str(e))
+    return src, link
+
+
+def _source_and_link_for_task(session, task) -> tuple[str, str]:
+    """FR-CR-05-206 — («Источник», «Ссылка») for a meeting/chat `Task`.
+    source = Zoom/Fireflies/Slack from `task.source_kind`; link prefers the
+    meeting's Google Doc REPORT (joined on `source_conversation_id` ==
+    `zoom_id`/`fireflies_id`), falling back to `source_permalink`. Defensive —
+    never raises."""
+    kind = (task.source_kind.value if task.source_kind else "").strip().lower()
+    src = _SOURCE_DISPLAY.get(kind, kind.capitalize() if kind else "")
+    link = task.source_permalink or ""
+    cid = task.source_conversation_id
+    if cid and kind in ("zoom", "fireflies"):
+        try:
+            from app.models import MeetingRecording, ZoomRecording
+
+            if kind == "zoom":
+                doc = session.query(ZoomRecording.google_doc_url).filter(
+                    ZoomRecording.zoom_id == cid
+                ).scalar()
+            else:
+                doc = session.query(MeetingRecording.google_doc_url).filter(
+                    MeetingRecording.fireflies_id == cid
+                ).scalar()
+            if doc:
+                link = doc
+        except Exception as e:  # noqa: BLE001
+            log.warning("export_task_source_link_doc_failed", error=str(e))
     return src, link
 
 
@@ -156,6 +186,53 @@ def main() -> int:
                 (p.get("description") or "").strip(),
                 owner,
                 args.status,
+                priority,
+                category,
+                "", "",          # start date/time
+                due, "",         # deadline date/time
+                "", "",          # completion date/time
+                "",              # comments
+                added,           # Added at
+                source_disp,     # FR-CR-05-205 Источник
+                source_link,     # FR-CR-05-205 Ссылка (на отчёт)
+            ])
+
+        # FR-CR-05-206 — strategic tasks from meetings/chat (zoom/ff/slack)
+        # live in the `tasks` table, NOT action_drafts. Pull them too so the
+        # sheet isn't telegram-only. direction lives in task.extra.
+        tasks = session.execute(
+            select(Task)
+            .where(Task.deleted_at.is_(None))
+            .where(Task.source_kind.in_([
+                TaskSourceKind.zoom, TaskSourceKind.fireflies, TaskSourceKind.slack,
+            ]))
+            .where(Task.created_at >= since_dt)
+            .order_by(Task.id.asc())
+        ).scalars().all()
+        for t in tasks:
+            direction = ((t.extra or {}).get("direction") or "").strip().lower()
+            if direction not in DIRECTIONS_IMPORTANT:
+                continue
+            title = (t.title or "").strip()
+            if not title:
+                skipped_no_title += 1
+                continue
+            owner = _resolve_owner(t.owner_display_name, by_username, by_name, valid_names)
+            priority = _PRIORITY_DISPLAY.get(
+                (t.priority.value if t.priority else "medium").lower(), "Medium"
+            )
+            status = STATUS_DISPLAY_BY_KEY.get(
+                t.status.value if t.status else "", args.status
+            )
+            category = direction.capitalize()
+            due = t.due_date.isoformat() if t.due_date else ""
+            added = t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else ""
+            source_disp, source_link = _source_and_link_for_task(session, t)
+            rows.append([
+                title,
+                (t.description or "").strip(),
+                owner,
+                status,
                 priority,
                 category,
                 "", "",          # start date/time

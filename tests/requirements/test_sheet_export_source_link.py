@@ -6,6 +6,7 @@ block (source_kind + permalink), stamped at draft creation.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 
@@ -76,3 +77,73 @@ def test_fr_cr_05_205_no_pending_empty() -> None:
 
     assert _source_and_link(MagicMock(), {"title": "X"}) == ("", "")
     assert _source_and_link(MagicMock(), {}) == ("", "")
+
+
+# --- FR-CR-05-206 — strategic tasks from the `tasks` table (zoom/ff/slack) ---
+
+
+def _task(*, kind: str, permalink: str | None, conversation_id: str | None):
+    return SimpleNamespace(
+        source_kind=SimpleNamespace(value=kind),
+        source_permalink=permalink,
+        source_conversation_id=conversation_id,
+    )
+
+
+def test_fr_cr_05_206_zoom_task_source_and_doc_report() -> None:
+    """Zoom meeting task → ('Zoom', google_doc_url REPORT joined by zoom_id)."""
+    from ops.sheet_sync_export_tasks import _source_and_link_for_task
+
+    sess = MagicMock()
+    sess.query.return_value.filter.return_value.scalar.return_value = (
+        "https://docs.google.com/document/d/REPORT/edit"
+    )
+    task = _task(
+        kind="zoom",
+        permalink="https://zoom.us/rec/share/abc",  # fallback, NOT used
+        conversation_id="z1",
+    )
+    src, link = _source_and_link_for_task(sess, task)
+    assert src == "Zoom"
+    assert link == "https://docs.google.com/document/d/REPORT/edit"
+
+
+def test_fr_cr_05_206_fireflies_task_prefers_doc_report() -> None:
+    from ops.sheet_sync_export_tasks import _source_and_link_for_task
+
+    sess = MagicMock()
+    sess.query.return_value.filter.return_value.scalar.return_value = (
+        "https://docs.google.com/document/d/FF_REPORT/edit"
+    )
+    task = _task(kind="fireflies", permalink="https://ff/share/x", conversation_id="f1")
+    src, link = _source_and_link_for_task(sess, task)
+    assert src == "Fireflies"
+    assert link == "https://docs.google.com/document/d/FF_REPORT/edit"
+
+
+def test_fr_cr_05_206_slack_task_uses_permalink() -> None:
+    """Chat task (slack) → permalink; must NOT hit the recordings tables."""
+    from ops.sheet_sync_export_tasks import _source_and_link_for_task
+
+    sess = MagicMock()
+    task = _task(
+        kind="slack",
+        permalink="https://slack.com/archives/C1/p123",
+        conversation_id="C1",
+    )
+    src, link = _source_and_link_for_task(sess, task)
+    assert src == "Slack"
+    assert link == "https://slack.com/archives/C1/p123"
+    sess.query.assert_not_called()
+
+
+def test_fr_cr_05_206_task_no_recording_falls_back_to_permalink() -> None:
+    """Zoom task whose recording has no google_doc_url → keep source_permalink."""
+    from ops.sheet_sync_export_tasks import _source_and_link_for_task
+
+    sess = MagicMock()
+    sess.query.return_value.filter.return_value.scalar.return_value = None
+    task = _task(kind="zoom", permalink="https://zoom.us/rec/share/fallback", conversation_id="z9")
+    src, link = _source_and_link_for_task(sess, task)
+    assert src == "Zoom"
+    assert link == "https://zoom.us/rec/share/fallback"

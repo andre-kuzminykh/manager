@@ -101,7 +101,7 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
     today's date, and operator-pinned search-strategy rules."""
     today = today or datetime.now(timezone.utc)
     today_iso = today.strftime("%Y-%m-%d")
-    return (
+    prompt = (
         f"Ты — CEO Brain Bot, личный ассистент Артема Соколова "
         f"(CEO humanoid.ai). Сегодня {today_iso}.\n\n"
         f"ОСНОВНОЕ ПРАВИЛО: на любой вопрос про данные оператора "
@@ -170,6 +170,20 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
         f"«hi», «hey») без конкретного запроса — отвечай коротко "
         f"приветствием без описания capabilities."
     )
+    # FR-CB2-4.6 — Atlassian Rovo MCP tools require a `cloudId` (site URL or
+    # UUID). Inject it from env so Claude always passes it; without it the
+    # call fails with «Cloud ID configuration error».
+    import os as _os
+
+    _atl = _os.environ.get("ATLASSIAN_CLOUD_ID", "").strip()
+    if _atl:
+        prompt += (
+            "\n\nATLASSIAN (Jira/Confluence/Rovo MCP): у инструментов "
+            "`atlassian` (getTeamworkGraphContext, getTeamworkGraphObject) "
+            f"параметр cloudId ОБЯЗАТЕЛЕН — всегда передавай cloudId='{_atl}'. "
+            "Без него запрос к Atlassian падает с ошибкой Cloud ID."
+        )
+    return prompt
 
 
 def build_thread_history(

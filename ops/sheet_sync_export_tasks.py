@@ -39,41 +39,35 @@ _SOURCE_DISPLAY = {
 }
 
 
-def _source_and_link(session, task_id) -> tuple[str, str]:
-    """FR-CR-05-205 — («Источник», «Ссылка») for an action-draft's task.
+def _source_and_link(session, payload) -> tuple[str, str]:
+    """FR-CR-05-205 — («Источник», «Ссылка») from the action-draft's
+    `_pending` provenance block (stamped at draft creation): `source_kind`
+    + `permalink`. These drafts are chat-sourced, so the permalink is the
+    original message link (= context «откуда пришла»). For meeting-sourced
+    drafts (zoom/fireflies) prefer the meeting's Google Doc REPORT over the
+    raw recording link. Defensive — never raises."""
+    pend = (payload or {}).get("_pending") or {}
+    kind = (pend.get("source_kind") or "").strip().lower()
+    src = _SOURCE_DISPLAY.get(kind, kind.capitalize() if kind else "")
+    link = pend.get("permalink") or ""
+    cid = pend.get("conversation_id")
+    if cid and kind in ("zoom", "fireflies"):
+        try:
+            from app.models import MeetingRecording, ZoomRecording
 
-    Source = channel (Zoom/Fireflies/Slack/Telegram). Link = the meeting's
-    Google Doc REPORT for zoom/ff (joined from the recording by
-    `source_conversation_id`; falls back to `source_permalink`), or the
-    message permalink for slack/telegram. Defensive — any error → ("","")."""
-    if not task_id:
-        return "", ""
-    try:
-        from app.models import MeetingRecording, Task, ZoomRecording
-
-        t = session.get(Task, task_id)
-        if t is None:
-            return "", ""
-        kind = t.source_kind.value if t.source_kind else "slack"
-        src = _SOURCE_DISPLAY.get(kind, kind.capitalize())
-        link = t.source_permalink or ""
-        cid = t.source_conversation_id
-        if cid and kind == "zoom":
-            doc = session.query(ZoomRecording.google_doc_url).filter(
-                ZoomRecording.zoom_id == cid
-            ).scalar()
+            if kind == "zoom":
+                doc = session.query(ZoomRecording.google_doc_url).filter(
+                    ZoomRecording.zoom_id == cid
+                ).scalar()
+            else:
+                doc = session.query(MeetingRecording.google_doc_url).filter(
+                    MeetingRecording.fireflies_id == cid
+                ).scalar()
             if doc:
                 link = doc
-        elif cid and kind == "fireflies":
-            doc = session.query(MeetingRecording.google_doc_url).filter(
-                MeetingRecording.fireflies_id == cid
-            ).scalar()
-            if doc:
-                link = doc
-        return src, link
-    except Exception as e:  # noqa: BLE001
-        log.warning("export_source_link_failed", task_id=task_id, error=str(e))
-        return "", ""
+        except Exception as e:  # noqa: BLE001
+            log.warning("export_source_link_doc_failed", error=str(e))
+    return src, link
 
 
 def _owner_resolvers(session):
@@ -155,8 +149,8 @@ def main() -> int:
             # category, start_date, start_time, deadline_date, deadline_time,
             # completed_date, completed_time, comments
             added = d.created_at.strftime("%Y-%m-%d %H:%M") if d.created_at else ""
-            # FR-CR-05-205 — источник + ссылка на отчёт (по task_id).
-            source_disp, source_link = _source_and_link(session, d.task_id)
+            # FR-CR-05-205 — источник + ссылка из payload._pending.
+            source_disp, source_link = _source_and_link(session, p)
             rows.append([
                 title,
                 (p.get("description") or "").strip(),
@@ -178,9 +172,9 @@ def main() -> int:
           f"пропущено без title: {skipped_no_title})")
     assert len(TASK_HEADERS) == 16  # FR-CR-05-205: +Источник +Ссылка
     if args.dry_run:
-        print("  #  | Category     | Prio   | Responsible          | Title")
+        print("  #  | Source     | Category     | Prio   | Responsible          | Title | Link")
         for i, r in enumerate(rows, 1):
-            print(f"  {i:3d} | {r[5]:<12} | {r[4]:<6} | {(r[2] or '—'):<20} | {r[0][:70]}")
+            print(f"  {i:3d} | {(r[14] or '—'):<10} | {r[5]:<12} | {r[4]:<6} | {(r[2] or '—'):<20} | {r[0][:36]} | {(r[15] or '')[:48]}")
         print(f"  (--dry-run, в лист НЕ пишу) — всего {len(rows)}")
         return 0
     if not rows:

@@ -1643,6 +1643,25 @@ class ZoomPipeline:
             row, session, cal_attendees,
         )
         final = zoom_attendees or cal_attendees
+        # FR-CR-05-173c — operator-pinned: «постить всё, где Артём стоит в
+        # календаре». Reconcile drops invitees who didn't join the Zoom, но
+        # факт ПРИГЛАШЕНИЯ оператора в календаре — достаточное условие для
+        # поста. Если оператор был среди приглашённых (pre-reconcile), но
+        # reconcile его выкинул (не зашёл) — возвращаем его entry, чтобы
+        # _operator_actually_present (post-guard) его увидел.
+        op = (self._settings.zoom_required_email or "").strip().lower()
+        op_toks = ("artem", "артем", "артём", "artyom")
+
+        def _is_op(a: Any) -> bool:
+            if not isinstance(a, dict):
+                return False
+            em = (a.get("email") or "").strip().lower()
+            nm = (a.get("resolved_name") or a.get("display_name") or "").lower()
+            return (bool(op) and em == op) or any(t in nm for t in op_toks)
+
+        if op and any(_is_op(a) for a in cal_attendees) and not any(_is_op(a) for a in (final or [])):
+            op_entry = next(a for a in cal_attendees if _is_op(a))
+            final = list(final or []) + [op_entry]
         if not final:
             return
         row.calendar_attendees = final

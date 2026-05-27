@@ -936,6 +936,8 @@ class ZoomPipeline:
         for a in (row.calendar_attendees or []):
             if not isinstance(a, dict):
                 continue
+            if a.get("invited_only"):
+                continue  # приглашён, но не зашёл — не показываем в «Участники:»
             nm = (
                 a.get("resolved_name") or a.get("display_name")
                 or a.get("email") or ""
@@ -1660,7 +1662,11 @@ class ZoomPipeline:
             return (bool(op) and em == op) or any(t in nm for t in op_toks)
 
         if op and any(_is_op(a) for a in cal_attendees) and not any(_is_op(a) for a in (final or [])):
-            op_entry = next(a for a in cal_attendees if _is_op(a))
+            op_entry = dict(next(a for a in cal_attendees if _is_op(a)))
+            # Помечаем: оператор ПРИГЛАШЁН, но в Zoom не заходил. Нужен
+            # только для post-гарда (_operator_actually_present), НЕ для
+            # строки «Участники:» — он там не был.
+            op_entry["invited_only"] = True
             final = list(final or []) + [op_entry]
         if not final:
             return

@@ -67,12 +67,13 @@ def parse_due_date_from_llm(
 def parse_due_time_from_llm(
     raw: Any,
     *,
-    fallback: time = time(18, 0),
+    fallback: time = time(23, 59),
 ) -> time:
     """Coerce an LLM-emitted `due_time` into `datetime.time`.
 
     Accepts `HH:MM` or `HH:MM:SS`. Anything else → fallback
-    (18:00 per FR-CR-05-63).
+    (23:59 — end of the deadline day, per FR-CR-05-210; was 18:00 in
+    FR-CR-05-63).
     """
     if raw is None or raw == "":
         return fallback

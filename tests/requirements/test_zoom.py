@@ -791,10 +791,10 @@ def test_zoom_pipeline_runs_every_step_and_creates_zoom_source_tasks(
             # every join returned 0 rows.
             assert t.source_conversation_id == row.zoom_id
             assert t.source_message_ts == row.zoom_id
-            # FR-CR-05-118 — Zoom-extracted tasks default to 18:00
-            # deadline same as Fireflies (FR-CR-05-63).
+            # FR-CR-05-118 — Zoom-extracted tasks default to end-of-day
+            # 23:59 deadline same as Fireflies (FR-CR-05-210, was 18:00).
             from datetime import time as _time
-            assert t.due_time == _time(18, 0)
+            assert t.due_time == _time(23, 59)
 
         # FR-CR-05-118 — Short summary DM (one) AND a per-task
         # DM card (one per extracted task) were sent. Pre-fix

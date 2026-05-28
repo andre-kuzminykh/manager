@@ -70,7 +70,7 @@ def test_fr11_task_row_exists_after_create(session):
 
 
 def test_fr11_task_defaults_are_applied(session):
-    """Default priority + FR-CR-05-63 default due (today 18:00).
+    """Default priority + FR-CR-05-63 default due (today 23:59).
     Status follows: today is within the 7-day current-week
     window so the task lands in Todo."""
     draft, snap = _prep(session, payload={"title": "t"})
@@ -82,9 +82,9 @@ def test_fr11_task_defaults_are_applied(session):
         fallback_author_slack_id="U1",
     )
     assert t.priority == TaskPriority.medium
-    # FR-CR-05-63 — every task gets a deadline now. Today 18:00.
+    # FR-CR-05-63 — every task gets a deadline now. Today 23:59.
     assert t.due_date == date.today()
-    assert t.due_time == time(18, 0)
+    assert t.due_time == time(23, 59)
     # Status is Todo because due is within the next 7 days.
     assert t.status == TaskStatus.todo
 
@@ -116,13 +116,13 @@ def test_fr11_invalid_due_date_falls_back_to_today_default(session):
     operator wanted EVERY task to carry a deadline so the
     digests pick it up («проверь всегда должно быть так
     сегодня в 6 вечера дедлайн по умолчанию»). New default:
-    due_date = today, due_time = 18:00."""
+    due_date = today, due_time = 23:59."""
     draft, snap = _prep(session, payload={"title": "t", "due_date": "not-a-date"})
     t = create_task_from_draft(
         session, draft=draft, source={}, context_snapshot_id=snap.id, fallback_author_slack_id="U1"
     )
     assert t.due_date == date.today()
-    assert t.due_time == time(18, 0)
+    assert t.due_time == time(23, 59)
 
 
 def test_fr11_empty_title_rejected(session):
@@ -448,19 +448,19 @@ def test_fr_cr05_72_long_title_word_boundary_cap(session):
 
 
 def test_fr_cr05_63_default_due_today_18_00(session):
-    """No `due_date` in payload → DB row carries today + 18:00."""
+    """No `due_date` in payload → DB row carries today + 23:59."""
     draft, snap = _prep(session, payload={"title": "t"})
     t = create_task_from_draft(
         session, draft=draft, source={},
         context_snapshot_id=snap.id, fallback_author_slack_id="U1",
     )
     assert t.due_date == date.today()
-    assert t.due_time == time(18, 0)
+    assert t.due_time == time(23, 59)
 
 
 def test_fr_cr05_63_explicit_due_date_overrides_default(session):
     """When the payload carries a real `due_date`, the default
-    doesn't kick in; `due_time` still defaults to 18:00 unless
+    doesn't kick in; `due_time` still defaults to 23:59 unless
     the payload also carries one."""
     draft, snap = _prep(
         session, payload={"title": "t", "due_date": "2026-05-15"}
@@ -470,5 +470,5 @@ def test_fr_cr05_63_explicit_due_date_overrides_default(session):
         context_snapshot_id=snap.id, fallback_author_slack_id="U1",
     )
     assert t.due_date == date(2026, 5, 15)
-    # No explicit due_time → 18:00 default fills.
-    assert t.due_time == time(18, 0)
+    # No explicit due_time → 23:59 default fills.
+    assert t.due_time == time(23, 59)

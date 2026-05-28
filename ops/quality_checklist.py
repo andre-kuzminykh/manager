@@ -419,7 +419,7 @@ def _make_check_table(
             if t.due_date
             and not (
                 t.due_date == default_due
-                and (t.due_time is None or t.due_time == dtime(18, 0))
+                and (t.due_time is None or t.due_time == dtime(23, 59))
             )
         )
         rows.append((

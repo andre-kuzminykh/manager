@@ -234,7 +234,7 @@ def main() -> int:
 
             md = r.meeting_date
             default_due_date = md.date()
-            default_due_time = dtime(18, 0)
+            default_due_time = dtime(23, 59)
             owner_ok = True
             dl_real = True
             owner_misses: list[str] = []

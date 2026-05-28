@@ -311,7 +311,7 @@ def _render_tasks_block(tasks: list[dict]) -> str:
     from datetime import date as _date, datetime, time as _time
 
     today_18 = datetime.combine(
-        _date.today(), _time(18, 0),
+        _date.today(), _time(23, 59),
     ).strftime("%d.%m.%Y %H:%M")
 
     def _format_deadline(t: dict) -> str:
@@ -328,9 +328,9 @@ def _render_tasks_block(tasks: list[dict]) -> str:
                 hh, mm = raw_time.split(":")
                 tt = _time(int(hh), int(mm))
             except (ValueError, TypeError):
-                tt = _time(18, 0)
+                tt = _time(23, 59)
         else:
-            tt = _time(18, 0)
+            tt = _time(23, 59)
         return datetime.combine(d, tt).strftime("%d.%m.%Y %H:%M")
 
     lines: list[str] = []

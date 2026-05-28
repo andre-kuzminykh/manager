@@ -477,7 +477,7 @@ def _build_todo_section(
         from datetime import date, time as _time
 
         d = task.due_date if getattr(task, "due_date", None) else date.today()
-        t = task.due_time if getattr(task, "due_time", None) else _time(18, 0)
+        t = task.due_time if getattr(task, "due_time", None) else _time(23, 59)
         return f"{d.strftime('%d.%m.%Y')} {t.strftime('%H:%M')}"
 
     items: list[str] = []
@@ -2566,7 +2566,7 @@ class FirefliesPipeline:
                     t.get("due_date"), fallback=today,
                 )
                 llm_due_time = parse_due_time_from_llm(
-                    t.get("due_time"), fallback=time(18, 0),
+                    t.get("due_time"), fallback=time(23, 59),
                 )
                 task_status = TaskStatus.todo  # due=today → todo per FR-CR-04
                 task = Task(
@@ -2780,7 +2780,7 @@ class FirefliesPipeline:
                     parse_due_time_from_llm as _pdt,
                 )
                 llm_due_date = _pdd(t.get("due_date"), fallback=today)
-                llm_due_time = _pdt(t.get("due_time"), fallback=time(18, 0))
+                llm_due_time = _pdt(t.get("due_time"), fallback=time(23, 59))
                 task = Task(
                     title=title[:10_000],
                     description=description,

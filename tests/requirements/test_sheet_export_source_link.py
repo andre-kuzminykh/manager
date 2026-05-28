@@ -137,6 +137,19 @@ def test_fr_cr_05_206_slack_task_uses_permalink() -> None:
     sess.query.assert_not_called()
 
 
+def test_fr_cr_05_210_deadline_time_defaults_to_end_of_day() -> None:
+    from ops.sheet_sync_export_tasks import _deadline_time
+
+    # explicit time wins
+    assert _deadline_time("2026-05-28", "09:30") == "09:30"
+    # deadline date present, no time → 23:59 end-of-day default
+    assert _deadline_time("2026-05-28", None) == "23:59"
+    assert _deadline_time("2026-05-28", "") == "23:59"
+    # no deadline date → empty (don't invent a time)
+    assert _deadline_time("", None) == ""
+    assert _deadline_time("", "23:59") == "23:59"  # explicit time still honored
+
+
 def test_fr_cr_05_206_task_no_recording_falls_back_to_permalink() -> None:
     """Zoom task whose recording has no google_doc_url → keep source_permalink."""
     from ops.sheet_sync_export_tasks import _source_and_link_for_task

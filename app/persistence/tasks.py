@@ -380,16 +380,16 @@ def create_task_from_draft(
             owner_assumed = True
 
     due = _coerce_due(payload.get("due_date"))
-    # FR-CR-05-63 — default deadline = today 18:00 when the LLM
-    # didn't pull a date out of the source. Operator wants every
-    # captured task to have a deadline so the morning / evening
-    # digests can include it; «когда-нибудь» / «потом» tasks
-    # leak to nowhere otherwise.
+    # FR-CR-05-63 — default deadline = today when the LLM didn't pull a
+    # date out of the source. Operator wants every captured task to have a
+    # deadline so the morning / evening digests can include it.
     if due is None:
         due = date.today()
+    # FR-CR-05-210 — default deadline TIME = 23:59 (end of the deadline
+    # day) unless the source specified one (was 18:00 in FR-CR-05-63).
     due_time = _coerce_due_time(payload.get("due_time"))
     if due_time is None:
-        due_time = time(18, 0)
+        due_time = time(23, 59)
     status = _initial_status(due)
 
     # FR-CR-04-26: discriminate Slack vs Telegram tasks. Source dict

@@ -31,10 +31,9 @@ log = get_logger(__name__)
 # (task auto-created with owner_assumed fallback). The two flows match
 # step-by-step, differing only in whether the entity is already a Task.
 # FR-CR-05-63 — `due_date` no longer drives the follow-up loop.
-# Every persisted task gets `due_date = today` and
-# `due_time = 18:00` by default (operator: «всегда должно быть так
-# сегодня в 6 вечера дедлайн по умолчанию»), so asking «when is
-# this due?» is just noise. Operator can override via the Edit
+# Every persisted task gets `due_date = today` and a default
+# `due_time` (FR-CR-05-210: 23:59 end-of-day, was 18:00), so asking
+# «when is this due?» is just noise. Operator can override via the Edit
 # modal / Edit reply when the deadline matters.
 TASK_FIELD_ORDER = ("title", "owner")
 MEETING_FIELD_ORDER = ("title", "datetime_at", "participants")

@@ -31,7 +31,7 @@ The contract these tests lock:
   RENDER-SIDE
     - `_render_tasks_block` uses task['due_date'] + task['due_time']
       when the LLM emitted them (FR-CR-05-185 alignment).
-    - Falls back to «today 18:00» only when both are absent.
+    - Falls back to «today 23:59» only when both are absent.
     - Uses description (if non-empty) else title for body text.
     - Caps body at 350 chars to mirror `_build_todo_section`.
 
@@ -288,7 +288,7 @@ def test_fr_cr_05_192k_resolver_passes_through_unknown_owner(session, patched_se
 
 def test_fr_cr_05_192k_render_uses_llm_due_date_when_present() -> None:
     """When the LLM emitted `due_date`+`due_time`, the rendered line
-    MUST carry those values — NOT the «today 18:00» fallback."""
+    MUST carry those values — NOT the «today 23:59» fallback."""
     out = _render_tasks_block([{
         "title": "T",
         "description": "Поднять commit Bosch до конца месяца",
@@ -302,9 +302,9 @@ def test_fr_cr_05_192k_render_uses_llm_due_date_when_present() -> None:
 
 def test_fr_cr_05_192k_render_falls_back_to_today_18_when_no_due_date() -> None:
     """When the LLM omits due_date, the renderer falls back to today
-    at 18:00 (FR-CR-05-119 convention). due_time alone is ignored —
+    at 23:59 (FR-CR-05-119 convention). due_time alone is ignored —
     a deadline without a date is meaningless."""
-    today_18 = f"{date.today().strftime('%d.%m.%Y')} 18:00"
+    today_18 = f"{date.today().strftime('%d.%m.%Y')} 23:59"
     out = _render_tasks_block([{
         "title": "T",
         "description": "D",

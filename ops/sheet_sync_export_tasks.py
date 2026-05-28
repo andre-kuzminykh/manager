@@ -128,6 +128,16 @@ def _resolve_owner(raw, by_username, by_name, valid_names):
     return name if name in valid_names else ""
 
 
+def _deadline_time(due: str, due_time: str | None) -> str:
+    """FR-CR-05-210 — Deadline time for the sheet: the explicit time if one was
+    given, else 23:59 (end of the deadline day) when a deadline DATE is
+    present, else empty."""
+    t = (due_time or "").strip()
+    if t:
+        return t
+    return "23:59" if due else ""
+
+
 def main() -> int:
     setup_logging()
     s = get_settings()
@@ -175,6 +185,7 @@ def main() -> int:
             priority = _PRIORITY_DISPLAY.get((p.get("priority") or "medium").lower(), "Medium")
             category = direction.capitalize()
             due = (p.get("due_date") or "").strip()
+            deadline_time = _deadline_time(due, p.get("due_time"))
             # TASK_HEADERS order: title, description, responsible, status, priority,
             # category, start_date, start_time, deadline_date, deadline_time,
             # completed_date, completed_time, comments
@@ -189,7 +200,7 @@ def main() -> int:
                 priority,
                 category,
                 "", "",          # start date/time
-                due, "",         # deadline date/time
+                due, deadline_time,  # deadline date/time (FR-CR-05-210)
                 "", "",          # completion date/time
                 "",              # comments
                 added,           # Added at
@@ -226,6 +237,9 @@ def main() -> int:
             )
             category = direction.capitalize()
             due = t.due_date.isoformat() if t.due_date else ""
+            deadline_time = _deadline_time(
+                due, t.due_time.strftime("%H:%M") if t.due_time else None
+            )
             added = t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else ""
             source_disp, source_link = _source_and_link_for_task(session, t)
             rows.append([
@@ -236,7 +250,7 @@ def main() -> int:
                 priority,
                 category,
                 "", "",          # start date/time
-                due, "",         # deadline date/time
+                due, deadline_time,  # deadline date/time (FR-CR-05-210)
                 "", "",          # completion date/time
                 "",              # comments
                 added,           # Added at

@@ -65,8 +65,9 @@ def test_due_date_wrong_type_returns_fallback():
     ) == _TODAY
 
 
-def test_due_time_default_is_18_00():
-    assert parse_due_time_from_llm(None) == time(18, 0)
+def test_due_time_default_is_23_59():
+    # FR-CR-05-210 — end-of-day default (was 18:00 in FR-CR-05-63).
+    assert parse_due_time_from_llm(None) == time(23, 59)
 
 
 def test_due_time_hh_mm_parsed():
@@ -83,8 +84,8 @@ def test_due_time_passes_through_time_instance():
 
 
 def test_due_time_garbage_returns_fallback():
-    assert parse_due_time_from_llm("к утру") == time(18, 0)
-    assert parse_due_time_from_llm("noon") == time(18, 0)
+    assert parse_due_time_from_llm("к утру") == time(23, 59)
+    assert parse_due_time_from_llm("noon") == time(23, 59)
 
 
 def test_due_time_custom_fallback():

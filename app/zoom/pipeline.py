@@ -2142,7 +2142,7 @@ class ZoomPipeline:
                     parse_due_time_from_llm as _pdt,
                 )
                 llm_due_date = _pdd(t.get("due_date"), fallback=today)
-                llm_due_time = _pdt(t.get("due_time"), fallback=time(18, 0))
+                llm_due_time = _pdt(t.get("due_time"), fallback=time(23, 59))
                 task = Task(
                     title=title[:10_000],
                     description=(t.get("description") or "").strip() or None,
@@ -2356,7 +2356,7 @@ class ZoomPipeline:
                     parse_due_time_from_llm as _pdt2,
                 )
                 llm_due_date = _pdd2(t.get("due_date"), fallback=today)
-                llm_due_time = _pdt2(t.get("due_time"), fallback=time(18, 0))
+                llm_due_time = _pdt2(t.get("due_time"), fallback=time(23, 59))
                 task = Task(
                     title=title[:10_000],
                     description=(t.get("description") or "").strip() or None,

@@ -304,7 +304,7 @@ def main() -> int:
         default_due = [
             t for t in tasks
             if t.due_date == r.meeting_date.date()
-            and (t.due_time is None or t.due_time == dtime(18, 0))
+            and (t.due_time is None or t.due_time == dtime(23, 59))
         ]
         if email_owners:
             print(f"  ⚠ {len(email_owners)} DB tasks have an EMAIL as owner_display_name:")

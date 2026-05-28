@@ -168,9 +168,10 @@ def _find_matching_event(
     zoom_meeting_id: str | None,
     meeting_date: datetime | None,
     meeting_title: str | None,
+    allow_time_only: bool = False,
 ) -> tuple[dict[str, Any] | None, str]:
     """Returns ``(event_dict_or_None, match_method)``. ``match_method``
-    is ``"url"``, ``"fuzzy"`` or ``""`` when nothing matches."""
+    is ``"url"``, ``"fuzzy"``, ``"time"`` or ``""`` when nothing matches."""
     if not events:
         return None, ""
     # 1. URL match — strongest signal.
@@ -193,6 +194,33 @@ def _find_matching_event(
                 continue
             if _title_fuzzy_overlap(meeting_title, _event_title(ev)):
                 return ev, "fuzzy"
+    # 3. FR-CR-05-208 — time-only fallback. Fireflies RENAMES meetings
+    # (e.g. «Mitsubishi: роботы…» for a calendar event titled «Kodai
+    # Yamagishi … Zoom call»), so title overlap fails. A person is in one
+    # meeting at a time, so the CLOSEST calendar event in the time window
+    # that actually has attendees is the meeting. Events with no attendees
+    # (working-location / focus blocks like «bedtime», «Set your working
+    # location») are skipped — they're not meetings.
+    if allow_time_only and meeting_date is not None:
+        best: dict[str, Any] | None = None
+        best_delta: timedelta | None = None
+        for ev in events:
+            ev_start = _coerce_event_start(ev)
+            if ev_start is None:
+                continue
+            delta = abs(ev_start - meeting_date)
+            if delta > _FUZZY_TIME_WINDOW:
+                continue
+            atts = ev.get("attendees")
+            if not (isinstance(atts, list) and any(
+                isinstance(a, dict) and (a.get("email") or a.get("displayName"))
+                for a in atts
+            )):
+                continue
+            if best_delta is None or delta < best_delta:
+                best, best_delta = ev, delta
+        if best is not None:
+            return best, "time"
     return None, ""
 
 
@@ -239,6 +267,7 @@ def resolve_calendar_attendees_for_zoom(
     session: Session,
     *,
     calendar_events: list[dict[str, Any]] | None = None,
+    allow_time_only: bool = False,
 ) -> dict[str, Any] | None:
     """Find the Calendar event for the given ``ZoomRecording`` and
     resolve its attendees. Returns ``{"event_id": str, "match_method":
@@ -260,6 +289,7 @@ def resolve_calendar_attendees_for_zoom(
         zoom_meeting_id=getattr(row, "zoom_meeting_id", None),
         meeting_date=getattr(row, "meeting_date", None),
         meeting_title=getattr(row, "title", None),
+        allow_time_only=allow_time_only,
     )
     if ev is None:
         return None
@@ -304,6 +334,24 @@ def resolve_calendar_attendees_for_zoom(
         dropped_declined=dropped_declined,
     )
     return result
+
+
+def resolve_calendar_attendees_for_fireflies(
+    row: Any,
+    session: Session,
+    *,
+    calendar_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """FR-CR-05-208 — Fireflies counterpart. Fireflies generates its OWN
+    semantic meeting title (« Mitsubishi: роботы…»), which never matches the
+    calendar event's title, so title-based fuzzy matching always fails and
+    the meta block falls back to Fireflies' unreliable participant list
+    (often the internal team). Match the calendar event by TIME proximity
+    instead (``allow_time_only=True``) so the authoritative invitee list is
+    used. Returns the same shape as the Zoom resolver, or ``None``."""
+    return resolve_calendar_attendees_for_zoom(
+        row, session, calendar_events=calendar_events, allow_time_only=True,
+    )
 
 
 def _normalise_name_for_match(name: str) -> set[str]:
@@ -615,5 +663,6 @@ def reconcile_with_zoom_participants(
 
 __all__ = [
     "resolve_calendar_attendees_for_zoom",
+    "resolve_calendar_attendees_for_fireflies",
     "reconcile_with_zoom_participants",
 ]

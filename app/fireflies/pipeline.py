@@ -1184,7 +1184,7 @@ class FirefliesPipeline:
         if row.meeting_date is None:
             return
         from app.services.calendar_attendees import (
-            resolve_calendar_attendees_for_zoom,
+            resolve_calendar_attendees_for_fireflies,
         )
         from app.services.calendar_match import (
             fetch_calendar_events_via_api,
@@ -1203,11 +1203,11 @@ class FirefliesPipeline:
                 fireflies_id=row.fireflies_id, error=str(e),
             )
             return
-        # `resolve_calendar_attendees_for_zoom` duck-types on the row
-        # (uses getattr for zoom_meeting_id / meeting_date / title);
-        # MeetingRecording has no zoom_meeting_id, so URL match is
-        # skipped and we rely on fuzzy title + time match.
-        resolved = resolve_calendar_attendees_for_zoom(
+        # FR-CR-05-208 — Fireflies renames meetings, so we match the
+        # calendar event by TIME proximity (closest event with attendees),
+        # not title. MeetingRecording has no zoom_meeting_id → URL match is
+        # skipped; title fuzzy is tried first, then the time-only fallback.
+        resolved = resolve_calendar_attendees_for_fireflies(
             row, session, calendar_events=events,
         )
         attendees = (resolved or {}).get("attendees") or []

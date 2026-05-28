@@ -48,14 +48,25 @@ def find_cross_source_duplicate(
     self_kind: str,
     self_id: str,
     window_minutes: int = 30,
+    time_window_minutes: int = 10,
 ) -> tuple[str, str] | None:
     """Return ``(kind, id)`` of another recording (in either
     ``zoom_recordings`` or ``meeting_recordings``) that represents the same
     meeting and is already posted to Slack (``slack_post_ts IS NOT NULL``),
     excluding the row itself. Returns ``None`` when no such duplicate exists.
 
-    Match = normalized title equal AND ``meeting_date`` within
-    ``±window_minutes``. ``self_kind`` ∈ {"zoom", "fireflies"}.
+    Two match paths:
+      1. **Title** — normalized title equal AND ``meeting_date`` within
+         ``±window_minutes`` (any source, incl. same-source re-records).
+      2. **FR-CR-05-209 time-only** — Fireflies RENAMES meetings, so the same
+         meeting captured by Zoom and Fireflies has DIFFERENT titles
+         («Kodai Yamagishi … Zoom call» vs «Mitsubishi: роботы…»). A person is
+         in one meeting at a time, so the CLOSEST already-posted recording in
+         the OTHER source within a tight ``±time_window_minutes`` is the same
+         meeting. Restricted to cross-source (``kind != self_kind``) to avoid
+         skipping a legitimate same-source re-record.
+
+    ``self_kind`` ∈ {"zoom", "fireflies"}.
 
     Defensive: any error is swallowed and ``None`` returned — a dedup-check
     failure must never block legitimate processing.
@@ -63,18 +74,19 @@ def find_cross_source_duplicate(
     try:
         from sqlalchemy import text
 
-        key = normalize_meeting_title(title)
-        if not key or meeting_date is None:
+        if meeting_date is None:
             return None
+        key = normalize_meeting_title(title)
         lo = meeting_date - timedelta(minutes=window_minutes)
         hi = meeting_date + timedelta(minutes=window_minutes)
+        time_best: tuple[timedelta, str, str] | None = None
         for table, col, kind in (
             ("zoom_recordings", "zoom_id", "zoom"),
             ("meeting_recordings", "fireflies_id", "fireflies"),
         ):
             rows = session.execute(
                 text(
-                    f"SELECT {col} AS id, title FROM {table} "
+                    f"SELECT {col} AS id, title, meeting_date AS md FROM {table} "
                     f"WHERE meeting_date BETWEEN :lo AND :hi "
                     f"AND slack_post_ts IS NOT NULL"
                 ),
@@ -85,8 +97,19 @@ def find_cross_source_duplicate(
                 rtitle = r.title if hasattr(r, "title") else r[1]
                 if kind == self_kind and rid == self_id:
                     continue  # don't treat the row's own post as a duplicate
-                if normalize_meeting_title(rtitle) == key:
+                # 1. Strong: normalized title match.
+                if key and normalize_meeting_title(rtitle) == key:
                     return (kind, rid)
+                # 2. Weaker: cross-source time proximity (renamed meeting).
+                rmd = getattr(r, "md", None)
+                if kind != self_kind and rmd is not None:
+                    delta = abs(rmd - meeting_date)
+                    if delta <= timedelta(minutes=time_window_minutes) and (
+                        time_best is None or delta < time_best[0]
+                    ):
+                        time_best = (delta, kind, rid)
+        if time_best is not None:
+            return (time_best[1], time_best[2])
         return None
     except Exception as e:  # noqa: BLE001
         log.warning("meeting_dedup_check_failed", error=str(e))

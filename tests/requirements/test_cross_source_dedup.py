@@ -116,6 +116,84 @@ def test_fr_cr_05_203_helper_defensive_on_db_error() -> None:
 # === process_one integration: skip the second capture ===
 
 
+# === FR-CR-05-209 — time-only match for RENAMED meetings ===
+
+
+class _RowMD:
+    def __init__(self, id: str, title: str, md) -> None:
+        self.id = id
+        self.title = title
+        self.md = md
+
+
+def test_fr_cr_05_209_time_only_matches_renamed_meeting() -> None:
+    """Same meeting, different titles: Zoom «Kodai … Zoom call» vs FF
+    «Mitsubishi: роботы…». Titles don't match, but the posted FF row is within
+    the tight time window → cross-source duplicate."""
+    from app.services.meeting_dedup import find_cross_source_duplicate
+
+    ff_md = datetime(2026, 5, 28, 8, 5, tzinfo=timezone.utc)
+
+    class FakeSession:
+        def execute(self, q, params):
+            if "meeting_recordings" in str(q):
+                return [_RowMD("ff149", "Mitsubishi: роботы для заводов в Азии", ff_md)]
+            return []
+
+    res = find_cross_source_duplicate(
+        FakeSession(),
+        title="Kodai Yamagishi (MC Global Innovation Inc) <> Humanoid | Zoom call",
+        meeting_date=datetime(2026, 5, 28, 8, 1, tzinfo=timezone.utc),
+        self_kind="zoom", self_id="z303",
+    )
+    assert res == ("fireflies", "ff149")
+
+
+def test_fr_cr_05_209_time_only_outside_window_proceeds() -> None:
+    """Different titles AND further apart than the tight window → not a dup."""
+    from app.services.meeting_dedup import find_cross_source_duplicate
+
+    class FakeSession:
+        def execute(self, q, params):
+            if "meeting_recordings" in str(q):
+                return [_RowMD(
+                    "ff1", "Totally different topic",
+                    datetime(2026, 5, 28, 8, 30, tzinfo=timezone.utc),
+                )]
+            return []
+
+    res = find_cross_source_duplicate(
+        FakeSession(),
+        title="Kodai Yamagishi <> Humanoid | Zoom call",
+        meeting_date=datetime(2026, 5, 28, 8, 1, tzinfo=timezone.utc),
+        self_kind="zoom", self_id="z303",
+    )
+    assert res is None
+
+
+def test_fr_cr_05_209_time_only_is_cross_source_only() -> None:
+    """A SAME-source posted row close in time but with a different title is NOT
+    a time-only duplicate — only the other source counts."""
+    from app.services.meeting_dedup import find_cross_source_duplicate
+
+    class FakeSession:
+        def execute(self, q, params):
+            if "zoom_recordings" in str(q):
+                return [_RowMD(
+                    "z999", "Another zoom meeting",
+                    datetime(2026, 5, 28, 8, 3, tzinfo=timezone.utc),
+                )]
+            return []
+
+    res = find_cross_source_duplicate(
+        FakeSession(),
+        title="Kodai Yamagishi <> Humanoid | Zoom call",
+        meeting_date=datetime(2026, 5, 28, 8, 1, tzinfo=timezone.utc),
+        self_kind="zoom", self_id="z303",
+    )
+    assert res is None
+
+
 def test_fr_cr_05_203_zoom_skips_when_other_source_posted(monkeypatch) -> None:
     """Zoom process_one: if FF already posted this meeting → skip BEFORE
     download (skipped_reason='duplicate_other_source')."""

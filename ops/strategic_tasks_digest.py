@@ -562,7 +562,14 @@ def _split_critical(
 
 
 def _post_to_slack(parent_text: str, rest_text: str, *, channel: str, token: str) -> dict:
-    """Parent message = critical digest; everything else goes into the thread."""
+    """Parent message = critical digest; everything else goes into the thread.
+
+    FR-CR-05-207 — NEVER post an empty digest. If there's no content at all
+    (no tasks for the window), skip the Slack call entirely so the channel
+    doesn't get a bare «Задачи на сегодня» with nothing under it.
+    """
+    if not (parent_text.strip() or rest_text.strip()):
+        return {"ok": False, "skipped": "empty"}
     from slack_sdk import WebClient
 
     from app.services.slack_mirror import SLACK_TEXT_CHUNK_CHARS, _split_for_slack

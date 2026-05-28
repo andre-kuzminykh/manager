@@ -294,3 +294,21 @@ def test_fr_cr_05_202_post_to_slack_parent_then_thread(monkeypatch):
     assert all(c.get("thread_ts") == "111.222" for c in calls[1:])
     assert any(c["text"] == "PARENT" for c in calls)
     assert any(c["text"] == "REST" for c in calls)
+
+
+def test_fr_cr_05_207_post_to_slack_skips_empty(monkeypatch):
+    """No tasks → no Slack call at all (никакого пустого todo)."""
+    calls = []
+
+    class FakeClient:
+        def __init__(self, token=None): pass
+        def chat_postMessage(self, **kw):
+            calls.append(kw)
+            return SimpleNamespace(data={"ts": "1"})
+
+    monkeypatch.setitem(sys.modules, "slack_sdk", SimpleNamespace(WebClient=FakeClient))
+
+    for parent, rest in (("", ""), ("   ", ""), ("", "  \n ")):
+        res = D._post_to_slack(parent, rest, channel="C1", token="t")
+        assert res == {"ok": False, "skipped": "empty"}
+    assert calls == []  # chat.postMessage never called

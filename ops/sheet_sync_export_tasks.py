@@ -179,6 +179,8 @@ def main() -> int:
                     help="Очистить строки данных перед заливкой (РАЗОВЫЙ сброс; стирает ручные правки).")
     ap.add_argument("--append", action="store_true",
                     help="Дописать только НОВЫЕ строки (дедуп по title+Added at), не трогая существующие и правки. Для крона.")
+    ap.add_argument("--all", action="store_true",
+                    help="Лить ВСЕ задачи, не только стратегические (включая other/None; категория → Other).")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -206,7 +208,7 @@ def main() -> int:
         for d in drafts:
             p = d.payload or {}
             direction = (p.get("direction") or "").strip().lower()
-            if direction not in DIRECTIONS_IMPORTANT:
+            if not args.all and direction not in DIRECTIONS_IMPORTANT:
                 continue
             title = (p.get("title") or "").strip()
             if not title:
@@ -214,7 +216,7 @@ def main() -> int:
                 continue
             owner = _resolve_owner(p.get("owner_display_name"), by_username, by_name, valid_names)
             priority = _PRIORITY_DISPLAY.get((p.get("priority") or "medium").lower(), "Medium")
-            category = direction.capitalize()
+            category = direction.capitalize() if direction else "Other"
             due = (p.get("due_date") or "").strip()
             deadline_time = _deadline_time(due, p.get("due_time"))
             # TASK_HEADERS order: title, description, responsible, status, priority,
@@ -253,7 +255,7 @@ def main() -> int:
         ).scalars().all()
         for t in tasks:
             direction = ((t.extra or {}).get("direction") or "").strip().lower()
-            if direction not in DIRECTIONS_IMPORTANT:
+            if not args.all and direction not in DIRECTIONS_IMPORTANT:
                 continue
             title = (t.title or "").strip()
             if not title:
@@ -266,7 +268,7 @@ def main() -> int:
             status = STATUS_DISPLAY_BY_KEY.get(
                 t.status.value if t.status else "", args.status
             )
-            category = direction.capitalize()
+            category = direction.capitalize() if direction else "Other"
             due = t.due_date.isoformat() if t.due_date else ""
             deadline_time = _deadline_time(
                 due, t.due_time.strftime("%H:%M") if t.due_time else None
@@ -290,7 +292,8 @@ def main() -> int:
             ])
         session.rollback()  # read-only on the DB
 
-    print(f"strategic-задач к заливке: {len(rows)} (с {args.since}, фильтр {DIRECTIONS_IMPORTANT}; "
+    print(f"задач к заливке: {len(rows)} (с {args.since}, "
+          f"фильтр {'ВСЕ (--all)' if args.all else DIRECTIONS_IMPORTANT}; "
           f"пропущено без title: {skipped_no_title})")
     assert len(TASK_HEADERS) == 16  # FR-CR-05-205: +Источник +Ссылка
     if args.dry_run:

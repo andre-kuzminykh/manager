@@ -137,6 +137,29 @@ def test_fr_cr_05_206_slack_task_uses_permalink() -> None:
     sess.query.assert_not_called()
 
 
+def test_fr_cr_05_212_append_filters_already_present_rows() -> None:
+    """Append mode: only rows whose (title, Added-at) isn't already in the
+    sheet are kept — existing rows/edits are never re-appended."""
+    from ops.sheet_sync_export_tasks import _filter_new_rows
+
+    def _row(title, added):
+        # 16-col row; index 0 = title, index 13 = Added at
+        return [title, "", "", "To Do", "Medium", "Investors",
+                "", "", "", "", "", "", "", added, "Telegram", "link"]
+
+    rows = [
+        _row("Позвонить им", "2026-05-28 10:53"),     # already present
+        _row("Новая задача", "2026-05-28 11:40"),      # new
+        _row("Ужин в Женеве", "2026-05-28 11:06"),     # new
+    ]
+    existing = {("Позвонить им", "2026-05-28 10:53")}
+    out = _filter_new_rows(rows, existing)
+    titles = [r[0] for r in out]
+    assert titles == ["Новая задача", "Ужин в Женеве"]
+    # nothing new → empty
+    assert _filter_new_rows([rows[0]], existing) == []
+
+
 def test_fr_cr_05_210_deadline_time_defaults_to_end_of_day() -> None:
     from ops.sheet_sync_export_tasks import _deadline_time
 

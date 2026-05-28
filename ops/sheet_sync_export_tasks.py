@@ -138,6 +138,35 @@ def _deadline_time(due: str, due_time: str | None) -> str:
     return "23:59" if due else ""
 
 
+def _existing_row_keys(client) -> set:
+    """FR-CR-05-212 — (title, Added-at) of every data row already in the sheet,
+    for append-mode dedup. Reads cols A (title) + N (Added at) raw, so it's
+    independent of `read_rows()` header mapping. Best-effort → empty set."""
+    try:
+        rng = client._svc.spreadsheets().values().get(
+            spreadsheetId=client._sid, range=f"{client._tab}!A2:N",
+        ).execute().get("values", [])
+    except Exception as e:  # noqa: BLE001
+        log.warning("export_existing_keys_failed", error=str(e))
+        return set()
+    keys: set = set()
+    for row in rng:
+        title = (row[0].strip() if len(row) > 0 and row[0] else "")
+        added = (row[13].strip() if len(row) > 13 and row[13] else "")
+        if title:
+            keys.add((title, added))
+    return keys
+
+
+def _filter_new_rows(rows: list[list[str]], existing: set) -> list[list[str]]:
+    """FR-CR-05-212 — keep only rows whose (title, Added-at) key isn't already
+    present in the sheet (append-mode dedup)."""
+    return [
+        r for r in rows
+        if (r[0].strip(), (r[13] or "").strip()) not in existing
+    ]
+
+
 def main() -> int:
     setup_logging()
     s = get_settings()
@@ -147,7 +176,9 @@ def main() -> int:
     ap.add_argument("--since", default="2026-05-22")
     ap.add_argument("--status", default="To Do", help="Статус для всех залитых задач.")
     ap.add_argument("--replace", action="store_true",
-                    help="Очистить строки данных перед заливкой (идемпотентно, без дублей).")
+                    help="Очистить строки данных перед заливкой (РАЗОВЫЙ сброс; стирает ручные правки).")
+    ap.add_argument("--append", action="store_true",
+                    help="Дописать только НОВЫЕ строки (дедуп по title+Added at), не трогая существующие и правки. Для крона.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -274,6 +305,20 @@ def main() -> int:
 
     client = TasksSheetClient(spreadsheet_id=args.spreadsheet_id, tab_title=args.tab)
     try:
+        if args.append:
+            # FR-CR-05-212 — append ONLY new rows; never clear, never touch
+            # existing rows or the operator's manual edits.
+            existing = _existing_row_keys(client)
+            new_rows = _filter_new_rows(rows, existing)
+            print(f"append: в листе уже {len(existing)} строк; новых к добавлению: {len(new_rows)}")
+            if not new_rows:
+                print("новых задач нет — лист не трогаю.")
+                return 0
+            n = client.append_rows(new_rows)
+            client.ensure_structure(responsible_options=responsible_options)
+            print(f"дописано строк: {n} в '{client.spreadsheet_title}' / tab '{args.tab}' "
+                  "(existing не тронуты).")
+            return 0
         if args.replace:
             client.clear_data_rows()
             print("строки данных очищены (--replace).")

@@ -140,6 +140,19 @@ def test_title_prompt_forbids_first_person_plural_in_description():
         assert fragment in blob, f"first-person-plural example {fragment!r} should be pinned"
 
 
+def test_title_prompt_forbids_bare_pronoun_object():
+    """FR-CR-05-211 — «Позвонить им» / «Call them» titles hide WHO.
+    The prompt must forbid bare-pronoun objects and require resolving
+    them to the named person/company from context."""
+    blob = TITLE_SYSTEM_PROMPT
+    assert "BARE-PRONOUN" in blob or "bare-pronoun" in blob.lower()
+    flat = " ".join(blob.split())
+    for word in ("Позвонить им", "Call them"):
+        assert word in flat, f"bare-pronoun example {word!r} should be pinned"
+    # and the resolve-to-name / уточнить fallback
+    assert "уточнить кому" in flat
+
+
 def test_title_prompt_forbids_third_party_status_promises():
     """FR-CR-05-13 — «Нет Алина сама отправит» (a third-party
     promise sentence about another teammate's commitment) must NOT

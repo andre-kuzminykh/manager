@@ -63,6 +63,22 @@ Produce three fields:
                               OR «Узнать слоты у Марко» — name
                               the addressee, drop the orphan «с».
 
+                NEVER SHIP A BARE-PRONOUN OBJECT (FR-CR-05-211).
+                A title whose object is a bare pronoun — «им», «их»,
+                «ему», «ей», «его», «them», «him», «her», «it» — is
+                useless: the operator can't tell WHO / WHAT. «Позвонить
+                им», «Ответить им», «Написать ему», «Call them» are
+                FORBIDDEN. Resolve the pronoun to the named person /
+                company / fund from the source AND context and put the
+                NAME in the title:
+                  source: «надо им позвонить»
+                  context: discussion of Charles Busson and partners
+                  BAD title:  «Позвонить им»
+                  GOOD title: «Позвонить Charles Busson и партнёрам»
+                If the context genuinely doesn't name the referent,
+                append «(уточнить кому)» rather than shipping the bare
+                pronoun.
+
                 NEVER quote large fragments — no email bodies,
                 screenshot transcripts ("На изображении письмо…"),
                 templates ("Hi [Name], reaching out as a fellow…"),

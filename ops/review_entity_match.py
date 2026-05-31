@@ -70,6 +70,10 @@ def main() -> int:
     ap.add_argument("--critic-model", default=s.entity_match_critic_model)
     ap.add_argument("--limit", type=int, default=0, help="only first N mentions (0 = all)")
     ap.add_argument("--skip-v1", action="store_true", help="skip the v1 baseline (faster; v2 only)")
+    # FR-CR-05-226 — Pass-1 mention extraction is the precision-critical
+    # step (must catch every garbled surface form); run it at max reasoning.
+    ap.add_argument("--extract-reasoning", default="high",
+                    help="reasoning_effort for mention extraction (low|medium|high)")
     args = ap.parse_args()
 
     if not s.openai_api_key:
@@ -110,6 +114,7 @@ def main() -> int:
         # --- extract mentions (shared Pass-1) ---
         mentions = extract_counterparty_mentions(
             transcript, llm_backend=backend, model=args.extract_model,
+            reasoning_effort=(args.extract_reasoning or None),
             trace_source="review", trace_recording_id=row.zoom_id,
         )
         print(f"extracted {len(mentions)} counterparty mentions: {mentions}")

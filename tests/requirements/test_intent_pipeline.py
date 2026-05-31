@@ -153,6 +153,17 @@ def test_title_prompt_forbids_bare_pronoun_object():
     assert "уточнить кому" in flat
 
 
+def test_title_prompt_forbids_invented_names():
+    """FR-CR-05-214 — gpt-4o-mini hallucinated «Игорь попросил Ирину» where
+    the source only said «Ир …» (author = Артём). Prompt must forbid
+    inventing person names not present in source/context."""
+    blob = TITLE_SYSTEM_PROMPT
+    assert "NEVER INVENT PERSON NAMES" in blob
+    flat = " ".join(blob.split())
+    assert "Игорь" in flat and "Ир " in flat  # the pinned regression example
+    assert "author" in flat.lower()
+
+
 def test_title_prompt_forbids_third_party_status_promises():
     """FR-CR-05-13 — «Нет Алина сама отправит» (a third-party
     promise sentence about another teammate's commitment) must NOT

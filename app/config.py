@@ -338,6 +338,11 @@ class Settings(BaseSettings):
     openai_model: str = Field(default="gpt-5.5", alias="OPENAI_MODEL")
     # FR-CR-05-204 — cost: date parse doesn't need gpt-5.5 reasoning → gpt-4o.
     openai_date_model: str = Field(default="gpt-4o", alias="OPENAI_DATE_MODEL")
+    # FR-CR-05-214 — title/description need a stronger model than the
+    # gpt-4o-mini intent stage: mini hallucinated names («Игорь попросил
+    # Ирину» where the source only said «Ир …»). gpt-4o for clean,
+    # faithful title+description; intent detection stays on openai_model.
+    openai_title_model: str = Field(default="gpt-4o", alias="OPENAI_TITLE_MODEL")
     # FR-CR-05-204 — cost: dedup is semantic; gpt-4o-mini misses near-dups
     # (FR-CR-05-102), so gpt-4o (NOT mini) — still much cheaper than gpt-5.5.
     openai_dedup_model: str = Field(default="gpt-4o", alias="OPENAI_DEDUP_MODEL")

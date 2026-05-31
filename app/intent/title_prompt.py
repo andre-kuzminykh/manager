@@ -432,6 +432,17 @@ the description if the message mentions them.
 Copy only text that appears in the source_message (or its immediate
 context). Do not invent details.
 
+NEVER INVENT PERSON NAMES (FR-CR-05-214). Use ONLY names that literally
+appear in the source_message or the context messages. If the source is
+an address like «Ир …» / «Ань …» / «@andre …», that's the ADDRESSEE —
+do not expand it into a different full name. The person who is ASKING is
+the message author (given in context), never a name you guessed. Hard
+regression: source «Ир поставь встречу в пон или вт, пжл обсудим»
+(author = Артём) was rendered as «Игорь попросил Ирину …» — there is NO
+«Игорь» anywhere. Correct: requester = Артём (author), addressee = Ира.
+If you can't identify a name from the text, write the role / «автор» /
+omit it — NEVER fabricate one.
+
 Respond with a single JSON object matching the provided schema.
 """
 

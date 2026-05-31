@@ -169,6 +169,17 @@ def test_classifier_fills_missing_due_date_locally(monkeypatch):
         ("собери отчёт через пять дней", "собери отчёт"),
         ("ship in about two months", "ship"),
         ("deliver within three weeks", "deliver"),
+        # FR-CR-05-215 — date alternatives ("X или Y", "X or Y"): the
+        # loop strips the first phrase ("на понедельник") and would
+        # otherwise leave a half-eaten "или вторник" in the title.
+        (
+            "поставить встречу на понедельник или вторник",
+            "поставить встречу",
+        ),
+        ("сдать отчёт в пятницу или субботу", "сдать отчёт"),
+        ("ship deck by Monday or Tuesday", "ship deck"),
+        ("отправить сегодня или завтра", "отправить"),
+        ("send today or tomorrow", "send"),
     ],
 )
 def test_strip_date_phrase(title, expected):

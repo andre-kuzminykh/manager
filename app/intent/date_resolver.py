@@ -412,9 +412,13 @@ def strip_date_phrase(text: str) -> str:
     patterns.append(r"\bна этой недел[еию]\b")
     patterns.append(r"\bthis week\b")
 
-    # Weekday names with optional preposition.
+    # Weekday names with optional preposition. FR-CR-05-215 — extend
+    # the RU prep set with "в/во" *only* before weekdays ("в пятницу",
+    # "во вторник"); we don't add it to the general _RU_PREPS to avoid
+    # eating "в окружении" / "в этом" matches elsewhere.
+    _RU_PREPS_WD = r"(?:к(?:о)?|до|на|ко\s|в(?:о)?)"
     ru_wd_group = "|".join(_RU_WEEKDAYS.keys())
-    patterns.append(rf"(?:\b{_RU_PREPS}\s+)?(?:{ru_wd_group})\w*")
+    patterns.append(rf"(?:\b{_RU_PREPS_WD}\s+)?(?:{ru_wd_group})\w*")
     en_wd_group = "|".join(_EN_WEEKDAYS.keys())
     patterns.append(rf"(?:\b{_EN_PREPS}\s+)?(?:{en_wd_group})\b")
 
@@ -424,6 +428,26 @@ def strip_date_phrase(text: str) -> str:
         if new != out:
             out = new
             break
+
+    # FR-CR-05-215 — date alternatives ("в понедельник или вторник",
+    # "May 1 or 2"): the loop above strips the first phrase ("на
+    # понедельник") and stops, leaving an orphan connector + date
+    # ("или вторник") in the title. Sweep those orphans so titles
+    # don't carry a half-eaten date alternative.
+    _RU_CONJ = r"(?:или|и)"
+    _EN_CONJ = r"(?:or|and)"
+    orphan_patterns = [
+        rf"\s*\b{_RU_CONJ}\s+(?:{ru_wd_group})\w*",
+        rf"\s*\b{_EN_CONJ}\s+(?:{en_wd_group})\b",
+        rf"\s*\b{_RU_CONJ}\s+\d{{1,2}}\s+(?:{ru_month_group})\w*",
+        rf"\s*\b{_EN_CONJ}\s+(?:{en_month_group})\w*\s+\d{{1,2}}(?:st|nd|rd|th)?\b",
+        rf"\s*\b{_RU_CONJ}\s+(?:сегодня|завтра|послезавтра)\b",
+        rf"\s*\b{_EN_CONJ}\s+(?:today|tomorrow)\b",
+        rf"\s*\b{_RU_CONJ}\s+\d{{1,2}}[./]\d{{1,2}}(?:[./]\d{{2,4}})?\b",
+        rf"\s*\b{_EN_CONJ}\s+\d{{1,2}}[./]\d{{1,2}}(?:[./]\d{{2,4}})?\b",
+    ]
+    for pp in orphan_patterns:
+        out = re.sub(pp, "", out, flags=re.IGNORECASE)
 
     # Tidy up leftover whitespace and trailing punctuation.
     out = re.sub(r"\s{2,}", " ", out).strip(" ,.;:—-")

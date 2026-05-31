@@ -71,13 +71,32 @@ def _flatten_attributes(attrs: dict[str, Any], *, max_chars: int = 600) -> str:
     return out[:max_chars]
 
 
-def build_text_repr_counterparty(name: str, attributes_blobs: Iterable[dict[str, Any]]) -> str:
-    """name + flattened key attributes from all satellite rows."""
+def build_text_repr_counterparty(
+    name: str,
+    attributes_blobs: Iterable[dict[str, Any]],
+    *,
+    mention_contexts: Iterable[str] | None = None,
+    max_mention_contexts: int = 3,
+    max_mention_chars: int = 300,
+) -> str:
+    """FR-CR-05-227 — name + flatten ключевых атрибутов + до 3 последних
+    реальных контекстов упоминаний из counterparty_mentions. Контексты
+    из встреч резко повышают сигнал на коротких именах (категории-теги
+    типа 'Partnerships' проваливаются вниз retrieval'а, потому что у
+    них контекстов нет), и делают alias-карточки отличимыми от canonical.
+    """
     base = _clean(name)
     attr_str = "; ".join(
         s for s in (_flatten_attributes(a) for a in attributes_blobs) if s
     )
-    return f"{base}. {attr_str}".strip(". ").strip() if attr_str else base
+    parts = [base]
+    if attr_str:
+        parts.append(attr_str)
+    for ctx in (mention_contexts or [])[:max_mention_contexts]:
+        c = _clean(ctx)
+        if c:
+            parts.append(c[:max_mention_chars])
+    return ". ".join(p for p in parts if p).strip()
 
 
 def build_text_repr_team_member(
@@ -135,11 +154,33 @@ def collect_entity_texts(session: Session, *, kinds: Sequence[str]) -> list[tupl
     out: list[tuple[str, str, str]] = []
 
     if KIND_COUNTERPARTY in kinds:
-        from app.models.counterparty import Counterparty
+        from app.models.counterparty import Counterparty, CounterpartyMention
+
+        # Pull recent mention contexts per counterparty once (FR-CR-05-227):
+        # the last 3 non-null contexts give the embedder real meeting prose,
+        # which is what makes alias-cards distinguishable from canonical and
+        # category-tags ('Partnerships') stop dominating retrieval.
+        mention_ctx_by_cp: dict[int, list[str]] = {}
+        q = (
+            session.query(CounterpartyMention)
+            .filter(CounterpartyMention.context.isnot(None))
+            .order_by(
+                CounterpartyMention.counterparty_id,
+                CounterpartyMention.created_at.desc().nullslast(),
+                CounterpartyMention.id.desc(),
+            )
+        )
+        for m in q:
+            lst = mention_ctx_by_cp.setdefault(m.counterparty_id, [])
+            if len(lst) < 3:
+                lst.append(m.context)
 
         for cp in session.query(Counterparty).all():
             blobs = [a.attributes for a in (cp.attributes or [])]
-            tr = build_text_repr_counterparty(cp.name, blobs)
+            tr = build_text_repr_counterparty(
+                cp.name, blobs,
+                mention_contexts=mention_ctx_by_cp.get(cp.id, []),
+            )
             if tr:
                 out.append((KIND_COUNTERPARTY, str(cp.id), tr))
 

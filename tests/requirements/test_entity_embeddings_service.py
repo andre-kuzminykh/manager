@@ -46,6 +46,36 @@ def test_counterparty_attributes_are_deterministic():
     assert a == b  # sorted keys → stable regardless of dict order
 
 
+def test_counterparty_text_repr_with_mention_contexts():
+    # FR-CR-05-227 — mention contexts make alias-cards distinguishable
+    # from canonical: name + meeting prose carries the actual signal.
+    tr = build_text_repr_counterparty(
+        "Mirae",
+        [],
+        mention_contexts=[
+            "обсудили возможность нового раунда с Mirae в августе",
+            "Mirae подтвердили участие в Series B",
+        ],
+    )
+    assert "Mirae" in tr
+    assert "обсудили возможность" in tr
+    assert "Series B" in tr
+
+
+def test_counterparty_text_repr_caps_mention_contexts():
+    # very long context is capped per mention; only first N kept.
+    tr = build_text_repr_counterparty(
+        "X", [],
+        mention_contexts=["A" * 1000, "B" * 1000, "C" * 1000, "D-skipped" * 100],
+        max_mention_contexts=3,
+        max_mention_chars=50,
+    )
+    assert "A" * 50 in tr
+    assert "B" * 50 in tr
+    assert "C" * 50 in tr
+    assert "D-skipped" not in tr  # only 3 kept
+
+
 def test_team_member_text_repr():
     tr = build_text_repr_team_member(
         real_name="Ирина Шипилова", role="Assistant",

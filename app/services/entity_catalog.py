@@ -312,6 +312,109 @@ def upsert_entity(session: Session, rec: dict) -> tuple[EntityCatalogStaging, bo
 
 
 # ---------------------------------------------------------------------------
+# 3b) Near-duplicate audit (read-only)
+# ---------------------------------------------------------------------------
+# The UNIQUE(name_normalised, is_org) constraint already makes EXACT
+# duplicates impossible. What it can't catch is *near* duplicates whose
+# normalised forms differ slightly — «Sebastian Thrun» vs «Sebastian Thrun
+# Ph.D», «Mirae» vs «Mirae Asset», a person seen both as a block-1 contact
+# and a block-2 profile. This is exactly the rot the old directory had, so
+# we surface such clusters for human review (we do NOT auto-merge here).
+DUP_RATIO_THRESHOLD = 0.86
+
+
+def _sig_tokens(norm: str) -> set[str]:
+    """Significant tokens (len>2) used to block the O(n^2) comparison so we
+    only score pairs that already share a meaningful token."""
+    return {t for t in (norm or "").split() if len(t) > 2}
+
+
+def find_duplicate_candidates(
+    items: list[dict], *, threshold: float = DUP_RATIO_THRESHOLD,
+) -> list[list[dict]]:
+    """Surface clusters of likely-duplicate entities for review.
+
+    ``items``: dicts with ``id``, ``name``, ``name_normalised``, ``is_org``.
+    Two entities of the SAME kind are flagged as a candidate pair when one
+    normalised name contains the other, or their ``SequenceMatcher`` ratio
+    is >= ``threshold``. Pairs are unioned into clusters (connected
+    components). Returns clusters of 2+ entities, largest first.
+    """
+    from difflib import SequenceMatcher
+    from itertools import combinations
+
+    parent: dict[object, object] = {}
+
+    def find(x: object) -> object:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: object, b: object) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    by_id = {it["id"]: it for it in items}
+    for it in items:
+        find(it["id"])  # register every node, even singletons
+
+    by_flag: dict[bool, list[dict]] = {True: [], False: []}
+    for it in items:
+        by_flag[bool(it["is_org"])].append(it)
+
+    for group in by_flag.values():
+        index: dict[str, list[dict]] = {}
+        for it in group:
+            for tok in _sig_tokens(it["name_normalised"]):
+                index.setdefault(tok, []).append(it)
+        scored: set[tuple] = set()
+        for bucket in index.values():
+            if len(bucket) < 2:
+                continue
+            for a, b in combinations(bucket, 2):
+                key = tuple(sorted((a["id"], b["id"])))
+                if key in scored:
+                    continue
+                scored.add(key)
+                na, nb = a["name_normalised"], b["name_normalised"]
+                if not na or not nb:
+                    continue
+                contained = na in nb or nb in na
+                ratio = SequenceMatcher(None, na, nb).ratio()
+                if contained or ratio >= threshold:
+                    union(a["id"], b["id"])
+
+    clusters: dict[object, list[dict]] = {}
+    for node in parent:
+        clusters.setdefault(find(node), []).append(by_id[node])
+    out = [c for c in clusters.values() if len(c) >= 2]
+    out.sort(key=lambda c: (-len(c), c[0]["name_normalised"]))
+    return out
+
+
+def load_staging_items(session: Session) -> list[dict]:
+    """Lightweight projection of the staging table for the dup auditor."""
+    rows = (
+        session.query(
+            EntityCatalogStaging.id,
+            EntityCatalogStaging.name,
+            EntityCatalogStaging.name_normalised,
+            EntityCatalogStaging.is_org,
+        )
+        .order_by(EntityCatalogStaging.id)
+        .all()
+    )
+    return [
+        {"id": r.id, "name": r.name, "name_normalised": r.name_normalised,
+         "is_org": bool(r.is_org)}
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
 # 4) Orchestration with per-chunk checkpoints
 # ---------------------------------------------------------------------------
 def ingest_source(
@@ -428,5 +531,8 @@ __all__ = [
     "extract_entities_from_chunk",
     "merge_description",
     "upsert_entity",
+    "find_duplicate_candidates",
+    "load_staging_items",
+    "DUP_RATIO_THRESHOLD",
     "ingest_source",
 ]

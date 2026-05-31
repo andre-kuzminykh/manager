@@ -211,6 +211,73 @@ def test_ingest_is_resumable_and_idempotent(session, tmp_path, monkeypatch):
     assert counter["n"] == calls_after_first + 2  # no repeat calls on done chunks
 
 
+# ---------------------------------------------------------------------------
+# Near-duplicate audit
+# ---------------------------------------------------------------------------
+def _it(id_, name, norm, is_org):
+    return {"id": id_, "name": name, "name_normalised": norm, "is_org": is_org}
+
+
+def test_find_dupes_flags_containment_and_close_ratio():
+    items = [
+        _it(1, "Sebastian Thrun", "sebastian thrun", False),
+        _it(2, "Sebastian Thrun Ph.D", "sebastian thrun ph.d", False),  # contains #1
+        _it(3, "Mirae", "mirae", True),
+        _it(4, "Mirae Asset", "mirae asset", True),  # contains #3
+        _it(5, "Goldman Sachs", "goldman sachs", True),  # unique
+    ]
+    clusters = ec.find_duplicate_candidates(items)
+    flat = {it["id"] for c in clusters for it in c}
+    assert {1, 2} <= flat and {3, 4} <= flat  # both near-dup pairs surfaced
+    assert 5 not in flat  # the unique org is not in any cluster
+
+
+def test_find_dupes_keeps_org_and_person_apart():
+    # Same normalised string but different kind must NOT be merged into a
+    # cluster (a company and its eponymous founder are distinct entities).
+    items = [
+        _it(1, "Dyson", "dyson", True),
+        _it(2, "Dyson", "dyson", False),
+    ]
+    assert ec.find_duplicate_candidates(items) == []
+
+
+def test_find_dupes_unions_into_clusters():
+    items = [
+        _it(1, "Acme Capital", "acme capital", True),
+        _it(2, "Acme Capital Partners", "acme capital partners", True),
+        _it(3, "Acme Capital Partners LP", "acme capital partners lp", True),
+    ]
+    clusters = ec.find_duplicate_candidates(items)
+    assert len(clusters) == 1
+    assert {it["id"] for it in clusters[0]} == {1, 2, 3}
+
+
+def test_find_dupes_empty_when_all_distinct():
+    items = [
+        _it(1, "Tesla", "tesla", True),
+        _it(2, "Foxconn", "foxconn", True),
+        _it(3, "Elon Musk", "elon musk", False),
+    ]
+    assert ec.find_duplicate_candidates(items) == []
+
+
+def test_load_staging_items_projection(session):
+    from app.models.entity_catalog import EntityCatalogStaging
+
+    session.add(
+        EntityCatalogStaging(
+            name="Tesla", name_normalised="tesla", is_org=True,
+            description="EV maker", mentions_count=1,
+        )
+    )
+    session.flush()
+    items = ec.load_staging_items(session)
+    assert len(items) == 1
+    assert items[0]["name"] == "Tesla" and items[0]["is_org"] is True
+    assert set(items[0]) == {"id", "name", "name_normalised", "is_org"}
+
+
 def test_ingest_dry_run_makes_no_calls_and_no_writes(session, tmp_path, monkeypatch):
     from app.models.entity_catalog import EntityCatalogIngest, EntityCatalogStaging
 

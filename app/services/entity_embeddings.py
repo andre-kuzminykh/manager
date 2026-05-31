@@ -36,6 +36,37 @@ log = get_logger(__name__)
 
 DEFAULT_EMBED_MODEL = "text-embedding-3-large"
 
+# FR-CR-05-229 — directory hygiene at embed time (sources not touched).
+# Two kinds of non-entity rows pollute counterparties and dominate the
+# vector top-K because they're short:
+#   1) category/segment tags leaked from the sheet's column-A label
+#      («Financial/VC», «Partnerships», «MENA» …) — NOT real companies.
+#   2) alias/pronunciation cards minted by past auto-enrollment from
+#      garbled Whisper mentions («Mirae/«миры»», «FURTS/«фьюртс»») —
+#      duplicates of a real canonical row.
+# We simply DON'T embed these, so they never appear as candidates.
+# Reversible + isolated (the source rows stay; only embeddings skip them).
+CATEGORY_TAG_BLACKLIST: frozenset[str] = frozenset({
+    "financial/vc", "financial/vc, business clubs", "financial/vc, partnerships",
+    "financial/vc, network", "financial/vc, банки", "partnerships",
+    "partnerships, financial/vc", "intros", "mena", "strategic",
+    "business clubs", "network", "банки", "looking for intros",
+    "outreach", "rejections", "financial", "vc",
+})
+
+
+def is_embeddable_counterparty(name: str) -> bool:
+    """False for category tags and alias/pronunciation cards (FR-CR-05-229)."""
+    if not name or not name.strip():
+        return False
+    n = name.strip()
+    # alias/pronunciation card: contains guillemet quotes from enrollment
+    if "«" in n or "»" in n:
+        return False
+    if n.casefold() in CATEGORY_TAG_BLACKLIST:
+        return False
+    return True
+
 # An embed function maps a batch of strings → a batch of vectors.
 EmbedFn = Callable[[Sequence[str]], list[list[float]]]
 
@@ -176,6 +207,9 @@ def collect_entity_texts(session: Session, *, kinds: Sequence[str]) -> list[tupl
                 lst.append(m.context)
 
         for cp in session.query(Counterparty).all():
+            # FR-CR-05-229 — skip category tags + alias cards.
+            if not is_embeddable_counterparty(cp.name):
+                continue
             blobs = [a.attributes for a in (cp.attributes or [])]
             tr = build_text_repr_counterparty(
                 cp.name, blobs,
@@ -226,6 +260,31 @@ def refresh_embeddings(
     rows = collect_entity_texts(session, kinds=kinds)
     scanned = len(rows)
 
+    # FR-CR-05-229 — prune embeddings whose source entity is no longer
+    # collectable (deleted, or now filtered out as a tag/alias). Scoped
+    # to the kinds + model we're refreshing so we never touch other data.
+    wanted: set[tuple[str, str]] = {(k, eid) for k, eid, _ in rows}
+    pruned = 0
+    existing_pairs = session.execute(
+        sql_text(
+            "SELECT kind, entity_id FROM entity_embeddings "
+            "WHERE model = :model AND kind = ANY(:kinds)"
+        ),
+        {"model": model, "kinds": list(kinds)},
+    ).fetchall()
+    for k, eid in existing_pairs:
+        if (k, eid) not in wanted:
+            session.execute(
+                sql_text(
+                    "DELETE FROM entity_embeddings "
+                    "WHERE kind = :k AND entity_id = :eid AND model = :model"
+                ),
+                {"k": k, "eid": eid, "model": model},
+            )
+            pruned += 1
+    if pruned:
+        session.flush()
+
     # Existing hashes for this model: {(kind, entity_id): hash}
     existing: dict[tuple[str, str], str] = {}
     res = session.execute(
@@ -268,9 +327,12 @@ def refresh_embeddings(
     log.info(
         "entity_embeddings_refresh",
         scanned=scanned, embedded=embedded, skipped=scanned - embedded,
-        kinds=list(kinds), model=model,
+        pruned=pruned, kinds=list(kinds), model=model,
     )
-    return {"scanned": scanned, "embedded": embedded, "skipped": scanned - embedded}
+    return {
+        "scanned": scanned, "embedded": embedded,
+        "skipped": scanned - embedded, "pruned": pruned,
+    }
 
 
 def _vec_literal(vec: Sequence[float]) -> str:

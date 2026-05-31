@@ -16,10 +16,35 @@ from app.services.entity_embeddings import (
     build_text_repr_counterparty,
     build_text_repr_employee,
     build_text_repr_team_member,
+    is_embeddable_counterparty,
     make_openai_embed_fn,
     text_repr_hash,
     _vec_literal,
 )
+
+
+# --------------------- FR-CR-05-229 directory hygiene --------------------- #
+def test_alias_pronunciation_cards_not_embeddable():
+    # auto-enrollment minted these from garbled Whisper mentions
+    for bad in ["Mirae/«миры»", "FURTS/«фьюртс»", "PML/«пим»", "Anthropic/«Entropiq»"]:
+        assert is_embeddable_counterparty(bad) is False
+
+
+def test_category_tags_not_embeddable():
+    for bad in ["Financial/VC", "Partnerships", "MENA", "Intros", "Strategic",
+                "Financial/VC, Partnerships", "Business Clubs", "Network"]:
+        assert is_embeddable_counterparty(bad) is False
+
+
+def test_real_companies_are_embeddable():
+    for ok in ["Mirae", "FURTS", "Bosch", "Goldman Sachs", "ADNOC",
+               "Da Vinci Capital", "Aramco Ventures", "Mitsubishi Corporation"]:
+        assert is_embeddable_counterparty(ok) is True
+
+
+def test_blank_names_not_embeddable():
+    assert is_embeddable_counterparty("") is False
+    assert is_embeddable_counterparty("   ") is False
 
 
 # --------------------------- text_repr builders --------------------------- #

@@ -20,6 +20,13 @@ from app.models.ceo_brain import (
 )
 from app.models.daily_plan import DailyPlanItem
 from app.models.employee import Employee
+from app.models.entity_embedding import (
+    EMBEDDING_DIM,
+    KIND_COUNTERPARTY,
+    KIND_EMPLOYEE,
+    KIND_TEAM_MEMBER,
+    EntityEmbedding,
+)
 from app.models.intent import ActionDraft, ActionDraftState, IntentInference
 from app.models.oauth import OAuthCredential
 from app.models.slack import (
@@ -66,6 +73,11 @@ __all__ = [
     "ActionDraftState",
     "DailyPlanItem",
     "Employee",
+    "EntityEmbedding",
+    "EMBEDDING_DIM",
+    "KIND_COUNTERPARTY",
+    "KIND_TEAM_MEMBER",
+    "KIND_EMPLOYEE",
     "IntentInference",
     "OAuthCredential",
     "ContextSnapshot",

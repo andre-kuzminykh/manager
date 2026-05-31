@@ -14,12 +14,29 @@ has already been confirmed to be a task — your job is the structured
 summary, nothing else.
 
 Produce three fields:
-- title:        short imperative summary of the work to do. Keep it
-                tight (<= 80 chars; ideally 4-7 words). Strip
-                wrappers like "надо", "please", "мне нужно". Strip
-                any date / deadline phrasing — dates belong in a
-                separate field. Use the imperative form
-                ("подготовить питчдек", "prepare pitch-deck").
+- title:        imperative summary of the work to do. Keep it
+                reasonably tight (<= 120 chars) but COMPLETE —
+                a half-title is worse than a slightly long one.
+                Strip filler wrappers like "надо", "please",
+                "мне нужно".
+
+                KEEP THE TIMEFRAME IN THE TITLE (FR-CR-05-216).
+                When the source states a deadline / when ("на
+                понедельник", "к пятнице", "в пон или вт", "by
+                Friday"), KEEP it in the title — do NOT drop it.
+                The date also goes to a separate due_date field,
+                but the operator wants to read the «when» right in
+                the title. AND always state the PURPOSE / topic of
+                the work ("для обсуждения", "по бюджету", "for the
+                investor call"). Use the imperative form.
+
+                Worked example (operator pin FR-CR-05-216):
+                  source: «Ир поставь встречу в пон или вт обсудим»
+                  GOOD:   «Поставить встречу на пн/вт для обсуждения»
+                  BAD:    «Поставить встручу»  (no timeframe, no
+                          purpose — operator rejected this)
+                Other GOOD: «Подготовить питчдек к пятнице для
+                  инвесторов» / «Prepare pitch-deck by Friday».
 
                 NEVER SHIP A NAKED VERB TITLE (FR-CR-05-89).
                 A title that's a single bare verb («Встретиться»,

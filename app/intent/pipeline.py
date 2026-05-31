@@ -37,7 +37,7 @@ from app.intent.date_prompt import (
     DATE_TOOL_PARAMETERS,
     build_date_user_prompt,
 )
-from app.intent.date_resolver import resolve_due_date, strip_date_phrase
+from app.intent.date_resolver import resolve_due_date
 from app.intent.detect_prompt import (
     DETECT_SYSTEM_PROMPT,
     DETECT_TOOL_DESCRIPTION,
@@ -251,13 +251,16 @@ def node_describe(state: IntentState) -> dict[str, Any]:
         tool_parameters=TITLE_TOOL_PARAMETERS,
         model=state.get("title_model"),
     ) or {}
-    raw_title = (data.get("title") or state["source_text"][:120]).strip()
-    title = strip_date_phrase(raw_title) or "(untitled)"
+    # FR-CR-05-216 — operator wants the timeframe KEPT in the title
+    # («Поставить встречу на пн/вт …») and FULL details in the
+    # description (reversal of FR-CR-04-5 date-stripping). The LLM
+    # already emits a tight title carrying the deadline + purpose and
+    # a complete description, so we keep both verbatim.
+    title = (data.get("title") or state["source_text"][:120]).strip() or "(untitled)"
     raw_desc = data.get("description")
-    if isinstance(raw_desc, str) and raw_desc.strip():
-        description = strip_date_phrase(raw_desc.strip()) or None
-    else:
-        description = None
+    description = (
+        raw_desc.strip() if isinstance(raw_desc, str) and raw_desc.strip() else None
+    )
     return {
         "title": title,
         "description": description,
@@ -572,11 +575,11 @@ def _extract_one_task(
         tool_parameters=TITLE_TOOL_PARAMETERS,
         model=title_model,
     ) or {}
-    raw_title = (data_t.get("title") or chunk_text[:120]).strip()
-    title = strip_date_phrase(raw_title) or "(untitled)"
+    # FR-CR-05-216 — keep timeframe in title + full description (no strip).
+    title = (data_t.get("title") or chunk_text[:120]).strip() or "(untitled)"
     raw_desc = data_t.get("description")
     description = (
-        strip_date_phrase(raw_desc.strip()) if isinstance(raw_desc, str) and raw_desc.strip() else None
+        raw_desc.strip() if isinstance(raw_desc, str) and raw_desc.strip() else None
     )
     priority = data_t.get("priority") or "medium"
 

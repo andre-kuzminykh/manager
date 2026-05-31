@@ -460,12 +460,16 @@ def test_pipeline_assembles_all_four_fields():
     assert out.task.due_date == date(2026, 4, 27)
 
 
-def test_pipeline_strips_date_from_title_and_description():
+def test_pipeline_keeps_date_and_full_description():
+    # FR-CR-05-216 — operator reversal of FR-CR-04-5: keep the
+    # timeframe IN the title and full details in the description
+    # (no date-stripping), while the date STILL also resolves into
+    # the separate due_date field.
     backend = _RecordingBackend(
         detect={"is_task": True, "confidence": 0.88},
         title={
             "title": "подготовить заметки к 1 мая",
-            "description": "к 1 мая",
+            "description": "подготовить заметки к 1 мая для встречи",
             "priority": "high",
         },
         owner={"reasoning": "no assignee", "display_name": None},
@@ -477,10 +481,11 @@ def test_pipeline_strips_date_from_title_and_description():
         author_user_id="U-author",
         today=date(2026, 4, 24),
     )
-    assert out.task.title == "подготовить заметки"
-    # Description was just "к 1 мая" → becomes None after stripping.
-    assert out.task.description is None
-    # Date still ends up in due_date.
+    # Title keeps the deadline verbatim (not stripped).
+    assert out.task.title == "подготовить заметки к 1 мая"
+    # Description keeps full details (not collapsed to None).
+    assert out.task.description == "подготовить заметки к 1 мая для встречи"
+    # Date STILL also ends up in the separate due_date field.
     assert out.task.due_date == date(2026, 5, 1)
 
 

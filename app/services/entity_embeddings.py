@@ -1,0 +1,316 @@
+"""FR-CR-05-220 — embedding service for directory entities.
+
+Builds a deterministic `text_repr` per entity, embeds it with OpenAI
+`text-embedding-3-large` (3072 dims), and upserts into the
+`entity_embeddings` satellite (FR-CR-05-219). A `text_repr_hash`
+(sha256) lets the refresh path (FR-CR-05-221) skip rows whose source
+text hasn't changed — so a full directory sync costs zero OpenAI calls
+when nothing moved.
+
+Search (`search_entities`) embeds a query string and returns the top-K
+nearest entities of ONE kind by cosine similarity — the point lookup
+the Zoom/FF matcher (FR-CR-05-222) uses instead of dumping the whole
+directory into the prompt.
+
+Everything that talks to OpenAI is injected (`embed_fn`) so unit tests
+run without network or keys.
+"""
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
+
+from sqlalchemy import text as sql_text
+from sqlalchemy.orm import Session
+
+from app.logging_setup import get_logger
+from app.models.entity_embedding import (
+    EMBEDDING_DIM,
+    KIND_COUNTERPARTY,
+    KIND_EMPLOYEE,
+    KIND_TEAM_MEMBER,
+)
+
+log = get_logger(__name__)
+
+DEFAULT_EMBED_MODEL = "text-embedding-3-large"
+
+# An embed function maps a batch of strings → a batch of vectors.
+EmbedFn = Callable[[Sequence[str]], list[list[float]]]
+
+
+# --------------------------------------------------------------------------- #
+# text_repr builders — ONE deterministic string per entity kind.
+# --------------------------------------------------------------------------- #
+def _clean(s: Any) -> str:
+    return " ".join(str(s).split()) if s is not None else ""
+
+
+def _flatten_attributes(attrs: dict[str, Any], *, max_chars: int = 600) -> str:
+    """Flatten a counterparty attributes JSON into a compact
+    `key: value` string. Skips empty values and very large blobs; keeps
+    scalars and short lists. Deterministic (sorted keys)."""
+    if not isinstance(attrs, dict):
+        return ""
+    parts: list[str] = []
+    for k in sorted(attrs.keys()):
+        v = attrs[k]
+        if v is None or v == "" or v == [] or v == {}:
+            continue
+        if isinstance(v, (list, tuple)):
+            v = ", ".join(_clean(x) for x in v if x not in (None, ""))
+        elif isinstance(v, dict):
+            # one level deep only — avoid embedding giant nested blobs
+            v = ", ".join(f"{ik}={_clean(iv)}" for ik, iv in v.items() if iv not in (None, "", [], {}))
+        v = _clean(v)
+        if not v:
+            continue
+        parts.append(f"{_clean(k)}: {v}")
+    out = "; ".join(parts)
+    return out[:max_chars]
+
+
+def build_text_repr_counterparty(name: str, attributes_blobs: Iterable[dict[str, Any]]) -> str:
+    """name + flattened key attributes from all satellite rows."""
+    base = _clean(name)
+    attr_str = "; ".join(
+        s for s in (_flatten_attributes(a) for a in attributes_blobs) if s
+    )
+    return f"{base}. {attr_str}".strip(". ").strip() if attr_str else base
+
+
+def build_text_repr_team_member(
+    *, real_name: str | None, role: str | None,
+    telegram_username: str | None, notes: str | None,
+) -> str:
+    bits = [_clean(real_name)]
+    if role:
+        bits.append(f"role: {_clean(role)}")
+    if telegram_username:
+        bits.append(f"@{_clean(telegram_username)}")
+    if notes:
+        bits.append(_clean(notes)[:200])
+    return ". ".join(b for b in bits if b).strip()
+
+
+def build_text_repr_employee(
+    *, display_name: str | None, real_name: str | None, title: str | None,
+) -> str:
+    name = _clean(real_name) or _clean(display_name)
+    bits = [name]
+    if display_name and _clean(display_name) != name:
+        bits.append(f"aka {_clean(display_name)}")
+    if title:
+        bits.append(f"title: {_clean(title)}")
+    return ". ".join(b for b in bits if b).strip()
+
+
+def text_repr_hash(text_repr: str) -> str:
+    return hashlib.sha256(text_repr.encode("utf-8")).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# OpenAI embed function factory
+# --------------------------------------------------------------------------- #
+def make_openai_embed_fn(client: Any, model: str = DEFAULT_EMBED_MODEL) -> EmbedFn:
+    """Wrap an OpenAI client into an EmbedFn. Returns 3072-dim vectors."""
+
+    def _embed(texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        resp = client.embeddings.create(model=model, input=list(texts))
+        # OpenAI returns items in input order.
+        return [d.embedding for d in resp.data]
+
+    return _embed
+
+
+# --------------------------------------------------------------------------- #
+# Collect directory rows → (kind, entity_id, text_repr)
+# --------------------------------------------------------------------------- #
+def collect_entity_texts(session: Session, *, kinds: Sequence[str]) -> list[tuple[str, str, str]]:
+    """Return [(kind, entity_id, text_repr)] for the requested kinds.
+    Imports models lazily to keep this module import-light."""
+    out: list[tuple[str, str, str]] = []
+
+    if KIND_COUNTERPARTY in kinds:
+        from app.models.counterparty import Counterparty
+
+        for cp in session.query(Counterparty).all():
+            blobs = [a.attributes for a in (cp.attributes or [])]
+            tr = build_text_repr_counterparty(cp.name, blobs)
+            if tr:
+                out.append((KIND_COUNTERPARTY, str(cp.id), tr))
+
+    if KIND_TEAM_MEMBER in kinds:
+        from app.models.team import TeamMember
+
+        for tm in session.query(TeamMember).filter(TeamMember.active.is_(True)).all():
+            tr = build_text_repr_team_member(
+                real_name=tm.real_name, role=tm.role,
+                telegram_username=tm.telegram_username, notes=tm.notes,
+            )
+            if tr:
+                out.append((KIND_TEAM_MEMBER, str(tm.id), tr))
+
+    if KIND_EMPLOYEE in kinds:
+        from app.models.employee import Employee
+
+        for e in session.query(Employee).filter(Employee.is_bot.is_(False)).all():
+            tr = build_text_repr_employee(
+                display_name=e.display_name, real_name=e.real_name, title=e.title,
+            )
+            if tr:
+                out.append((KIND_EMPLOYEE, e.slack_user_id, tr))
+
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Refresh: embed only rows whose text_repr_hash changed / is missing.
+# --------------------------------------------------------------------------- #
+def refresh_embeddings(
+    session: Session,
+    *,
+    embed_fn: EmbedFn,
+    kinds: Sequence[str] = (KIND_COUNTERPARTY, KIND_TEAM_MEMBER, KIND_EMPLOYEE),
+    model: str = DEFAULT_EMBED_MODEL,
+    batch_size: int = 256,
+) -> dict[str, int]:
+    """Upsert embeddings for all entities whose text_repr changed.
+
+    Returns counters: {"scanned", "embedded", "skipped"}.
+    """
+    rows = collect_entity_texts(session, kinds=kinds)
+    scanned = len(rows)
+
+    # Existing hashes for this model: {(kind, entity_id): hash}
+    existing: dict[tuple[str, str], str] = {}
+    res = session.execute(
+        sql_text(
+            "SELECT kind, entity_id, text_repr_hash "
+            "FROM entity_embeddings WHERE model = :model"
+        ),
+        {"model": model},
+    )
+    for kind, entity_id, h in res:
+        existing[(kind, entity_id)] = h
+
+    # Which rows need (re)embedding?
+    todo: list[tuple[str, str, str, str]] = []  # (kind, entity_id, text_repr, hash)
+    for kind, entity_id, tr in rows:
+        h = text_repr_hash(tr)
+        if existing.get((kind, entity_id)) != h:
+            todo.append((kind, entity_id, tr, h))
+
+    embedded = 0
+    for i in range(0, len(todo), batch_size):
+        chunk = todo[i : i + batch_size]
+        vectors = embed_fn([c[2] for c in chunk])
+        if len(vectors) != len(chunk):
+            raise RuntimeError(
+                f"embed_fn returned {len(vectors)} vectors for {len(chunk)} inputs"
+            )
+        for (kind, entity_id, tr, h), vec in zip(chunk, vectors):
+            if len(vec) != EMBEDDING_DIM:
+                raise RuntimeError(
+                    f"embedding dim {len(vec)} != expected {EMBEDDING_DIM}"
+                )
+            _upsert_embedding(
+                session, kind=kind, entity_id=entity_id, model=model,
+                vec=vec, text_repr=tr, text_repr_hash=h,
+            )
+            embedded += 1
+        session.flush()
+
+    log.info(
+        "entity_embeddings_refresh",
+        scanned=scanned, embedded=embedded, skipped=scanned - embedded,
+        kinds=list(kinds), model=model,
+    )
+    return {"scanned": scanned, "embedded": embedded, "skipped": scanned - embedded}
+
+
+def _vec_literal(vec: Sequence[float]) -> str:
+    """pgvector text literal: '[0.1,0.2,...]'."""
+    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+
+def _upsert_embedding(
+    session: Session, *, kind: str, entity_id: str, model: str,
+    vec: Sequence[float], text_repr: str, text_repr_hash: str,
+) -> None:
+    session.execute(
+        sql_text(
+            """
+            INSERT INTO entity_embeddings
+                (kind, entity_id, model, dim, embedding, text_repr, text_repr_hash, updated_at)
+            VALUES
+                (:kind, :entity_id, :model, :dim, (:emb)::vector, :tr, :hash, now())
+            ON CONFLICT (kind, entity_id, model) DO UPDATE SET
+                dim = EXCLUDED.dim,
+                embedding = EXCLUDED.embedding,
+                text_repr = EXCLUDED.text_repr,
+                text_repr_hash = EXCLUDED.text_repr_hash,
+                updated_at = now()
+            """
+        ),
+        {
+            "kind": kind, "entity_id": entity_id, "model": model,
+            "dim": len(vec), "emb": _vec_literal(vec),
+            "tr": text_repr, "hash": text_repr_hash,
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Search: top-K nearest entities of ONE kind by cosine similarity.
+# --------------------------------------------------------------------------- #
+def search_entities(
+    session: Session,
+    *,
+    kind: str,
+    query_text: str,
+    embed_fn: EmbedFn,
+    model: str = DEFAULT_EMBED_MODEL,
+    k: int = 10,
+) -> list[dict[str, Any]]:
+    """Embed `query_text`, return top-K rows of `kind` as
+    [{entity_id, text_repr, score}] (score = cosine similarity in
+    [0,1], higher = closer)."""
+    vecs = embed_fn([query_text])
+    if not vecs:
+        return []
+    qv = _vec_literal(vecs[0])
+    res = session.execute(
+        sql_text(
+            """
+            SELECT entity_id, text_repr,
+                   1 - (embedding <=> (:q)::vector) AS score
+            FROM entity_embeddings
+            WHERE kind = :kind AND model = :model
+            ORDER BY embedding <=> (:q)::vector
+            LIMIT :k
+            """
+        ),
+        {"q": qv, "kind": kind, "model": model, "k": k},
+    )
+    return [
+        {"entity_id": entity_id, "text_repr": tr, "score": float(score)}
+        for entity_id, tr, score in res
+    ]
+
+
+__all__ = [
+    "DEFAULT_EMBED_MODEL",
+    "EmbedFn",
+    "build_text_repr_counterparty",
+    "build_text_repr_team_member",
+    "build_text_repr_employee",
+    "text_repr_hash",
+    "make_openai_embed_fn",
+    "collect_entity_texts",
+    "refresh_embeddings",
+    "search_entities",
+]

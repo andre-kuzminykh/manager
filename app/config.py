@@ -346,6 +346,11 @@ class Settings(BaseSettings):
     # FR-CR-05-204 — cost: dedup is semantic; gpt-4o-mini misses near-dups
     # (FR-CR-05-102), so gpt-4o (NOT mini) — still much cheaper than gpt-5.5.
     openai_dedup_model: str = Field(default="gpt-4o", alias="OPENAI_DEDUP_MODEL")
+    # FR-CR-05-220/221 — directory entity embeddings (pgvector
+    # entity-matching epic). 3072-dim model; see entity_embeddings.
+    embedding_model: str = Field(
+        default="text-embedding-3-large", alias="EMBEDDING_MODEL"
+    )
     # FR-CR-05-110 — narrow Python safety net under the LLM
     # dedup gate: when candidate's normalized title +
     # owner-key set overlaps an existing item, mark

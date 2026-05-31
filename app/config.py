@@ -351,6 +351,13 @@ class Settings(BaseSettings):
     embedding_model: str = Field(
         default="text-embedding-3-large", alias="EMBEDDING_MODEL"
     )
+    # FR-CR-05-225 — entity-match critic. Per-mention LLM that picks the
+    # right directory entity from the pgvector top-K. gpt-4o (NOT gpt-5.5):
+    # choosing among ~10 candidates doesn't need gpt-5.5 reasoning, and
+    # per-mention fan-out makes a cheaper/faster model matter.
+    entity_match_critic_model: str = Field(
+        default="gpt-4o", alias="ENTITY_MATCH_CRITIC_MODEL"
+    )
     # FR-CR-05-110 — narrow Python safety net under the LLM
     # dedup gate: when candidate's normalized title +
     # owner-key set overlaps an existing item, mark

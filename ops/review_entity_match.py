@@ -62,7 +62,14 @@ def main() -> int:
     ap.add_argument("--out", default="/tmp/entity_match_review.json")
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--embed-model", default=s.embedding_model)
-    ap.add_argument("--critic-model", default=s.fireflies_tasks_model)
+    # v1 baseline + shared Pass-1 extraction stay on the prod model so the
+    # comparison reflects real production behaviour.
+    ap.add_argument("--extract-model", default=s.fireflies_tasks_model)
+    # v2 critic: gpt-4o by default (FR-CR-05-225) — cheaper/faster per
+    # mention than gpt-5.5, ample for choosing among ~10 candidates.
+    ap.add_argument("--critic-model", default=s.entity_match_critic_model)
+    ap.add_argument("--limit", type=int, default=0, help="only first N mentions (0 = all)")
+    ap.add_argument("--skip-v1", action="store_true", help="skip the v1 baseline (faster; v2 only)")
     args = ap.parse_args()
 
     if not s.openai_api_key:
@@ -102,18 +109,24 @@ def main() -> int:
 
         # --- extract mentions (shared Pass-1) ---
         mentions = extract_counterparty_mentions(
-            transcript, llm_backend=backend, model=args.critic_model,
+            transcript, llm_backend=backend, model=args.extract_model,
             trace_source="review", trace_recording_id=row.zoom_id,
         )
         print(f"extracted {len(mentions)} counterparty mentions: {mentions}")
+        if args.limit and args.limit > 0:
+            mentions = mentions[: args.limit]
+            print(f"--limit {args.limit} → reviewing first {len(mentions)}")
 
-        # --- v1: whole-directory resolve ---
+        # --- v1: whole-directory resolve (baseline; skippable for speed) ---
         directory = session.query(Counterparty).order_by(Counterparty.name).all()
         id_to_name = {c.id: c.name for c in directory}
-        v1 = resolve_mentions_to_directory(
-            mentions, directory, llm_backend=backend, model=args.critic_model,
-            trace_source="review", trace_recording_id=row.zoom_id,
-        )
+        if args.skip_v1:
+            v1 = {}
+        else:
+            v1 = resolve_mentions_to_directory(
+                mentions, directory, llm_backend=backend, model=args.extract_model,
+                trace_source="review", trace_recording_id=row.zoom_id,
+            )
 
         # --- v2: pgvector top-K + critic ---
         def retrieve_fn(query: str, k: int):

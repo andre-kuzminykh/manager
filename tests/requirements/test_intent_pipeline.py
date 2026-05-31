@@ -1233,8 +1233,8 @@ class _ModelCapturingBackend(_RecordingBackend):
     """Records the `model` kwarg per tool so we can assert which stage
     used which model (FR-CR-05-214)."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, **kw):
+        super().__init__(**kw)
         self.model_by_tool: dict[str, object] = {}
 
     def call_tool(self, **kw):
@@ -1246,13 +1246,19 @@ def test_fr_cr_05_214_title_stage_routed_to_title_model():
     """FR-CR-05-214 — title/description stage runs on `title_model` (gpt-4o),
     NOT the intent/detect default. Regression: gpt-4o-mini hallucinated
     «Игорь» from «Ир …»."""
-    b = _ModelCapturingBackend()
+    from app.intent.date_prompt import DATE_TOOL_NAME
+
+    b = _ModelCapturingBackend(
+        detect={"is_task": True, "confidence": 0.9},
+        title={"title": "купить кофе"},
+        owner={"reasoning": "no one", "display_name": None},
+    )
     run_pipeline(
         backend=b,
-        source_text="купить кофе",
+        source_text="надо купить кофе",
         context_messages=[],
-        author_user_id=None,
-        today=_d(2026, 5, 28),
+        author_user_id="U-author",
+        today=date(2026, 5, 28),
         date_model="gpt-4o",
         title_model="gpt-4o",
         known_employees=[],

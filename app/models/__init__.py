@@ -27,6 +27,12 @@ from app.models.entity_embedding import (
     KIND_TEAM_MEMBER,
     EntityEmbedding,
 )
+from app.models.entity_catalog import (
+    INGEST_DONE,
+    INGEST_ERROR,
+    EntityCatalogIngest,
+    EntityCatalogStaging,
+)
 from app.models.intent import ActionDraft, ActionDraftState, IntentInference
 from app.models.oauth import OAuthCredential
 from app.models.slack import (
@@ -78,6 +84,10 @@ __all__ = [
     "KIND_COUNTERPARTY",
     "KIND_TEAM_MEMBER",
     "KIND_EMPLOYEE",
+    "EntityCatalogStaging",
+    "EntityCatalogIngest",
+    "INGEST_DONE",
+    "INGEST_ERROR",
     "IntentInference",
     "OAuthCredential",
     "ContextSnapshot",

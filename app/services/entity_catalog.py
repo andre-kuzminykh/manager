@@ -322,11 +322,39 @@ def upsert_entity(session: Session, rec: dict) -> tuple[EntityCatalogStaging, bo
 # we surface such clusters for human review (we do NOT auto-merge here).
 DUP_RATIO_THRESHOLD = 0.86
 
+# Structural / legal words that don't distinguish one org from another.
+# Dropped for *blocking* so «Vest Capital» vs «IST Capital» (which share
+# only the generic «capital») never become a candidate pair; and a pair
+# that differs only by these still clusters («Acme» ⇄ «Acme Ltd»).
+GENERIC_ORG_TOKENS = {
+    "partners", "partner", "group", "holding", "holdings", "management",
+    "advisors", "advisory", "asset", "assets", "family", "office", "ltd",
+    "limited", "llc", "inc", "incorporated", "lp", "llp", "gmbh", "kg",
+    "corp", "corporation", "company", "co", "global", "international", "the",
+}
 
-def _sig_tokens(norm: str) -> set[str]:
-    """Significant tokens (len>2) used to block the O(n^2) comparison so we
-    only score pairs that already share a meaningful token."""
-    return {t for t in (norm or "").split() if len(t) > 2}
+# Investment-arm markers. Operator-pinned 2026-05-31: «о инвест-арм
+# сохраняй» — «Anthropic» vs «Anthropic Capital», «Accenture» vs «Accenture
+# Ventures», «Salesforce» vs «Salesforce Ventures» are DISTINCT entities
+# (parent company vs its investment vehicle) and must NOT be merged. So a
+# pair that differs ONLY by one of these tokens is preserved as separate.
+ARM_MARKER_TOKENS = {"ventures", "venture", "capital", "fund", "funds"}
+
+# Union used to strip blocking tokens (a shared generic/arm word alone must
+# not bucket two unrelated orgs together).
+_BLOCK_EXCLUDE = GENERIC_ORG_TOKENS | ARM_MARKER_TOKENS
+
+
+def _norm_tokens(norm: str) -> list[str]:
+    return [t for t in (norm or "").split() if t]
+
+
+def _block_tokens(tokens: list[str], is_org: bool) -> set[str]:
+    """Distinctive (len>2) tokens used to bucket the O(n^2) comparison so we
+    only score pairs that already share a meaningful token. For orgs we drop
+    generic/arm words; people have no such words."""
+    excl = _BLOCK_EXCLUDE if is_org else set()
+    return {t for t in tokens if len(t) > 2 and t not in excl}
 
 
 def find_duplicate_candidates(
@@ -335,10 +363,24 @@ def find_duplicate_candidates(
     """Surface clusters of likely-duplicate entities for review.
 
     ``items``: dicts with ``id``, ``name``, ``name_normalised``, ``is_org``.
-    Two entities of the SAME kind are flagged as a candidate pair when one
-    normalised name contains the other, or their ``SequenceMatcher`` ratio
-    is >= ``threshold``. Pairs are unioned into clusters (connected
-    components). Returns clusters of 2+ entities, largest first.
+    Same-kind entities are paired via token-set logic:
+      * identical token sets → duplicate;
+      * one token set ⊂ the other → duplicate, UNLESS the extra tokens are
+        ALL investment-arm markers (operator: «о инвест-арм сохраняй» —
+        «Anthropic» vs «Anthropic Capital» stay separate), while a fuller
+        legal/descriptive name («Phoenix Court» ⇄ «Phoenix Court Group
+        Limited») still merges;
+      * neither subset → ``SequenceMatcher`` ratio >= ``threshold`` catches
+        typos («Artem Tokarenko» ⇄ «Artem Tikarenko»).
+
+    Precision guards from the first live run:
+      * orgs sharing only a generic/arm word («Vest Capital» / «IST
+        Capital») don't share a blocking token → never compared;
+      * a bare single-name person («Andrew») is NOT swallowed by fuller
+        names sharing that first name (subset needs a surname on both sides).
+
+    Pairs are unioned into clusters; clusters of 2+ are returned, largest
+    first. We never auto-merge — this is a review aid.
     """
     from difflib import SequenceMatcher
     from itertools import combinations
@@ -358,17 +400,19 @@ def find_duplicate_candidates(
             parent[rb] = ra
 
     by_id = {it["id"]: it for it in items}
+    toks: dict[object, list[str]] = {}
     for it in items:
         find(it["id"])  # register every node, even singletons
+        toks[it["id"]] = _norm_tokens(it["name_normalised"])
 
     by_flag: dict[bool, list[dict]] = {True: [], False: []}
     for it in items:
         by_flag[bool(it["is_org"])].append(it)
 
-    for group in by_flag.values():
+    for is_org, group in by_flag.items():
         index: dict[str, list[dict]] = {}
         for it in group:
-            for tok in _sig_tokens(it["name_normalised"]):
+            for tok in _block_tokens(toks[it["id"]], is_org):
                 index.setdefault(tok, []).append(it)
         scored: set[tuple] = set()
         for bucket in index.values():
@@ -379,12 +423,27 @@ def find_duplicate_candidates(
                 if key in scored:
                     continue
                 scored.add(key)
-                na, nb = a["name_normalised"], b["name_normalised"]
-                if not na or not nb:
+                la, lb = toks[a["id"]], toks[b["id"]]
+                sa, sb = set(la), set(lb)
+                if not sa or not sb:
                     continue
-                contained = na in nb or nb in na
-                ratio = SequenceMatcher(None, na, nb).ratio()
-                if contained or ratio >= threshold:
+                if sa == sb:
+                    union(a["id"], b["id"])
+                    continue
+                if sa <= sb or sb <= sa:
+                    extra = sa ^ sb
+                    if is_org:
+                        # arm-only difference → distinct entities, preserve
+                        if extra and extra <= ARM_MARKER_TOKENS:
+                            continue
+                        union(a["id"], b["id"])
+                    else:
+                        # need a surname on the shorter side (no bare names)
+                        if min(len(la), len(lb)) >= 2:
+                            union(a["id"], b["id"])
+                    continue
+                ratio = SequenceMatcher(None, " ".join(la), " ".join(lb)).ratio()
+                if ratio >= threshold:
                     union(a["id"], b["id"])
 
     clusters: dict[object, list[dict]] = {}

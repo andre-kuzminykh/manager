@@ -253,6 +253,62 @@ def test_find_dupes_unions_into_clusters():
     assert {it["id"] for it in clusters[0]} == {1, 2, 3}
 
 
+def test_find_dupes_ignores_generic_token_collisions():
+    # Orgs that share ONLY a generic word ('capital') must not cluster.
+    items = [
+        _it(1, "Vest Capital", "vest capital", True),
+        _it(2, "IST Capital", "ist capital", True),
+        _it(3, "JAM Capital Partners", "jam capital partners", True),
+        _it(4, "D1 Capital Partners", "d1 capital partners", True),
+    ]
+    assert ec.find_duplicate_candidates(items) == []
+
+
+def test_find_dupes_legal_suffix_still_merges():
+    # A fuller legal / descriptive name (NOT an arm marker) still clusters.
+    items = [
+        _it(1, "Phoenix Court", "phoenix court", True),
+        _it(2, "Phoenix Court Group Limited", "phoenix court group limited", True),
+        _it(3, "Acme", "acme", True),
+        _it(4, "Acme Ltd", "acme ltd", True),
+    ]
+    clusters = ec.find_duplicate_candidates(items)
+    pairs = {frozenset(it["id"] for it in c) for c in clusters}
+    assert frozenset({1, 2}) in pairs and frozenset({3, 4}) in pairs
+
+
+def test_find_dupes_investment_arm_kept_separate():
+    # operator: «о инвест-арм сохраняй» — parent vs investment vehicle that
+    # differ ONLY by an arm marker must NOT be clustered.
+    items = [
+        _it(1, "Anthropic", "anthropic", True),
+        _it(2, "Anthropic Capital", "anthropic capital", True),
+        _it(3, "Accenture", "accenture", True),
+        _it(4, "Accenture Ventures", "accenture ventures", True),
+        _it(5, "Salesforce", "salesforce", True),
+        _it(6, "Salesforce Ventures", "salesforce ventures", True),
+    ]
+    assert ec.find_duplicate_candidates(items) == []
+
+
+def test_find_dupes_bare_first_name_not_clustered():
+    items = [
+        _it(1, "Andrew", "andrew", False),
+        _it(2, "Andrew Kang", "andrew kang", False),
+        _it(3, "Andrew Wooten", "andrew wooten", False),
+    ]
+    assert ec.find_duplicate_candidates(items) == []
+
+
+def test_find_dupes_typo_person_clustered():
+    items = [
+        _it(1, "Artem Tokarenko", "artem tokarenko", False),
+        _it(2, "Artem Tikarenko", "artem tikarenko", False),
+    ]
+    clusters = ec.find_duplicate_candidates(items)
+    assert len(clusters) == 1 and {it["id"] for it in clusters[0]} == {1, 2}
+
+
 def test_find_dupes_empty_when_all_distinct():
     items = [
         _it(1, "Tesla", "tesla", True),

@@ -98,6 +98,7 @@ def classify_with_backend(
 ) -> IntentClassification:
     try:
         date_model = (get_settings().openai_date_model or None)
+        title_model = (get_settings().openai_title_model or None)
         classification = run_pipeline(
             backend=backend,
             source_text=source_text,
@@ -105,6 +106,7 @@ def classify_with_backend(
             author_user_id=context.source_message.get("user"),
             today=date.today(),
             date_model=date_model,
+            title_model=title_model,
             known_employees=known_employees,
         )
     except Exception as e:  # noqa: BLE001 — degrade to rules

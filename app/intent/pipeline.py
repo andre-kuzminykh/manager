@@ -73,6 +73,9 @@ class IntentState(TypedDict, total=False):
     author_user_id: Optional[str]
     today: _date
     date_model: Optional[str]
+    # FR-CR-05-214 — model for the title/description stage (gpt-4o),
+    # separate from the gpt-4o-mini intent stage which hallucinated names.
+    title_model: Optional[str]
     known_employees: list[dict]
 
     # Stage 1 output.
@@ -246,6 +249,7 @@ def node_describe(state: IntentState) -> dict[str, Any]:
         tool_name=TITLE_TOOL_NAME,
         tool_description=TITLE_TOOL_DESCRIPTION,
         tool_parameters=TITLE_TOOL_PARAMETERS,
+        model=state.get("title_model"),
     ) or {}
     raw_title = (data.get("title") or state["source_text"][:120]).strip()
     title = strip_date_phrase(raw_title) or "(untitled)"
@@ -549,6 +553,7 @@ def _extract_one_task(
     author_user_id: str | None,
     today: _date,
     date_model: str | None,
+    title_model: str | None,
     known_employees: list[dict],
 ) -> TaskDraft:
     """Run the 2a / 2b / 2c stages on a single chunk and assemble a
@@ -565,6 +570,7 @@ def _extract_one_task(
         tool_name=TITLE_TOOL_NAME,
         tool_description=TITLE_TOOL_DESCRIPTION,
         tool_parameters=TITLE_TOOL_PARAMETERS,
+        model=title_model,
     ) or {}
     raw_title = (data_t.get("title") or chunk_text[:120]).strip()
     title = strip_date_phrase(raw_title) or "(untitled)"
@@ -712,6 +718,7 @@ def node_assemble(state: IntentState) -> dict[str, Any]:
                 author_user_id=state.get("author_user_id"),
                 today=state["today"],
                 date_model=state.get("date_model"),
+                title_model=state.get("title_model"),
                 known_employees=state.get("known_employees") or [],
             )
         )
@@ -762,6 +769,7 @@ def run_pipeline(
     author_user_id: str | None,
     today: _date,
     date_model: str | None = None,
+    title_model: str | None = None,
     known_employees: list[dict] | None = None,
 ) -> IntentClassification:
     initial: IntentState = {
@@ -771,6 +779,7 @@ def run_pipeline(
         "author_user_id": author_user_id,
         "today": today,
         "date_model": date_model,
+        "title_model": title_model,
         "known_employees": known_employees or [],
     }
     final = _GRAPH.invoke(initial)

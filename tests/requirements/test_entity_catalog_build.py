@@ -287,6 +287,10 @@ def test_find_dupes_investment_arm_kept_separate():
         _it(4, "Accenture Ventures", "accenture ventures", True),
         _it(5, "Salesforce", "salesforce", True),
         _it(6, "Salesforce Ventures", "salesforce ventures", True),
+        # arm with a descriptive name (marker not the only extra token)
+        _it(7, "Amazon", "amazon", True),
+        _it(8, "Amazon Industrial Innovation Fund",
+            "amazon industrial innovation fund", True),
     ]
     assert ec.find_duplicate_candidates(items) == []
 

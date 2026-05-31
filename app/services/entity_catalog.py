@@ -431,10 +431,13 @@ def find_duplicate_candidates(
                     union(a["id"], b["id"])
                     continue
                 if sa <= sb or sb <= sa:
-                    extra = sa ^ sb
+                    extra = sa ^ sb  # == superset − subset (one is subset)
                     if is_org:
-                        # arm-only difference → distinct entities, preserve
-                        if extra and extra <= ARM_MARKER_TOKENS:
+                        # If the superset adds ANY investment-arm marker over
+                        # the subset, it's a distinct vehicle/arm of it
+                        # («Amazon» vs «Amazon Industrial Innovation Fund»,
+                        # «Anthropic» vs «Anthropic Capital») → preserve.
+                        if extra & ARM_MARKER_TOKENS:
                             continue
                         union(a["id"], b["id"])
                     else:

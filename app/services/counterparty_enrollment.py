@@ -492,6 +492,13 @@ def _ensure_counterparty(
     )
     if existing is not None:
         return existing
+    # FR-CR-05-230 — do not mint new cards for unmatched mentions when
+    # auto-enrollment is off (default). Keeps the directory clean; new
+    # counterparties enter only via the Google-Sheet sync.
+    from app.config import get_settings
+
+    if not get_settings().counterparty_autoenroll_enabled:
+        return None
     cp = Counterparty(name=name, name_normalised=norm)
     session.add(cp)
     try:

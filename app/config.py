@@ -358,6 +358,16 @@ class Settings(BaseSettings):
     entity_match_critic_model: str = Field(
         default="gpt-4o", alias="ENTITY_MATCH_CRITIC_MODEL"
     )
+    # FR-CR-05-230 — auto-enrollment kill-switch. The 3 enrollment paths
+    # (summary canonicalize + 2 enrollment services) used to MINT a new
+    # Counterparty row whenever a mention didn't match an existing
+    # name_normalised exactly. Garbled Whisper variants («Тезером»,
+    # «миры») never match → the directory accumulated alias/dup cards
+    # (9 «Tether» rows!). Default OFF: unknown mentions are NOT auto-
+    # created; the directory changes ONLY via the Google-Sheet sync.
+    counterparty_autoenroll_enabled: bool = Field(
+        default=False, alias="COUNTERPARTY_AUTOENROLL_ENABLED"
+    )
     # FR-CR-05-110 — narrow Python safety net under the LLM
     # dedup gate: when candidate's normalized title +
     # owner-key set overlaps an existing item, mark

@@ -707,6 +707,11 @@ def _ensure_counterparty(
     )
     if existing is not None:
         return existing
+    # FR-CR-05-230 — auto-enroll kill-switch (default off).
+    from app.config import get_settings
+
+    if not get_settings().counterparty_autoenroll_enabled:
+        return None
     cp = Counterparty(name=name, name_normalised=norm)
     session.add(cp)
     try:

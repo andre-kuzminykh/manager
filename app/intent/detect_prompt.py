@@ -208,7 +208,7 @@ Confidence in [0, 1]:
   0.40-0.69  might be a task, tone unclear
   <0.40   probably chat
 
-MULTI-TASK SPLITTING (FR-CR-05-05):
+MULTI-TASK SPLITTING (FR-CR-05-05 / FR-CR-05-217):
 A single message can describe several tasks. Split when each chunk
 has its own imperative verb + object pair, often joined by "и"/"и
 ещё"/"+"/", "/"and"/"plus":
@@ -221,6 +221,24 @@ has its own imperative verb + object pair, often joined by "и"/"и
   "send the deck and call the client tomorrow"
       → 2 tasks: ["send the deck",
                   "call the client tomorrow"]
+
+ALSO SPLIT WHEN DIFFERENT PEOPLE GET DIFFERENT ACTIONS (FR-CR-05-217).
+Even if the second clause is framed as preparation ("а до этого пусть
+X сделает Y…", "before that have Z do W…", "meanwhile Z does W"),
+it's a SEPARATE TASK for a different owner. The dependency belongs
+in the description; the action belongs in its own task chunk.
+
+Worked example (operator pin FR-CR-05-217):
+  source: «Ир поставь встречу в пон или вт пжл обсудим
+           А до этого пусть Андрей поговорит с Олегом Синявским 20 мин»
+      → 2 tasks (different addressees, different actions):
+         chunk 1: «Ир поставь встречу в пон или вт пжл обсудим»
+                  (owner: Ирина)
+         chunk 2: «пусть Андрей поговорит с Олегом Синявским 20 мин»
+                  (owner: Андрей)
+      BAD: 1 task with "Андрей поговорит" only in the description —
+           operator rejected this because Андрей's task vanishes
+           from the assignee list.
 
 DO NOT split when the second clause is a *sub-item* of the first
 (no second verb / object pair):

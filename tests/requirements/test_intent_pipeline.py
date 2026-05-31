@@ -592,6 +592,26 @@ def test_intent_prompt_teaches_multi_task_split():
     assert "single-item" in blob.lower() or "one item" in blob.lower()
 
 
+def test_detect_prompt_splits_different_addressees():
+    """FR-CR-05-217 — DETECT prompt must teach that different
+    addressees + different actions = separate tasks, even when the
+    second clause is framed as preparation ('а до этого пусть X…').
+    Pinned because draft 5598 captured «Ир поставь встречу … А до
+    этого пусть Андрей …» as a single task, dropping Андрей's chore."""
+    from app.intent.detect_prompt import DETECT_SYSTEM_PROMPT
+
+    blob = DETECT_SYSTEM_PROMPT
+    assert "FR-CR-05-217" in blob
+    # The rule itself.
+    assert "DIFFERENT PEOPLE GET DIFFERENT ACTIONS" in blob
+    # The worked example from the regression source.
+    assert "Ир поставь встречу" in blob
+    assert "Андрей поговорит" in blob
+    # And the BAD/anti-pattern is pinned so a future edit can't drop
+    # the "describe-the-second-task-only-in-description" anti-pattern.
+    assert "BAD" in blob and "description" in blob
+
+
 def test_intent_tool_schema_has_tasks_array():
     """FR-CR-05-46 — `INTENT_TOOL_PARAMETERS` exposes a `tasks`
     array (in addition to legacy `task`) so the LLM can return

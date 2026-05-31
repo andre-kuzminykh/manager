@@ -1227,3 +1227,39 @@ def test_owner_prompt_pins_requester_not_doer_rule():
     assert "attribution" in blob.lower()
     # The exact regression case is pinned.
     assert "посмотреть письмо" in blob.lower()
+
+
+class _ModelCapturingBackend(_RecordingBackend):
+    """Records the `model` kwarg per tool so we can assert which stage
+    used which model (FR-CR-05-214)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model_by_tool: dict[str, object] = {}
+
+    def call_tool(self, **kw):
+        self.model_by_tool[kw["tool_name"]] = kw.get("model")
+        return super().call_tool(**kw)
+
+
+def test_fr_cr_05_214_title_stage_routed_to_title_model():
+    """FR-CR-05-214 — title/description stage runs on `title_model` (gpt-4o),
+    NOT the intent/detect default. Regression: gpt-4o-mini hallucinated
+    «Игорь» from «Ир …»."""
+    b = _ModelCapturingBackend()
+    run_pipeline(
+        backend=b,
+        source_text="купить кофе",
+        context_messages=[],
+        author_user_id=None,
+        today=_d(2026, 5, 28),
+        date_model="gpt-4o",
+        title_model="gpt-4o",
+        known_employees=[],
+    )
+    # title stage explicitly routed to the title model
+    assert b.model_by_tool.get(TITLE_TOOL_NAME) == "gpt-4o"
+    # detect/intent stage stays on the backend default (no model override)
+    assert b.model_by_tool.get(DETECT_TOOL_NAME) is None
+    # date stage uses its own date_model
+    assert b.model_by_tool.get(DATE_TOOL_NAME) == "gpt-4o"

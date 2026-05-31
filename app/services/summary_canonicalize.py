@@ -271,6 +271,13 @@ def _seed_counterparties_from_orgs(
         from app.sync.counterparties import normalise_name
     except Exception:  # noqa: BLE001
         return []
+    # FR-CR-05-230 — auto-enroll kill-switch (default off): never mint
+    # new counterparty cards from summary orgs; the directory changes
+    # only via the Google-Sheet sync.
+    from app.config import get_settings
+
+    if not get_settings().counterparty_autoenroll_enabled:
+        return []
     # Same generic filter as ops/seed_counterparties_from_summaries.py
     GENERIC = {
         "humanoid", "humain", "company", "fund", "investor",

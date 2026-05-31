@@ -33,7 +33,7 @@ def test_all_three_creation_sites_are_gated():
 
 
 def test_enrollment_returns_none_when_disabled(session, monkeypatch):
-    """Behavioural: with the switch off, _resolve_or_create_one returns
+    """Behavioural: with the switch off, _ensure_counterparty returns
     None for an unknown name and creates no row."""
     from app.config import get_settings
     from app.models.counterparty import Counterparty
@@ -44,7 +44,7 @@ def test_enrollment_returns_none_when_disabled(session, monkeypatch):
     monkeypatch.setattr(s, "counterparty_autoenroll_enabled", False, raising=False)
 
     before = session.query(Counterparty).count()
-    out = ce._resolve_or_create_one(session, name="Совершенно Новый Контрагент XYZ")
+    out = ce._ensure_counterparty(session, name="Совершенно Новый Контрагент XYZ")
     assert out is None
     assert session.query(Counterparty).count() == before
 
@@ -58,7 +58,7 @@ def test_enrollment_creates_when_enabled(session, monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "counterparty_autoenroll_enabled", True, raising=False)
 
-    out = ce._resolve_or_create_one(session, name="Brand New Co ABC")
+    out = ce._ensure_counterparty(session, name="Brand New Co ABC")
     assert out is not None
     assert out.name == "Brand New Co ABC"
     assert session.query(Counterparty).filter(

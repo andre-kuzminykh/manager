@@ -460,6 +460,10 @@ def node_date(state: IntentState) -> dict[str, Any]:
             source_text=source_text,
             current_date=today.isoformat(),
             current_weekday=today.strftime("%A"),
+            # FR-CR-05-218 — single-task path: chunk == full source,
+            # but still hand chat history so anchors like «как
+            # договорились в чате» resolve.
+            prior_context=state.get("context_messages"),
         ),
         tool_name=DATE_TOOL_NAME,
         tool_description=DATE_TOOL_DESCRIPTION,
@@ -525,6 +529,16 @@ def node_date(state: IntentState) -> dict[str, Any]:
         else:
             source_used = "llm_null"
 
+    # FR-CR-05-218 — operator policy «дедлайн должен стоять в
+    # любом случае»: when no anchor was found in source, chat
+    # history, or by the python resolver, fall back to TODAY
+    # rather than emitting None. The proof-quote rule still
+    # applies upstream — by the time we get here the LLM
+    # already had its chance to find an anchor.
+    if picked is None:
+        picked = today
+        source_used = "today_fallback"
+
     log.info(
         "date_node_result",
         llm_iso=llm_iso,
@@ -558,6 +572,7 @@ def _extract_one_task(
     date_model: str | None,
     title_model: str | None,
     known_employees: list[dict],
+    full_source: str | None = None,
 ) -> TaskDraft:
     """Run the 2a / 2b / 2c stages on a single chunk and assemble a
     ``TaskDraft``. Used both by ``node_assemble`` (per chunk for the
@@ -645,6 +660,12 @@ def _extract_one_task(
             source_text=chunk_text,
             current_date=today.isoformat(),
             current_weekday=today.strftime("%A"),
+            # FR-CR-05-218 — multi-task path: hand the LLM the
+            # whole message so it can resolve dependencies like
+            # «а до этого пусть X сделает Y», and the chat
+            # history for «как договорились» style anchors.
+            wider_source=full_source,
+            prior_context=context_messages,
         ),
         tool_name=DATE_TOOL_NAME,
         tool_description=DATE_TOOL_DESCRIPTION,
@@ -658,10 +679,22 @@ def _extract_one_task(
             parsed = _date.fromisoformat(llm_iso)
         except ValueError:
             parsed = None
-        if parsed is not None and _date_is_acceptable(parsed, chunk_text, today):
+        # FR-CR-05-218 — anchor check against the wider source too,
+        # because the chunk may not state «к/до …» itself but the
+        # full message does. Same for date-is-acceptable.
+        anchor_text = full_source or chunk_text
+        if (
+            parsed is not None
+            and _date_is_acceptable(parsed, anchor_text, today)
+        ):
             picked = parsed
     if picked is None:
-        picked = resolve_due_date(chunk_text, today)
+        picked = resolve_due_date(chunk_text, today) or resolve_due_date(
+            full_source or "", today
+        )
+    # FR-CR-05-218 — operator: «дедлайн должен стоять в любом случае».
+    if picked is None:
+        picked = today
 
     return TaskDraft(
         title=title,
@@ -723,6 +756,11 @@ def node_assemble(state: IntentState) -> dict[str, Any]:
                 date_model=state.get("date_model"),
                 title_model=state.get("title_model"),
                 known_employees=state.get("known_employees") or [],
+                # FR-CR-05-218 — pass the WHOLE message so the chunk's
+                # date stage can resolve cross-chunk dependencies
+                # («а до этого Андрей …» refers to the meeting slot
+                # in chunk 1).
+                full_source=state["source_text"],
             )
         )
     return {

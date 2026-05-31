@@ -129,13 +129,14 @@ def test_date_node_uses_llm_answer_when_future_iso():
 
 
 def test_date_node_does_not_fall_back_when_llm_intentionally_null():
-    """FR-CR-05-101 — operator regression: LLM correctly judged
-    a context date as not-a-deadline (FR-CR-05-87/89), returned
-    null + reasoning, but the Python fallback re-extracted the
-    same date from source text and overrode the null. The
-    pipeline now SKIPS the fallback whenever the LLM gave a
-    non-empty reasoning (signal that the null is intentional,
-    not an infrastructure error)."""
+    """FR-CR-05-101 (updated by FR-CR-05-218) — operator regression:
+    LLM correctly judged a context date as not-a-deadline
+    (FR-CR-05-87/89), returned null + reasoning. The python date
+    resolver is SKIPPED whenever the LLM gave a non-empty reasoning
+    (signal that the null is intentional). FR-CR-05-218 then adds a
+    final today-fallback so the operator never sees a None deadline
+    — the task lands on today rather than re-extracting the date
+    the LLM intentionally rejected."""
     backend = _StubBackend(
         detect={"is_task": True, "confidence": 0.9},
         title={"title": "t"},
@@ -152,8 +153,10 @@ def test_date_node_does_not_fall_back_when_llm_intentionally_null():
         author_user_id="U",
         today=TODAY,
     )
-    # LLM intentionally said null with reasoning → no fallback.
-    assert out.task.due_date is None
+    # LLM intentionally said null with reasoning → python fallback
+    # skipped, BUT FR-CR-05-218 today-fallback lands on TODAY (the
+    # date the LLM REJECTED — «к понедельнику» — is NOT re-extracted).
+    assert out.task.due_date == TODAY
 
 
 def test_date_node_falls_back_when_llm_silent_no_reasoning():
@@ -333,3 +336,66 @@ def test_detect_node_failure_yields_no_action():
     # No recovery at pipeline level — classify_with_backend sits above
     # and runs the prefilter override. The graph alone returns no_action.
     assert out.intent == IntentType.no_action
+
+
+def test_fr_cr_05_218_today_fallback_when_no_anchor_anywhere():
+    """FR-CR-05-218 — operator: «дедлайн должен стоять в любом случае».
+    When the LLM emits null AND there's no temporal anchor anywhere
+    (source, no chat history), the pipeline lands on TODAY rather
+    than None."""
+    backend = _StubBackend(
+        detect={"is_task": True, "confidence": 0.9},
+        title={"title": "сделай отчёт"},
+        owner={"reasoning": "no", "display_name": None},
+        date_={"due_date": None, "reasoning": "no date stated"},
+    )
+    out = run_pipeline(
+        backend=backend,
+        source_text="надо сделать отчёт",
+        context_messages=[],
+        author_user_id="U",
+        today=TODAY,
+    )
+    assert out.task is not None
+    # Operator: never leave a draft with due_date=None.
+    assert out.task.due_date == TODAY
+
+
+def test_fr_cr_05_218_build_date_user_prompt_passes_wider_source():
+    """FR-CR-05-218 — date-stage user prompt now carries
+    `wider_source` and `prior_context` blocks so multi-task chunks
+    can resolve dependencies that live OUTSIDE the chunk itself."""
+    from app.intent.date_prompt import build_date_user_prompt
+
+    prompt = build_date_user_prompt(
+        source_text="пусть Андрей поговорит с Олегом 20 мин",
+        current_date="2026-05-31",
+        current_weekday="Sunday",
+        wider_source=(
+            "Ир поставь встречу в пон или вт обсудим "
+            "А до этого пусть Андрей поговорит с Олегом 20 мин"
+        ),
+        prior_context=[{"user": "U-author", "text": "контекст выше"}],
+    )
+    assert "wider_source" in prompt
+    assert "Ир поставь встречу" in prompt  # the cross-chunk anchor
+    assert "prior_context" in prompt
+    assert "контекст выше" in prompt
+    # The chunk itself is still labelled clearly.
+    assert "пусть Андрей поговорит" in prompt
+
+
+def test_fr_cr_05_218_date_prompt_teaches_preparation_dependency():
+    """FR-CR-05-218 — DATE_SYSTEM_PROMPT must teach the dependency
+    pattern «а до этого пусть X сделает Y» = deadline ≤ dependent
+    task's date. Pinned worked example from snapshot 4965."""
+    from app.intent.date_prompt import DATE_SYSTEM_PROMPT
+
+    blob = DATE_SYSTEM_PROMPT
+    assert "FR-CR-05-218" in blob
+    assert "CONTEXT-AWARE DEADLINES" in blob
+    # The exact dependency phrase patterns are pinned.
+    assert "а до этого" in blob.lower() or "до этого" in blob.lower()
+    # Worked example from the operator regression is pinned.
+    assert "Ир поставь встречу" in blob
+    assert "Андрей поговорит" in blob

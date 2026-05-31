@@ -187,6 +187,42 @@ Rules:
 
     If you cannot quote source verbatim, you have not
     earned the right to emit a date — emit null.
+12. CONTEXT-AWARE DEADLINES (FR-CR-05-218). When a `wider_source`
+    or `prior_context` block is provided, the source_message you
+    score may be a CHUNK of a larger task list. Use those wider
+    blocks to find a temporal anchor the chunk itself doesn't
+    state. Two important patterns:
+
+    a) Preparation tasks. The chunk frames itself as work that
+       must finish BEFORE another dated task in the same source.
+       Markers: «а до этого пусть X сделает Y», «перед этим / до
+       этого / до встречи / до X», «before that / first do X /
+       прежде / сначала». In that case the deadline of THIS chunk
+       must be ON OR BEFORE the deadline of the dependent task.
+
+       Worked example (operator pin FR-CR-05-218):
+         wider_source: «Ир поставь встречу в пон или вт обсудим
+                        А до этого пусть Андрей поговорит с
+                        Олегом Синявским 20 мин с ним это обсудит»
+         this chunk:   «А до этого пусть Андрей поговорит с
+                        Олегом Синявским 20 мин»
+         current_date: 2026-05-31 (Sunday)
+         GOOD output:  due_date=2026-06-01 (the «в пон» / Monday
+                       slot of the dependent meeting — this
+                       chunk says «А до этого», so its deadline
+                       is the meeting day at the latest)
+         reasoning:    «"А до этого" — до встречи в пон, т.е.
+                        2026-06-01»
+
+    b) Anchors in prior_context. The recent chat history may
+       contain temporal cues that the source_message refers to:
+       «как договорились», «к тому сроку», «as agreed», «for the
+       deadline». Pull the anchor from prior_context when the
+       chunk uses such referential phrases.
+
+    When NO temporal cue exists anywhere (chunk, wider_source,
+    or prior_context), emit null — the downstream pipeline will
+    apply the today fallback (see FR-CR-05-218 in pipeline).
 
 Worked examples:
   current_date 2026-04-24 (Friday)
@@ -224,13 +260,34 @@ def build_date_user_prompt(
     source_text: str,
     current_date: str,
     current_weekday: str,
+    wider_source: str | None = None,
+    prior_context: list[dict[str, Any]] | None = None,
 ) -> str:
-    return (
-        f"current_date: {current_date} ({current_weekday})\n"
-        "\n"
-        "source_message:\n"
-        f"{source_text}"
-    )
+    """Build the date-stage user prompt.
+
+    FR-CR-05-218 — `wider_source` and `prior_context` are optional
+    additional context so the date LLM can resolve dependencies that
+    live OUTSIDE the chunk it's scoring (multi-task split + chat
+    history). When omitted (single-task or no history), behaviour is
+    identical to the original prompt.
+    """
+    parts = [f"current_date: {current_date} ({current_weekday})", ""]
+    if wider_source and wider_source.strip() and wider_source.strip() != source_text.strip():
+        parts.append("wider_source (the full message this chunk came from):")
+        parts.append(wider_source.strip())
+        parts.append("")
+    if prior_context:
+        parts.append("prior_context (recent chat history, oldest first):")
+        for m in prior_context[-10:]:  # cap to keep token budget tight
+            t = (m.get("text") or "").strip()
+            if not t:
+                continue
+            u = m.get("user") or "?"
+            parts.append(f"- [{u}] {t[:300]}")
+        parts.append("")
+    parts.append("source_message (this chunk — the task we're dating):")
+    parts.append(source_text)
+    return "\n".join(parts)
 
 
 __all__ = [

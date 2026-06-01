@@ -77,11 +77,16 @@ def resolve_mentions_against_catalog(
             embed_fn=embed_fn, model=embed_model, k=kk,
         )
 
+    def _info(eid: int, method: str) -> dict[str, Any]:
+        row = by_id[eid]
+        return {"entity_id": eid, "name": row.name,
+                "aliases": getattr(row, "aliases", "") or "", "method": method}
+
     out: dict[str, dict[str, Any]] = {}
     for m in mentions:
         eid = lex.get(_normalise_name(m))
         if eid is not None:
-            out[m] = {"entity_id": eid, "name": by_id[eid].name, "method": "exact"}
+            out[m] = _info(eid, "exact")
             continue
         res = match_entity(
             kind=CATALOG_KIND, mention=m, context=context_window(transcript, m),
@@ -90,8 +95,7 @@ def resolve_mentions_against_catalog(
         )
         mid = res.get("matched_entity_id")
         if mid and str(mid).isdigit() and int(mid) in by_id:
-            out[m] = {"entity_id": int(mid), "name": by_id[int(mid)].name,
-                      "method": "critic"}
+            out[m] = _info(int(mid), "critic")
     return out
 
 
@@ -129,7 +133,18 @@ def resolve_mentions_to_directory_via_catalog(
         )
         linked = absent = 0
         for m, info in matches.items():
-            cid = norm_to_id.get(_normalise_name(info["name"]))
+            # Map catalog entity → directory by NAME, then by any of its
+            # ALIASES (the catalog and directory use different canonical
+            # strings for the same entity, e.g. «NVIDIA Corporation» vs
+            # «Nvidia»; an alias bridges them). First hit wins.
+            keys = [info["name"]] + [
+                a for a in (info.get("aliases") or "").split(",") if a.strip()
+            ]
+            cid = None
+            for key in keys:
+                cid = norm_to_id.get(_normalise_name(key))
+                if cid is not None:
+                    break
             result[m] = cid
             if cid is not None:
                 linked += 1

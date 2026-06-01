@@ -72,6 +72,21 @@ def test_absent_from_directory_is_none_not_created(monkeypatch):
     assert out == {"SpaceX": None}
 
 
+def test_alias_bridges_different_canonical_names(monkeypatch):
+    """Catalog «NVIDIA Corporation» vs directory «Nvidia»: the name doesn't
+    normalise-match, but the catalog entity's alias «Nvidia» bridges to the
+    directory id."""
+    matches = {"Nvidia": {"entity_id": 7, "name": "NVIDIA Corporation",
+                          "aliases": "NVDA, Nvidia", "method": "critic"}}
+    _patch_catalog(monkeypatch, matches)
+    directory = [_CP(42, "nvidia")]
+    out = r.resolve_mentions_to_directory_via_catalog(
+        object(), settings=_settings(), mentions=["Nvidia"],
+        transcript="...", directory=directory,
+    )
+    assert out == {"Nvidia": 42}  # linked via alias, not name
+
+
 def test_no_catalog_match_is_none(monkeypatch):
     _patch_catalog(monkeypatch, {})  # nothing matched
     directory = [_CP(50, "mitsubishi")]

@@ -47,24 +47,28 @@ KIND = "catalog"
 
 
 def _build_lexical_index(session) -> tuple[dict[str, int], dict[int, EntityCatalogStaging]]:
-    """norm(name)/norm(alias) → entity_id, plus id → row for display.
-    On collision (same normalised key for two entities) the higher
-    mentions_count wins — the more-referenced entity is the safer default."""
+    """norm(name)/norm(alias) → entity_id for UNAMBIGUOUS keys only.
+
+    FR-CR-05-239 follow-up (A/B regression «Хёндай»): the aggressive
+    Cyrillic alias pass put the same transliteration on several members
+    of a brand family (Hyundai / Hyundai Motor / Hyundai Venture …). A
+    coarse «max mentions_count wins» tiebreak then mis-routed the bare
+    brand mention. Fix: a key that maps to MORE THAN ONE distinct entity
+    is AMBIGUOUS — drop it from the exact layer so it falls through to
+    vector+critic, which disambiguates with context."""
     rows = session.execute(select(EntityCatalogStaging)).scalars().all()
     by_id = {r.id: r for r in rows}
-    idx: dict[str, int] = {}
+    key_to_ids: dict[str, set[int]] = {}
     def _put(key: str, r: EntityCatalogStaging) -> None:
         k = _normalise_name(key)
-        if not k:
-            return
-        cur = idx.get(k)
-        if cur is None or (by_id[cur].mentions_count or 0) < (r.mentions_count or 0):
-            idx[k] = r.id
+        if k:
+            key_to_ids.setdefault(k, set()).add(r.id)
     for r in rows:
         _put(r.name, r)
         for a in (r.aliases or "").split(","):
             if a.strip():
                 _put(a, r)
+    idx = {k: next(iter(ids)) for k, ids in key_to_ids.items() if len(ids) == 1}
     return idx, by_id
 
 

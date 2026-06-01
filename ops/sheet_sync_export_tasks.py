@@ -178,6 +178,14 @@ def main() -> int:
     ap.add_argument("--status", default="To Do", help="Статус для всех залитых задач.")
     ap.add_argument("--replace", action="store_true",
                     help="Очистить строки данных перед заливкой (РАЗОВЫЙ сброс; стирает ручные правки).")
+    ap.add_argument(
+        "--replace-source",
+        default=None,
+        choices=["slack", "telegram", "zoom", "fireflies"],
+        help="Точечный сброс: удалить из листа только строки с указанным "
+             "Источником и залить их заново. Остальные источники + ручные "
+             "правки НЕ трогаются. Заливаются только задачи этого источника.",
+    )
     ap.add_argument("--append", action="store_true",
                     help="Дописать только НОВЫЕ строки (дедуп по title+Added at), не трогая существующие и правки. Для крона.")
     ap.add_argument("--all", action="store_true",
@@ -296,6 +304,11 @@ def main() -> int:
             ])
         session.rollback()  # read-only on the DB
 
+    if args.replace_source:
+        target = _SOURCE_DISPLAY.get(args.replace_source.lower(), args.replace_source.capitalize())
+        rows = [r for r in rows if (r[14] or "").strip().lower() == target.lower()]
+        print(f"--replace-source={args.replace_source}: фильтруем заливку до Источник='{target}' → {len(rows)} строк")
+
     print(f"задач к заливке: {len(rows)} (с {args.since}, "
           f"фильтр {'ВСЕ (--all)' if args.all else DIRECTIONS_IMPORTANT}; "
           f"пропущено без title: {skipped_no_title})")
@@ -326,6 +339,10 @@ def main() -> int:
             print(f"дописано строк: {n} в '{client.spreadsheet_title}' / tab '{args.tab}' "
                   "(existing не тронуты).")
             return 0
+        if args.replace_source:
+            target = _SOURCE_DISPLAY.get(args.replace_source.lower(), args.replace_source.capitalize())
+            removed = client.delete_rows_where_source(target)
+            print(f"удалено старых строк Источник='{target}': {removed}")
         if args.replace:
             client.clear_data_rows()
             print("строки данных очищены (--replace).")

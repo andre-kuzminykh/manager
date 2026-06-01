@@ -127,3 +127,24 @@ def test_export_tasks_wires_real_added_at_helpers():
     # the old created-at formatting for 'added' must be gone
     assert 'added = d.created_at.strftime' not in src
     assert 'added = t.created_at.strftime' not in src
+
+
+def test_export_has_replace_source_flag_and_filter():
+    """FR-CR-05-233 — exporter must support --replace-source: a targeted
+    rebuild of a single Источник that leaves other sources / manual edits
+    intact. We assert the wiring without invoking the real Google API."""
+    import pathlib
+    import ops.sheet_sync_export_tasks as exp
+
+    src = pathlib.Path(exp.__file__).read_text(encoding="utf-8")
+    # CLI flag exists and is restricted to the known sources
+    assert '"--replace-source"' in src
+    for s in ("slack", "telegram", "zoom", "fireflies"):
+        assert f'"{s}"' in src
+    # Rows are filtered to the chosen source BEFORE writing
+    assert "args.replace_source" in src
+    assert "delete_rows_where_source" in src
+    # Sheets client exposes the row deletion entrypoint
+    from app.sheet_sync.sheets_client import TasksSheetClient
+
+    assert callable(getattr(TasksSheetClient, "delete_rows_where_source", None))

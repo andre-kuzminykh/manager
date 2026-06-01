@@ -176,6 +176,47 @@ class TasksSheetClient:
             spreadsheetId=self._sid, range=f"{self._tab}!A2:{_END_COL}", body={}
         ).execute()
 
+    def delete_rows_where_source(self, source_value: str) -> int:
+        """FR-CR-05-233 — delete rows whose 'Источник' column (O = col 15)
+        equals ``source_value`` (case-insensitive). Used for the
+        ``--replace-source`` flow: wipe e.g. all Slack rows so the exporter
+        can refill them from the DB, while leaving Zoom/Fireflies/Telegram
+        and any manual edits untouched.
+
+        Iterates rows TOP→BOTTOM but deletes BOTTOM→TOP so indices stay
+        stable. Returns the number of deleted rows.
+        """
+        rng = self._svc.spreadsheets().values().get(
+            spreadsheetId=self._sid, range=f"{self._tab}!A2:{_END_COL}",
+        ).execute().get("values", [])
+        target = (source_value or "").strip().lower()
+        # Column O is index 14 (zero-based) in the sheet row, but values()
+        # trims trailing empties — guard for short rows.
+        to_delete: list[int] = []  # absolute row indices (header is row 1)
+        for i, row in enumerate(rng):
+            src = (row[14] if len(row) > 14 else "") or ""
+            if src.strip().lower() == target:
+                to_delete.append(i + 2)  # +1 for header, +1 for 1-based
+        if not to_delete:
+            return 0
+        sheet_gid = self.resolve_tab()
+        requests = []
+        for r in reversed(to_delete):
+            requests.append({
+                "deleteDimension": {
+                    "range": {
+                        "sheetId": sheet_gid,
+                        "dimension": "ROWS",
+                        "startIndex": r - 1,  # API uses 0-based half-open
+                        "endIndex": r,
+                    }
+                }
+            })
+        self._svc.spreadsheets().batchUpdate(
+            spreadsheetId=self._sid, body={"requests": requests},
+        ).execute()
+        return len(to_delete)
+
     # -- append rows (DB → Sheet seed/export) -----------------------------
     def append_rows(self, rows: list[list[str]]) -> int:
         """Append data rows below the header (USER_ENTERED so dates/dropdowns

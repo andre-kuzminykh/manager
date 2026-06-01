@@ -114,8 +114,13 @@ def merge_pair(
 def _collect_pairs(args, exclude_src: set[int] | None = None) -> list[tuple[int, int, str, str]]:
     """Return [(from_id, into_id, confidence, why)] from --review or
     explicit --from/--into. Pairs whose source id ∈ exclude_src are
-    dropped (operator review found them unsafe)."""
+    dropped (operator review found them unsafe).
+
+    `--only-confidence X` selects EXACTLY level X (e.g. just 'medium'
+    after 'high' is already applied); otherwise `--confidence X` is a
+    floor (X and above)."""
     exclude_src = exclude_src or set()
+    only = getattr(args, "only_confidence", None)
     pairs: list[tuple[int, int, str, str]] = []
     if args.from_id and args.into_id:
         pairs.append((int(args.from_id), int(args.into_id), "manual", "explicit pair"))
@@ -128,7 +133,10 @@ def _collect_pairs(args, exclude_src: set[int] | None = None) -> list[tuple[int,
     for cl in report.get("clusters", []):
         for sg in (cl.get("verdict") or {}).get("subgroups", []):
             conf = sg.get("confidence", "low")
-            if _CONF_ORDER.get(conf, 0) < min_conf:
+            if only:
+                if conf != only:
+                    continue
+            elif _CONF_ORDER.get(conf, 0) < min_conf:
                 continue
             keep = sg.get("keep")
             for src in sg.get("merge_in", []):
@@ -165,7 +173,10 @@ def main() -> int:
     ap.add_argument("--into", dest="into_id", type=int, default=0)
     ap.add_argument("--confidence", choices=["high", "medium", "low"],
                     default="high",
-                    help="минимальный уровень из LLM-отчёта (default: high)")
+                    help="минимальный уровень из LLM-отчёта (floor; default: high)")
+    ap.add_argument("--only-confidence", choices=["high", "medium", "low"],
+                    default=None,
+                    help="ровно ОДИН уровень (e.g. medium после применённого high)")
     ap.add_argument("--limit", type=int, default=0, help="0 = без лимита")
     ap.add_argument("--apply", action="store_true",
                     help="ЗАПИСАТЬ изменения (default: dry-run)")

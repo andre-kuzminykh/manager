@@ -32,6 +32,7 @@ EMBEDDING_DIM = 3072
 KIND_COUNTERPARTY = "counterparty"
 KIND_TEAM_MEMBER = "team_member"
 KIND_EMPLOYEE = "employee"
+KIND_TASK = "task"  # FR-TV — semantic task search / NL status updates
 
 
 class EntityEmbedding(Base, TimestampMixin):

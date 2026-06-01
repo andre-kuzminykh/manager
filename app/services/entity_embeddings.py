@@ -156,6 +156,33 @@ def build_text_repr_employee(
     return ". ".join(b for b in bits if b).strip()
 
 
+def build_text_repr_task(
+    *,
+    title: str | None,
+    description: str | None = None,
+    owner_display_name: str | None = None,
+    status: str | None = None,
+    due_date: Any = None,
+    category: str | None = None,
+    max_desc_chars: int = 500,
+) -> str:
+    """FR-TV-010 — CONTENT-only text for a task embedding: title + description
+    + owner + category (the semantic match signal). `status` and `due_date`
+    are accepted for signature symmetry but are DELIBERATELY NOT embedded
+    (DEC-2): they are volatile and read live at query time, so a status change
+    must neither re-embed the task (FR-TV-014) nor skew similarity. Empty
+    content ⇒ "" (not embeddable)."""
+    _ = (status, due_date)  # intentionally not part of the embedded content
+    bits = [_clean(title)]
+    if description:
+        bits.append(_clean(description)[:max_desc_chars])
+    if owner_display_name:
+        bits.append(f"owner: {_clean(owner_display_name)}")
+    if category:
+        bits.append(f"category: {_clean(category)}")
+    return ". ".join(b for b in bits if b).strip()
+
+
 def text_repr_hash(text_repr: str) -> str:
     return hashlib.sha256(text_repr.encode("utf-8")).hexdigest()
 

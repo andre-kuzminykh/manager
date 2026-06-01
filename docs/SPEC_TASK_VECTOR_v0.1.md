@@ -67,11 +67,23 @@ history + sync (`app/models/task.py`, `app/sync/{task_sync,tasks_api,sheets}.py`
 |----|----------|-----------|
 | **DEC-1** | Tasks indexed as `kind='task'` in the existing `entity_embeddings`, in the **separate** vector DB. | Reuses proven stack; keeps prod DB free of pgvector (operator decision 2026-06-01). |
 | **DEC-2** | Embed **content only**; read status/due **live**. | Status churn shouldn't re-embed or skew search; live read = always correct status. |
-| **DEC-3** | Status update is a **confirmed write**, one task per action. | Writes are real (Sheets/GTasks). Avoid silent/mass mutation. |
-| **DEC-4** | Expose as **CEO-brain local tools** (search_tasks / get_task / update_task_status), not an external MCP server (yet). | Matches current architecture (app is MCP *client*); fastest, safe. External MCP-server is a future FR-TV-090. |
-| **DEC-5** | NL→status mapping done by the **agent (LLM)**, then confirmed. | «отправил письмо» → likely `done`; but ambiguous → agent proposes, operator confirms. |
+| **DEC-3** | Status update applies **immediately on a confident single match** (no «да?» confirmation), one task per action, with **undo** + audit. The ambiguity gate still asks when 2+ match or confidence is low. | Operator choice 2026-06-01 «меняй сразу». Undo + allow-list + ambiguity gate are the safety net replacing the confirmation step. |
+| **DEC-4** | Expose task tools **both** as CEO-brain local tools **and** as an external **MCP server** (for an external Claude client). | Operator choice 2026-06-01 «да, ещё и для внешнего Клода». Same executors behind both surfaces. → FR-TV-090. |
+| **DEC-5** | NL→status mapping by a fixed **verb→status table** (below), applied by the agent. | Operator choice 2026-06-01 «да». Deterministic, reviewable. |
 | **DEC-6** | Person reference («Семёну») handled two ways: owner is in `text_repr` (cheap recall) **and** optional owner-filter via person resolution. | Robust without a hard dependency on person-matcher. |
 | **DEC-7** | Feature gated by `TASK_VECTOR_ENABLED` (off) + reversible. | Same safe-rollout discipline as FR-CR-05-241. |
+
+**Verb→status table (DEC-5, OQ-2 resolved).** Case-insensitive stem match on the
+utterance's action verb:
+
+| Russian verb stem (examples) | → target status |
+|---|---|
+| отправил / сделал / закрыл / завершил / готово / выполнил / отдал / сдал | `done` |
+| начал / в работе / приступил / делаю / занимаюсь | `in_progress` |
+| (no recognised action verb) | no status inferred → agent asks |
+
+Unknown/ambiguous verb ⇒ no inference; agent asks. The mapping is a constant in
+`task_tools` (`VERB_STATUS_MAP`) so it's unit-testable and reviewable.
 
 ---
 
@@ -162,14 +174,21 @@ history + sync (`app/models/task.py`, `app/sync/{task_sync,tasks_api,sheets}.py`
 - **FR-TV-041** — Invalid/unknown `task_id` → no write, structured `{error:"not_found"}`.
 - **FR-TV-042** — Invalid `new_status` or disallowed transition → no write,
   `{error:"invalid_transition", from, to}`.
-- **FR-TV-043** — The agent MUST NOT call `update_task_status` when search is ambiguous
-  (≥2 within δ) or low-confidence (<τ_high); it asks the operator first. (Orchestration rule
-  + tool is itself id-precise so it can't mass-update.)
+- **FR-TV-043** — Confidence/ambiguity gate (DEC-3): when exactly ONE candidate has score
+  ≥ τ_high and no other is within δ, the agent applies the change **immediately** (no
+  confirmation). When ≥2 are within δ, or the top is in [τ_low, τ_high), the agent lists
+  candidates and asks; no write. When < τ_low, no write. The tool stays id-precise (cannot
+  mass-update).
 - **FR-TV-044** — Idempotent: updating to the current status is a no-op success
   (`{ok:true, changed:false}`), no duplicate history row.
 - **FR-TV-045** — On success the index entry for that task is refreshed only if content
   changed (status-only change ⇒ no re-embed, FR-TV-014); response includes the new status +
   task title for the agent to echo.
+- **FR-TV-046 (UNDO)** — Because writes apply without confirmation, every auto-applied change
+  is reversible: `undo_last_task_status(actor_id)` (and/or `update_task_status` back to the
+  prior status) restores `from_status` using the most recent `TaskStatusHistory` row for that
+  task and re-syncs. The agent surfaces «изменил X→done (отменить?)» so the operator can revert
+  in one step. Undo is itself audited.
 
 ### 5.5 Tools / agent integration
 - **FR-TV-070** — New module `app/ceo_brain/task_tools.py` exposes `TASK_TOOL_SCHEMAS`
@@ -177,11 +196,17 @@ history + sync (`app/models/task.py`, `app/sync/{task_sync,tasks_api,sheets}.py`
   settings)` returning `{name: callable(input)->json_str}`, mirroring `slack_tools.py`.
 - **FR-TV-071** — `responder.build_anthropic_request` merges task tools into `tools=[...]`
   ONLY when `TASK_VECTOR_ENABLED`. System prompt gains task-tool routing hints.
-- **FR-TV-072** — `update_task_status` executor requires confirmation context: it executes the
-  write only when the agent passes an explicit confirmed flag/derived from operator assent
-  (the executor itself stays id-precise; the *confirmation* is enforced by prompt rule +
-  the ambiguity gate FR-TV-043). v0.1: executor writes when called; the prompt forbids calling
-  it pre-confirmation.
+- **FR-TV-072** — `update_task_status` executor is id-precise and writes when called (no
+  confirmation step, DEC-3). Safety is enforced by: the ambiguity gate FR-TV-043 (agent only
+  auto-calls on a single confident match), the allow-list FR-TV-060, undo FR-TV-046, and audit
+  FR-TV-061.
+- **FR-TV-090 (EXTERNAL MCP SERVER)** — The same executors are exposed via a standalone MCP
+  server (`ops.task_mcp_server` / `app/mcp/task_server.py`) speaking MCP over stdio/HTTP, so an
+  external Claude client can call `search_tasks` / `get_task` / `update_task_status` /
+  `undo_last_task_status`. The server reuses `build_task_executors` (single source of truth),
+  enforces the SAME allow-list + ambiguity discipline, is gated by `TASK_MCP_SERVER_ENABLED`,
+  and authenticates the client (token). Tool schemas are shared with the local CEO-brain
+  registry.
 
 ### 5.6 Sync
 - **FR-TV-050** — A status change via `update_task_status` propagates identically to a manual
@@ -207,8 +232,11 @@ history + sync (`app/models/task.py`, `app/sync/{task_sync,tasks_api,sheets}.py`
   `CEO_BRAIN_MAX_RUN_COST_USD`.
 - **NFR-TV-003 Freshness** — a new/edited task is searchable within ≤ `refresh interval`
   (target 10 min), or near-instant if `TASK_VECTOR_IMMEDIATE_UPSERT` on.
-- **NFR-TV-004 Accuracy** — precision-first for status writes: prefer asking over wrong write;
-  τ_high/τ_low/δ tunable via settings; measured on a labelled set before `on`.
+- **NFR-TV-004 Accuracy** — precision-first for status writes. τ_high/τ_low/δ tunable via
+  settings, calibrated on a **synthetic** dataset (OQ-5 resolved: no human-labelled set
+  available). A generator (`ops.gen_task_vector_eval`) produces (utterance → expected task)
+  pairs from real task titles with paraphrase/typo/transliteration noise; thresholds chosen to
+  maximise precision@1 with high recall on that set before any auto-write is enabled.
 - **NFR-TV-005 Resilience** — vector DB / OpenAI failure NEVER breaks task pipelines or the
   agent; tools degrade to `{error}` and the agent explains. Mirrors the never-raise discipline
   of `counterparty_shadow_v2`.
@@ -361,18 +389,19 @@ tests skip when `TEST_PG_VECTOR_URL` unset (house style, `test_entity_embeddings
 
 ---
 
-## 11. Open questions / risks
+## 11. Resolved decisions (2026-06-01) & risks
 
-- **OQ-1 (DEC-4)** Confirm: internal CEO-brain tools are enough, or do you also need an
-  external **MCP server** exposing these tools to other Claude clients? (→ future FR-TV-090.)
-- **OQ-2 (DEC-5)** NL→status policy: should «отправил/сделал/закрыл» map to `done`, and
-  «начал/в работе» to `in_progress`? Confirm verb→status table for the prompt.
-- **OQ-3** Person scope: do utterances reference task **owner** only, or also «по <теме>»?
-  (We support both via content text_repr; confirm priority.)
-- **OQ-4** Confirmation channel: in Slack/TG, is an explicit operator «да» required before
-  every write, or is high-confidence single-match auto-applied with an undo? (Default: ask.)
-- **OQ-5** τ/δ thresholds and the labelled calibration set (who provides ground truth).
-- **RISK-1** Index staleness causing a just-created task to be unfindable for a status update →
-  mitigated by immediate-upsert (FR-TV-013) or short refresh interval.
-- **RISK-2** Wrong-task status write → mitigated by ambiguity gate + confirmation + audit + undo
-  via history.
+- **OQ-1 → RESOLVED:** expose **both** internal CEO-brain tools **and** an external MCP server
+  (FR-TV-090).
+- **OQ-2 → RESOLVED:** fixed verb→status table (§2). 
+- **OQ-3 → RESOLVED:** support both owner («Семёну») and topic («по найму») — owner + content
+  in `text_repr`.
+- **OQ-4 → RESOLVED:** **apply immediately** on a confident single match (no confirmation);
+  ambiguity/low-confidence still asks; **undo** (FR-TV-046) + allow-list + audit are the net.
+- **OQ-5 → RESOLVED:** calibrate τ/δ on a **synthetic** eval set (NFR-TV-004); no human dataset.
+- **RISK-1** Index staleness → a just-created task may miss a status update → mitigated by
+  immediate-upsert (FR-TV-013) / short refresh interval.
+- **RISK-2** Wrong-task auto-write (raised by «меняй сразу») → mitigated by τ_high single-match
+  gate + allow-list + **undo** + full audit; thresholds tuned conservatively on synthetic eval.
+- **RISK-3** External MCP server widens the attack surface → token auth + allow-list on writes +
+  flag-gated (`TASK_MCP_SERVER_ENABLED`, default off).

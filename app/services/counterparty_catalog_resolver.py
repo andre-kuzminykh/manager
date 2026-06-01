@@ -99,6 +99,34 @@ def resolve_mentions_against_catalog(
     return out
 
 
+def recognize_against_catalog(
+    fallback_session: Any,
+    *,
+    settings: Any,
+    mentions: list[str],
+    transcript: str,
+) -> dict[str, dict[str, Any]]:
+    """RECOGNIZE-ONLY (operator choice 2026-06-01 «А»): resolve mentions
+    against the 4000 vector catalog and return the matches
+    {mention: {entity_id, name, method}} — for showing/logging. Writes
+    NOTHING, touches no directory. Opens/closes the separate catalog session.
+    NEVER raises (returns {} on failure)."""
+    if not mentions:
+        return {}
+    session, owns = open_catalog_session(fallback_session)
+    try:
+        return resolve_mentions_against_catalog(
+            session, settings=settings, mentions=mentions, transcript=transcript,
+        )
+    except Exception as e:  # noqa: BLE001 — never break the pipeline
+        log.error("recognize_against_catalog_failed", error=str(e))
+        return {}
+    finally:
+        if owns:
+            session.rollback()
+            session.close()
+
+
 def resolve_mentions_to_directory_via_catalog(
     prod_session: Any,
     *,
@@ -173,5 +201,6 @@ def resolve_mentions_to_directory_via_catalog(
 __all__ = [
     "open_catalog_session",
     "resolve_mentions_against_catalog",
+    "recognize_against_catalog",
     "resolve_mentions_to_directory_via_catalog",
 ]

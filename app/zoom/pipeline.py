@@ -1178,6 +1178,12 @@ class ZoomPipeline:
 
         if not row.transcript_text:
             return 0
+        # FR-CR-05-241 — mode=on: RECOGNIZE-ONLY against the 4000 vector
+        # catalog (operator choice «А»: just log what matched what; write
+        # NOTHING, ignore the legacy directory). off/shadow → v1 below.
+        if getattr(self._settings, "counterparty_match_v2_mode", "off") == "on":
+            return self._recognize_counterparties_catalog(row, source_kind="zoom",
+                                                          source_id=row.zoom_id)
         directory = (
             session.query(Counterparty)
             .order_by(Counterparty.name)
@@ -1212,32 +1218,20 @@ class ZoomPipeline:
                 zoom_id=row.zoom_id,
             )
             return 0
-        # FR-CR-05-241 — resolver selection. "on" = v2 (vector catalog +
-        # critic, mapped to the directory by name); otherwise v1 whole-dir.
-        _mode = getattr(self._settings, "counterparty_match_v2_mode", "off")
         try:
-            if _mode == "on":
-                from app.services.counterparty_catalog_resolver import (
-                    resolve_mentions_to_directory_via_catalog,
-                )
-                mention_to_id = resolve_mentions_to_directory_via_catalog(
-                    session, settings=self._settings, mentions=mentions,
-                    transcript=row.transcript_text or "", directory=directory,
-                )
-            else:
-                mention_to_id = resolve_mentions_to_directory(
-                    mentions,
-                    directory,
-                    llm_backend=self._llm,
-                    model=self._settings.fireflies_tasks_model,
-                    reasoning_effort=(
-                        self._settings.fireflies_tasks_reasoning_effort or None
-                    ),
-                    batch_size=self._settings.counterparty_resolve_batch_size,
-                    max_workers=self._settings.counterparty_resolve_max_workers,
-                    trace_source="zoom",
-                    trace_recording_id=row.zoom_id,
-                )
+            mention_to_id = resolve_mentions_to_directory(
+                mentions,
+                directory,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                batch_size=self._settings.counterparty_resolve_batch_size,
+                max_workers=self._settings.counterparty_resolve_max_workers,
+                trace_source="zoom",
+                trace_recording_id=row.zoom_id,
+            )
         except Exception as e:  # noqa: BLE001
             log.warning(
                 "zoom_counterparty_resolve_unexpected_error",
@@ -1320,6 +1314,48 @@ class ZoomPipeline:
                 source_kind="zoom", source_id=row.zoom_id,
             )
         return len(unique_ids)
+
+    def _recognize_counterparties_catalog(
+        self, row: ZoomRecording, *, source_kind: str, source_id: str
+    ) -> int:
+        """FR-CR-05-241 mode=on — RECOGNIZE-ONLY against the 4000 vector
+        catalog. Extracts mentions, resolves them against the catalog, and
+        LOGS «what matched what». Writes NOTHING (no CounterpartyMention, no
+        directory) — recognition only, per operator choice «А»."""
+        from app.services.counterparty_match import extract_counterparty_mentions
+        from app.services.counterparty_catalog_resolver import (
+            recognize_against_catalog,
+        )
+
+        try:
+            mentions = extract_counterparty_mentions(
+                row.transcript_text,
+                llm_backend=self._llm,
+                model=self._settings.fireflies_tasks_model,
+                reasoning_effort=(
+                    self._settings.fireflies_tasks_reasoning_effort or None
+                ),
+                trace_source=source_kind, trace_recording_id=source_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("counterparty_recognize_extract_error",
+                        source_kind=source_kind, source_id=source_id, error=str(e))
+            return 0
+        if not mentions:
+            return 0
+        matches = recognize_against_catalog(
+            None, settings=self._settings, mentions=mentions,
+            transcript=row.transcript_text or "",
+        )
+        recognized = {m: info["name"] for m, info in matches.items()}
+        unmatched = [m for m in mentions if m not in matches]
+        log.info(
+            "counterparty_recognized_v2",
+            source_kind=source_kind, source_id=source_id,
+            mentions=len(mentions), recognized=len(recognized),
+            matched=recognized, unmatched=unmatched,
+        )
+        return len(recognized)
 
     def _step_enroll_unresolved(
         self, session: Session, row: ZoomRecording

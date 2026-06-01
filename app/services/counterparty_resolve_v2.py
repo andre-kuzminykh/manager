@@ -64,16 +64,17 @@ ROLLOUT (shadow-first, gated by COUNTERPARTY_MATCH_V2_MODE, default "off"):
                     shadow_compare_v2` ALSO resolves against the catalog and
                     LOGS the name-based diff (both/v1_only/v2_only). Zero
                     writes, never raises. Validate on live meetings.
-  Phase 2  on     — v2 is the SINGLE canonical resolver (implemented in
-                    counterparty_catalog_resolver.resolve_mentions_to_
-                    directory_via_catalog, wired into both pipelines). A
-                    matched catalog entity is mapped back to a `counterparties`
-                    row by name_normalised (catalog ids ≠ counterparties ids).
-                    CONSERVATIVE: links ONLY to entities already in the
-                    directory; a real catalog entity absent from it → None
-                    (review) and is NEVER auto-created — the directory's source
-                    of truth is the Google Sheet, which would wipe an
-                    auto-created row. Reversible instantly via the flag (→off).
+  Phase 2  on     — RECOGNIZE-ONLY (operator choice 2026-06-01 «А»: «в лог
+                    только сохрани что с чем смэтчил»). v2 recognises mentions
+                    against the 4000 catalog and LOGS «what matched what»
+                    (counterparty_recognized_v2). Writes NOTHING — no
+                    CounterpartyMention, and the legacy `counterparties`
+                    directory (847, Google-Sheet-synced) is ignored entirely.
+                    Implemented via counterparty_catalog_resolver.recognize_
+                    against_catalog, wired into both pipelines' recognize-only
+                    branch. Reversible instantly via the flag (→off = v1).
+                    (resolve_mentions_to_directory_via_catalog is retained as a
+                    building block for a future opt-in «save» mode.)
 
 PROD INFRA (operator decision 2026-06-01: SEPARATE pgvector instance — the
 prod transactional DB is NEVER touched / migrated):

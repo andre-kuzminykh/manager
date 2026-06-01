@@ -135,6 +135,35 @@ def test_empty_mentions_short_circuits(monkeypatch):
     assert out == {}
 
 
+def test_recognize_only_returns_matches(monkeypatch):
+    """mode=on recognize-only: returns the catalog matches for logging,
+    writes nothing, touches no directory."""
+    matches = {"Тезер": {"entity_id": 188, "name": "Tether", "method": "critic"}}
+    monkeypatch.setattr(r, "open_catalog_session", lambda s: (s, False))
+    monkeypatch.setattr(r, "resolve_mentions_against_catalog",
+                        lambda cat, **_kw: matches)
+    out = r.recognize_against_catalog(
+        None, settings=_settings(), mentions=["Тезер"], transcript="...",
+    )
+    assert out == matches
+
+
+def test_recognize_only_empty_mentions(monkeypatch):
+    assert r.recognize_against_catalog(
+        None, settings=_settings(), mentions=[], transcript="x") == {}
+
+
+def test_recognize_only_never_raises(monkeypatch):
+    monkeypatch.setattr(r, "open_catalog_session", lambda s: (s, False))
+
+    def boom(cat, **_kw):
+        raise RuntimeError("catalog down")
+    monkeypatch.setattr(r, "resolve_mentions_against_catalog", boom)
+    out = r.recognize_against_catalog(
+        None, settings=_settings(), mentions=["X"], transcript="x")
+    assert out == {}  # swallowed → recognition simply yields nothing this run
+
+
 def test_owns_session_is_closed(monkeypatch):
     """When a separate catalog session is opened, it must be closed."""
     closed = {"rollback": 0, "close": 0}

@@ -84,6 +84,15 @@ def cmd_embed(args) -> int:
     embed_fn = make_openai_embed_fn(OpenAI(api_key=s.openai_api_key), args.model)
 
     with session_scope() as session:
+        # heal: drop embeddings whose staging row was merged away (orphans),
+        # so 3994 entities ⇒ 3994 embeddings stays an invariant.
+        orphaned = session.execute(sql_text(
+            "DELETE FROM entity_embeddings WHERE kind = :k AND entity_id NOT IN "
+            "(SELECT id::text FROM entity_catalog_staging)"
+        ), {"k": KIND}).rowcount
+        if orphaned:
+            print(f"[heal] удалено осиротевших эмбеддингов: {orphaned}")
+            session.commit()
         if args.reset:
             n = session.execute(
                 sql_text("DELETE FROM entity_embeddings WHERE kind = :k"),

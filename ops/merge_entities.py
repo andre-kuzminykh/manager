@@ -41,7 +41,7 @@ import sys
 import time
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text as sql_text
 from sqlalchemy.orm import Session
 
 from app.db import session_scope
@@ -100,6 +100,16 @@ def merge_pair(
     if not (dst.parent_org or "").strip() and (src.parent_org or "").strip():
         dst.parent_org = src.parent_org.strip()
     session.delete(src)
+    # FR-CR-05-239: drop the deleted row's catalog embedding so it can't
+    # surface as a stale top-K candidate (no orphan in entity_embeddings).
+    try:
+        session.execute(
+            sql_text("DELETE FROM entity_embeddings "
+                     "WHERE kind='catalog' AND entity_id = :eid"),
+            {"eid": str(src.id)},
+        )
+    except Exception:  # noqa: BLE001 — table may be absent in some envs/tests
+        pass
     session.flush()
     return {
         "from_id": src.id, "into_id": dst.id,

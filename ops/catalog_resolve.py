@@ -88,6 +88,9 @@ def main() -> int:
     g.add_argument("--mentions", help="comma-separated mention surface forms")
     g.add_argument("--text-file", help="transcript file; mentions auto-extracted")
     ap.add_argument("--extract-model", default=s.openai_model)
+    ap.add_argument("--extract-reasoning-effort", default="high",
+                    help="'high' for reasoning models (gpt-5.5/o*); "
+                         "set to 'none' or '' for plain chat models (gpt-4o).")
     ap.add_argument("--critic-model", default=getattr(s, "entity_match_critic_model", "gpt-4o"))
     ap.add_argument("--embed-model", default="text-embedding-3-large")
     ap.add_argument("--k", type=int, default=20)  # 4000-target recall (operator: «k 12→20»)
@@ -105,9 +108,11 @@ def main() -> int:
         if args.text_file:
             with open(args.text_file, encoding="utf-8") as fh:
                 transcript = fh.read()
+            re = (args.extract_reasoning_effort or "").strip().lower()
+            re = None if re in ("", "none") else re
             mentions = extract_counterparty_mentions(
                 transcript, llm_backend=backend, model=args.extract_model,
-                reasoning_effort="high",
+                reasoning_effort=re,
             )
             print(f"извлечено упоминаний: {len(mentions)} → {mentions}\n")
         else:

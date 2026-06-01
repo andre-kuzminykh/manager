@@ -1,27 +1,40 @@
-"""FR-CR-05-241 — v2 counterparty resolution (pgvector top-K → critic),
-the building block for replacing the slow whole-directory LLM resolve in
-the Zoom/Fireflies pipeline. PURE orchestration: no DB writes, no Slack,
-no enrollment side-effects — so it's safe to compute in SHADOW alongside
-v1 before any cutover.
+"""FR-CR-05-241 — entity resolution for the **4000-entity catalog**
+(operator 2026-06-01: «мы делаем для 4000»). TARGET ARCHITECTURE = pure
+RAG, because a directory of ~4000 names CANNOT be stuffed into an LLM
+prompt:
 
-WHY (operator 2026-06-01): the live `match_counterparties` step takes
-~8.85 min/recording (whole directory stuffed into the LLM) AND auto-
-enrolls every unresolved mention as a new counterparty — which polluted
-the prod directory with speech-to-text garbage («Забалты», «Не бучи»,
-«День Z», «сугу»…). v2 fixes both: per-mention pgvector retrieval +
-tightened critic (seconds, precise) and a CONSERVATIVE ENROLLMENT POLICY.
+    transcript
+      → extract (gpt-5.5, ONE call) → mentions
+      → per mention:
+           pgvector top-K (k≈20, widen on low confidence)   # NOT the whole 4000
+           critic gpt-4o over those K candidates only
+           ├─ matched → link to a catalog entity
+           └─ none    → REVIEW QUEUE (never auto-enrolled, never lost)
 
-ENROLLMENT POLICY (the precision-critical contract):
-  Under v2 an unresolved mention (critic → matched_entity_id is None) is
-  NEVER auto-enrolled into `counterparties`. It is surfaced as
-  `unresolved` for review/logging only. Enrollment of genuinely-new real
-  entities is an explicit, separate, curated action — not a side-effect
-  of a garbled transcript. (v1 enrolled ALL unresolved → the pollution.)
+WHY: the legacy `match_counterparties` step stuffed the WHOLE directory
+into the LLM (~8.85 min) AND auto-enrolled every unresolved mention as a
+new counterparty — polluting the directory with speech-to-text garbage
+(«Забалты», «Не бучи», «сугу», «Long Ball Finance»…). At 4000 names the
+whole-dir trick is impossible anyway; RAG + a conservative enrollment
+policy is the only thing that scales AND stays clean.
 
-SHADOW CONTRACT:
-  In shadow mode the pipeline keeps v1 as the source of truth and only
-  LOGS `shadow_diff(v1, v2)` — agreements, v1-only, v2-only, both-none —
-  with timings. No behaviour change → zero risk.
+ENROLLMENT POLICY (precision-critical):
+  An unresolved mention (critic → None, even after widening k) is NEVER
+  auto-enrolled. It goes to a REVIEW QUEUE (`review_queue(...)`) for the
+  operator to curate — genuinely-new entities are added via the source
+  export + rebuild, not as a side-effect of a garbled transcript.
+
+RECALL levers at 4000 scale (no «whole base in context»):
+  1. larger k (top-50/100 = 100 names in the prompt, not 4000);
+  2. retrieval quality — clean catalog + acronym/Cyrillic aliases;
+  3. extract quality (gpt-5.5 + name-bias → cleaner surface forms).
+  If still none → review queue. That is the ceiling, moved by k/aliases/
+  extract — NOT by dumping the directory into the LLM.
+
+NOTE: `resolve_mentions_hybrid` (below) keeps a whole-directory v1
+FALLBACK — that is **847-only legacy** (a small directory fits a prompt).
+It does NOT apply to the 4000 catalog target and is kept only for the
+small-directory scenario.
 """
 from __future__ import annotations
 
@@ -30,9 +43,14 @@ from typing import Any, Callable
 
 from app.logging_setup import get_logger
 from app.models.entity_embedding import KIND_COUNTERPARTY
-from app.services.entity_match_v2 import DEFAULT_K, match_entity
+from app.services.entity_match_v2 import match_entity
 
 log = get_logger(__name__)
+
+# 4000-catalog default retrieval width (operator 2026-06-01: «дефолт k 12→20»).
+# Wider than the 847-tuned DEFAULT_K so rare/garbled names still enter the
+# critic's candidate window without the whole base in context.
+CATALOG_DEFAULT_K = 20
 
 # retrieve_fn(query_text, k) -> [{entity_id, text_repr, score}]
 RetrieveFn = Callable[[str, int], list[dict[str, Any]]]
@@ -54,7 +72,7 @@ def resolve_mentions_v2(
     backend: Any,
     context_for: Callable[[str], str] | None = None,
     critic_model: str | None = None,
-    k: int = DEFAULT_K,
+    k: int = CATALOG_DEFAULT_K,
 ) -> list[V2Resolution]:
     """Resolve each mention via pgvector top-K + critic. No side effects."""
     out: list[V2Resolution] = []
@@ -83,7 +101,7 @@ def resolve_mentions_hybrid(
     v1_resolve_fn: Callable[[list[str]], dict[str, int | None]],
     context_for: Callable[[str], str] | None = None,
     critic_model: str | None = None,
-    k: int = DEFAULT_K,
+    k: int = CATALOG_DEFAULT_K,
 ) -> list[V2Resolution]:
     """FR-CR-05-241 hybrid — recall-safe rollout of v2.
 
@@ -139,6 +157,38 @@ def mentions_to_enroll(resolutions: list[V2Resolution]) -> list[str]:
     return []
 
 
+def review_queue(resolutions: list[V2Resolution]) -> list[dict[str, Any]]:
+    """4000-target REVIEW QUEUE (replaces auto-enroll).
+
+    An unresolved mention (critic → None even after widening k) is NOT
+    written to the catalog — it is emitted here for the operator to curate.
+    Genuinely-new entities are then added via the source export + rebuild,
+    not as a side-effect of a garbled transcript surface form.
+
+    Returns one row per unresolved mention:
+      {surface_form, confidence, reasoning, method}
+    Matched mentions are excluded (they already link to a catalog entity).
+    De-duplicates repeated surface forms (keeps the highest-confidence
+    near-miss so the operator sees the strongest signal). Writes nothing —
+    the caller persists/surfaces these rows (table or log)."""
+    best: dict[str, V2Resolution] = {}
+    for r in resolutions:
+        if r.matched_entity_id is not None:
+            continue
+        prev = best.get(r.mention)
+        if prev is None or r.confidence > prev.confidence:
+            best[r.mention] = r
+    return [
+        {
+            "surface_form": r.mention,
+            "confidence": r.confidence,
+            "reasoning": r.reasoning,
+            "method": r.method,
+        }
+        for r in best.values()
+    ]
+
+
 def shadow_diff(
     v1_matched_ids: dict[str, int | None],
     v2: list[V2Resolution],
@@ -177,6 +227,7 @@ def shadow_diff(
 
 
 __all__ = [
-    "V2Resolution", "resolve_mentions_v2", "partition",
-    "mentions_to_enroll", "shadow_diff",
+    "V2Resolution", "resolve_mentions_v2", "resolve_mentions_hybrid",
+    "partition", "mentions_to_enroll", "review_queue", "shadow_diff",
+    "CATALOG_DEFAULT_K",
 ]

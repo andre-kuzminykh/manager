@@ -1,20 +1,30 @@
-"""FR-CR-05-241 — SPEC + tests for v2 counterparty resolution and the
-enrollment policy that fixes the prod directory pollution.
+"""FR-CR-05-241 — SPEC + tests for v2 counterparty resolution against the
+**4000-entity catalog** (operator 2026-06-01: «мы делаем для 4000»).
 
-This module IS the specification for the safe rollout of pgvector+critic
-counterparty matching:
+TARGET = pure RAG: extract (gpt-5.5 ×1) → pgvector top-K (k≈20) → critic
+gpt-4o → matched | REVIEW QUEUE. A 4000-name directory CANNOT be stuffed
+into an LLM prompt, so the legacy whole-dir resolve is impossible here;
+the only knobs on recall are k / aliases / extract quality. This module
+IS the specification:
 
   CONTRACT
     1. resolve_mentions_v2: each mention → pgvector top-K (retrieve_fn) →
        critic → V2Resolution(matched_entity_id|None, confidence,
-       reasoning). PURE — no DB writes, no enrollment.
+       reasoning). PURE — no DB writes, no enrollment. Default k =
+       CATALOG_DEFAULT_K (=20, the 4000-target recall width).
     2. ENROLLMENT POLICY: mentions_to_enroll(...) ALWAYS returns [].
        v2 never auto-enrolls an unresolved (garbled) mention as a new
        counterparty — the v1 behaviour that filled the directory with
-       «Забалты»/«Не бучи»/«День Z». Unresolved are surfaced via
-       partition() for review only.
-    3. SHADOW: shadow_diff(v1, v2) yields agree/disagree/v1_only/v2_only/
+       «Забалты»/«Не бучи»/«День Z». Unresolved go to review_queue(...)
+       (and are also surfaced via partition()).
+    3. REVIEW QUEUE: review_queue(...) returns one curatable row per
+       unresolved mention (surface_form, confidence, reasoning, method),
+       de-duplicated — the operator-curated replacement for auto-enroll.
+    4. SHADOW: shadow_diff(v1, v2) yields agree/disagree/v1_only/v2_only/
        both_none counts for logging — no behaviour change.
+
+  NOTE: resolve_mentions_hybrid (v1 whole-dir fallback) is **847-only
+  legacy** — kept for the small-directory scenario, NOT the 4000 target.
 
   SAFETY: these are pure functions exercised with a FAKE retrieve_fn and
   FAKE critic backend — no network, no DB. Wiring into the live pipeline
@@ -23,11 +33,13 @@ counterparty matching:
 from __future__ import annotations
 
 from app.services.counterparty_resolve_v2 import (
+    CATALOG_DEFAULT_K,
     V2Resolution,
     mentions_to_enroll,
     partition,
     resolve_mentions_hybrid,
     resolve_mentions_v2,
+    review_queue,
     shadow_diff,
 )
 
@@ -88,6 +100,38 @@ def test_enrollment_policy_never_enrolls_unresolved():
     matched, unresolved = partition(res)
     assert [m.matched_entity_id for m in matched] == [1219]
     assert unresolved == ["Забалты", "Не бучи", "День Z"]  # surfaced, not written
+
+
+def test_review_queue_holds_unresolved_for_curation_not_catalog():
+    """4000-target: unresolved → review_queue rows (operator curates),
+    matched are excluded, and NOTHING is enrolled."""
+    res = [
+        V2Resolution("Митсобиш", 1219, 0.92, "same name"),
+        V2Resolution("Забалты", None, 0.30, "no same-name candidate"),
+        V2Resolution("сугу", None, 0.25, "Sugo != Genia"),
+    ]
+    q = review_queue(res)
+    forms = {r["surface_form"] for r in q}
+    assert forms == {"Забалты", "сугу"}          # matched excluded
+    assert all("matched_entity_id" not in r for r in q)
+    assert {r["reasoning"] for r in q} == {"no same-name candidate", "Sugo != Genia"}
+    assert mentions_to_enroll(res) == []          # still zero auto-enroll
+
+
+def test_review_queue_dedups_keeping_strongest_near_miss():
+    res = [
+        V2Resolution("Маслон", None, 0.20, "weak"),
+        V2Resolution("Маслон", None, 0.55, "closer near-miss"),  # higher conf kept
+    ]
+    q = review_queue(res)
+    assert len(q) == 1
+    assert q[0]["confidence"] == 0.55
+    assert q[0]["reasoning"] == "closer near-miss"
+
+
+def test_catalog_default_k_is_20():
+    """The 4000-target recall width the operator raised 12→20."""
+    assert CATALOG_DEFAULT_K == 20
 
 
 def test_invalid_critic_id_is_dropped_to_none():

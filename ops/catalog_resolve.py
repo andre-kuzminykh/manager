@@ -21,7 +21,7 @@ Usage:
       python -m ops.catalog_resolve --mentions "GS, a16z, Тезер, Шафлер, the softbank guys"
 
     docker run ... -v /tmp:/host ... python -m ops.catalog_resolve \\
-      --text-file /host/transcript.txt --k 8
+      --text-file /host/transcript.txt --k 20
 """
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ def main() -> int:
     ap.add_argument("--extract-model", default=s.openai_model)
     ap.add_argument("--critic-model", default=getattr(s, "entity_match_critic_model", "gpt-4o"))
     ap.add_argument("--embed-model", default="text-embedding-3-large")
-    ap.add_argument("--k", type=int, default=8)
+    ap.add_argument("--k", type=int, default=20)  # 4000-target recall (operator: «k 12→20»)
     args = ap.parse_args()
 
     if not s.openai_api_key:

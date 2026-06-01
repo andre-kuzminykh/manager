@@ -427,6 +427,12 @@ class Settings(BaseSettings):
     sheet_sync_spreadsheet_id: str = Field(
         default="", alias="SHEET_SYNC_SPREADSHEET_ID"
     )
+    # FR-CR-05-233 — operator 2026-06-01: «надо все» — push EVERY titled
+    # task to the Sheet, not only the strategic directions. Set False to
+    # restore the strategic-only filter.
+    sheet_sync_all_directions: bool = Field(
+        default=True, alias="SHEET_SYNC_ALL_DIRECTIONS"
+    )
     sheet_sync_tab_title: str = Field(
         default="ceo_brain_tasks", alias="SHEET_SYNC_TAB_TITLE"
     )

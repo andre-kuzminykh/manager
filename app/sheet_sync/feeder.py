@@ -14,7 +14,8 @@ engine handles those.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 
@@ -66,10 +67,47 @@ def build_owner_resolver(session) -> tuple[Callable[[str], str], list[str]]:
     return resolve, sorted(valid)
 
 
+_LONDON = ZoneInfo("Europe/London")
+
+
 def _added_at(dt) -> str:
+    """Format a datetime as 'YYYY-MM-DD HH:MM' in Europe/London."""
     if isinstance(dt, datetime):
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(_LONDON)
         return dt.strftime("%Y-%m-%d %H:%M")
     return ""
+
+
+def _ts_to_dt(ts) -> datetime | None:
+    """Slack/epoch ts string → tz-aware UTC datetime, or None if not a
+    plausible epoch (≈ 2001–2096). Slack ts looks like '1779989690.6756'."""
+    try:
+        f = float(ts)
+    except (TypeError, ValueError):
+        return None
+    if f < 1_000_000_000 or f > 4_000_000_000:
+        return None
+    return datetime.fromtimestamp(f, tz=timezone.utc)
+
+
+def _draft_added_at(d) -> str:
+    """FR-CR-05-233 — the REAL time the task happened = the source Slack
+    message timestamp (from `_pending.message_ts` or `slack_message_ts`),
+    not when we exported it. Falls back to draft creation time."""
+    pend = (d.payload or {}).get("_pending") or {}
+    for cand in (pend.get("message_ts"), getattr(d, "slack_message_ts", None)):
+        dt = _ts_to_dt(cand)
+        if dt is not None:
+            return _added_at(dt)
+    return _added_at(d.created_at)
+
+
+def _task_added_at(t) -> str:
+    """Real time for meeting-sourced tasks: the source message ts when set,
+    else the row's creation time."""
+    dt = _ts_to_dt(getattr(t, "source_message_ts", None))
+    return _added_at(dt or t.created_at)
 
 
 def _row(*, title, description, owner, status, priority_key, direction, due, added_at):
@@ -118,7 +156,15 @@ def feed_new_strategic(
     session, client, *, integration_id: str, since_dt, status: str = "To Do",
     llm=None, classify_model: str = "gpt-4o-mini",
 ) -> int:
-    """Append strategic, titled, not-yet-exported tasks from ALL sources."""
+    """Append titled, not-yet-exported tasks from ALL sources.
+
+    FR-CR-05-233 — when ``sheet_sync_all_directions`` is on (default,
+    operator «надо все») EVERY titled task is appended regardless of
+    `direction`; otherwise only the strategic DIRECTIONS_IMPORTANT.
+    """
+    from app.config import get_settings
+
+    include_all = bool(getattr(get_settings(), "sheet_sync_all_directions", True))
     resolve, team_names = build_owner_resolver(session)
     exported = {
         (sk, sid) for sk, sid in session.execute(
@@ -142,7 +188,7 @@ def feed_new_strategic(
         if ("action_draft", str(d.id)) in exported:
             continue
         p = d.payload or {}
-        if (p.get("direction") or "").strip().lower() not in DIRECTIONS_IMPORTANT:
+        if not include_all and (p.get("direction") or "").strip().lower() not in DIRECTIONS_IMPORTANT:
             continue
         if not (p.get("title") or "").strip():
             continue
@@ -154,7 +200,7 @@ def feed_new_strategic(
             priority_key=p.get("priority"),
             direction=(p.get("direction") or "").strip().lower(),
             due=(p.get("due_date") or "").strip(),
-            added_at=_added_at(d.created_at),
+            added_at=_draft_added_at(d),
         ))
         new.append(("action_draft", str(d.id)))
 
@@ -170,7 +216,7 @@ def feed_new_strategic(
         if ("task", str(t.id)) in exported:
             continue
         direction = ((t.extra or {}).get("direction") or "").strip().lower()
-        if direction not in DIRECTIONS_IMPORTANT:
+        if not include_all and direction not in DIRECTIONS_IMPORTANT:
             continue
         if not (t.title or "").strip():
             continue
@@ -182,7 +228,7 @@ def feed_new_strategic(
             priority_key=t.priority.value if t.priority else "medium",
             direction=direction,
             due=t.due_date.isoformat() if t.due_date else "",
-            added_at=_added_at(t.created_at),
+            added_at=_task_added_at(t),
         ))
         new.append(("task", str(t.id)))
 

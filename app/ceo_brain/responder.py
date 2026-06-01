@@ -205,6 +205,32 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
             "текст ошибки и повтори запрос с исправленным полем. Поле "
             "`total` в ответе — число найденных задач."
         )
+
+    # FR-TV-071 — task-tool routing rules (only when the layer is enabled).
+    try:
+        from app.config import get_settings as _gs
+
+        if getattr(_gs(), "task_vector_enabled", False):
+            prompt += (
+                "\n\nЗАДАЧИ (vector): для вопросов про задачи и для NL-"
+                "обновлений используй инструменты `search_tasks` / `get_task` "
+                "/ `resolve_person` / `update_task_status` / `update_task_due` "
+                "/ `update_task_owner`.\n"
+                "• Глагол→статус: отправил/сделал/закрыл/завершил/готово → "
+                "done; начал/в работе/приступил → in_progress.\n"
+                "• Срок: «перенеси на пятницу / до 10 июня» — разбери дату САМ "
+                "в ISO (YYYY-MM-DD) и зови `update_task_due`.\n"
+                "• Ответственный: «теперь Семён» — сперва `resolve_person`, "
+                "потом `update_task_owner` с person_id+именем.\n"
+                "• Сначала `search_tasks`, чтобы найти задачу. Если РОВНО ОДНА "
+                "уверенно подходит — применяй изменение СРАЗУ и сообщи "
+                "«<поле> X→Y (отменить?)». Если подходят 2+ или уверенность "
+                "низкая — НЕ меняй, перечисли кандидатов и спроси, какую. "
+                "Отмена = повторный вызов того же тула со старым значением "
+                "(в ответе тула есть `from`)."
+            )
+    except Exception:  # noqa: BLE001 — prompt must never fail to build
+        pass
     return prompt
 
 
@@ -492,6 +518,13 @@ _MCP_DESCRIPTIONS: dict[str, str] = {
         "канала, поиск юзера по email, permalink. Используй когда "
         "вопрос про сам Slack — «в каких каналах ты добавлен», "
         "«найди в slack сообщение X», «кто такой пользователь Y»."
+    ),
+    "tasks_self": (
+        "Задачи (семантический поиск + обновления): search_tasks, get_task, "
+        "resolve_person, update_task_status, update_task_due, "
+        "update_task_owner. Используй для вопросов про задачи («какие задачи "
+        "по X / что на Y / что просрочено») и для NL-обновлений («отправил "
+        "письмо Семёну», «перенеси на пятницу», «ответственный теперь Семён»)."
     ),
 }
 
@@ -861,6 +894,26 @@ def run_responder(
         tool_executors = {**tool_executors, **_jira_execs}
         local_tool_schemas = list(local_tool_schemas) + _jira_schemas
 
+    # FR-TV (P3) — local Task tools (semantic search + NL status/due/owner
+    # updates), gated by TASK_VECTOR_ENABLED. Never breaks the responder.
+    _task_execs: dict[str, Any] = {}
+    try:
+        from app.config import get_settings as _gs
+
+        if getattr(_gs(), "task_vector_enabled", False):
+            from app.ceo_brain.task_tools import (
+                TASK_TOOL_SCHEMAS as _TTS,
+                build_task_executors as _bte,
+            )
+            from app.db import get_session_factory as _gsf
+
+            _task_execs = _bte(session_factory=_gsf(), settings=_gs())
+            tool_executors = {**tool_executors, **_task_execs}
+            local_tool_schemas = list(local_tool_schemas) + list(_TTS)
+    except Exception as e:  # noqa: BLE001 — never break the responder
+        log.warning("ceo_brain_task_tools_wire_failed", error=str(e))
+        _task_execs = {}
+
     request = build_anthropic_request(
         thread_history=thread_history, today=today,
         tools=local_tool_schemas,
@@ -934,6 +987,16 @@ def run_responder(
                 "url": "local://jira",
                 "type": "url",
             })
+        # FR-TV — virtual `tasks_self` MCP so the planner can route task
+        # questions/updates to the local task tools.
+        if _task_execs and not any(
+            s.get("name") == "tasks_self" for s in servers_with_self
+        ):
+            servers_with_self.append({
+                "name": "tasks_self",
+                "url": "local://tasks",
+                "type": "url",
+            })
         # Re-classify with slack_self in the mix.
         picked2 = select_mcps_for_question(
             question=last_user_q,
@@ -980,6 +1043,10 @@ def run_responder(
             if name == "jira_self":
                 from app.ceo_brain.jira_tools import JIRA_TOOL_SCHEMAS
                 tools_by_mcp[name] = list(JIRA_TOOL_SCHEMAS)
+                continue
+            if name == "tasks_self":
+                from app.ceo_brain.task_tools import TASK_TOOL_SCHEMAS
+                tools_by_mcp[name] = list(TASK_TOOL_SCHEMAS)
                 continue
             if not url:
                 continue

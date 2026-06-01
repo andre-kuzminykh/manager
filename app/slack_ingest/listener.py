@@ -34,7 +34,22 @@ Feature-flagged: requires SLACK_INGEST_ENABLED=true + SLACK_APP_TOKEN
 """
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# Slack mention token «<@U0123ABCD>» (optionally «<@U…|label>»).
+_MENTION_RE = re.compile(r"<@([UW][A-Z0-9]+)(?:\|[^>]*)?>")
+
+
+def _mention_uids(text: str, *, exclude: str | None = None) -> list[str]:
+    """FR-CR-05-232 — ordered, de-duplicated @mentioned user ids in the
+    message (the delegation addressees), minus the author."""
+    out: list[str] = []
+    for uid in _MENTION_RE.findall(text or ""):
+        if uid == exclude or uid in out:
+            continue
+        out.append(uid)
+    return out
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -289,6 +304,11 @@ def _process(
         sender_name = _author_display_from_registry(
             author_slack_uid, known_employees
         )
+        # FR-CR-05-232 — addressees of the message (minus author) so the
+        # owner chain prefers «please review @X» over blaming the sender.
+        mention_uids = _mention_uids(
+            event.get("text") or "", exclude=author_slack_uid
+        )
         for td in classification.tasks:
             _resolve_owner(
                 td,
@@ -296,6 +316,7 @@ def _process(
                 sender_user_id=author_slack_uid,
                 sender_user_name=sender_name,
                 admin_uid=admin_uid,
+                mention_uids=mention_uids,
             )
 
         # --- 5. Permalink (best-effort) -----------------------------

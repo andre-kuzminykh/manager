@@ -2,6 +2,7 @@
 pipeline and persist the resulting tasks in our local DB."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
@@ -140,6 +141,39 @@ def _admin_display_for(
     return None
 
 
+_BRACKET_PREFIX_RE = re.compile(r"^\s*\[[^\]]*\]\s*")
+
+
+def _clean_display(name: str | None) -> str | None:
+    """FR-CR-05-232 — strip company/source bracket prefixes like
+    «[Sterling Law] Ilia Martynov» → «Ilia Martynov» so the card shows a
+    clean human name. Idempotent; returns the input when nothing to strip."""
+    if not name:
+        return name
+    s = _BRACKET_PREFIX_RE.sub("", name.strip()).strip()
+    return s or name.strip()
+
+
+def _looks_handleish(s: str | None) -> bool:
+    """A login/handle rather than a human name: a single all-lowercase
+    token with no spaces (e.g. «kaa», «evictorov», «cwin»). Proper names
+    are capitalised or multi-word, so they're not flagged."""
+    s = (s or "").strip()
+    return bool(s) and (" " not in s) and s == s.lower()
+
+
+def _best_employee_display(e: dict) -> str:
+    """FR-CR-05-232 — pick the cleanest human label for an employee row.
+    Prefer a proper `real_name` when the `display_name` is a handle/login;
+    always strip bracket prefixes. operator 2026-06-01: «имена нормальные…
+    из таблицы с командой мэтчить»."""
+    disp = _clean_display(e.get("display_name")) or ""
+    real = _clean_display(e.get("real_name")) or ""
+    if real and (not disp or _looks_handleish(disp)):
+        return real
+    return disp or real or (e.get("slack_user_id") or "")
+
+
 def _resolve_owner(
     td,
     *,
@@ -147,6 +181,7 @@ def _resolve_owner(
     sender_user_id: str | None,
     sender_user_name: str | None,
     admin_uid: str | None,
+    mention_uids: list[str] | None = None,
 ) -> None:
     """FR-CR-05-10 — single owner-resolution pipeline applied to
     each TaskDraft after the LLM stages have run.
@@ -160,6 +195,13 @@ def _resolve_owner(
       2. LLM gave only a `owner_display_name` that isn't in the
          registry (the «CEO Rosecliff» case — outsider mentioned
          in chat). Drop it entirely and fall through to admin.
+      2.5 FR-CR-05-232 — ADDRESSEE over author. When the message
+         @mentions known teammates OTHER than the author (a
+         delegation like «please review/sign @X»), assign the first
+         such addressee instead of falling back to the author.
+         operator 2026-06-01: «ответственный → адресат, не автор».
+         Fires only when `mention_uids` is supplied (Slack ingest);
+         Telegram passes None so its behaviour is unchanged.
       3. Sender, but only when the registry is populated AND they
          appear in it (FR-CR-05-09 author-fallback rule).
       4. Admin uid from `TELEGRAM_ADMIN_USER_IDS`. ALWAYS clobber
@@ -188,17 +230,10 @@ def _resolve_owner(
             if known_employees:
                 for e in known_employees:
                     if e.get("slack_user_id") == td.owner_user_id:
-                        canonical = (
-                            e.get("display_name") or e.get("real_name")
-                        )
-                        if canonical and canonical != td.owner_user_id:
-                            td.owner_display_name = canonical
-                        elif not td.owner_display_name:
-                            td.owner_display_name = (
-                                e.get("display_name")
-                                or e.get("real_name")
-                                or td.owner_user_id
-                            )
+                        # FR-CR-05-232 — registry display ALWAYS wins, and
+                        # we use the cleaned human label (no «[Sterling Law]»
+                        # prefix, real_name over a handle like «kaa»).
+                        td.owner_display_name = _best_employee_display(e)
                         break
             return
 
@@ -213,7 +248,7 @@ def _resolve_owner(
             real = (e.get("real_name") or "").strip().lower()
             if needle and (needle == disp or needle == real):
                 td.owner_user_id = e.get("slack_user_id")
-                td.owner_display_name = e.get("display_name") or td.owner_display_name
+                td.owner_display_name = _best_employee_display(e)
                 matched = True
                 break
         if not matched:
@@ -223,13 +258,35 @@ def _resolve_owner(
     if td.owner_user_id:
         return
 
+    # Step 2.5 — FR-CR-05-232 addressee over author. A delegation message
+    # @mentions the doer(s); assign the first @mentioned teammate that is
+    # NOT the author rather than blaming the author via the sender fallback.
+    if mention_uids and known_employees:
+        emp_by_id = {e.get("slack_user_id"): e for e in known_employees}
+        for uid in mention_uids:
+            if not uid or uid == sender_user_id:
+                continue
+            e = emp_by_id.get(uid)
+            if e is not None:
+                td.owner_user_id = uid
+                td.owner_display_name = _best_employee_display(e)
+                return
+
     # Step 3 — sender fallback (only when allowed by FR-CR-05-09 rule).
     if _author_fallback_allowed(
         sender_user_id, known_employees=known_employees
     ):
         td.owner_user_id = sender_user_id
-        if not td.owner_display_name and sender_user_name:
-            td.owner_display_name = sender_user_name
+        # Prefer the cleaned registry label for the sender too.
+        sender_emp = next(
+            (e for e in (known_employees or [])
+             if e.get("slack_user_id") == sender_user_id),
+            None,
+        )
+        if sender_emp is not None:
+            td.owner_display_name = _best_employee_display(sender_emp)
+        elif not td.owner_display_name and sender_user_name:
+            td.owner_display_name = _clean_display(sender_user_name)
         return
 
     # Step 4 — admin fallback. Always clobber display_name so a

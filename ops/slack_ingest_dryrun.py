@@ -41,6 +41,7 @@ from app.slack_ingest.listener import (
     _SKIPPED_SUBTYPES,
     _author_display_from_registry,
     _known_employees_from_db,
+    _mention_uids,
 )
 from app.telegram_ingest.service import _admin_fallback_owner_id, _resolve_owner
 
@@ -113,6 +114,7 @@ def _trace_message(
         return
 
     sender_name = _author_display_from_registry(author, known_employees)
+    mention_uids = _mention_uids(text, exclude=author)
     for i, td in enumerate(classification.tasks, 1):
         _resolve_owner(
             td,
@@ -120,6 +122,7 @@ def _trace_message(
             sender_user_id=author,
             sender_user_name=sender_name,
             admin_uid=admin_uid,
+            mention_uids=mention_uids,
         )
         try:
             direction = classify_one_direction(

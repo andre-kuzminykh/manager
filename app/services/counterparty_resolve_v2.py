@@ -44,6 +44,7 @@ class V2Resolution:
     matched_entity_id: int | None
     confidence: float
     reasoning: str
+    method: str = "v2"  # "v2" | "v1_fallback" | "none"
 
 
 def resolve_mentions_v2(
@@ -71,6 +72,55 @@ def resolve_mentions_v2(
             confidence=float(res.get("confidence", 0.0)),
             reasoning=res.get("reasoning", "") or "",
         ))
+    return out
+
+
+def resolve_mentions_hybrid(
+    *,
+    mentions: list[str],
+    retrieve_fn: RetrieveFn,
+    backend: Any,
+    v1_resolve_fn: Callable[[list[str]], dict[str, int | None]],
+    context_for: Callable[[str], str] | None = None,
+    critic_model: str | None = None,
+    k: int = DEFAULT_K,
+) -> list[V2Resolution]:
+    """FR-CR-05-241 hybrid — recall-safe rollout of v2.
+
+    Fast path: v2 (pgvector top-K + critic). For ONLY the mentions v2
+    can't resolve (`none`), fall back to v1 (`v1_resolve_fn` = the whole-
+    directory LLM resolver, which handles speech-to-text-garbled forms a
+    top-K miss would drop, e.g. «хабспот»→HubSpot, «BofA»). So:
+      * recall ≥ v1 (fallback covers every v2 miss),
+      * cost ≈ v2 for the confident majority — v1 LLM runs ONLY on the
+        small none-set, not on every mention,
+      * enrollment policy UNCHANGED: a mention still `none` after BOTH
+        stages stays unresolved and is NEVER auto-enrolled.
+
+    `v1_resolve_fn(mentions) -> {mention: counterparty_id | None}` is
+    injected so this stays pure/testable (no DB/LLM here)."""
+    v2 = resolve_mentions_v2(
+        mentions=mentions, retrieve_fn=retrieve_fn, backend=backend,
+        context_for=context_for, critic_model=critic_model, k=k,
+    )
+    none_mentions = [r.mention for r in v2 if r.matched_entity_id is None]
+    v1_map = v1_resolve_fn(none_mentions) if none_mentions else {}
+    out: list[V2Resolution] = []
+    for r in v2:
+        if r.matched_entity_id is not None:
+            r.method = r.method or "v2"
+            out.append(r)
+            continue
+        mid = v1_map.get(r.mention)
+        if mid is not None:
+            out.append(V2Resolution(
+                mention=r.mention, matched_entity_id=int(mid),
+                confidence=r.confidence, reasoning="v1 whole-dir fallback",
+                method="v1_fallback",
+            ))
+        else:
+            r.method = "none"
+            out.append(r)
     return out
 
 

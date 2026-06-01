@@ -26,6 +26,7 @@ from app.services.counterparty_resolve_v2 import (
     V2Resolution,
     mentions_to_enroll,
     partition,
+    resolve_mentions_hybrid,
     resolve_mentions_v2,
     shadow_diff,
 )
@@ -102,6 +103,61 @@ def test_no_candidates_yields_none():
     backend = _FakeBackend({})
     res = resolve_mentions_v2(mentions=["Ghost"], retrieve_fn=_retrieve_factory({}), backend=backend)
     assert res[0].matched_entity_id is None
+
+
+def test_hybrid_falls_back_to_v1_only_for_v2_none():
+    """Recall-safe contract: v2 wins are kept; v1 LLM is invoked ONLY on
+    the mentions v2 returned none for (efficiency), and recovers the
+    speech-garbled ones v2 missed («хабспот»→HubSpot)."""
+    cands = {
+        "20VC": [{"entity_id": "55", "text_repr": "20VC", "score": 0.8}],
+        "хабспот": [{"entity_id": "70", "text_repr": "Shorooq", "score": 0.3}],  # wrong top
+    }
+    backend = _FakeBackend({
+        "20VC": {"matched_entity_id": "55", "confidence": 0.9, "reasoning": "same"},
+        "хабспот": {"matched_entity_id": None, "confidence": 0.3, "reasoning": "no same-name"},
+    })
+
+    v1_calls = {}
+    def v1_resolve(none_mentions):
+        v1_calls["arg"] = list(none_mentions)
+        # v1 whole-dir LLM recovers the garbled HubSpot
+        return {"хабспот": 1404}
+
+    res = resolve_mentions_hybrid(
+        mentions=["20VC", "хабспот"],
+        retrieve_fn=_retrieve_factory(cands), backend=backend,
+        v1_resolve_fn=v1_resolve,
+    )
+    by = {r.mention: r for r in res}
+    assert by["20VC"].matched_entity_id == 55 and by["20VC"].method == "v2"
+    assert by["хабспот"].matched_entity_id == 1404 and by["хабспот"].method == "v1_fallback"
+    # v1 called ONLY for the none-set (not for 20VC)
+    assert v1_calls["arg"] == ["хабспот"]
+
+
+def test_hybrid_still_none_when_both_fail_and_not_enrolled():
+    cands = {"Забалты": [{"entity_id": "192", "text_repr": "Jimco", "score": 0.3}]}
+    backend = _FakeBackend({"Забалты": {"matched_entity_id": None, "confidence": 0.3, "reasoning": "no"}})
+    res = resolve_mentions_hybrid(
+        mentions=["Забалты"], retrieve_fn=_retrieve_factory(cands), backend=backend,
+        v1_resolve_fn=lambda ms: {m: None for m in ms},  # v1 also can't
+    )
+    assert res[0].matched_entity_id is None and res[0].method == "none"
+    assert mentions_to_enroll(res) == []  # garbage still NOT enrolled
+
+
+def test_hybrid_skips_v1_entirely_when_v2_resolves_all():
+    cands = {"20VC": [{"entity_id": "55", "text_repr": "20VC", "score": 0.9}]}
+    backend = _FakeBackend({"20VC": {"matched_entity_id": "55", "confidence": 0.95, "reasoning": "same"}})
+    called = {"n": 0}
+    def v1(ms):
+        called["n"] += 1
+        return {}
+    res = resolve_mentions_hybrid(mentions=["20VC"], retrieve_fn=_retrieve_factory(cands),
+                                  backend=backend, v1_resolve_fn=v1)
+    assert res[0].matched_entity_id == 55
+    assert called["n"] == 0  # no none-set → v1 not called at all (cost saved)
 
 
 def test_shadow_diff_counts_and_samples():

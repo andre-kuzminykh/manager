@@ -194,8 +194,9 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    print(f"запланировано мёржей: {len(pairs)} (apply={args.apply}, "
-          f"min_conf={args.confidence})")
+    _tier = (f"only={args.only_confidence}" if args.only_confidence
+             else f"min_conf={args.confidence}")
+    print(f"запланировано мёржей: {len(pairs)} (apply={args.apply}, {_tier})")
 
     with session_scope() as session:
         ids = {p[0] for p in pairs} | {p[1] for p in pairs}

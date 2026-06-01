@@ -582,7 +582,31 @@ def build_candidates(
             "AGENDA_TASKS_FROM_LAST_PRIOR_ONLY", "true",
         ).strip().lower() not in ("false", "0", "no", "off")
         if _last_only and prior:
-            zoom_ids = [prior[0].zoom_id]
+            # FR-CR-05-235 — source open_tasks from the newest prior that
+            # actually has a USABLE transcript, so one failed/empty
+            # recording (silent audio → thin transcript, e.g. a 20-min
+            # 1-1 whose Zoom audio came back near-silent) doesn't blank
+            # out the agenda. The `min_prior_meetings` gate above still
+            # counts ALL priors, so the meeting is never DROPPED — we
+            # only pick a better recording to recap. Falls back to
+            # prior[0] when none qualifies (genuinely empty history).
+            from app.services.transcription import is_transcript_unsummarizable
+
+            chosen = next(
+                (
+                    r for r in prior
+                    if not is_transcript_unsummarizable(r.transcript_text or "")[0]
+                ),
+                prior[0],
+            )
+            if chosen.zoom_id != prior[0].zoom_id:
+                log.info(
+                    "agenda_prior_skipped_thin",
+                    title=title,
+                    skipped_zoom_id=prior[0].zoom_id,
+                    chosen_zoom_id=chosen.zoom_id,
+                )
+            zoom_ids = [chosen.zoom_id]
         else:
             zoom_ids = [r.zoom_id for r in prior]
         open_tasks = open_tasks_for_recordings(

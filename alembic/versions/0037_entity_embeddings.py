@@ -24,6 +24,7 @@ Create Date: 2026-05-31
 from __future__ import annotations
 
 from alembic import op
+from sqlalchemy import text
 
 revision = "0037_entity_embeddings"
 down_revision = "0036_gs_sheet_sync"
@@ -32,6 +33,25 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # FR-CR-05-241 — SEPARATE-INSTANCE topology (operator decision
+    # 2026-06-01): the vector catalog lives in a DEDICATED pgvector DB
+    # (CATALOG_DATABASE_URL), so the prod app DB (postgres:*-alpine, no
+    # pgvector) must NEVER get this table. If the `vector` extension isn't
+    # available, SKIP gracefully so `alembic upgrade head` stays green on the
+    # prod DB without touching it. On the pgvector catalog DB this runs in
+    # full (idempotent — IF NOT EXISTS).
+    conn = op.get_bind()
+    has_pgvector = conn.execute(
+        text("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")
+    ).scalar() is not None
+    if not has_pgvector:
+        print(
+            "0037: pgvector unavailable — skipping entity_embeddings "
+            "(catalog lives in the separate pgvector instance, prod DB "
+            "untouched)"
+        )
+        return
+
     # pgvector extension. Requires the pgvector/pgvector image (NOT
     # postgres:*-alpine, which ships without it). Safe to re-run.
     op.execute("CREATE EXTENSION IF NOT EXISTS vector;")

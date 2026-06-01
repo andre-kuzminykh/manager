@@ -15,6 +15,7 @@ Create Date: 2026-05-31
 from __future__ import annotations
 
 from alembic import op
+from sqlalchemy import text
 
 revision = "0038_entity_catalog_staging"
 down_revision = "0037_entity_embeddings"
@@ -23,6 +24,22 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # FR-CR-05-241 — SEPARATE-INSTANCE topology: the catalog (and these
+    # staging tables) live ONLY in the dedicated pgvector DB. Skip on a
+    # non-pgvector DB so the prod app DB stays free of catalog artifacts and
+    # `alembic upgrade head` stays green there. Idempotent on the catalog DB.
+    conn = op.get_bind()
+    has_pgvector = conn.execute(
+        text("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'")
+    ).scalar() is not None
+    if not has_pgvector:
+        print(
+            "0038: pgvector unavailable — skipping entity_catalog_staging "
+            "(catalog lives in the separate pgvector instance, prod DB "
+            "untouched)"
+        )
+        return
+
     op.execute(
         """
         CREATE TABLE IF NOT EXISTS entity_catalog_staging (

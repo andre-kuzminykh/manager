@@ -110,3 +110,20 @@ def test_feeder_added_at_is_real_message_time(session):
     assert len(client.appended) == 1
     added_at = client.appended[0][-1]  # trailing 'Added at' column
     assert added_at.startswith("2026-05-29"), added_at
+
+
+def test_export_tasks_wires_real_added_at_helpers():
+    """The cron exporter (ops.sheet_sync_export_tasks) must use the shared
+    real-message-time helpers, not draft.created_at."""
+    import ops.sheet_sync_export_tasks as exp
+    from app.sheet_sync import feeder
+
+    assert exp._draft_added_at is feeder._draft_added_at
+    assert exp._task_added_at is feeder._task_added_at
+    src = (
+        __import__("pathlib").Path(exp.__file__).read_text(encoding="utf-8")
+    )
+    assert "_draft_added_at(d)" in src and "_task_added_at(t)" in src
+    # the old created-at formatting for 'added' must be gone
+    assert 'added = d.created_at.strftime' not in src
+    assert 'added = t.created_at.strftime' not in src

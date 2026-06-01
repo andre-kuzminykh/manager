@@ -27,6 +27,7 @@ from app.models.task import Task, TaskSourceKind
 from app.services.task_direction import DIRECTIONS_IMPORTANT
 from app.services.team_members import get_humans_for_matcher
 from app.sheet_sync.config import STATUS_DISPLAY_BY_KEY, TASK_HEADERS
+from app.sheet_sync.feeder import _draft_added_at, _task_added_at
 from app.sheet_sync.sheets_client import SheetTabNotFound, TasksSheetClient
 
 log = get_logger(__name__)
@@ -222,7 +223,10 @@ def main() -> int:
             # TASK_HEADERS order: title, description, responsible, status, priority,
             # category, start_date, start_time, deadline_date, deadline_time,
             # completed_date, completed_time, comments
-            added = d.created_at.strftime("%Y-%m-%d %H:%M") if d.created_at else ""
+            # FR-CR-05-233 — «Added at» = РЕАЛЬНОЕ время сообщения (Slack ts из
+            # _pending.message_ts / slack_message_ts, Europe/London), не время
+            # создания драфта. Фолбэк на created_at.
+            added = _draft_added_at(d)
             # FR-CR-05-205 — источник + ссылка из payload._pending.
             source_disp, source_link = _source_and_link(session, p)
             rows.append([
@@ -273,7 +277,7 @@ def main() -> int:
             deadline_time = _deadline_time(
                 due, t.due_time.strftime("%H:%M") if t.due_time else None
             )
-            added = t.created_at.strftime("%Y-%m-%d %H:%M") if t.created_at else ""
+            added = _task_added_at(t)  # FR-CR-05-233 — real message time
             source_disp, source_link = _source_and_link_for_task(session, t)
             rows.append([
                 title,

@@ -313,6 +313,27 @@ def test_find_dupes_typo_person_clustered():
     assert len(clusters) == 1 and {it["id"] for it in clusters[0]} == {1, 2}
 
 
+def test_find_dupes_descriptor_does_not_chain_unrelated_brands():
+    """FR-CR-05-231 (live audit) — short brands sharing only «investment(s)»
+    must NOT chain into one mega-cluster. Same-brand variants still merge."""
+    items = [
+        _it(1, "SBI", "sbi", True),
+        _it(2, "SBI Investment", "sbi investment", True),
+        _it(3, "SBI Investments", "sbi investments", True),
+        _it(4, "KB Investment", "kb investment", True),
+        _it(5, "LR Investments", "lr investments", True),
+        _it(6, "ARK Investment", "ark investment", True),
+        _it(7, "ARK Investment Management", "ark investment management", True),
+    ]
+    clusters = ec.find_duplicate_candidates(items)
+    by = {frozenset(it["id"] for it in c) for c in clusters}
+    assert frozenset({1, 2, 3}) in by  # SBI variants merge
+    assert frozenset({6, 7}) in by  # ARK variants merge
+    # KB / LR are unrelated → must NOT be glued to SBI or each other
+    clustered_ids = {it["id"] for c in clusters for it in c}
+    assert 4 not in clustered_ids and 5 not in clustered_ids
+
+
 def test_find_dupes_empty_when_all_distinct():
     items = [
         _it(1, "Tesla", "tesla", True),

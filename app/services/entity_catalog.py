@@ -328,9 +328,15 @@ DUP_RATIO_THRESHOLD = 0.86
 # that differs only by these still clusters («Acme» ⇄ «Acme Ltd»).
 GENERIC_ORG_TOKENS = {
     "partners", "partner", "group", "holding", "holdings", "management",
-    "advisors", "advisory", "asset", "assets", "family", "office", "ltd",
-    "limited", "llc", "inc", "incorporated", "lp", "llp", "gmbh", "kg",
-    "corp", "corporation", "company", "co", "global", "international", "the",
+    "mgmt", "advisors", "advisory", "advisers", "asset", "assets", "family",
+    "office", "ltd", "limited", "llc", "inc", "incorporated", "lp", "llp",
+    "gmbh", "kg", "corp", "corporation", "company", "co", "global",
+    "international", "the",
+    # FR-CR-05-231 (2026-06-01 live audit) — financial descriptors that
+    # were chaining unrelated short-brand firms into a mega-cluster via the
+    # shared «investment(s)» suffix («KB Investment» ⇄ «SBI Investment»).
+    "investment", "investments", "investing", "securities", "bank",
+    "financial", "technologies", "technology", "growth", "equity",
 }
 
 # Investment-arm markers. Operator-pinned 2026-05-31: «о инвест-арм
@@ -355,6 +361,17 @@ def _block_tokens(tokens: list[str], is_org: bool) -> set[str]:
     generic/arm words; people have no such words."""
     excl = _BLOCK_EXCLUDE if is_org else set()
     return {t for t in tokens if len(t) > 2 and t not in excl}
+
+
+def _core_tokens(tokens: list[str], is_org: bool) -> list[str]:
+    """Distinctive tokens (order-preserving) for ratio scoring. For orgs we
+    drop generic/arm descriptors; for people we keep everything (every name
+    token is distinctive). Falls back to the full list if stripping empties
+    it (e.g. an org literally named «Capital Group»)."""
+    if not is_org:
+        return tokens
+    core = [t for t in tokens if t not in _BLOCK_EXCLUDE]
+    return core or tokens
 
 
 def find_duplicate_candidates(
@@ -445,7 +462,15 @@ def find_duplicate_candidates(
                         if min(len(la), len(lb)) >= 2:
                             union(a["id"], b["id"])
                     continue
-                ratio = SequenceMatcher(None, " ".join(la), " ".join(lb)).ratio()
+                # FR-CR-05-231 — score the ratio on the DISTINCTIVE core
+                # (generic/arm words stripped for orgs) so a long shared
+                # descriptor suffix («…investment») can't inflate the
+                # similarity of two short, unrelated brands («kb» vs «sbi»).
+                ca = _core_tokens(la, is_org)
+                cb = _core_tokens(lb, is_org)
+                ratio = SequenceMatcher(
+                    None, " ".join(ca), " ".join(cb)
+                ).ratio()
                 if ratio >= threshold:
                     union(a["id"], b["id"])
 

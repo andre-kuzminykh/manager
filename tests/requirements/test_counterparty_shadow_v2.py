@@ -1,6 +1,6 @@
 """FR-CR-05-241 — SPEC + tests for the v2 SHADOW hook.
 
-The shadow hook is the SAFE first phase of the vector-catalog rollout. Its
+The shadow hook is the observe-only phase of the vector-catalog rollout. Its
 contract is exactly its safety guarantees:
 
   1. NAME-BASED DIFF: v1 ids (prod directory) and v2 ids (catalog) live in
@@ -9,21 +9,17 @@ contract is exactly its safety guarantees:
   2. REUSES v1's mentions: no extra extract call; only embeddings + critic.
   3. NEVER WRITES: the hook touches no DB rows (it only reads the catalog).
   4. NEVER RAISES: any internal failure is swallowed and reported as None,
-     so the canonical v1 pipeline can't be broken or slowed-failed by it.
+     so the canonical pipeline can't be broken or slowed-failed by it.
 
-Exercised with fakes — build_catalog_lexical_index / match_entity are
-monkeypatched, so there is no network and no DB.
+Shadow shares its catalog resolution with the live "on" path via
+counterparty_catalog_resolver, so these tests monkeypatch that seam
+(open_catalog_session / resolve_mentions_against_catalog) — no network, no DB.
 """
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 import app.services.counterparty_shadow_v2 as shadow
-
-
-class _Ent:
-    def __init__(self, name: str):
-        self.name = name
 
 
 def _settings():
@@ -35,18 +31,13 @@ def _settings():
     )
 
 
-def _patch(monkeypatch, *, by_id, lex, verdicts):
-    monkeypatch.setattr(shadow, "build_catalog_lexical_index",
-                        lambda session: (lex, by_id))
-    # embed fn is never actually exercised because match_entity is faked
-    monkeypatch.setattr(shadow, "make_openai_embed_fn",
-                        lambda *a, **k: (lambda text: [0.0]))
-    monkeypatch.setattr(shadow, "search_entities",
-                        lambda *a, **k: [])
-
-    def fake_match_entity(*, mention, **_kw):
-        return verdicts.get(mention, {"matched_entity_id": None})
-    monkeypatch.setattr(shadow, "match_entity", fake_match_entity)
+def _patch(monkeypatch, matches, *, session=None, owns=False):
+    monkeypatch.setattr(shadow, "open_catalog_session",
+                        lambda s: (session if session is not None else s, owns))
+    monkeypatch.setattr(shadow, "resolve_mentions_against_catalog",
+                        lambda cat_session, **_kw: matches)
+    monkeypatch.setattr(shadow, "_normalise_name",
+                        lambda s: (s or "").strip().lower())
 
 
 def test_no_api_key_is_a_safe_skip(monkeypatch):
@@ -60,15 +51,12 @@ def test_no_api_key_is_a_safe_skip(monkeypatch):
 
 
 def test_name_based_diff_both_v1only_v2only(monkeypatch):
-    by_id = {70: _Ent("Shorooq Partners"), 1219: _Ent("Mitsubishi Corporation"),
-             1054: _Ent("CEVA Logistics")}
-    lex = {}  # force everything through the critic path
-    verdicts = {
-        "Шрука": {"matched_entity_id": "70"},        # v2 catches, v1 had it too → both
-        "Митсобиш": {"matched_entity_id": "1219"},   # v2 only (v1 missed)
-        "Забалты": {"matched_entity_id": None},       # neither
+    matches = {
+        "Шрука": {"entity_id": 70, "name": "Shorooq Partners", "method": "critic"},
+        "Митсобиш": {"entity_id": 1219, "name": "Mitsubishi Corporation", "method": "critic"},
+        # "Забалты" → no match (omitted)
     }
-    _patch(monkeypatch, by_id=by_id, lex=lex, verdicts=verdicts)
+    _patch(monkeypatch, matches)
     out = shadow.shadow_compare_v2(
         object(), settings=_settings(),
         mentions=["Шрука", "Митсобиш", "Забалты"],
@@ -78,47 +66,31 @@ def test_name_based_diff_both_v1only_v2only(monkeypatch):
     assert out is not None
     assert out["both"] == ["Shorooq Partners"]
     assert out["v2_only"] == ["Mitsubishi Corporation"]
-    assert out["v1_only"] == ["Aviva Investors"]     # v1 had it, v2 didn't
+    assert out["v1_only"] == ["Aviva Investors"]
     assert out["v2_critic"] == 2 and out["v2_none"] == 1
 
 
-def test_exact_lexical_layer_counts_as_v2_match(monkeypatch):
-    by_id = {1219: _Ent("Mitsubishi Corporation")}
-    lex = {"mitsubishi": 1219}  # exact key (post-normalise)
-    # match_entity must NOT be called for the exact hit
-    def boom(**_kw):
-        raise AssertionError("critic called for an exact-lexical hit")
-    _patch(monkeypatch, by_id=by_id, lex={}, verdicts={})
-    monkeypatch.setattr(shadow, "build_catalog_lexical_index",
-                        lambda session: (lex, by_id))
-    monkeypatch.setattr(shadow, "match_entity", boom)
-    monkeypatch.setattr(shadow, "_normalise_name", lambda s: (s or "").lower())
+def test_method_counts_exact_vs_critic(monkeypatch):
+    matches = {
+        "Tether": {"entity_id": 188, "name": "Tether", "method": "exact"},
+        "Митсобиш": {"entity_id": 1219, "name": "Mitsubishi", "method": "critic"},
+    }
+    _patch(monkeypatch, matches)
     out = shadow.shadow_compare_v2(
-        object(), settings=_settings(), mentions=["Mitsubishi"],
-        v1_canonical_names=[], transcript="Mitsubishi",
+        object(), settings=_settings(), mentions=["Tether", "Митсобиш", "Ghost"],
+        v1_canonical_names=[], transcript="...",
         source_kind="zoom", source_id="z1",
     )
-    assert out["v2_exact"] == 1
-    assert out["v2_only"] == ["Mitsubishi Corporation"]
-
-
-def test_invalid_critic_id_is_ignored(monkeypatch):
-    by_id = {70: _Ent("Shorooq Partners")}
-    verdicts = {"X": {"matched_entity_id": "999"}}  # id not in catalog
-    _patch(monkeypatch, by_id=by_id, lex={}, verdicts=verdicts)
-    out = shadow.shadow_compare_v2(
-        object(), settings=_settings(), mentions=["X"],
-        v1_canonical_names=[], transcript="X",
-        source_kind="zoom", source_id="z1",
-    )
-    assert out["v2_none"] == 1 and out["v2_only"] == []
+    assert out["v2_exact"] == 1 and out["v2_critic"] == 1 and out["v2_none"] == 1
 
 
 def test_never_raises_on_internal_error(monkeypatch):
     """The safety guarantee: an exploding dependency must NOT propagate."""
-    def boom(session):
-        raise RuntimeError("pgvector not installed")
-    monkeypatch.setattr(shadow, "build_catalog_lexical_index", boom)
+    monkeypatch.setattr(shadow, "open_catalog_session", lambda s: (s, False))
+
+    def boom(cat_session, **_kw):
+        raise RuntimeError("pgvector unreachable")
+    monkeypatch.setattr(shadow, "resolve_mentions_against_catalog", boom)
     out = shadow.shadow_compare_v2(
         object(), settings=_settings(), mentions=["X"],
         v1_canonical_names=[], transcript="X",
@@ -127,26 +99,10 @@ def test_never_raises_on_internal_error(monkeypatch):
     assert out is None  # swallowed, pipeline unharmed
 
 
-def test_empty_catalog_is_a_safe_skip(monkeypatch):
-    _patch(monkeypatch, by_id={}, lex={}, verdicts={})
-    out = shadow.shadow_compare_v2(
-        object(), settings=_settings(), mentions=["X"],
-        v1_canonical_names=[], transcript="X",
-        source_kind="zoom", source_id="z1",
-    )
-    assert out is None
-
-
-def test_uses_separate_catalog_session_and_closes_it(monkeypatch):
-    """Prod-DB-untouched guarantee: when a catalog session factory exists,
-    catalog reads run on THAT session (not the pipeline's prod session), and
-    the borrowed session is rolled back + closed."""
-    by_id = {70: _Ent("Shorooq Partners")}
-    verdicts = {"Шрука": {"matched_entity_id": "70"}}
-    _patch(monkeypatch, by_id=by_id, lex={}, verdicts=verdicts)
-
+def test_borrowed_catalog_session_is_closed(monkeypatch):
+    """When a separate catalog session is opened (owns=True) it must be
+    rolled back + closed — the prod-DB-untouched / no-leak guarantee."""
     closed = {"rollback": 0, "close": 0}
-    seen: dict[str, object] = {}
 
     class _CatSession:
         def rollback(self):
@@ -155,23 +111,11 @@ def test_uses_separate_catalog_session_and_closes_it(monkeypatch):
         def close(self):
             closed["close"] += 1
 
-    cat_session = _CatSession()
-    import app.db as appdb
-    monkeypatch.setattr(appdb, "get_catalog_session_factory",
-                        lambda: (lambda: cat_session))
-
-    def capture_lex(session):
-        seen["session"] = session
-        return ({}, by_id)
-    monkeypatch.setattr(shadow, "build_catalog_lexical_index", capture_lex)
-
-    prod_session = object()
+    _patch(monkeypatch, {}, session=_CatSession(), owns=True)
     out = shadow.shadow_compare_v2(
-        prod_session, settings=_settings(), mentions=["Шрука"],
-        v1_canonical_names=["Shorooq Partners"], transcript="...",
+        object(), settings=_settings(), mentions=["X"],
+        v1_canonical_names=[], transcript="X",
         source_kind="zoom", source_id="z1",
     )
-    assert out is not None and out["both"] == ["Shorooq Partners"]
-    assert seen["session"] is cat_session       # NOT the prod session
-    assert seen["session"] is not prod_session
-    assert closed == {"rollback": 1, "close": 1}  # borrowed session cleaned up
+    assert out is not None  # empty catalog → diff with v2 finding nothing
+    assert closed == {"rollback": 1, "close": 1}

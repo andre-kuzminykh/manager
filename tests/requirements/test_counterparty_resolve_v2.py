@@ -27,8 +27,10 @@ IS the specification:
   legacy** — kept for the small-directory scenario, NOT the 4000 target.
 
   SAFETY: these are pure functions exercised with a FAKE retrieve_fn and
-  FAKE critic backend — no network, no DB. Wiring into the live pipeline
-  happens later behind COUNTERPARTY_MATCH_V2 (default off), shadow-first.
+  FAKE critic backend — no network, no DB. Live wiring is gated by
+  COUNTERPARTY_MATCH_V2_MODE (off | shadow | on, default off): shadow logs a
+  diff (counterparty_shadow_v2), on makes v2 the canonical resolver
+  (counterparty_catalog_resolver) — see those modules + their tests.
 """
 from __future__ import annotations
 

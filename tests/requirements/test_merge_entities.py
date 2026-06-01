@@ -75,6 +75,22 @@ def test_description_grows_does_not_shrink(session):
     assert "additional context" in dst.description
 
 
+def test_cross_isorg_merge_carries_aliases_and_mentions(session):
+    """Manual per↔org merge (e.g. «Genia Xasis» the person mistakenly also
+    entered as an org): merge_pair itself does NOT gate on is_org — the
+    guard lives in the CLI (--allow-cross-isorg). Here we assert the data
+    contract still holds when the operator forces it."""
+    person = _row(session, name="Genia Xasis", name_normalised="genia xasis",
+                  is_org=False, mentions_count=5, description="Advisor; MENA.")
+    org = _row(session, name="Genia Xasis", name_normalised="genia xasis org",
+               is_org=True, mentions_count=1, description="Financial/VC firm.")
+    merge_pair(session, src=org, dst=person)
+    # org's distinct facts survive as alias/description; person stays the leader
+    assert person.is_org is False
+    assert person.mentions_count == 6
+    assert "Financial/VC firm" in person.description
+
+
 def test_alias_set_helper_orders_and_strips():
     assert _alias_set("BG, bg ,  Ballie Gifford , BG") == ["BG", "Ballie Gifford"]
     assert _alias_set("") == []

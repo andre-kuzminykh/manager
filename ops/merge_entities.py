@@ -184,6 +184,11 @@ def main() -> int:
     ap.add_argument("--exclude", type=int, nargs="*", default=[],
                     help="entity ids to SKIP (review found them unsafe); "
                          "skips any pair where this id is source OR leader")
+    ap.add_argument("--allow-cross-isorg", action="store_true",
+                    help="разрешить мёрж person↔org (по умолчанию запрещён). "
+                         "Только для ЯВНЫХ ручных пар (--from/--into), когда "
+                         "оператор подтвердил, что это один референт "
+                         "(напр. человек, ошибочно заведённый и как org).")
     args = ap.parse_args()
 
     pairs = _collect_pairs(args, exclude_src=set(args.exclude or []))
@@ -217,7 +222,7 @@ def main() -> int:
             src = by_id.get(src_id); dst = by_id.get(dst_id)
             if src is None or dst is None or src.id == dst.id:
                 skipped += 1; continue
-            if src.is_org != dst.is_org:
+            if src.is_org != dst.is_org and not args.allow_cross_isorg:
                 print(f"  SKIP {src_id}→{dst_id}: is_org разные ({src.is_org} vs {dst.is_org}) — мёрж per↔org не делаем автоматом ({why})")
                 skipped += 1; continue
             print(f"  {('APPLY' if args.apply else 'DRY  ')} "

@@ -387,6 +387,15 @@ class Settings(BaseSettings):
     counterparty_match_v2_k: int = Field(
         default=20, alias="COUNTERPARTY_MATCH_V2_K"
     )
+    # FR-CR-05-241 — the vector catalog (entity_catalog_staging +
+    # entity_embeddings, kind='catalog') lives in a SEPARATE pgvector DB so
+    # the prod transactional DB is never touched (operator decision
+    # 2026-06-01: «отдельный pgvector-инстанс»). When set, the shadow hook /
+    # v2 read the catalog via this DSN; when None they fall back to the
+    # primary DB (the ops sidecar case, where catalog + app share one DB).
+    catalog_database_url: str | None = Field(
+        default=None, alias="CATALOG_DATABASE_URL"
+    )
     # FR-CR-05-110 — narrow Python safety net under the LLM
     # dedup gate: when candidate's normalized title +
     # owner-key set overlaps an existing item, mark

@@ -70,40 +70,54 @@ def shadow_compare_v2(
         backend = OpenAIBackend(client, critic_model)
         k = getattr(settings, "counterparty_match_v2_k", 20)
 
-        lex, by_id = build_catalog_lexical_index(session)
-        if not by_id:
-            log.info(
-                "counterparty_shadow_v2_skipped_empty_catalog",
-                source_kind=source_kind, source_id=source_id,
-            )
-            return None
+        # The vector catalog lives in a SEPARATE pgvector DB (operator choice
+        # 2026-06-01) so the prod DB stays untouched. Open a read-only catalog
+        # session if CATALOG_DATABASE_URL is set; otherwise fall back to the
+        # caller's session (ops sidecar / tests, where catalog shares the DB).
+        from app.db import get_catalog_session_factory
 
-        def retrieve_fn(query: str, kk: int) -> list[dict[str, Any]]:
-            return search_entities(
-                session, kind=CATALOG_KIND, query_text=query,
-                embed_fn=embed_fn, model=embed_model, k=kk,
-            )
+        cat_factory = get_catalog_session_factory()
+        cat_session = cat_factory() if cat_factory is not None else session
+        owns_session = cat_factory is not None
+        try:
+            lex, by_id = build_catalog_lexical_index(cat_session)
+            if not by_id:
+                log.info(
+                    "counterparty_shadow_v2_skipped_empty_catalog",
+                    source_kind=source_kind, source_id=source_id,
+                )
+                return None
 
-        v2_names: set[str] = set()
-        n_exact = n_critic = n_none = 0
-        for m in mentions:
-            eid = lex.get(_normalise_name(m))
-            if eid is not None:
-                v2_names.add(by_id[eid].name)
-                n_exact += 1
-                continue
-            res = match_entity(
-                kind=CATALOG_KIND, mention=m,
-                context=context_window(transcript, m),
-                retrieve_fn=retrieve_fn, backend=backend,
-                critic_model=critic_model, k=k,
-            )
-            mid = res.get("matched_entity_id")
-            if mid and str(mid).isdigit() and int(mid) in by_id:
-                v2_names.add(by_id[int(mid)].name)
-                n_critic += 1
-            else:
-                n_none += 1
+            def retrieve_fn(query: str, kk: int) -> list[dict[str, Any]]:
+                return search_entities(
+                    cat_session, kind=CATALOG_KIND, query_text=query,
+                    embed_fn=embed_fn, model=embed_model, k=kk,
+                )
+
+            v2_names: set[str] = set()
+            n_exact = n_critic = n_none = 0
+            for m in mentions:
+                eid = lex.get(_normalise_name(m))
+                if eid is not None:
+                    v2_names.add(by_id[eid].name)
+                    n_exact += 1
+                    continue
+                res = match_entity(
+                    kind=CATALOG_KIND, mention=m,
+                    context=context_window(transcript, m),
+                    retrieve_fn=retrieve_fn, backend=backend,
+                    critic_model=critic_model, k=k,
+                )
+                mid = res.get("matched_entity_id")
+                if mid and str(mid).isdigit() and int(mid) in by_id:
+                    v2_names.add(by_id[int(mid)].name)
+                    n_critic += 1
+                else:
+                    n_none += 1
+        finally:
+            if owns_session:
+                cat_session.rollback()
+                cat_session.close()
 
         v1n = {_normalise_name(n): n for n in v1_canonical_names if n}
         v2n = {_normalise_name(n): n for n in v2_names}

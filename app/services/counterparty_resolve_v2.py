@@ -69,17 +69,18 @@ ROLLOUT (shadow-first, gated by COUNTERPARTY_MATCH_V2_MODE, default "off"):
                     by name_normalised before writing CounterpartyMention
                     (catalog ids ≠ counterparties ids — different id-space);
                     catalog-only matches → review queue. Do NOT enable until
-                    the infra runbook below is done + a shadow window passes.
+                    a shadow window passes.
 
-PROD INFRA RUNBOOK (prerequisites for shadow/on — prod DB is on 0036 with
-NO pgvector):
-  1. swap prod DB image postgres:16-alpine → pgvector/pgvector:pg16 via
-     dump/restore (musl→glibc collation caveat: re-`CREATE`, don't binary-
-     copy);
-  2. `alembic upgrade head` to apply 0037 (pgvector + entity_embeddings) and
-     0038 (entity_catalog_staging);
-  3. load the operator-curated catalog into entity_catalog_staging and embed
-     it (kind='catalog') — ops.catalog_vector_search;
+PROD INFRA (operator decision 2026-06-01: SEPARATE pgvector instance — the
+prod transactional DB is NEVER touched / migrated):
+  1. run a dedicated pgvector/pgvector:pg16 container = the catalog DB (it
+     can be the existing sidecar that already holds the 4030-entity catalog
+     + embeddings); apply migrations 0037/0038 THERE, not on prod;
+  2. load + embed the operator-curated catalog into it (kind='catalog') —
+     ops.catalog_vector_search;
+  3. set CATALOG_DATABASE_URL on the prod app to that container; the shadow
+     hook / v2 read the catalog over this second connection
+     (app.db.get_catalog_session_factory), leaving the prod DB alone;
   4. set COUNTERPARTY_MATCH_V2_MODE=shadow, watch `counterparty_shadow_v2`
      logs for a few days; only then consider Phase 2.
 """

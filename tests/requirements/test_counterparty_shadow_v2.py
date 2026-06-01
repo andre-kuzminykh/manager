@@ -135,3 +135,43 @@ def test_empty_catalog_is_a_safe_skip(monkeypatch):
         source_kind="zoom", source_id="z1",
     )
     assert out is None
+
+
+def test_uses_separate_catalog_session_and_closes_it(monkeypatch):
+    """Prod-DB-untouched guarantee: when a catalog session factory exists,
+    catalog reads run on THAT session (not the pipeline's prod session), and
+    the borrowed session is rolled back + closed."""
+    by_id = {70: _Ent("Shorooq Partners")}
+    verdicts = {"Шрука": {"matched_entity_id": "70"}}
+    _patch(monkeypatch, by_id=by_id, lex={}, verdicts=verdicts)
+
+    closed = {"rollback": 0, "close": 0}
+    seen: dict[str, object] = {}
+
+    class _CatSession:
+        def rollback(self):
+            closed["rollback"] += 1
+
+        def close(self):
+            closed["close"] += 1
+
+    cat_session = _CatSession()
+    import app.db as appdb
+    monkeypatch.setattr(appdb, "get_catalog_session_factory",
+                        lambda: (lambda: cat_session))
+
+    def capture_lex(session):
+        seen["session"] = session
+        return ({}, by_id)
+    monkeypatch.setattr(shadow, "build_catalog_lexical_index", capture_lex)
+
+    prod_session = object()
+    out = shadow.shadow_compare_v2(
+        prod_session, settings=_settings(), mentions=["Шрука"],
+        v1_canonical_names=["Shorooq Partners"], transcript="...",
+        source_kind="zoom", source_id="z1",
+    )
+    assert out is not None and out["both"] == ["Shorooq Partners"]
+    assert seen["session"] is cat_session       # NOT the prod session
+    assert seen["session"] is not prod_session
+    assert closed == {"rollback": 1, "close": 1}  # borrowed session cleaned up

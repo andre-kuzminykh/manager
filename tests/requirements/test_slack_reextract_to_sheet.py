@@ -35,6 +35,8 @@ def test_humanize_mentions_keeps_jira_keys():
     m = {"U0796A349R7": "Polly Ng"}
     assert rx._humanize("Transfer ownership to U0796A349R7", m) == "Transfer ownership to Polly Ng"
     assert rx._humanize("share with <@U0796A349R7> today", m) == "share with Polly Ng today"
+    # a bare mention written with a stray @ loses the @ and resolves to the name
+    assert rx._humanize("approval to @U0796A349R7", m) == "approval to Polly Ng"
     # unknown uid is left as-is; Jira keys (HUMPROC-####) are not touched
     assert rx._humanize("Provide update on HUMPROC-4335", m) == "Provide update on HUMPROC-4335"
 

@@ -63,7 +63,7 @@ _SLACK_SRC = "Slack"
 import re  # noqa: E402
 
 _UID_RE = re.compile(r"<@([UW][A-Z0-9]{6,})>")
-_BARE_UID_RE = re.compile(r"\b([UW][A-Z0-9]{8,})\b")
+_BARE_UID_RE = re.compile(r"@?\b([UW][A-Z0-9]{8,})\b")
 _GREETINGS = ("hi all", "hi ", "hi,", "hi!", "hello", "hey ", "hey,")
 _Q_STARTS = (
     "when ", "what ", "which ", "why ", "how ", "are ", "is ", "do ", "does ",
@@ -228,8 +228,9 @@ def main() -> int:
         print(f"loaded {len(rows)} rows from {args.load}")
         if args.clean:
             with session_scope() as session:
+                # prefer real_name ("Thomas Shepherd") over the handle ("thsh")
                 uid_to_name = {
-                    e["slack_user_id"]: (e.get("display_name") or e.get("real_name") or "")
+                    e["slack_user_id"]: (e.get("real_name") or e.get("display_name") or "")
                     for e in _known_employees_from_db(session)
                 }
                 session.rollback()  # READ-ONLY

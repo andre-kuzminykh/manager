@@ -207,9 +207,15 @@ def make_openai_embed_fn(client: Any, model: str = DEFAULT_EMBED_MODEL) -> Embed
 # --------------------------------------------------------------------------- #
 # Collect directory rows → (kind, entity_id, text_repr)
 # --------------------------------------------------------------------------- #
-def collect_entity_texts(session: Session, *, kinds: Sequence[str]) -> list[tuple[str, str, str]]:
+def collect_entity_texts(
+    session: Session, *, kinds: Sequence[str],
+    task_created_since: Any = None,
+) -> list[tuple[str, str, str]]:
     """Return [(kind, entity_id, text_repr)] for the requested kinds.
-    Imports models lazily to keep this module import-light."""
+    Imports models lazily to keep this module import-light.
+
+    `task_created_since` (a date) optionally restricts KIND_TASK to tasks
+    created on/after that date (FR-TV — «только сегодняшние»)."""
     out: list[tuple[str, str, str]] = []
 
     if KIND_COUNTERPARTY in kinds:
@@ -270,9 +276,16 @@ def collect_entity_texts(session: Session, *, kinds: Sequence[str]) -> list[tupl
     if KIND_TASK in kinds:
         # FR-TV-010/011/015 — index live (non-deleted) tasks. CONTENT-only
         # text_repr (status/due read live at query time, NOT embedded).
+        import datetime as _d
+
         from app.models.task import Task
 
-        for t in session.query(Task).filter(Task.deleted_at.is_(None)).all():
+        _tq = session.query(Task).filter(Task.deleted_at.is_(None))
+        if task_created_since is not None:
+            _since = _d.datetime.combine(
+                task_created_since, _d.time.min, tzinfo=_d.timezone.utc)
+            _tq = _tq.filter(Task.created_at >= _since)
+        for t in _tq.all():
             tr = build_text_repr_task(
                 title=t.title, description=t.description,
                 owner_display_name=t.owner_display_name,

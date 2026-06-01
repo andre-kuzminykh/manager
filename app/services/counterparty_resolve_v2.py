@@ -35,6 +35,53 @@ NOTE: `resolve_mentions_hybrid` (below) keeps a whole-directory v1
 FALLBACK — that is **847-only legacy** (a small directory fits a prompt).
 It does NOT apply to the 4000 catalog target and is kept only for the
 small-directory scenario.
+
+VALIDATED ON DIRTY DATA (operator run 2026-06-01, prod transcript
+"Fundraising daily", gpt-5.5 extract + gpt-4o critic + k=20 + transcript
+context):
+  * precision is the win — 0 false positives. The old whole-dir critic
+    force-matched garbled forms (Винроботикс→Rainbow, Маслон→Mistral,
+    сугу→Genia, День Z→2PZ); v2 correctly returns NONE for all of them.
+  * legitimate garbled same-name matches are recovered BY CONTEXT:
+    Xtix→XTX Markets, Митсобиш(+электроникс)→Mitsubishi, ДВНЕ→DN Capital,
+    Люната→Lunate, Блюму→Blume, Севе/Севы→CEVA — these miss WITHOUT
+    context (the retrieval query / critic prompt carry ≤300 / ≤1500 chars
+    of surrounding transcript, see entity_match_v2._query_text /
+    build_critic_user_prompt). Context is the recall lever, NOT a looser
+    critic prompt.
+  * recall is now bounded by CATALOG MEMBERSHIP, not the critic: real
+    entities absent from the 4000 (SpaceX, Cargill, Anthropic…) correctly
+    go to the review queue for curation, exactly as designed.
+  * extract MUST be gpt-5.5 reasoning — gpt-4o w/o reasoning is too shallow
+    for ASR-garbled forms (it surfaced 11 clean names vs 41 for gpt-5.5).
+    Cost note: extract is ONE call per RECORDING and is INDEPENDENT of the
+    4000 catalog size (the catalog never enters the extract prompt; it is
+    reached only via pgvector retrieval + ≤k critic candidates).
+
+ROLLOUT (shadow-first, gated by COUNTERPARTY_MATCH_V2_MODE, default "off"):
+  Phase 0  off    — v1 whole-dir resolver only (current prod).
+  Phase 1  shadow — v1 stays canonical; `counterparty_shadow_v2.
+                    shadow_compare_v2` ALSO resolves against the catalog and
+                    LOGS the name-based diff (both/v1_only/v2_only). Zero
+                    writes, never raises. Validate on live meetings.
+  Phase 2  on     — RESERVED cutover. v2 becomes canonical; a matched
+                    catalog entity is mapped back to a `counterparties` row
+                    by name_normalised before writing CounterpartyMention
+                    (catalog ids ≠ counterparties ids — different id-space);
+                    catalog-only matches → review queue. Do NOT enable until
+                    the infra runbook below is done + a shadow window passes.
+
+PROD INFRA RUNBOOK (prerequisites for shadow/on — prod DB is on 0036 with
+NO pgvector):
+  1. swap prod DB image postgres:16-alpine → pgvector/pgvector:pg16 via
+     dump/restore (musl→glibc collation caveat: re-`CREATE`, don't binary-
+     copy);
+  2. `alembic upgrade head` to apply 0037 (pgvector + entity_embeddings) and
+     0038 (entity_catalog_staging);
+  3. load the operator-curated catalog into entity_catalog_staging and embed
+     it (kind='catalog') — ops.catalog_vector_search;
+  4. set COUNTERPARTY_MATCH_V2_MODE=shadow, watch `counterparty_shadow_v2`
+     logs for a few days; only then consider Phase 2.
 """
 from __future__ import annotations
 

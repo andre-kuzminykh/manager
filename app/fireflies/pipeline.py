@@ -1673,6 +1673,17 @@ class FirefliesPipeline:
             matched=len(unique_ids),
             skipped_stale_after_pull_race=skipped_stale,
         )
+        # FR-CR-05-241 — optional SHADOW: v1 above stays canonical; if enabled
+        # we ALSO resolve against the vector catalog and log the diff. Never
+        # writes, never raises (see counterparty_shadow_v2).
+        if getattr(self._settings, "counterparty_match_v2_mode", "off") == "shadow":
+            from app.services.counterparty_shadow_v2 import shadow_compare_v2
+            shadow_compare_v2(
+                session, settings=self._settings, mentions=mentions,
+                v1_canonical_names=mention_to_canonical.values(),
+                transcript=row.transcript_text or "",
+                source_kind="fireflies", source_id=row.fireflies_id,
+            )
         return len(unique_ids)
 
     def _step_enroll_unresolved(

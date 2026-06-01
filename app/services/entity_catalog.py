@@ -235,6 +235,54 @@ def _normalise_name(s: str | None) -> str:
     return normalise_name(s)
 
 
+# ---------------------------------------------------------------------------
+# 3b) Catalog resolution helpers (shared by ops.catalog_resolve, the shadow
+#     hook, and the future v2 wiring). Kept here in `app` so production code
+#     never has to import from `ops`.
+# ---------------------------------------------------------------------------
+CATALOG_KIND = "catalog"  # entity_embeddings.kind for the staging catalog
+
+
+def build_catalog_lexical_index(
+    session: Session,
+) -> tuple[dict[str, int], dict[int, EntityCatalogStaging]]:
+    """norm(name)/norm(alias) → catalog entity_id, for UNAMBIGUOUS keys only.
+
+    FR-CR-05-239: a key that maps to MORE THAN ONE distinct entity (e.g. a
+    shared Cyrillic transliteration across a Hyundai brand family) is dropped
+    from the exact layer so it falls through to vector+critic, which
+    disambiguates with context. Returns (index, by_id)."""
+    rows = session.query(EntityCatalogStaging).all()
+    by_id = {r.id: r for r in rows}
+    key_to_ids: dict[str, set[int]] = {}
+
+    def _put(key: str, r: EntityCatalogStaging) -> None:
+        k = _normalise_name(key)
+        if k:
+            key_to_ids.setdefault(k, set()).add(r.id)
+
+    for r in rows:
+        _put(r.name, r)
+        for a in (r.aliases or "").split(","):
+            if a.strip():
+                _put(a, r)
+    idx = {k: next(iter(ids)) for k, ids in key_to_ids.items() if len(ids) == 1}
+    return idx, by_id
+
+
+def context_window(transcript: str, mention: str, *, window: int = 300) -> str:
+    """A slice of the transcript around the first occurrence of `mention`
+    (so the critic matches by surrounding context, not just the name).
+    Falls back to the bare mention when it isn't found verbatim."""
+    if not transcript:
+        return mention
+    i = transcript.lower().find(mention.lower())
+    if i < 0:
+        return mention
+    a = max(0, i - window)
+    return transcript[a:i + len(mention) + window]
+
+
 def merge_description(old: str, new: str, *, limit: int = DESCRIPTION_LIMIT) -> str:
     """Accumulate context without duplicating it. If `new` adds nothing
     (already contained, case-insensitively) keep `old`; otherwise append,

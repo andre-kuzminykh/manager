@@ -368,6 +368,25 @@ class Settings(BaseSettings):
     counterparty_autoenroll_enabled: bool = Field(
         default=False, alias="COUNTERPARTY_AUTOENROLL_ENABLED"
     )
+    # FR-CR-05-241 — vector counterparty resolution (v2) rollout switch.
+    # v2 = extract (gpt-5.5 ×1) → pgvector top-K over the NEW 4000-entity
+    # catalog (entity_embeddings kind='catalog') → gpt-4o critic → match |
+    # review-queue. Modes:
+    #   "off"    — v1 whole-directory resolver only (current prod behaviour).
+    #   "shadow" — v1 stays canonical; ADDITIONALLY run v2 and LOG how it
+    #              would differ (counts + samples). Zero writes, zero risk.
+    #   "on"     — RESERVED for the cutover (needs prod pgvector + migrations
+    #              0037/0038 + catalog load + id-space mapping; do NOT set
+    #              until that maintenance window).
+    # shadow/on require prod-side pgvector, which is NOT yet deployed — keep
+    # "off" until the infra runbook (FR-CR-05-241) is done.
+    counterparty_match_v2_mode: str = Field(
+        default="off", alias="COUNTERPARTY_MATCH_V2_MODE"
+    )
+    # Retrieval width for v2 (operator 2026-06-01: «дефолт k 12→20»).
+    counterparty_match_v2_k: int = Field(
+        default=20, alias="COUNTERPARTY_MATCH_V2_K"
+    )
     # FR-CR-05-110 — narrow Python safety net under the LLM
     # dedup gate: when candidate's normalized title +
     # owner-key set overlaps an existing item, mark

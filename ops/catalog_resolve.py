@@ -29,55 +29,28 @@ import argparse
 import sys
 
 from openai import OpenAI
-from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import session_scope
 from app.intent.llm_backends import OpenAIBackend
 from app.logging_setup import get_logger, setup_logging
-from app.models.entity_catalog import EntityCatalogStaging
 from app.services.counterparty_match import extract_counterparty_mentions
-from app.services.entity_catalog import _normalise_name
+from app.services.entity_catalog import (
+    CATALOG_KIND,
+    _normalise_name,
+    build_catalog_lexical_index,
+    context_window,
+)
 from app.services.entity_embeddings import make_openai_embed_fn, search_entities
 from app.services.entity_match_v2 import match_entity
 
 log = get_logger(__name__)
 
-KIND = "catalog"
-
-
-def _build_lexical_index(session) -> tuple[dict[str, int], dict[int, EntityCatalogStaging]]:
-    """norm(name)/norm(alias) → entity_id for UNAMBIGUOUS keys only.
-
-    FR-CR-05-239 follow-up (A/B regression «Хёндай»): the aggressive
-    Cyrillic alias pass put the same transliteration on several members
-    of a brand family (Hyundai / Hyundai Motor / Hyundai Venture …). A
-    coarse «max mentions_count wins» tiebreak then mis-routed the bare
-    brand mention. Fix: a key that maps to MORE THAN ONE distinct entity
-    is AMBIGUOUS — drop it from the exact layer so it falls through to
-    vector+critic, which disambiguates with context."""
-    rows = session.execute(select(EntityCatalogStaging)).scalars().all()
-    by_id = {r.id: r for r in rows}
-    key_to_ids: dict[str, set[int]] = {}
-    def _put(key: str, r: EntityCatalogStaging) -> None:
-        k = _normalise_name(key)
-        if k:
-            key_to_ids.setdefault(k, set()).add(r.id)
-    for r in rows:
-        _put(r.name, r)
-        for a in (r.aliases or "").split(","):
-            if a.strip():
-                _put(a, r)
-    idx = {k: next(iter(ids)) for k, ids in key_to_ids.items() if len(ids) == 1}
-    return idx, by_id
-
-
-def _context_for(transcript: str, mention: str, *, window: int = 300) -> str:
-    i = transcript.lower().find(mention.lower())
-    if i < 0:
-        return mention
-    a = max(0, i - window)
-    return transcript[a:i + len(mention) + window]
+KIND = CATALOG_KIND
+# Back-compat aliases — these helpers were lifted into app.services.entity_catalog
+# (so production code never imports from ops); ops.shadow_report imports them here.
+_build_lexical_index = build_catalog_lexical_index
+_context_for = context_window
 
 
 def main() -> int:

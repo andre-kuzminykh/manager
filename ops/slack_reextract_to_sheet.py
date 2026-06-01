@@ -43,7 +43,8 @@ from app.schemas.intent import IntentType, InvocationType
 from app.services.task_direction import classify_one_direction
 from app.sheet_sync.config import TASK_HEADERS
 from app.sheet_sync.feeder import _added_at, _ts_to_dt
-from app.sheet_sync.sheets_client import SheetTabNotFound, TasksSheetClient
+# NB: app.sheet_sync.sheets_client (Google libs) is imported LAZILY inside the
+# write branch so phase-1 extraction can run in a container without Google creds.
 from app.slack_ingest.listener import (
     _SKIPPED_SUBTYPES,
     _author_display_from_registry,
@@ -138,11 +139,31 @@ def main() -> int:
     ap.add_argument("--channel", default=None, help="single channel id (default: all member channels)")
     ap.add_argument("--model", default=s.openai_model)
     ap.add_argument("--apply", action="store_true", help="WRITE to the sheet (default: dry-run)")
+    ap.add_argument(
+        "--dump", default=None,
+        help="phase-1: write extracted rows to this JSON path and exit "
+             "(run where Slack is readable; no Google needed).",
+    )
+    ap.add_argument(
+        "--load", default=None,
+        help="phase-2: read rows from this JSON instead of extracting "
+             "(run where Google creds exist); combine with --apply.",
+    )
     args = ap.parse_args()
 
-    if not args.spreadsheet_id:
+    if not args.spreadsheet_id and not args.dump:
         print("ERROR: spreadsheet id not set", file=sys.stderr)
         return 2
+
+    # -- phase 2 shortcut: load pre-extracted rows, skip Slack + LLM --------
+    if args.load:
+        import json
+
+        with open(args.load, encoding="utf-8") as fh:
+            rows = json.load(fh)
+        print(f"loaded {len(rows)} rows from {args.load}")
+        return _write(args, rows)
+
     if not (s.slack_bot_token and s.openai_api_key):
         print("ERROR: need SLACK_BOT_TOKEN + OPENAI_API_KEY", file=sys.stderr)
         return 2
@@ -229,12 +250,28 @@ def main() -> int:
     if len(rows) > 60:
         print(f"  … +{len(rows)-60} ещё")
 
+    if args.dump:
+        import json
+
+        with open(args.dump, "w", encoding="utf-8") as fh:
+            json.dump(rows, fh, ensure_ascii=False)
+        print(f"\n[dump] {len(rows)} строк → {args.dump} (Slack-чтение завершено; "
+              "перенеси файл туда, где есть Google, и запусти с --load … --apply)")
+        return 0
+
+    return _write(args, rows)
+
+
+def _write(args, rows: list[list[str]]) -> int:
+    """Phase-2 write: rebuild ONLY the Slack section of the sheet. Lazy-imports
+    the Google sheets client so phase-1 can run without Google creds."""
     if not args.apply:
         print("\n(--dry-run — в лист НЕ пишу; добавь --apply для записи)")
         return 0
     if not rows:
         print("нет задач — лист не трогаю.")
         return 0
+    from app.sheet_sync.sheets_client import SheetTabNotFound, TasksSheetClient
 
     sheet = TasksSheetClient(spreadsheet_id=args.spreadsheet_id, tab_title=args.tab)
     try:

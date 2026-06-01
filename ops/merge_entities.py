@@ -111,13 +111,15 @@ def merge_pair(
     }
 
 
-def _collect_pairs(args) -> list[tuple[int, int, str, str]]:
+def _collect_pairs(args, exclude_src: set[int] | None = None) -> list[tuple[int, int, str, str]]:
     """Return [(from_id, into_id, confidence, why)] from --review or
-    explicit --from/--into."""
+    explicit --from/--into. Pairs whose source id ∈ exclude_src are
+    dropped (operator review found them unsafe)."""
+    exclude_src = exclude_src or set()
     pairs: list[tuple[int, int, str, str]] = []
     if args.from_id and args.into_id:
         pairs.append((int(args.from_id), int(args.into_id), "manual", "explicit pair"))
-        return pairs
+        return [p for p in pairs if p[0] not in exclude_src]
     if not args.review:
         return pairs
     with open(args.review, encoding="utf-8") as fh:
@@ -131,6 +133,8 @@ def _collect_pairs(args) -> list[tuple[int, int, str, str]]:
             keep = sg.get("keep")
             for src in sg.get("merge_in", []):
                 if isinstance(keep, int) and isinstance(src, int) and keep != src:
+                    if src in exclude_src or keep in exclude_src:
+                        continue
                     pairs.append((src, keep, conf, sg.get("why", "")))
     return pairs
 
@@ -166,9 +170,12 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true",
                     help="ЗАПИСАТЬ изменения (default: dry-run)")
     ap.add_argument("--backup", default=f"/tmp/merge_backup_{int(time.time())}.json")
+    ap.add_argument("--exclude", type=int, nargs="*", default=[],
+                    help="entity ids to SKIP (review found them unsafe); "
+                         "skips any pair where this id is source OR leader")
     args = ap.parse_args()
 
-    pairs = _collect_pairs(args)
+    pairs = _collect_pairs(args, exclude_src=set(args.exclude or []))
     if args.limit:
         pairs = pairs[: args.limit]
     if not pairs:

@@ -66,9 +66,16 @@ def _list_member_channels(client: WebClient) -> list[dict]:
     return out
 
 
-def _human_messages(client: WebClient, channel: str, limit: int) -> list[dict]:
-    """Most recent `limit` non-bot, non-service text messages, oldest first."""
-    resp = client.conversations_history(channel=channel, limit=limit)
+def _human_messages(
+    client: WebClient, channel: str, limit: int, oldest: float | None = None,
+) -> list[dict]:
+    """Most recent `limit` non-bot, non-service text messages, oldest first.
+    When `oldest` (epoch seconds) is given, only messages at/after it are
+    fetched (used for the --today window)."""
+    kwargs: dict = {"channel": channel, "limit": limit}
+    if oldest is not None:
+        kwargs["oldest"] = str(oldest)
+    resp = client.conversations_history(**kwargs)
     msgs = list(resp.get("messages", []))
     msgs.reverse()  # Slack returns newest-first
     keep = []
@@ -148,7 +155,22 @@ def main() -> int:
     ap.add_argument("--list-channels", action="store_true")
     ap.add_argument("--channel", default=None, help="channel id (default: all member channels)")
     ap.add_argument("--limit", type=int, default=15, help="messages per channel")
+    ap.add_argument(
+        "--today", action="store_true",
+        help="only messages since 00:00 Europe/London today (uses --limit as cap)",
+    )
     args = ap.parse_args()
+
+    oldest: float | None = None
+    if args.today:
+        from datetime import datetime, time as _time
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Europe/London")
+        start = datetime.combine(datetime.now(tz).date(), _time(0, 0), tzinfo=tz)
+        oldest = start.timestamp()
+        if args.limit < 100:
+            args.limit = 200  # widen so a busy day isn't truncated
 
     if not s.slack_bot_token:
         print("ERROR: SLACK_BOT_TOKEN not set", file=sys.stderr)
@@ -182,7 +204,7 @@ def main() -> int:
             print("\n" + "═" * 78)
             print(f"CHANNEL {ch}  #{name_by_id.get(ch, '?')}  (last {args.limit} msgs)")
             try:
-                msgs = _human_messages(client, ch, args.limit)
+                msgs = _human_messages(client, ch, args.limit, oldest=oldest)
             except Exception as e:  # noqa: BLE001
                 print(f"  ! cannot read history: {e}")
                 continue

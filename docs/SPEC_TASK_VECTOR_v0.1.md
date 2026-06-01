@@ -12,9 +12,15 @@ operable** through the existing CEO-brain agent:
 
 1. **Search** — «какие задачи по найму висят?» → vector search over tasks.
 2. **Q&A** — «что на Семёне и что просрочено?» → search + read live fields, answer.
-3. **Status update by natural language** — «отправил письмо Семёну» → find the
-   matching task by vector → propose status change → (confirm) → update +
-   propagate to Google Sheets/Tasks + refresh cards.
+3. **Field update by natural language** — find the matching task by vector, then update:
+   - **status** — «отправил письмо Семёну» → `done`;
+   - **due date** — «перенеси задачу X на пятницу / срок до 10 июня» → new `due_date`;
+   - **owner / responsible** — «переназначь на Семёна / ответственный теперь Семён» →
+     resolve the person (vector over the **team**) → new `owner_user_id`/`owner_display_name`.
+   Each applies immediately on a confident single match, propagates to Google Sheets/Tasks +
+   cards, and is undoable.
+4. **Team in the vector DB** — team members (and Slack employees) are indexed alongside tasks
+   so people can be resolved by name/role for owner updates and answered-about.
 
 **Non-goals (v0.1).**
 - No new task CREATION via vector (creation stays in the meeting/Slack pipelines).
@@ -71,7 +77,10 @@ history + sync (`app/models/task.py`, `app/sync/{task_sync,tasks_api,sheets}.py`
 | **DEC-4** | Expose task tools **both** as CEO-brain local tools **and** as an external **MCP server** (for an external Claude client). | Operator choice 2026-06-01 «да, ещё и для внешнего Клода». Same executors behind both surfaces. → FR-TV-090. |
 | **DEC-5** | NL→status mapping by a fixed **verb→status table** (below), applied by the agent. | Operator choice 2026-06-01 «да». Deterministic, reviewable. |
 | **DEC-6** | Person reference («Семёну») handled two ways: owner is in `text_repr` (cheap recall) **and** optional owner-filter via person resolution. | Robust without a hard dependency on person-matcher. |
-| **DEC-7** | Feature gated by `TASK_VECTOR_ENABLED` (off) + reversible. | Same safe-rollout discipline as FR-CR-05-241. |
+| **DEC-7** | Feature gated by `TASK_VECTOR_ENABLED` (off) + reversible; the flag is flipped **last**, after indexing + calibration (operator «фича флаг в конце»). | Same safe-rollout discipline as FR-CR-05-241. |
+| **DEC-8** | The **team** is indexed in the same vector instance as `kind='team_member'` (+ `kind='employee'`), reusing `build_text_repr_team_member`/`_employee` + `refresh_embeddings`. | People resolution for owner updates + Q&A; zero new infra. |
+| **DEC-9** | Update tools cover **status, due_date, owner**. **Undo** is generic: every update returns `{field, from, to}`; undo re-applies `from` via the same tool. | One pattern for all field updates; no new history table for due/owner. |
+| **DEC-10** | Owner update resolves the person by **vector over the team** (`kind in team_member,employee`) + the same τ/δ ambiguity gate. | «ответственный — Семён» needs name→person; reuse the search stack. |
 
 **Verb→status table (DEC-5, OQ-2 resolved).** Case-insensitive stem match on the
 utterance's action verb:
@@ -84,6 +93,18 @@ utterance's action verb:
 
 Unknown/ambiguous verb ⇒ no inference; agent asks. The mapping is a constant in
 `task_tools` (`VERB_STATUS_MAP`) so it's unit-testable and reviewable.
+
+**Intent table (status / due / owner).** The agent classifies the utterance's intent and
+routes to one update tool:
+
+| Intent cue (examples) | → tool | extracted arg |
+|---|---|---|
+| отправил/сделал/закрыл/начал… | `update_task_status` | target status (verb→status above) |
+| перенеси/срок/дедлайн/до <дата>/на <день недели> | `update_task_due` | parsed `due_date` (+`due_time`?) |
+| переназначь/ответственный/назначь/на <имя> | `update_task_owner` | resolved person (vector over team) |
+
+Date parsing («на пятницу», «до 10 июня», «завтра») is done by the agent into an ISO date
+passed to `update_task_due`; the tool validates the ISO date (no NL parsing inside the tool).
 
 ---
 
@@ -105,6 +126,12 @@ Unknown/ambiguous verb ⇒ no inference; agent asks. The mapping is a constant i
   and every change is audited. → FR-TV-060, NFR-TV-006.
 - **US-TV-08** — *As an operator*, if the vector layer is down, normal task flows keep
   working and the agent says it can't search rather than crashing. → NFR-TV-005.
+- **US-TV-09** — *As the operator*, I say «перенеси задачу про лендинг на пятницу» and the
+  matching task's due date moves, syncing everywhere. → FR-TV-047.
+- **US-TV-10** — *As the operator*, I say «ответственный за договор теперь Семён» and the
+  task's owner changes after the person is resolved from the team. → FR-TV-048, FR-TV-024.
+- **US-TV-11** — *As the operator*, I ask «кто такой Семён / какие задачи на нём», and the
+  team (people) is searchable in the same vector layer. → FR-TV-015, FR-TV-024.
 
 ---
 
@@ -124,13 +151,28 @@ Unknown/ambiguous verb ⇒ no inference; agent asks. The mapping is a constant i
 
 ### UC-TV-03 — Status update by natural language
 - **Main:** utterance «<action> <person/topic>» → agent infers target status (DEC-5) →
-  `search_tasks` → **single** top candidate with score ≥ τ_high → agent **confirms** →
-  `update_task_status(id,new_status,reason)` → DB update + history + sync → agent reports.
+  `search_tasks` → **single** top candidate with score ≥ τ_high → apply immediately (DEC-3) →
+  `update_task_status(id,new_status,reason)` → DB update + history + sync → agent reports «X→done
+  (отменить?)».
 - **Alt-ambiguous:** ≥2 candidates within δ of top OR top score ∈ [τ_low, τ_high) → agent
   lists candidates, asks operator to pick; no write until chosen.
 - **Alt-already-in-state:** task already `done` → no-op, agent says so (idempotent).
 - **Error-none:** best score < τ_low → no write; agent says «не нашёл подходящую задачу».
 - **Error-unauthorized:** caller ∉ allowed users → refused, audited.
+
+### UC-TV-04 — Due-date update by natural language
+- **Main:** «перенеси <topic> на <date>» → agent parses date→ISO → `search_tasks` → single
+  confident task → `update_task_due(id, due_date_iso, reason)` → validate ISO → set `due_date`
+  → sync → report «срок X → <date> (отменить?)».
+- **Alt/Errors:** same ambiguity / none / unauthorized gates as UC-TV-03. Invalid date → no write.
+
+### UC-TV-05 — Owner (responsible) update by natural language
+- **Main:** «ответственный за <topic> — <name>» → `search_tasks` → single confident task →
+  `resolve_person(name)` = vector over `kind in {team_member, employee}` → single confident
+  person → `update_task_owner(id, owner_user_id, owner_display_name, reason)` → sync → report
+  «ответственный X → <name> (отменить?)».
+- **Alt-ambiguous-task / ambiguous-person:** either side ambiguous/low-conf → agent asks; no
+  write. **Error-person-not-found:** no person ≥ τ_low → no write, agent says so.
 
 ---
 
@@ -150,6 +192,10 @@ Unknown/ambiguous verb ⇒ no inference; agent asks. The mapping is a constant i
   a best-effort immediate upsert runs; failure is swallowed (cron is the backstop).
 - **FR-TV-014** — Re-embed is triggered only by a change in the **content** text_repr; a pure
   status change does NOT re-embed (DEC-2).
+- **FR-TV-015 (TEAM INDEX)** — The same refresh indexes the **team** into the vector instance:
+  `kind='team_member'` (from `TeamMember`, via `build_text_repr_team_member`) and
+  `kind='employee'` (from `Employee`, via `build_text_repr_employee`). Idempotent + pruned like
+  tasks. This is what makes owner resolution + people Q&A possible (DEC-8).
 
 ### 5.2 Search
 - **FR-TV-020** — `search_tasks(query, k=TASK_VECTOR_K, status?, owner?, overdue?)` →
@@ -160,6 +206,11 @@ Unknown/ambiguous verb ⇒ no inference; agent asks. The mapping is a constant i
 - **FR-TV-022** — Soft-deleted tasks never appear in results (defense-in-depth even if index
   lagged).
 - **FR-TV-023** — Empty query or no candidates → `[]` (tool returns empty, not error).
+- **FR-TV-024 (PERSON RESOLUTION)** — `resolve_person(name, k)` → vector search over
+  `kind in {team_member, employee}` → `[{person_id, display_name, role, score}]` ordered by
+  score. Used by owner updates and people Q&A. Applies the same τ/δ confidence gate; returns
+  `[]` when nothing ≥ τ_low. `person_id` is the owner key written to the task
+  (`team_member`→a stable user id / `employee`→`slack_user_id`).
 
 ### 5.3 Q&A
 - **FR-TV-030** — The agent answers task questions strictly from `search_tasks`+live fields;
@@ -184,16 +235,29 @@ Unknown/ambiguous verb ⇒ no inference; agent asks. The mapping is a constant i
 - **FR-TV-045** — On success the index entry for that task is refreshed only if content
   changed (status-only change ⇒ no re-embed, FR-TV-014); response includes the new status +
   task title for the agent to echo.
-- **FR-TV-046 (UNDO)** — Because writes apply without confirmation, every auto-applied change
-  is reversible: `undo_last_task_status(actor_id)` (and/or `update_task_status` back to the
-  prior status) restores `from_status` using the most recent `TaskStatusHistory` row for that
-  task and re-syncs. The agent surfaces «изменил X→done (отменить?)» so the operator can revert
-  in one step. Undo is itself audited.
+- **FR-TV-046 (UNDO, generic)** — Because writes apply without confirmation, every auto-applied
+  update (status/due/owner) is reversible (DEC-9): each update tool returns
+  `{field, from, to, task_id}`; the agent surfaces «изменил <field> X→Y (отменить?)» and an undo
+  re-applies `from` via the same tool (status also has `TaskStatusHistory` as a second source).
+  Undo is itself audited.
+- **FR-TV-047 (UPDATE DUE)** — `update_task_due(task_id, due_date, reason, actor_id[, due_time])`:
+  validates `due_date` is a real ISO date (the tool does NOT parse natural language — the agent
+  supplies ISO), sets `due_date`(/`due_time`), recomputes `is_current_week` per existing rules,
+  triggers `TaskSyncer.sync`. Returns `{field:'due_date', from, to}`. Invalid date → no write,
+  `{error:'invalid_date'}`. No re-embed (due not in content). Allow-list + audit as FR-TV-060/061.
+- **FR-TV-048 (UPDATE OWNER)** — `update_task_owner(task_id, owner_user_id, owner_display_name,
+  reason, actor_id)`: sets `owner_user_id`+`owner_display_name`, updates subscriptions per
+  existing rules, triggers sync. Returns `{field:'owner', from, to}`. Owner CONTENT changed ⇒
+  the task IS re-embedded on next refresh (owner is in `text_repr`, FR-TV-010). Unknown/empty
+  owner → no write. Allow-list + audit. The person is resolved upstream via FR-TV-024 (the tool
+  takes an already-resolved id; the ambiguity gate lives in the agent).
 
 ### 5.5 Tools / agent integration
 - **FR-TV-070** — New module `app/ceo_brain/task_tools.py` exposes `TASK_TOOL_SCHEMAS`
-  (`search_tasks`, `get_task`, `update_task_status`) and `build_task_executors(session_factory,
-  settings)` returning `{name: callable(input)->json_str}`, mirroring `slack_tools.py`.
+  (`search_tasks`, `get_task`, `resolve_person`, `update_task_status`, `update_task_due`,
+  `update_task_owner`) and `build_task_executors(session_factory, settings)` returning
+  `{name: callable(input)->json_str}`, mirroring `slack_tools.py`. All four update/resolve tools
+  share the τ/δ gate, allow-list and audit.
 - **FR-TV-071** — `responder.build_anthropic_request` merges task tools into `tools=[...]`
   ONLY when `TASK_VECTOR_ENABLED`. System prompt gains task-tool routing hints.
 - **FR-TV-072** — `update_task_status` executor is id-precise and writes when called (no
@@ -317,6 +381,38 @@ Then it makes zero OpenAI calls and embeds nothing
 Given a task's status changes but its content does not
 When refresh runs
 Then its embedding is not recomputed
+
+# SC-TV-13 (FR-TV-047) due-date update
+Given exactly one task matches "лендинг" with score >= τ_high
+When the operator says "перенеси лендинг на пятницу"
+Then the agent parses Friday to an ISO date and calls update_task_due
+And the due_date changes and syncs, with an undo offer
+
+# SC-TV-14 (FR-TV-048,024) owner update via person resolution
+Given exactly one task matches "договор" and the team is indexed
+When the operator says "ответственный за договор теперь Семён"
+And resolve_person("Семён") yields a single person with score >= τ_high
+Then update_task_owner sets that owner and syncs, with an undo offer
+
+# SC-TV-15 (FR-TV-024) ambiguous person → ask
+Given two team members match "Семён" within δ
+When the operator reassigns a task to "Семён"
+Then the agent lists both people and asks which, and no owner is written
+
+# SC-TV-16 (FR-TV-024) person not found
+Given no team member scores >= τ_low for the name
+When the operator reassigns to that name
+Then no write happens and the agent says the person was not found
+
+# SC-TV-17 (FR-TV-015) team indexed
+Given team members and employees exist
+When refresh runs
+Then kind='team_member' and kind='employee' embeddings are upserted
+
+# SC-TV-18 (FR-TV-046) undo a due/owner change
+Given the agent just changed a task's due_date X->Y
+When the operator says "отмени"
+Then the agent re-applies X via update_task_due
 ```
 
 ---
@@ -343,8 +439,15 @@ tests skip when `TEST_PG_VECTOR_URL` unset (house style, `test_entity_embeddings
 | T-FR-TV-045-a | FR-TV-045 | unit | response carries new status+title |
 | T-FR-TV-050-a | FR-TV-050 | unit | TaskSyncer.sync invoked on update (mocked) |
 | T-FR-TV-060-a | FR-TV-060 | unit | non-allow-listed actor refused + audited |
-| T-FR-TV-070-a | FR-TV-070 | unit | task_tools schemas valid; executors map present |
+| T-FR-TV-015-a | FR-TV-015 | pg | team_member + employee embeddings upserted/pruned |
+| T-FR-TV-024-a | FR-TV-024 | unit | resolve_person ranks team; []< τ_low; ambiguity flagged |
+| T-FR-TV-047-a | FR-TV-047 | unit | valid ISO due set+sync; invalid date→no write |
+| T-FR-TV-048-a | FR-TV-048 | unit | owner set+sync; returns {field:'owner',from,to}; re-embed flagged |
+| T-FR-TV-046-a | FR-TV-046 | unit | each update returns {field,from,to}; undo re-applies `from` |
+| T-FR-TV-070-a | FR-TV-070 | unit | task_tools schemas valid (6 tools); executors map present |
 | T-FR-TV-071-a | FR-TV-071 | unit | tools merged only when TASK_VECTOR_ENABLED |
+| T-SC-TV-14 | SC-TV-14 | integ | owner update via person resolution (fakes) |
+| T-SC-TV-15 | SC-TV-15 | integ | ambiguous person → ask, no write |
 | T-SC-TV-03 | SC-TV-03 | integ | happy NL update end-to-end (fakes) |
 | T-SC-TV-04 | SC-TV-04 | integ | ambiguity gate: no write, asks |
 | T-SC-TV-05 | SC-TV-05 | integ | no-match: no write |
@@ -373,9 +476,11 @@ tests skip when `TEST_PG_VECTOR_URL` unset (house style, `test_entity_embeddings
 ## 10. Work plan (phased, safe-rollout like FR-CR-05-241)
 
 - **P0 — Spec & tests (this doc).** Land spec + failing/skeleton tests (the contract). *0 prod.*
-- **P1 — Indexing.** `KIND_TASK`, `build_text_repr_task`, extend `refresh_embeddings`/new
-  `ops.refresh_task_embeddings`; unit + pg tests. *0 prod.*
-- **P2 — Tools.** `app/ceo_brain/task_tools.py` (`search_tasks`,`get_task`,`update_task_status`),
+- **P1 — Indexing.** `KIND_TASK`, `build_text_repr_task`, **team index** (`kind=team_member,
+  employee`, FR-TV-015), `ops.refresh_task_embeddings` (cross-DB: read primary tasks/team →
+  write vector instance); unit + pg tests. *0 prod.*
+- **P2 — Tools.** `app/ceo_brain/task_tools.py`: `search_tasks`, `get_task`, `resolve_person`,
+  `update_task_status`, `update_task_due`, `update_task_owner` (+ generic undo), `VERB_STATUS_MAP`,
   config flags; unit tests with fakes (no live DB/LLM). *0 prod.*
 - **P3 — Wire (flag off).** Merge tools in `responder` behind `TASK_VECTOR_ENABLED`; system-
   prompt routing + ambiguity/confirmation rules. Deploy with flag **off**. *No behaviour change.*

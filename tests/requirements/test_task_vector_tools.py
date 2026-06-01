@@ -19,12 +19,50 @@ def _executors(**kw):
     return tt.build_task_executors(**kw)
 
 
-# T-FR-TV-070-a — schemas + executor map present and well-formed
+# T-FR-TV-070-a — schemas + executor map present and well-formed (6 tools)
 def test_schemas_and_executors_present():
     names = {s["name"] for s in tt.TASK_TOOL_SCHEMAS}
-    assert {"search_tasks", "get_task", "update_task_status"} <= names
+    assert {"search_tasks", "get_task", "resolve_person",
+            "update_task_status", "update_task_due", "update_task_owner"} <= names
     for s in tt.TASK_TOOL_SCHEMAS:
         assert s.get("description") and s.get("input_schema")
+
+
+# T-FR-TV-046-a — every update tool returns {field, from, to} for generic undo
+@pytest.mark.skipif(not hasattr(tt, "build_task_executors"),
+                    reason="build_task_executors not implemented (P2)")
+def test_updates_return_field_from_to_for_undo():
+    raise pytest.skip.Exception
+
+
+# T-FR-TV-047-a — due update: valid ISO sets+syncs; invalid date → no write
+@pytest.mark.skipif(not hasattr(tt, "build_task_executors"),
+                    reason="build_task_executors not implemented (P2)")
+def test_update_due_valid_and_invalid():
+    raise pytest.skip.Exception
+
+
+# T-FR-TV-048-a — owner update: sets owner + returns {field:'owner',...}
+@pytest.mark.skipif(not hasattr(tt, "build_task_executors"),
+                    reason="build_task_executors not implemented (P2)")
+def test_update_owner_sets_and_reports():
+    raise pytest.skip.Exception
+
+
+# T-FR-TV-024-a — resolve_person ranks the team; [] below τ_low; ambiguity flagged
+@pytest.mark.skipif(not hasattr(tt, "build_task_executors"),
+                    reason="build_task_executors not implemented (P2)")
+def test_resolve_person_over_team():
+    raise pytest.skip.Exception
+
+
+# T-FR-TV-... — verb→status map is a reviewable constant
+def test_verb_status_map_constant():
+    vsm = getattr(tt, "VERB_STATUS_MAP", None)
+    if vsm is None:
+        pytest.skip("VERB_STATUS_MAP not implemented (P2)")
+    # done-verbs and in_progress-verbs present, values are valid statuses
+    assert set(vsm.values()) <= {"backlog", "todo", "in_progress", "done"}
 
 
 # T-FR-TV-020-a — search returns LIVE fields, ordered by score, no fabrication

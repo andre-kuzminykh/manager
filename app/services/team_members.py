@@ -561,6 +561,18 @@ def upsert_from_sheet_rows(
         id_str = (as_dict.get("id") or "").strip()
         tg_user_str = (as_dict.get("telegram_user_id") or "").strip()
         slack_id = (as_dict.get("slack_user_id") or "").strip() or None
+        _name = (as_dict.get("real_name") or "").strip()
+        _tg_un = (as_dict.get("telegram_username") or "").strip()
+        _email = (as_dict.get("email") or "").strip()
+
+        # BUG-FIX 2026-06-01 — SKIP completely blank sheet rows. A trailing
+        # empty row in the `Team` tab (range A:Z reads them) has no id / tg /
+        # slack / name; without this guard each pull fell through to «insert as
+        # a new row», so the periodic listener pull accumulated ~12.9k blank
+        # TeamMember rows over 11 days. A row with NO identifying field at all
+        # is never a real member — drop it.
+        if not (id_str or tg_user_str or slack_id or _name or _tg_un or _email):
+            continue
 
         target: TeamMember | None = None
         if id_str.isdigit():

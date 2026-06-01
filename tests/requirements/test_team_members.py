@@ -549,6 +549,26 @@ def test_upsert_from_sheet_rows_inserts_new_then_updates_by_id(session):
     assert refreshed.role == "CEO"
 
 
+def test_upsert_from_sheet_rows_skips_blank_rows(session):
+    """BUG-FIX 2026-06-01 — a completely blank trailing sheet row (no id /
+    tg / slack / name) must be SKIPPED, not inserted. Otherwise each periodic
+    pull accumulates a new blank TeamMember (12.9k seen in prod over 11 days)."""
+    rows = [
+        ["", "Andre", "42", "andre", "U1", "Founder", "a@x.com", "true", ""],
+        ["", "", "", "", "", "", "", "", ""],          # blank trailing row
+        ["", "", "", "", "", "", "", "true", ""],       # blank but active=true
+        [""] * 3,                                        # short blank row
+    ]
+    updated, inserted = upsert_from_sheet_rows(session, rows)
+    assert (updated, inserted) == (0, 1)               # only the real row
+    members = list_active(session)
+    assert len(members) == 1 and members[0].real_name == "Andre"
+
+    # A second pull with the same blank rows still inserts nothing new.
+    updated, inserted = upsert_from_sheet_rows(session, rows[1:])
+    assert inserted == 0
+
+
 def test_upsert_from_sheet_rows_matches_by_telegram_id_when_no_id(session):
     """Operator added a row by hand without filling in the `id` column.
     The pull should still find the existing DB row by tg_user_id and

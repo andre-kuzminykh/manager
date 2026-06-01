@@ -31,6 +31,38 @@ def test_deadline_time_eod_only_when_due_present():
     assert rx._deadline_time("") == ""
 
 
+def test_humanize_mentions_keeps_jira_keys():
+    m = {"U0796A349R7": "Polly Ng"}
+    assert rx._humanize("Transfer ownership to U0796A349R7", m) == "Transfer ownership to Polly Ng"
+    assert rx._humanize("share with <@U0796A349R7> today", m) == "share with Polly Ng today"
+    # unknown uid is left as-is; Jira keys (HUMPROC-####) are not touched
+    assert rx._humanize("Provide update on HUMPROC-4335", m) == "Provide update on HUMPROC-4335"
+
+
+def test_noise_reason_flags_non_tasks_but_keeps_imperatives():
+    assert rx._noise_reason("*Weekly Hiring Update* (May 18-22)\n\nHi all") == "multiline-paste"
+    assert rx._noise_reason("Hi, we are currently arranging the logistics") == "greeting"
+    assert rx._noise_reason("When we last extended our London WeWork contract") == "question-start"
+    assert rx._noise_reason("Какие задачи открыты?") == "question"
+    # real imperative tasks survive
+    for t in ["Review and sign the NDA", "Provide update on HUMPROC-4335",
+              "Reach out to Amazon to unblock account", "Issue 3 new credit cards"]:
+        assert rx._noise_reason(t) is None, t
+
+
+def test_clean_rows_drops_noise_and_fixes_names():
+    m = {"U0796A349R7": "Polly Ng"}
+    rows = [
+        rx._row(title="Send signed agreement to U0796A349R7", description="", owner="X",
+                priority_key="medium", direction="other", due="", added_at="", link=""),
+        rx._row(title="*Weekly Hiring Update*\nHi all", description="", owner="X",
+                priority_key="medium", direction="other", due="", added_at="", link=""),
+    ]
+    out = rx._clean_rows(rows, m)
+    assert len(out) == 1
+    assert out[0][0] == "Send signed agreement to Polly Ng"
+
+
 def test_is_read_only_and_dry_run_by_default():
     # DB is never mutated: a rollback guards the session, no add/commit of
     # action_drafts / tasks anywhere in this op.

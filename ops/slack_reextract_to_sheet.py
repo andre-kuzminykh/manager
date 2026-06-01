@@ -59,6 +59,65 @@ _LONDON = ZoneInfo("Europe/London")
 _PRIORITY_DISPLAY = {"low": "Low", "medium": "Medium", "high": "High", "urgent": "High"}
 _SLACK_SRC = "Slack"
 
+# --- post-extraction cleanup (no LLM) ---------------------------------------
+import re  # noqa: E402
+
+_UID_RE = re.compile(r"<@([UW][A-Z0-9]{6,})>")
+_BARE_UID_RE = re.compile(r"\b([UW][A-Z0-9]{8,})\b")
+_GREETINGS = ("hi all", "hi ", "hi,", "hi!", "hello", "hey ", "hey,")
+_Q_STARTS = (
+    "when ", "what ", "which ", "why ", "how ", "are ", "is ", "do ", "does ",
+    "did ", "should ", "could ", "would ", "can ", "was ", "were ", "is there",
+    "какие", "что ", "кто ", "нужно", "можно", "есть ",
+)
+
+
+def _humanize(text: str, uid_to_name: dict[str, str]) -> str:
+    """Replace <@U…> and bare U… mention tokens with the employee's name."""
+    text = _UID_RE.sub(lambda m: uid_to_name.get(m.group(1), ""), text)
+    text = _BARE_UID_RE.sub(lambda m: uid_to_name.get(m.group(1), m.group(1)), text)
+    return re.sub(r"\s{2,}", " ", text).strip()
+
+
+def _noise_reason(title: str) -> str | None:
+    t = title.strip()
+    low = t.lower()
+    if "\n" in t:
+        return "multiline-paste"
+    if t.startswith(("*", ">", "•", "- ")):
+        return "broadcast/formatting"
+    if low.endswith("?"):
+        return "question"
+    if any(low.startswith(g) for g in _GREETINGS):
+        return "greeting"
+    if any(low.startswith(q) for q in _Q_STARTS):
+        return "question-start"
+    if len(t) > 200:
+        return "too-long"
+    return None
+
+
+def _clean_rows(rows: list[list[str]], uid_to_name: dict[str, str]) -> list[list[str]]:
+    """Humanise mention tokens in title/description, drop non-task noise.
+    Prints a report of what was rewritten / dropped. No LLM, no network."""
+    kept: list[list[str]] = []
+    dropped = 0
+    for r in rows:
+        before = r[0]
+        r[0] = _humanize(r[0] or "", uid_to_name)
+        r[1] = _humanize(r[1] or "", uid_to_name)
+        reason = _noise_reason(r[0])
+        if reason:
+            dropped += 1
+            print(f"  [drop:{reason}] {(before or '')[:70].replace(chr(10), ' ')}")
+            continue
+        if before != r[0]:
+            print(f"  [name-fix] → {r[0][:70]}")
+        kept.append(r)
+    print(f"[clean] оставлено {len(kept)}, выкинуто {dropped} (шум)")
+    return kept
+
+
 
 def _list_member_channels(client: WebClient) -> list[dict]:
     out, cursor = [], None
@@ -149,19 +208,37 @@ def main() -> int:
         help="phase-2: read rows from this JSON instead of extracting "
              "(run where Google creds exist); combine with --apply.",
     )
+    ap.add_argument(
+        "--clean", action="store_true",
+        help="post-process rows (no LLM): humanise <@U…> mentions to names "
+             "and drop non-task noise. Needs the Employees DB for the map.",
+    )
     args = ap.parse_args()
 
     if not args.spreadsheet_id and not args.dump:
         print("ERROR: spreadsheet id not set", file=sys.stderr)
         return 2
 
-    # -- phase 2 shortcut: load pre-extracted rows, skip Slack + LLM --------
+    # -- load pre-extracted rows, optionally clean, then dump or write ------
     if args.load:
         import json
 
         with open(args.load, encoding="utf-8") as fh:
             rows = json.load(fh)
         print(f"loaded {len(rows)} rows from {args.load}")
+        if args.clean:
+            with session_scope() as session:
+                uid_to_name = {
+                    e["slack_user_id"]: (e.get("display_name") or e.get("real_name") or "")
+                    for e in _known_employees_from_db(session)
+                }
+                session.rollback()  # READ-ONLY
+            rows = _clean_rows(rows, uid_to_name)
+        if args.dump:
+            with open(args.dump, "w", encoding="utf-8") as fh:
+                json.dump(rows, fh, ensure_ascii=False)
+            print(f"[dump] {len(rows)} строк → {args.dump}")
+            return 0
         return _write(args, rows)
 
     if not (s.slack_bot_token and s.openai_api_key):

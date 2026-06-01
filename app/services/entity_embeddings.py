@@ -29,6 +29,7 @@ from app.models.entity_embedding import (
     EMBEDDING_DIM,
     KIND_COUNTERPARTY,
     KIND_EMPLOYEE,
+    KIND_TASK,
     KIND_TEAM_MEMBER,
 )
 
@@ -266,6 +267,21 @@ def collect_entity_texts(session: Session, *, kinds: Sequence[str]) -> list[tupl
             if tr:
                 out.append((KIND_EMPLOYEE, e.slack_user_id, tr))
 
+    if KIND_TASK in kinds:
+        # FR-TV-010/011/015 — index live (non-deleted) tasks. CONTENT-only
+        # text_repr (status/due read live at query time, NOT embedded).
+        from app.models.task import Task
+
+        for t in session.query(Task).filter(Task.deleted_at.is_(None)).all():
+            tr = build_text_repr_task(
+                title=t.title, description=t.description,
+                owner_display_name=t.owner_display_name,
+                status=getattr(t.status, "value", t.status),
+                due_date=t.due_date, category=t.category,
+            )
+            if tr:
+                out.append((KIND_TASK, str(t.id), tr))
+
     return out
 
 
@@ -280,11 +296,51 @@ def refresh_embeddings(
     model: str = DEFAULT_EMBED_MODEL,
     batch_size: int = 256,
 ) -> dict[str, int]:
-    """Upsert embeddings for all entities whose text_repr changed.
+    """Upsert embeddings for all entities whose text_repr changed (single DB:
+    source rows and embeddings live in `session`).
 
-    Returns counters: {"scanned", "embedded", "skipped"}.
+    Returns counters: {"scanned", "embedded", "skipped", "pruned"}.
     """
     rows = collect_entity_texts(session, kinds=kinds)
+    return _apply_embeddings(
+        session, rows, embed_fn=embed_fn, kinds=kinds, model=model,
+        batch_size=batch_size,
+    )
+
+
+def refresh_embeddings_cross_db(
+    source_session: Session,
+    target_session: Session,
+    *,
+    embed_fn: EmbedFn,
+    kinds: Sequence[str],
+    model: str = DEFAULT_EMBED_MODEL,
+    batch_size: int = 256,
+) -> dict[str, int]:
+    """FR-TV — collect source rows from `source_session` (e.g. the primary DB
+    holding tasks/team) and upsert their embeddings into `target_session` (the
+    SEPARATE pgvector instance). Same prune/hash-skip/embed/upsert logic as
+    `refresh_embeddings`; the two DBs are simply different. Caller commits
+    `target_session`."""
+    rows = collect_entity_texts(source_session, kinds=kinds)
+    return _apply_embeddings(
+        target_session, rows, embed_fn=embed_fn, kinds=kinds, model=model,
+        batch_size=batch_size,
+    )
+
+
+def _apply_embeddings(
+    session: Session,
+    rows: list[tuple[str, str, str]],
+    *,
+    embed_fn: EmbedFn,
+    kinds: Sequence[str],
+    model: str,
+    batch_size: int,
+) -> dict[str, int]:
+    """Prune vanished rows, (re)embed only changed/missing rows by
+    text_repr_hash, upsert into `session`.entity_embeddings. Scoped to `kinds`
+    + `model` so other data is never touched. Returns counters."""
     scanned = len(rows)
 
     # FR-CR-05-229 — prune embeddings whose source entity is no longer
@@ -312,14 +368,14 @@ def refresh_embeddings(
     if pruned:
         session.flush()
 
-    # Existing hashes for this model: {(kind, entity_id): hash}
+    # Existing hashes for this model, scoped to the refreshed kinds.
     existing: dict[tuple[str, str], str] = {}
     res = session.execute(
         sql_text(
-            "SELECT kind, entity_id, text_repr_hash "
-            "FROM entity_embeddings WHERE model = :model"
+            "SELECT kind, entity_id, text_repr_hash FROM entity_embeddings "
+            "WHERE model = :model AND kind = ANY(:kinds)"
         ),
-        {"model": model},
+        {"model": model, "kinds": list(kinds)},
     )
     for kind, entity_id, h in res:
         existing[(kind, entity_id)] = h

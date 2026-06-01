@@ -76,3 +76,29 @@ def catalog_session_scope() -> Iterator[Session]:
     finally:
         session.rollback()
         session.close()
+
+
+# FR-TV — SEPARATE engine for the task/team vector DB (kind='task'/'team_member'
+# /'employee'). DSN precedence: TASK_VECTOR_DATABASE_URL → CATALOG_DATABASE_URL →
+# None (caller falls back to the primary DB). Isolated from the primary engine.
+_task_vector_engine: Engine | None = None
+_TaskVectorSessionLocal: sessionmaker[Session] | None = None
+
+
+def get_task_vector_session_factory() -> sessionmaker[Session] | None:
+    """Sessionmaker bound to the task vector DB, or None when neither
+    TASK_VECTOR_DATABASE_URL nor CATALOG_DATABASE_URL is set (callers then use
+    the primary DB)."""
+    global _task_vector_engine, _TaskVectorSessionLocal
+    s = get_settings()
+    dsn = getattr(s, "task_vector_database_url", None) or getattr(
+        s, "catalog_database_url", None
+    )
+    if not dsn:
+        return None
+    if _task_vector_engine is None:
+        _task_vector_engine = create_engine(dsn, pool_pre_ping=True, future=True)
+        _TaskVectorSessionLocal = sessionmaker(
+            bind=_task_vector_engine, autoflush=False, expire_on_commit=False
+        )
+    return _TaskVectorSessionLocal

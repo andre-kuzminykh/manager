@@ -396,6 +396,39 @@ class Settings(BaseSettings):
     catalog_database_url: str | None = Field(
         default=None, alias="CATALOG_DATABASE_URL"
     )
+    # FR-TV — Task Vector layer (semantic task search / NL field updates via
+    # the CEO-brain agent + external MCP server). All default-OFF; the enable
+    # flag is flipped LAST, after indexing + synthetic calibration (operator
+    # decision 2026-06-01 «фича флаг в конце»). See docs/SPEC_TASK_VECTOR_v0.1.md.
+    task_vector_enabled: bool = Field(
+        default=False, alias="TASK_VECTOR_ENABLED"
+    )
+    # Tasks + team are indexed (kind='task'/'team_member'/'employee') in a
+    # SEPARATE pgvector DB so the prod transactional DB is never touched. When
+    # None, falls back to CATALOG_DATABASE_URL, then the primary DB.
+    task_vector_database_url: str | None = Field(
+        default=None, alias="TASK_VECTOR_DATABASE_URL"
+    )
+    task_vector_model: str = Field(
+        default="text-embedding-3-large", alias="TASK_VECTOR_MODEL"
+    )
+    task_vector_k: int = Field(default=10, alias="TASK_VECTOR_K")
+    # Confidence gate for auto-applied field updates (FR-TV-043): a single
+    # match with score >= tau_high and no rival within delta auto-applies;
+    # [tau_low, tau_high) or >=2 within delta → the agent asks; < tau_low → none.
+    # Calibrated on a synthetic eval set before any auto-write is enabled.
+    task_vector_tau_high: float = Field(default=0.45, alias="TASK_VECTOR_TAU_HIGH")
+    task_vector_tau_low: float = Field(default=0.30, alias="TASK_VECTOR_TAU_LOW")
+    task_vector_delta: float = Field(default=0.05, alias="TASK_VECTOR_DELTA")
+    # Best-effort immediate re-embed on task create/edit (FR-TV-013); the cron
+    # is the backstop either way.
+    task_vector_immediate_upsert: bool = Field(
+        default=False, alias="TASK_VECTOR_IMMEDIATE_UPSERT"
+    )
+    # External MCP server exposing the task tools (FR-TV-090). Off by default.
+    task_mcp_server_enabled: bool = Field(
+        default=False, alias="TASK_MCP_SERVER_ENABLED"
+    )
     # FR-CR-05-110 — narrow Python safety net under the LLM
     # dedup gate: when candidate's normalized title +
     # owner-key set overlaps an existing item, mark

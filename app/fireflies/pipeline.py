@@ -1579,21 +1579,32 @@ class FirefliesPipeline:
                 fireflies_id=row.fireflies_id,
             )
             return 0
-        # Pass 2.
+        # Pass 2. FR-CR-05-241 — resolver selection. "on" = v2 (vector catalog
+        # + critic, mapped to the directory by name); otherwise v1 whole-dir.
+        _mode = getattr(self._settings, "counterparty_match_v2_mode", "off")
         try:
-            mention_to_id = resolve_mentions_to_directory(
-                mentions,
-                directory,
-                llm_backend=self._llm,
-                model=self._settings.fireflies_tasks_model,
-                reasoning_effort=(
-                    self._settings.fireflies_tasks_reasoning_effort or None
-                ),
-                batch_size=self._settings.counterparty_resolve_batch_size,
-                max_workers=self._settings.counterparty_resolve_max_workers,
-                trace_source="fireflies",
-                trace_recording_id=row.fireflies_id,
-            )
+            if _mode == "on":
+                from app.services.counterparty_catalog_resolver import (
+                    resolve_mentions_to_directory_via_catalog,
+                )
+                mention_to_id = resolve_mentions_to_directory_via_catalog(
+                    session, settings=self._settings, mentions=mentions,
+                    transcript=row.transcript_text or "", directory=directory,
+                )
+            else:
+                mention_to_id = resolve_mentions_to_directory(
+                    mentions,
+                    directory,
+                    llm_backend=self._llm,
+                    model=self._settings.fireflies_tasks_model,
+                    reasoning_effort=(
+                        self._settings.fireflies_tasks_reasoning_effort or None
+                    ),
+                    batch_size=self._settings.counterparty_resolve_batch_size,
+                    max_workers=self._settings.counterparty_resolve_max_workers,
+                    trace_source="fireflies",
+                    trace_recording_id=row.fireflies_id,
+                )
         except Exception as e:  # noqa: BLE001
             log.warning(
                 "fireflies_counterparty_resolve_unexpected_error",

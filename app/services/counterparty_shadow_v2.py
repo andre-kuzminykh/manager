@@ -26,14 +26,11 @@ import time
 from typing import Any, Iterable
 
 from app.logging_setup import get_logger
-from app.services.entity_catalog import (
-    CATALOG_KIND,
-    _normalise_name,
-    build_catalog_lexical_index,
-    context_window,
+from app.services.counterparty_catalog_resolver import (
+    open_catalog_session,
+    resolve_mentions_against_catalog,
 )
-from app.services.entity_embeddings import make_openai_embed_fn, search_entities
-from app.services.entity_match_v2 import match_entity
+from app.services.entity_catalog import _normalise_name
 
 log = get_logger(__name__)
 
@@ -59,65 +56,25 @@ def shadow_compare_v2(
         api_key = getattr(settings, "openai_api_key", None)
         if not api_key:
             return None
-        from openai import OpenAI
-
-        from app.intent.llm_backends import OpenAIBackend
-
-        client = OpenAI(api_key=api_key)
-        embed_model = settings.embedding_model
-        critic_model = settings.entity_match_critic_model
-        embed_fn = make_openai_embed_fn(client, embed_model)
-        backend = OpenAIBackend(client, critic_model)
-        k = getattr(settings, "counterparty_match_v2_k", 20)
 
         # The vector catalog lives in a SEPARATE pgvector DB (operator choice
-        # 2026-06-01) so the prod DB stays untouched. Open a read-only catalog
-        # session if CATALOG_DATABASE_URL is set; otherwise fall back to the
-        # caller's session (ops sidecar / tests, where catalog shares the DB).
-        from app.db import get_catalog_session_factory
-
-        cat_factory = get_catalog_session_factory()
-        cat_session = cat_factory() if cat_factory is not None else session
-        owns_session = cat_factory is not None
+        # 2026-06-01) so the prod DB stays untouched. Resolve via the shared
+        # catalog resolver (same code path the live "on" mode uses).
+        cat_session, owns_session = open_catalog_session(session)
         try:
-            lex, by_id = build_catalog_lexical_index(cat_session)
-            if not by_id:
-                log.info(
-                    "counterparty_shadow_v2_skipped_empty_catalog",
-                    source_kind=source_kind, source_id=source_id,
-                )
-                return None
-
-            def retrieve_fn(query: str, kk: int) -> list[dict[str, Any]]:
-                return search_entities(
-                    cat_session, kind=CATALOG_KIND, query_text=query,
-                    embed_fn=embed_fn, model=embed_model, k=kk,
-                )
-
-            v2_names: set[str] = set()
-            n_exact = n_critic = n_none = 0
-            for m in mentions:
-                eid = lex.get(_normalise_name(m))
-                if eid is not None:
-                    v2_names.add(by_id[eid].name)
-                    n_exact += 1
-                    continue
-                res = match_entity(
-                    kind=CATALOG_KIND, mention=m,
-                    context=context_window(transcript, m),
-                    retrieve_fn=retrieve_fn, backend=backend,
-                    critic_model=critic_model, k=k,
-                )
-                mid = res.get("matched_entity_id")
-                if mid and str(mid).isdigit() and int(mid) in by_id:
-                    v2_names.add(by_id[int(mid)].name)
-                    n_critic += 1
-                else:
-                    n_none += 1
+            matches = resolve_mentions_against_catalog(
+                cat_session, settings=settings, mentions=mentions,
+                transcript=transcript,
+            )
         finally:
             if owns_session:
                 cat_session.rollback()
                 cat_session.close()
+
+        v2_names = {info["name"] for info in matches.values()}
+        n_exact = sum(1 for i in matches.values() if i["method"] == "exact")
+        n_critic = sum(1 for i in matches.values() if i["method"] == "critic")
+        n_none = len(mentions) - len(matches)
 
         v1n = {_normalise_name(n): n for n in v1_canonical_names if n}
         v2n = {_normalise_name(n): n for n in v2_names}

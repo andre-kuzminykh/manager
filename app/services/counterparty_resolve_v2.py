@@ -64,12 +64,16 @@ ROLLOUT (shadow-first, gated by COUNTERPARTY_MATCH_V2_MODE, default "off"):
                     shadow_compare_v2` ALSO resolves against the catalog and
                     LOGS the name-based diff (both/v1_only/v2_only). Zero
                     writes, never raises. Validate on live meetings.
-  Phase 2  on     — RESERVED cutover. v2 becomes canonical; a matched
-                    catalog entity is mapped back to a `counterparties` row
-                    by name_normalised before writing CounterpartyMention
-                    (catalog ids ≠ counterparties ids — different id-space);
-                    catalog-only matches → review queue. Do NOT enable until
-                    a shadow window passes.
+  Phase 2  on     — v2 is the SINGLE canonical resolver (implemented in
+                    counterparty_catalog_resolver.resolve_mentions_to_
+                    directory_via_catalog, wired into both pipelines). A
+                    matched catalog entity is mapped back to a `counterparties`
+                    row by name_normalised (catalog ids ≠ counterparties ids).
+                    CONSERVATIVE: links ONLY to entities already in the
+                    directory; a real catalog entity absent from it → None
+                    (review) and is NEVER auto-created — the directory's source
+                    of truth is the Google Sheet, which would wipe an
+                    auto-created row. Reversible instantly via the flag (→off).
 
 PROD INFRA (operator decision 2026-06-01: SEPARATE pgvector instance — the
 prod transactional DB is NEVER touched / migrated):

@@ -42,7 +42,11 @@ from app.services.entity_embeddings import (
 
 log = get_logger(__name__)
 
-# Tasks + the team in one pass (team is needed for owner resolution, FR-TV-015).
+# Tasks + the CURATED team for owner resolution. `employee` (auto-pulled Slack
+# workspace, ~150 incl. non-team noise + cross-dupes with team_member) is NOT
+# indexed for people (operator decision 2026-06-01: «только team_member, без
+# ботов»); it stays an allowed --kinds opt-in for the directory use-case.
+_DEFAULT_KINDS = (KIND_TASK, KIND_TEAM_MEMBER)
 _ALL_KINDS = (KIND_TASK, KIND_TEAM_MEMBER, KIND_EMPLOYEE)
 
 
@@ -52,8 +56,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--kinds",
-        default=",".join(_ALL_KINDS),
-        help="comma-separated subset of: " + ",".join(_ALL_KINDS),
+        default=",".join(_DEFAULT_KINDS),
+        help="comma-separated subset of: " + ",".join(_ALL_KINDS)
+        + " (default: task,team_member — employee excluded as noise)",
     )
     ap.add_argument(
         "--model",

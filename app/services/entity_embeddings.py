@@ -256,6 +256,12 @@ def collect_entity_texts(
         from app.models.team import TeamMember
 
         for tm in session.query(TeamMember).filter(TeamMember.active.is_(True)).all():
+            # FR-TV — exclude bot accounts from the people index (TeamMember has
+            # no is_bot flag; heuristic on name/telegram «…bot…»). Garbage rows
+            # with empty names are dropped anyway (build_text_repr → "").
+            blob = f"{tm.real_name or ''} {tm.telegram_username or ''}".lower()
+            if "bot" in blob:
+                continue
             tr = build_text_repr_team_member(
                 real_name=tm.real_name, role=tm.role,
                 telegram_username=tm.telegram_username, notes=tm.notes,

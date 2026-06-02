@@ -341,12 +341,18 @@ def refresh_embeddings_cross_db(
     holding tasks/team) and upsert their embeddings into `target_session` (the
     SEPARATE pgvector instance). Same prune/hash-skip/embed/upsert logic as
     `refresh_embeddings`; the two DBs are simply different. Caller commits
-    `target_session`."""
+    `target_session`.
+
+    When `task_created_since` is set the source scan is PARTIAL (only newer
+    tasks), so pruning is disabled — otherwise every embedding outside the
+    window would be deleted. A full re-index (no `--since`) is what reconciles
+    deletions."""
     rows = collect_entity_texts(source_session, kinds=kinds,
                                 task_created_since=task_created_since)
     return _apply_embeddings(
         target_session, rows, embed_fn=embed_fn, kinds=kinds, model=model,
         batch_size=batch_size,
+        prune=task_created_since is None,
     )
 
 
@@ -358,36 +364,43 @@ def _apply_embeddings(
     kinds: Sequence[str],
     model: str,
     batch_size: int,
+    prune: bool = True,
 ) -> dict[str, int]:
     """Prune vanished rows, (re)embed only changed/missing rows by
     text_repr_hash, upsert into `session`.entity_embeddings. Scoped to `kinds`
-    + `model` so other data is never touched. Returns counters."""
+    + `model` so other data is never touched. Returns counters.
+
+    `prune=False` MUST be used whenever `rows` is a PARTIAL scan of the source
+    (e.g. a `--since` window): pruning assumes `rows` is the complete current
+    set for `kinds`, and would otherwise delete every row outside the window."""
     scanned = len(rows)
 
     # FR-CR-05-229 — prune embeddings whose source entity is no longer
     # collectable (deleted, or now filtered out as a tag/alias). Scoped
     # to the kinds + model we're refreshing so we never touch other data.
+    # SAFETY: only valid on a FULL scan — see `prune` docstring above.
     wanted: set[tuple[str, str]] = {(k, eid) for k, eid, _ in rows}
     pruned = 0
-    existing_pairs = session.execute(
-        sql_text(
-            "SELECT kind, entity_id FROM entity_embeddings "
-            "WHERE model = :model AND kind = ANY(:kinds)"
-        ),
-        {"model": model, "kinds": list(kinds)},
-    ).fetchall()
-    for k, eid in existing_pairs:
-        if (k, eid) not in wanted:
-            session.execute(
-                sql_text(
-                    "DELETE FROM entity_embeddings "
-                    "WHERE kind = :k AND entity_id = :eid AND model = :model"
-                ),
-                {"k": k, "eid": eid, "model": model},
-            )
-            pruned += 1
-    if pruned:
-        session.flush()
+    if prune:
+        existing_pairs = session.execute(
+            sql_text(
+                "SELECT kind, entity_id FROM entity_embeddings "
+                "WHERE model = :model AND kind = ANY(:kinds)"
+            ),
+            {"model": model, "kinds": list(kinds)},
+        ).fetchall()
+        for k, eid in existing_pairs:
+            if (k, eid) not in wanted:
+                session.execute(
+                    sql_text(
+                        "DELETE FROM entity_embeddings "
+                        "WHERE kind = :k AND entity_id = :eid AND model = :model"
+                    ),
+                    {"k": k, "eid": eid, "model": model},
+                )
+                pruned += 1
+        if pruned:
+            session.flush()
 
     # Existing hashes for this model, scoped to the refreshed kinds.
     existing: dict[tuple[str, str], str] = {}

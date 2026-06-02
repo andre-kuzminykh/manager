@@ -51,11 +51,26 @@ def _mk_task(sm, *, title="Отправить договор Семёну", owne
         s.close()
 
 
-def _execs(sm, *, calls=None, search=None):
+def _execs(sm, *, calls=None, search=None, writes_enabled=True):
     return tt.build_task_executors(
         session_factory=sm, settings=_Settings(), search_fn=search,
         sync_fn=(calls.append if calls is not None else (lambda i: None)),
+        writes_enabled=writes_enabled,
     )
+
+
+# ---- read-only gate (FR-TV — writes off until τ/δ calibrated) -------------
+def test_writes_disabled_by_default_omits_writers():
+    ex = tt.build_task_executors(session_factory=lambda: None, settings=_Settings())
+    assert set(ex) == {"search_tasks", "get_task", "resolve_person"}
+    assert "update_task_status" not in ex
+
+
+def test_task_tool_schemas_read_only_subset():
+    ro = {s["name"] for s in tt.task_tool_schemas(writes_enabled=False)}
+    assert ro == {"search_tasks", "get_task", "resolve_person"}
+    rw = {s["name"] for s in tt.task_tool_schemas(writes_enabled=True)}
+    assert "update_task_status" in rw and "update_task_due" in rw
 
 
 # ---- schemas / constants (no DB) -----------------------------------------

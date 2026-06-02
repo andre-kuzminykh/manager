@@ -40,6 +40,19 @@ VERB_STATUS_MAP: dict[str, str] = {
 
 _VALID_STATUSES = {"backlog", "todo", "in_progress", "done"}
 
+# FR-TV — read tools are always safe to expose; write tools mutate tasks and
+# are gated behind `writes_enabled` (TASK_VECTOR_WRITES_ENABLED) so search/Q&A
+# can go live read-only before the τ/δ confidence gate is calibrated.
+READ_TOOL_NAMES = ("search_tasks", "get_task", "resolve_person")
+WRITE_TOOL_NAMES = ("update_task_status", "update_task_due", "update_task_owner")
+
+
+def task_tool_schemas(*, writes_enabled: bool) -> list[dict[str, Any]]:
+    """Subset of TASK_TOOL_SCHEMAS the agent may see. Read-only by default;
+    write-tool schemas are included only when `writes_enabled` is True."""
+    allow = set(READ_TOOL_NAMES) | (set(WRITE_TOOL_NAMES) if writes_enabled else set())
+    return [s for s in TASK_TOOL_SCHEMAS if s["name"] in allow]
+
 
 TASK_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
@@ -155,10 +168,15 @@ def build_task_executors(
     settings: Any,
     search_fn: Callable[[str, str, int], list[dict[str, Any]]] | None = None,
     sync_fn: Callable[[int], None] | None = None,
+    writes_enabled: bool = False,
 ) -> dict[str, Callable[[dict[str, Any]], str]]:
     """name→callable map. Dependencies are injectable for tests:
     `search_fn(query, kind, k)`→candidates (default: pgvector over the task
-    vector DB), `sync_fn(task_id)` (default: app.sync.task_sync.sync_task)."""
+    vector DB), `sync_fn(task_id)` (default: app.sync.task_sync.sync_task).
+
+    `writes_enabled=False` (default) returns ONLY the read tools
+    (search_tasks/get_task/resolve_person); the three update_* tools are
+    omitted entirely so they can never be invoked until writes are turned on."""
 
     allowed = _allowed_users(settings)
     default_k = int(getattr(settings, "task_vector_k", 10) or 10)
@@ -437,14 +455,23 @@ def build_task_executors(
             log.error("task_owner_update_failed", error=str(e))
             return _err(f"update_failed: {e}")
 
-    return {
+    execs: dict[str, Callable[[dict[str, Any]], str]] = {
         "search_tasks": search_tasks,
         "get_task": get_task,
         "resolve_person": resolve_person,
-        "update_task_status": update_task_status,
-        "update_task_due": update_task_due,
-        "update_task_owner": update_task_owner,
     }
+    if writes_enabled:
+        execs["update_task_status"] = update_task_status
+        execs["update_task_due"] = update_task_due
+        execs["update_task_owner"] = update_task_owner
+    return execs
 
 
-__all__ = ["TASK_TOOL_SCHEMAS", "VERB_STATUS_MAP", "build_task_executors"]
+__all__ = [
+    "READ_TOOL_NAMES",
+    "TASK_TOOL_SCHEMAS",
+    "VERB_STATUS_MAP",
+    "WRITE_TOOL_NAMES",
+    "build_task_executors",
+    "task_tool_schemas",
+]

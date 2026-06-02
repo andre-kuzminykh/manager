@@ -212,23 +212,30 @@ def build_system_prompt(*, today: datetime | None = None) -> str:
 
         if getattr(_gs(), "task_vector_enabled", False):
             prompt += (
-                "\n\nЗАДАЧИ (vector): для вопросов про задачи и для NL-"
-                "обновлений используй инструменты `search_tasks` / `get_task` "
-                "/ `resolve_person` / `update_task_status` / `update_task_due` "
-                "/ `update_task_owner`.\n"
-                "• Глагол→статус: отправил/сделал/закрыл/завершил/готово → "
-                "done; начал/в работе/приступил → in_progress.\n"
-                "• Срок: «перенеси на пятницу / до 10 июня» — разбери дату САМ "
-                "в ISO (YYYY-MM-DD) и зови `update_task_due`.\n"
-                "• Ответственный: «теперь Семён» — сперва `resolve_person`, "
-                "потом `update_task_owner` с person_id+именем.\n"
-                "• Сначала `search_tasks`, чтобы найти задачу. Если РОВНО ОДНА "
-                "уверенно подходит — применяй изменение СРАЗУ и сообщи "
-                "«<поле> X→Y (отменить?)». Если подходят 2+ или уверенность "
-                "низкая — НЕ меняй, перечисли кандидатов и спроси, какую. "
-                "Отмена = повторный вызов того же тула со старым значением "
-                "(в ответе тула есть `from`)."
+                "\n\nЗАДАЧИ (vector): для вопросов про задачи используй "
+                "инструменты `search_tasks` / `get_task` / `resolve_person`. "
+                "`search_tasks` возвращает ЖИВЫЕ поля (status, owner, due_date)."
             )
+            # Write-tool guidance only when writers are actually exposed
+            # (TASK_VECTOR_WRITES_ENABLED). Otherwise the agent has no update_*
+            # tools, so we must not instruct it to call them (FR-TV — read-only).
+            if getattr(_gs(), "task_vector_writes_enabled", False):
+                prompt += (
+                    "\nДля NL-обновлений: `update_task_status` / "
+                    "`update_task_due` / `update_task_owner`.\n"
+                    "• Глагол→статус: отправил/сделал/закрыл/завершил/готово → "
+                    "done; начал/в работе/приступил → in_progress.\n"
+                    "• Срок: «перенеси на пятницу / до 10 июня» — разбери дату "
+                    "САМ в ISO (YYYY-MM-DD) и зови `update_task_due`.\n"
+                    "• Ответственный: «теперь Семён» — сперва `resolve_person`, "
+                    "потом `update_task_owner` с person_id+именем.\n"
+                    "• Сначала `search_tasks`, чтобы найти задачу. Если РОВНО "
+                    "ОДНА уверенно подходит — применяй изменение СРАЗУ и сообщи "
+                    "«<поле> X→Y (отменить?)». Если подходят 2+ или уверенность "
+                    "низкая — НЕ меняй, перечисли кандидатов и спроси, какую. "
+                    "Отмена = повторный вызов того же тула со старым значением "
+                    "(в ответе тула есть `from`)."
+                )
     except Exception:  # noqa: BLE001 — prompt must never fail to build
         pass
     return prompt
@@ -902,14 +909,19 @@ def run_responder(
 
         if getattr(_gs(), "task_vector_enabled", False):
             from app.ceo_brain.task_tools import (
-                TASK_TOOL_SCHEMAS as _TTS,
                 build_task_executors as _bte,
+                task_tool_schemas as _tts,
             )
             from app.db import get_session_factory as _gsf
 
-            _task_execs = _bte(session_factory=_gsf(), settings=_gs())
+            # Second gate: writes stay off until τ/δ is calibrated, so read-only
+            # search/Q&A can go live first (FR-TV — read-only P5).
+            _writes = getattr(_gs(), "task_vector_writes_enabled", False)
+            _task_execs = _bte(session_factory=_gsf(), settings=_gs(),
+                               writes_enabled=_writes)
             tool_executors = {**tool_executors, **_task_execs}
-            local_tool_schemas = list(local_tool_schemas) + list(_TTS)
+            local_tool_schemas = list(local_tool_schemas) + list(
+                _tts(writes_enabled=_writes))
     except Exception as e:  # noqa: BLE001 — never break the responder
         log.warning("ceo_brain_task_tools_wire_failed", error=str(e))
         _task_execs = {}

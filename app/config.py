@@ -403,6 +403,13 @@ class Settings(BaseSettings):
     task_vector_enabled: bool = Field(
         default=False, alias="TASK_VECTOR_ENABLED"
     )
+    # FR-TV — second gate, INSIDE task_vector_enabled. When False (default) only
+    # the read tools (search_tasks/get_task/resolve_person) are exposed; the
+    # three update_* writers are omitted entirely. Stays off until the τ/δ
+    # confidence gate is calibrated, so search/Q&A can go live first.
+    task_vector_writes_enabled: bool = Field(
+        default=False, alias="TASK_VECTOR_WRITES_ENABLED"
+    )
     # Tasks + team are indexed (kind='task'/'team_member'/'employee') in a
     # SEPARATE pgvector DB so the prod transactional DB is never touched. When
     # None, falls back to CATALOG_DATABASE_URL, then the primary DB.

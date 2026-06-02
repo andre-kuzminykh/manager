@@ -1,7 +1,8 @@
 # SPEC — Task Vector Layer (FR-TV) v0.1
 
-**Status:** draft for review · **Owner:** admin@andre.technology · **Date:** 2026-06-01
-**Epic ID:** `FR-TV` (Task Vector) · **Feature flag:** `TASK_VECTOR_ENABLED` (default **off**)
+**Status:** P5 deployed (read-only) 2026-06-02 · **Owner:** admin@andre.technology · **Date:** 2026-06-01 (rev. 2026-06-02)
+**Epic ID:** `FR-TV` (Task Vector) · **Feature flags:** `TASK_VECTOR_ENABLED` (layer, default **off**;
+**on** in prod since 2026-06-02) + `TASK_VECTOR_WRITES_ENABLED` (writers, default **off**; still off — gates P6)
 
 ---
 
@@ -188,8 +189,14 @@ passed to `update_task_due`; the tool validates the ISO date (no NL parsing insi
   text_repr_hash)`, and **skips** rows whose `text_repr_hash` is unchanged (idempotent, zero
   OpenAI calls when nothing changed).
 - **FR-TV-012** — Deleted/soft-deleted tasks are **pruned** from the index on refresh.
-- **FR-TV-013** — *(optional, flag `TASK_VECTOR_IMMEDIATE_UPSERT`)* on task create/status/edit,
-  a best-effort immediate upsert runs; failure is swallowed (cron is the backstop).
+- **FR-TV-013** — *(flag `TASK_VECTOR_IMMEDIATE_UPSERT`, **NOT YET IMPLEMENTED** as of
+  2026-06-02)* on task create/status/edit, a best-effort immediate upsert SHOULD run; failure
+  swallowed (cron is the backstop). The config field exists but has no create/edit hook yet —
+  setting it is a no-op. Freshness is currently the 10-min cron only (operator choice
+  2026-06-02: «cron every 10 min»).
+- **FR-TV-013a** — `refresh_embeddings_cross_db` supports a partial `task_created_since` window
+  (CLI `--since YYYY-MM-DD`). A windowed scan MUST NOT prune (it is a deliberate subset);
+  `prune = (task_created_since is None)`. Only a full scan reconciles deletions.
 - **FR-TV-014** — Re-embed is triggered only by a change in the **content** text_repr; a pure
   status change does NOT re-embed (DEC-2).
 - **FR-TV-015 (TEAM INDEX)** — The same refresh indexes the **team** into the vector instance:
@@ -259,7 +266,15 @@ passed to `update_task_due`; the tool validates the ISO date (no NL parsing insi
   `{name: callable(input)->json_str}`, mirroring `slack_tools.py`. All four update/resolve tools
   share the τ/δ gate, allow-list and audit.
 - **FR-TV-071** — `responder.build_anthropic_request` merges task tools into `tools=[...]`
-  ONLY when `TASK_VECTOR_ENABLED`. System prompt gains task-tool routing hints.
+  ONLY when `TASK_VECTOR_ENABLED`. System prompt gains task-tool routing hints (the write-tool
+  hints are themselves gated by `TASK_VECTOR_WRITES_ENABLED`, FR-TV-073).
+- **FR-TV-073 (READ-ONLY-FIRST GATE)** — A second flag `TASK_VECTOR_WRITES_ENABLED` (default
+  **off**) lives INSIDE `TASK_VECTOR_ENABLED`. When off, `build_task_executors(writes_enabled=
+  False)` returns only `{search_tasks, get_task, resolve_person}` and `task_tool_schemas(
+  writes_enabled=False)` omits the three `update_*` schemas — so the writers are absent from the
+  agent's tool set entirely (cannot be hallucinated into existence). Same gate applies to the
+  external MCP server (FR-TV-090). This lets search/Q&A go live (P5) before τ/δ is calibrated;
+  writes turn on only at P6. Read tools are always `READ_TOOL_NAMES`; writers `WRITE_TOOL_NAMES`.
 - **FR-TV-072** — `update_task_status` executor is id-precise and writes when called (no
   confirmation step, DEC-3). Safety is enforced by: the ambiguity gate FR-TV-043 (agent only
   auto-calls on a single confident match), the allow-list FR-TV-060, undo FR-TV-046, and audit
@@ -295,7 +310,8 @@ passed to `update_task_due`; the tool validates the ISO date (no NL parsing insi
   refresh = 0 OpenAI calls when nothing changed (hash gate). Stays within
   `CEO_BRAIN_MAX_RUN_COST_USD`.
 - **NFR-TV-003 Freshness** — a new/edited task is searchable within ≤ `refresh interval`
-  (target 10 min), or near-instant if `TASK_VECTOR_IMMEDIATE_UPSERT` on.
+  (deployed: 10-min cron, 2026-06-02). `TASK_VECTOR_IMMEDIATE_UPSERT` (near-instant) is spec'd
+  but NOT yet implemented (FR-TV-013) — cron is the sole mechanism today.
 - **NFR-TV-004 Accuracy** — precision-first for status writes. τ_high/τ_low/δ tunable via
   settings, calibrated on a **synthetic** dataset (OQ-5 resolved: no human-labelled set
   available). A generator (`ops.gen_task_vector_eval`) produces (utterance → expected task)
@@ -446,6 +462,9 @@ tests skip when `TEST_PG_VECTOR_URL` unset (house style, `test_entity_embeddings
 | T-FR-TV-046-a | FR-TV-046 | unit | each update returns {field,from,to}; undo re-applies `from` |
 | T-FR-TV-070-a | FR-TV-070 | unit | task_tools schemas valid (6 tools); executors map present |
 | T-FR-TV-071-a | FR-TV-071 | unit | tools merged only when TASK_VECTOR_ENABLED |
+| T-FR-TV-073-a | FR-TV-073 | unit | writes off (default) ⇒ executors = read-only 3; no update_* |
+| T-FR-TV-073-b | FR-TV-073 | unit | task_tool_schemas(writes_enabled) read-only vs full subset |
+| T-FR-TV-013a-a | FR-TV-013a | pg | `--since` window does NOT prune rows outside the window |
 | T-SC-TV-14 | SC-TV-14 | integ | owner update via person resolution (fakes) |
 | T-SC-TV-15 | SC-TV-15 | integ | ambiguous person → ask, no write |
 | T-SC-TV-03 | SC-TV-03 | integ | happy NL update end-to-end (fakes) |
@@ -486,11 +505,31 @@ tests skip when `TEST_PG_VECTOR_URL` unset (house style, `test_entity_embeddings
   prompt routing + ambiguity/confirmation rules. Deploy with flag **off**. *No behaviour change.*
 - **P4 — Index build + dry search.** Point `TASK_VECTOR_DATABASE_URL` at the (existing) pgvector
   instance, run `refresh_task_embeddings`, verify search quality offline. Calibrate τ/δ.
-- **P5 — Read-only enable.** `TASK_VECTOR_ENABLED=on` but `update_task_status` gated to
-  **dry-run/confirm-only** first (search + Q&A live; writes still ask+confirm). Observe.
-- **P6 — Writes live.** Enable confirmed status writes. Watch `task_status_update` logs.
-- **Rollback at any phase:** `TASK_VECTOR_ENABLED=off` (+ recreate) → tools vanish, task
-  pipeline unchanged. Index rows are inert.
+- **P5 — Read-only enable.** ✅ DONE (2026-06-02). `TASK_VECTOR_ENABLED=on` on `manager-bot-1`
+  with the **second gate** `TASK_VECTOR_WRITES_ENABLED=off` (default): only the read tools
+  (`search_tasks`/`get_task`/`resolve_person`) are exposed — the three `update_*` writers are
+  omitted from BOTH the executor map AND the tool schemas (responder + external MCP server), so
+  the agent literally cannot invoke a write. Search + Q&A live; writes impossible until P6.
+  Freshness via cron (see §Freshness below). *Search/Q&A live, 0 write risk.*
+- **P6 — Writes live.** `TASK_VECTOR_WRITES_ENABLED=on` AFTER τ/δ calibration on the synthetic
+  eval set (NFR-TV-004). Confirmed status/due/owner writes; watch `task_status_update` /
+  `task_due_update` / `task_owner_update` logs. Reversible by clearing the flag.
+- **Rollback at any phase:** `TASK_VECTOR_ENABLED=off` (+ recreate) → all task tools vanish;
+  `TASK_VECTOR_WRITES_ENABLED=off` → only writers vanish (read stays). Task pipeline unchanged.
+  Index rows are inert.
+
+### Freshness (as deployed 2026-06-02)
+- The index is kept current **only** by the batch `ops.refresh_task_embeddings` (idempotent via
+  `text_repr_hash`: an unchanged run does `embedded=0` with **zero** OpenAI calls). Deployed as a
+  cron every 10 min (`/home/andre/task_reindex.sh`, full scan = embeds new/changed + prunes
+  deleted). New tasks become searchable within ≤10 min.
+- **FR-TV-013 (`TASK_VECTOR_IMMEDIATE_UPSERT`) is NOT YET IMPLEMENTED** — the config flag exists
+  but there is no create/edit hook; setting it is currently a no-op. The cron is the sole
+  freshness mechanism. (Future work, if ≤10 min latency is insufficient.)
+- **`--since YYYY-MM-DD`** (incremental task window) is supported but **never prunes**: a windowed
+  scan is a deliberate SUBSET, so pruning is force-disabled when `--since` is set (a full scan,
+  no `--since`, is what reconciles deletions). Regression: `--since` once pruned 3361/3655 rows;
+  fixed 2026-06-02 (`prune = task_created_since is None`).
 
 ---
 

@@ -45,3 +45,35 @@ def test_empty_content_not_embeddable():
     out = _build(title="", description=None, owner_display_name=None,
                  status="todo", due_date=None, category=None)
     assert not (out or "").strip()
+
+
+# T-FR-TV-013a-a — REGRESSION: a `--since` window MUST NOT prune.
+# A windowed scan is a deliberate subset; pruning would delete every row
+# outside the window (observed: --since once pruned 3361/3655 rows).
+# We assert the prune flag handed to _apply_embeddings is derived from
+# task_created_since, without needing a real pgvector DB.
+def test_since_window_disables_prune(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(ee, "collect_entity_texts",
+                        lambda *a, **k: [("task", "1", "repr")])
+
+    def _fake_apply(session, rows, *, embed_fn, kinds, model, batch_size,
+                    prune=True):
+        captured["prune"] = prune
+        return {"scanned": len(rows), "embedded": 0, "skipped": len(rows),
+                "pruned": 0}
+
+    monkeypatch.setattr(ee, "_apply_embeddings", _fake_apply)
+
+    # full scan (no window) → prune ON (reconciles deletions)
+    ee.refresh_embeddings_cross_db(
+        object(), object(), embed_fn=lambda t: [[0.0]], kinds=["task"],
+        task_created_since=None)
+    assert captured["prune"] is True
+
+    # windowed scan (--since) → prune OFF (never deletes outside the window)
+    ee.refresh_embeddings_cross_db(
+        object(), object(), embed_fn=lambda t: [[0.0]], kinds=["task"],
+        task_created_since=dt.date(2026, 6, 1))
+    assert captured["prune"] is False

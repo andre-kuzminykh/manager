@@ -613,6 +613,70 @@ def test_looks_like_whisper_hallucination_flags_low_unique_word_ratio():
     assert looks_like_whisper_hallucination(looped) is True
 
 
+# --------------------------------------------------------------------------- #
+# FR-CR-05-157 follow-up — roster-only (silent meeting) transcripts
+# --------------------------------------------------------------------------- #
+def test_unsummarizable_flags_roster_only_silent_meeting():
+    """Operator regression on «PR Status» 2026-06-02: a silent meeting
+    (no real audio) clears the 800-char floor because the only surviving
+    text is the participant roster inside bilingual-restoration scaffolding.
+    Nothing to summarize → must be flagged unsummarizable."""
+    from app.services.transcription import is_transcript_unsummarizable
+
+    # The exact production shape: PRIMARY wrapper + <<< … >>> + name list,
+    # padded to the real 831-char length so it CLEARS the < 800 floor and
+    # exercises the roster path (not the length short-circuit).
+    roster = (
+        "PRIMARY (Russian-biased pass):\n<<<\n"
+        "Humanoid, PR Status, Шлюгер Сергей, Эльмира Ларионова, Suzanne Ley, "
+        "Катя Шетинина, Aleksandra Efremova, Olga Ponomarenko, Дмитрий Седов, "
+        "Кристиан, CEO_office1 bot, Alexander Egorov, Валентина, "
+        "Андрей Кузьминых, Саша Васильев, Антон Новосельцев, Миронова Люба, "
+        "Aray, Оля Головина, Pavel Lebedev, Kristina, Thomas Shepherd, "
+        "Alina Kolpakova, Anastasia M, George Machitidze, Alexander Grishin, "
+        "Юля, Daniella Shabarina, Елена, Viktor, Ekaterina Selezneva, Лиля, "
+        "Fedor Pavlovich, Давид, Игорь, Valeriya Tarasova, Радионова Елена, "
+        "Maksim Maksim, Жойкина Наталья, Luiza, Ekaterina Chia, LinkedIn bot, "
+        "Валерия, Vlad Gaon, Daniel Minkowitz, Julia Mus, Дима Дроздов, "
+        "Genia Xasis, Irina Shipilova, Maria Maria, Jarad Cannon, "
+        "Sotirios Stasinopoulos, Jochen Ruda, Boris Yangel\n>>>"
+    )
+    assert len(roster.strip()) >= 800  # clears the crude length floor
+    flagged, reason = is_transcript_unsummarizable(roster)
+    assert flagged is True
+    assert "roster" in (reason or "")
+
+
+def test_unsummarizable_passes_real_discussion_over_800():
+    """A real ≥800-char discussion (sentences, punctuation) must NOT be
+    mistaken for a roster."""
+    from app.services.transcription import is_transcript_unsummarizable
+
+    real = (
+        "Артем: обсудили статус PR по запуску, договорились о пресс-релизе. "
+        "Ольга предложила перенести анонс на следующую неделю. "
+        "Решили согласовать формулировки с юристами и вернуться в среду. "
+    ) * 5
+    assert len(real) >= 800
+    flagged, _ = is_transcript_unsummarizable(real)
+    assert flagged is False
+
+
+def test_unsummarizable_passes_comma_heavy_prose():
+    """A comma-heavy but genuine sentence (with terminators) is NOT a
+    roster — guards against false positives on enumerations in prose."""
+    from app.services.transcription import is_transcript_unsummarizable
+
+    prose = (
+        "Обсудили инвесторов: Tether, Schaeffler, Object First и KeyOne, "
+        "и решили, что Алина подготовит messaging, Дмитрий пнёт юристов, "
+        "а Ирина зафиксирует follow-up по каждому из них к среде. " * 6
+    )
+    assert len(prose) >= 800
+    flagged, _ = is_transcript_unsummarizable(prose)
+    assert flagged is False
+
+
 def test_parse_vtt_to_plain_text_strips_timing_and_cue_ids():
     """FR-CR-05-148 — Zoom VTT format: WEBVTT header, optional
     cue-id (numeric), timing line `00:00:00.000 --> ...`, then

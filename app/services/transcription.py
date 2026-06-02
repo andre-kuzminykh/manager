@@ -261,7 +261,44 @@ def is_transcript_unsummarizable(text: str) -> tuple[bool, str | None]:
     sub_hits = sum(head.count(m) for m in sub_markers_lc)
     if sub_hits >= 2:
         return True, f"transcript dominated by subtitle credits ({sub_hits} hits)"
+    # FR-CR-05-157 follow-up 2026-06-02 — a SILENT meeting (no real speech)
+    # can still clear the 800-char floor when all that survives is the
+    # participant roster wrapped in bilingual-restoration scaffolding, e.g.
+    #   PRIMARY (Russian-biased pass):
+    #   <<<
+    #   Humanoid, PR Status, Сергей, Suzanne Ley, … , Boris Yangel
+    #   >>>
+    # That is a comma-separated name list with no sentences — nothing to
+    # summarize. Catch it so we don't waste a summary call / emit junk.
+    if _looks_like_roster_only(text):
+        return True, "transcript is roster-only (no real sentences)"
     return False, None
+
+
+def _looks_like_roster_only(text: str) -> bool:
+    """True when `text`, after stripping bilingual-restoration scaffolding,
+    is essentially a comma-separated roster (≥8 short name-like segments,
+    ≤1 sentence terminator, ≥80% of segments are ≤3 words). Conservative:
+    real prose has sentence punctuation and longer comma-segments, so it
+    won't trip this."""
+    import re as _re
+
+    # Drop bilingual-restoration wrapper lines (PRIMARY/SECONDARY … pass:)
+    # and the <<< … >>> fences, then collapse whitespace.
+    t = _re.sub(r"(?im)^\s*(?:primary|secondary)\b[^\n]*:\s*$", " ", text)
+    t = t.replace("<<<", " ").replace(">>>", " ")
+    t = _re.sub(r"\s+", " ", t).strip()
+    if not t:
+        return True
+
+    segments = [s.strip() for s in t.split(",") if s.strip()]
+    if len(segments) < 8:
+        return False
+    enders = t.count(".") + t.count("!") + t.count("?")
+    if enders > 1:
+        return False
+    shortish = sum(1 for s in segments if len(s.split()) <= 3)
+    return shortish / len(segments) >= 0.8
 
 
 def looks_like_whisper_hallucination(

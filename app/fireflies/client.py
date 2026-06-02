@@ -21,7 +21,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.logging_setup import get_logger
@@ -63,26 +63,41 @@ query Transcripts($limit: Int!, $skip: Int) {
 
 
 def _coerce_dt(value: Any) -> datetime | None:
+    """Parse Fireflies' meeting date into a tz-aware **UTC** datetime.
+
+    Fireflies sends the date as Unix-millis (int) or an ISO string. We ALWAYS
+    return aware-UTC so downstream calendar math (attendee resolution, title
+    match) never hits «can't subtract offset-naive and offset-aware datetimes».
+    Bug 2026-06-02: the millis branch used `datetime.fromtimestamp(secs)` which
+    returns a NAIVE local datetime → broke `_step_match_calendar_title` /
+    `_populate_calendar_attendees` (meeting stayed «Jun 02, 01:03 PM», no
+    calendar rename, no attendees).
+    """
     if value is None:
         return None
+    dt: datetime | None = None
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, (int, float)):
-        # Fireflies returns the meeting date as a Unix-millis
-        # timestamp; convert to seconds for fromtimestamp.
+        dt = value
+    elif isinstance(value, (int, float)):
+        # Unix-millis timestamp; convert to seconds for fromtimestamp.
         try:
             secs = float(value)
             if secs > 1e11:  # millis (~year 5138 in seconds)
                 secs /= 1000.0
-            return datetime.fromtimestamp(secs)
+            dt = datetime.fromtimestamp(secs, tz=timezone.utc)
         except (TypeError, ValueError, OSError):
             return None
-    if isinstance(value, str):
+    elif isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
-    return None
+    if dt is None:
+        return None
+    # Normalise to aware-UTC (assume UTC for naive inputs).
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _coerce_participants(value: Any) -> list[str]:

@@ -335,13 +335,15 @@ def refresh_embeddings_cross_db(
     kinds: Sequence[str],
     model: str = DEFAULT_EMBED_MODEL,
     batch_size: int = 256,
+    task_created_since: Any = None,
 ) -> dict[str, int]:
     """FR-TV — collect source rows from `source_session` (e.g. the primary DB
     holding tasks/team) and upsert their embeddings into `target_session` (the
     SEPARATE pgvector instance). Same prune/hash-skip/embed/upsert logic as
     `refresh_embeddings`; the two DBs are simply different. Caller commits
     `target_session`."""
-    rows = collect_entity_texts(source_session, kinds=kinds)
+    rows = collect_entity_texts(source_session, kinds=kinds,
+                                task_created_since=task_created_since)
     return _apply_embeddings(
         target_session, rows, embed_fn=embed_fn, kinds=kinds, model=model,
         batch_size=batch_size,

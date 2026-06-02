@@ -15,7 +15,7 @@ Usage (prod):
       -e DATABASE_URL=<primary> -e TASK_VECTOR_DATABASE_URL=<pgvector> \\
       -e OPENAI_API_KEY=... manager-bot:v2shadow \\
       python -m ops.refresh_task_embeddings [--kinds task,team_member,employee] \\
-      [--model ...] [--batch-size 256] [--dry-run]
+      [--model ...] [--batch-size 256] [--dry-run] [--since YYYY-MM-DD]
 
 Cron (every 10 min):
     */10 * * * * docker run ... python -m ops.refresh_task_embeddings
@@ -23,6 +23,7 @@ Cron (every 10 min):
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import sys
 
 from openai import OpenAI
@@ -70,7 +71,22 @@ def main() -> int:
         action="store_true",
         help="count source rows only; no OpenAI calls, no writes",
     )
+    ap.add_argument(
+        "--since",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="restrict KIND_TASK to tasks created on/after this date (UTC); "
+             "team_member/employee always full-scan",
+    )
     args = ap.parse_args()
+
+    task_created_since: _dt.date | None = None
+    if args.since:
+        try:
+            task_created_since = _dt.date.fromisoformat(args.since)
+        except ValueError:
+            print(f"ERROR: --since must be YYYY-MM-DD, got {args.since!r}", file=sys.stderr)
+            return 2
 
     kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
     bad = [k for k in kinds if k not in _ALL_KINDS]
@@ -81,14 +97,16 @@ def main() -> int:
     # --- DRY RUN: read source only, report counts per kind ---
     if args.dry_run:
         with session_scope() as src:
-            rows = collect_entity_texts(src, kinds=kinds)
+            rows = collect_entity_texts(src, kinds=kinds,
+                                        task_created_since=task_created_since)
             by_kind: dict[str, int] = {}
             for kind, _eid, _tr in rows:
                 by_kind[kind] = by_kind.get(kind, 0) + 1
             src.rollback()
         log.info("task_embeddings_dry_run", total=len(rows), by_kind=by_kind,
-                 model=args.model)
-        print(f"DRY-RUN: {len(rows)} source rows (model={args.model})")
+                 model=args.model, since=str(task_created_since) if task_created_since else None)
+        print(f"DRY-RUN: {len(rows)} source rows (model={args.model}"
+              + (f", since={task_created_since}" if task_created_since else "") + ")")
         for k in kinds:
             print(f"  {k}: {by_kind.get(k, 0)}")
         return 0
@@ -108,7 +126,8 @@ def main() -> int:
     )
 
     log.info("task_embeddings_refresh_started", kinds=kinds, model=args.model,
-             batch_size=args.batch_size)
+             batch_size=args.batch_size,
+             since=str(task_created_since) if task_created_since else None)
     # source = primary DB (tasks/team); target = separate pgvector instance.
     target = target_factory()
     try:
@@ -117,6 +136,7 @@ def main() -> int:
                 src, target,
                 embed_fn=embed_fn, kinds=kinds, model=args.model,
                 batch_size=args.batch_size,
+                task_created_since=task_created_since,
             )
             src.rollback()  # source is read-only here
         target.commit()

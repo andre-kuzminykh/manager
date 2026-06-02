@@ -341,16 +341,18 @@ class FirefliesClient:
             "Authorization": f"Bearer {self._token}",
             "Content-Type": "application/json",
         }
+        # Fireflies schema (2026-06): input field is `id` (not the old
+        # `transcript_id`) and the mutation returns a `Transcript` (no
+        # `success`/`message`). The old shape now 400s with
+        # GRAPHQL_VALIDATION_FAILED.
         query = (
-            "mutation UpdateMeetingTitle($title: String!, "
-            "$transcript_id: String!) { "
-            "updateMeetingTitle(input: { title: $title, "
-            "transcript_id: $transcript_id }) "
-            "{ title success message } }"
+            "mutation UpdateMeetingTitle($title: String!, $id: String!) { "
+            "updateMeetingTitle(input: { title: $title, id: $id }) "
+            "{ id title } }"
         )
         body = {
             "query": query,
-            "variables": {"title": title, "transcript_id": transcript_id},
+            "variables": {"title": title, "id": transcript_id},
         }
         try:
             payload = self._request_func(self._endpoint, headers, body)
@@ -372,18 +374,19 @@ class FirefliesClient:
             return False
         data = (payload or {}).get("data") or {}
         result = data.get("updateMeetingTitle") or {}
-        if not result.get("success"):
+        # New schema returns the updated Transcript; success = it echoed a
+        # title back (no top-level `errors`, handled above).
+        if not result.get("title"):
             log.warning(
                 "fireflies_update_title_returned_unsuccessful",
                 transcript_id=transcript_id,
-                message=result.get("message"),
+                result=result,
             )
             return False
         log.info(
             "fireflies_title_updated_remote",
             transcript_id=transcript_id,
-            new_title=title,
-            message=result.get("message"),
+            new_title=result.get("title"),
         )
         return True
 

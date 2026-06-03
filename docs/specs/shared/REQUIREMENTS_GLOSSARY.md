@@ -1,5 +1,12 @@
 # Requirements ID Convention
 
+> ⚠️ **Реальность кода (2026-06-03 аудит):** схема ниже (`FR-NT-*` / `FR-TT-*`) —
+> *аспирационная* и в коде **не используется**. Код трассируется префиксами
+> `FR-CR-04-*` / `FR-CR-05-*` (Note Taker + Task pipeline), `FR-CB2-*` (CEO Brain Bot),
+> `FR-CB-*` (Counterparty Briefs), `FR-TV-*` (Task Vector), `FR-GS-*` (Sheets sync).
+> Каноничная карта префиксов — в [`PRD.md`](../../../PRD.md) §4. Схема ниже сохранена
+> как историческая разметка спек Note Taker / Task Tracker.
+
 ## ID структура
 
 ```

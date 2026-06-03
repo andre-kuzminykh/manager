@@ -52,6 +52,7 @@ from app.models.task import (
     TaskStatusHistory,
     TaskSubscription,
 )
+from app.models.task_status_event import TaskStatusEvent
 from app.models.fireflies import MeetingRecording
 from app.models.meeting_agenda import MeetingAgenda
 from app.models.zoom import ZoomRecording
@@ -107,6 +108,7 @@ __all__ = [
     "TaskSourceKind",
     "TaskStatus",
     "TaskStatusHistory",
+    "TaskStatusEvent",
     "TaskSubscription",
     "TeamMember",
     "MeetingAgenda",

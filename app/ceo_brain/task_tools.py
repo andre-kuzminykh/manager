@@ -371,6 +371,12 @@ def build_task_executors(
             finally:
                 sess.close()
             _sync(tid)
+            # FR-ST-LOG — unified status-event log (never breaks the update)
+            from app.services.status_events import record_status_event_safe
+            record_status_event_safe(
+                session_factory, task_id=tid, source="chat", actor=actor,
+                field="status", from_value=str(old), to_value=str(new),
+            )
             log.info("task_status_update", task_id=tid, **{"from": old}, to=new,
                      actor=actor, ok=True)
             return _ok({"ok": True, "changed": True, "field": "status",
@@ -411,6 +417,12 @@ def build_task_executors(
             finally:
                 sess.close()
             _sync(tid)
+            # FR-ST-LOG — unified status-event log (never breaks the update)
+            from app.services.status_events import record_status_event_safe
+            record_status_event_safe(
+                session_factory, task_id=tid, source="chat", actor=actor,
+                field="due_date", from_value=old, to_value=new_due.isoformat(),
+            )
             log.info("task_due_update", task_id=tid, **{"from": old},
                      to=new_due.isoformat(), actor=actor)
             return _ok({"ok": True, "changed": True, "field": "due_date",
@@ -445,6 +457,13 @@ def build_task_executors(
             finally:
                 sess.close()
             _sync(tid)
+            # FR-ST-LOG — unified status-event log (never breaks the update)
+            from app.services.status_events import record_status_event_safe
+            record_status_event_safe(
+                session_factory, task_id=tid, source="chat", actor=actor,
+                field="owner", from_value=old,
+                to_value={"owner_user_id": owner_id, "owner_display_name": owner_name},
+            )
             log.info("task_owner_update", task_id=tid, **{"from": old["owner_display_name"]},
                      to=owner_name, actor=actor)
             return _ok({"ok": True, "changed": True, "field": "owner",

@@ -233,15 +233,37 @@ def resolve_organizations_to_counterparties(
     cps = session.query(Counterparty).all()
     if not cps:
         return {}
-    # LLM returns {mention: counterparty_id | None}
-    resolved = resolve_mentions_to_directory(
-        mentions=filtered,
-        directory=cps,
-        llm_backend=llm_backend,
-        model=model,
-        trace_source=trace_source,
-        trace_recording_id=trace_recording_id,
-    )
+    # FR-CR-05-241 follow-up 2026-06-03 — when the canonical resolver is the
+    # vector+critic catalog (mode=on), use it HERE too instead of the
+    # directory-LLM. The directory-LLM dumps the whole directory into a prompt
+    # with no vector grounding / confidence floor and force-matched phonetic
+    # garbage in the summary text (Klef→Ross Cliff, K Stix→Styx on «Алина,
+    # Ирина» 2026-06-03). The catalog resolver is recall-conservative and
+    # critic-gated. off/shadow keep the legacy directory-LLM. Both return
+    # {mention: counterparty_id | None}, so downstream is unchanged.
+    from app.config import get_settings
+
+    settings = get_settings()
+    if getattr(settings, "counterparty_match_v2_mode", "off") == "on":
+        from app.services.counterparty_catalog_resolver import (
+            resolve_mentions_to_directory_via_catalog,
+        )
+        # transcript context is unavailable at canonicalisation time; the
+        # critic falls back to mention-only context (still gated on score).
+        resolved = resolve_mentions_to_directory_via_catalog(
+            session, settings=settings, mentions=filtered,
+            transcript="", directory=cps,
+        )
+    else:
+        # LLM returns {mention: counterparty_id | None}
+        resolved = resolve_mentions_to_directory(
+            mentions=filtered,
+            directory=cps,
+            llm_backend=llm_backend,
+            model=model,
+            trace_source=trace_source,
+            trace_recording_id=trace_recording_id,
+        )
     id_to_name: dict[int, str] = {cp.id: cp.name for cp in cps}
     out: dict[str, str] = {}
     for mention, cp_id in resolved.items():

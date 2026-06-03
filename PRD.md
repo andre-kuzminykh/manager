@@ -60,6 +60,7 @@ Google (Sheets / Tasks / Docs / Calendar) и отвечает на вопрос�
 | **Task Vector** — поиск/Q&A/апдейт задач NL | `FR-TV-*` | [docs/SPEC_TASK_VECTOR_v0.1.md](./docs/SPEC_TASK_VECTOR_v0.1.md) | 🟡 | ✅ |
 | **CEO Brain Bot** — чат-агент | `FR-CB2-*` | [SPEC_CEO_BRAIN_BOT_v0.1.md](./SPEC_CEO_BRAIN_BOT_v0.1.md) | 🟡 | ⚠️ |
 | **Status Tracker** — встречи → статус в Sheet + лог/откат | `FR-ST-*` | [SPEC_STATUS_TRACKER_v0.2.md](./SPEC_STATUS_TRACKER_v0.2.md) | ⚪ | ⬜ |
+| **Sheet Sync bridge** — двунапр. Sheet↔БД (интерфейс правок) | `FR-SS-*` | [SPEC_SHEET_SYNC_v0.1.md](./SPEC_SHEET_SYNC_v0.1.md) | ⚪ | ⬜ |
 
 ¹ **Важно:** в коде требования трассируются префиксами `FR-CR-05-*`, `FR-CB2-*`, `FR-TV-*`,
 `FR-CR-05-168`. «Дизайнерские» ID из спек (`FR-NT-*`, `FR-TT-*`, `FR-TX-*`, `FR-MA-*`) в коде

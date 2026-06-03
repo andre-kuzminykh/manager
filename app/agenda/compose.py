@@ -260,8 +260,35 @@ def _compose_lite(candidate: AgendaCandidate) -> AgendaOutput:
     Total wall time: <50 ms (no network, no LLM). Compare to the
     LLM compose path which is 30-180 sec on gpt-5.5.
     """
-    prior = candidate.prior_recordings[0] if candidate.prior_recordings else {}
-    recap = _strip_prior_short_summary_body(prior.get("short_summary") or "")
+    # FR-CR-05-235 mirror — pick the newest prior whose short_summary
+    # actually yields a non-empty recap body. `prior_recordings` is
+    # ordered newest-first, but the newest can be a thin/failed
+    # recording (e.g. today's meeting whose Whisper transcription
+    # came back empty → blank short_summary). Blindly taking [0] then
+    # produced an agenda with no «На прошлой встрече: …» line even
+    # though an older, fully-summarised prior was available. The task
+    # path already skips thin recordings in `service.py`; do the same
+    # for the recap so both halves of the agenda agree on one prior.
+    recap = ""
+    chosen_prior: dict[str, Any] = (
+        candidate.prior_recordings[0] if candidate.prior_recordings else {}
+    )
+    for p in candidate.prior_recordings or []:
+        body = _strip_prior_short_summary_body(p.get("short_summary") or "")
+        if body:
+            recap = body
+            chosen_prior = p
+            break
+    if (
+        candidate.prior_recordings
+        and chosen_prior is not candidate.prior_recordings[0]
+    ):
+        log.info(
+            "agenda_recap_prior_skipped_thin",
+            calendar_event_id=candidate.calendar_event_id,
+            skipped_zoom_id=candidate.prior_recordings[0].get("zoom_id"),
+            chosen_zoom_id=chosen_prior.get("zoom_id"),
+        )
     tasks_checklist: list[dict[str, Any]] = []
     for t in candidate.open_tasks:
         tasks_checklist.append({

@@ -177,6 +177,67 @@ def test_fr_cr_05_192u_compose_lite_tasks_passthrough() -> None:
     assert t["status"] == "todo"
 
 
+def test_fr_cr_05_235_compose_lite_skips_thin_newest_prior_for_recap() -> None:
+    """Regression — «03/06 Design Status» 2026-06-03.
+
+    The newest prior is a thin/failed recording (Whisper returned an
+    empty transcript → blank short_summary). `_compose_lite` MUST NOT
+    blindly take prior[0]; it MUST fall through to the next prior that
+    actually yields a recap body. Before the fix, the agenda posted
+    with NO «На прошлой встрече: …» line even though an older,
+    fully-summarised recording was available.
+    """
+    c = _candidate(
+        prior=[
+            # newest — today's failed recording, empty summary
+            {
+                "zoom_id": "today-thin==",
+                "short_summary": "",
+                "meeting_date": "2026-06-03T15:30:00+00:00",
+            },
+            # older — last good Design Status
+            {
+                "zoom_id": "good-21-05==",
+                "short_summary": (
+                    '<a href="u">21/05 - Design Status</a>\n\n'
+                    "Участники: A, B\n\n"
+                    "Зафиксировали диапазон роста робота 152–168 см.\n"
+                ),
+                "meeting_date": "2026-05-21T16:59:00+00:00",
+            },
+        ],
+        open_tasks=[{"title": "Lock target height", "owner": "Henry"}],
+    )
+    out = _compose_lite(c)
+    assert out is not None
+    assert out.previous_recap == [
+        "Зафиксировали диапазон роста робота 152–168 см."
+    ]
+    # doc body must carry the real recap, not the empty placeholder
+    assert "152–168 см" in out.doc_body_md
+    assert "(нет данных по прошлой встрече)" not in out.doc_body_md
+
+
+def test_fr_cr_05_235_compose_lite_all_priors_thin_recap_empty() -> None:
+    """When EVERY prior is thin (no usable summary), recap stays an
+    empty list — no crash, tasks still pass through, doc body falls
+    back to the «(нет данных)» placeholder."""
+    c = _candidate(
+        prior=[
+            {"zoom_id": "a==", "short_summary": ""},
+            {"zoom_id": "b==", "short_summary": (
+                # only meta, nothing left after strip
+                '<a href="u">T</a>\n\nУчастники: A\n'
+            )},
+        ],
+        open_tasks=[{"title": "T"}],
+    )
+    out = _compose_lite(c)
+    assert out is not None
+    assert out.previous_recap == []
+    assert "(нет данных по прошлой встрече)" in out.doc_body_md
+
+
 def test_fr_cr_05_192u_compose_lite_empty_priors() -> None:
     """When no prior recording exists, recap is empty list. open
     tasks still pass through. doc_body_md still built (with

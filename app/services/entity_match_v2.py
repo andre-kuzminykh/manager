@@ -54,24 +54,40 @@ You receive:
 - candidates: the top vector-search matches (id + description). ONLY
   these ids are valid answers.
 
+TRANSLITERATE FIRST: the mention is often Cyrillic from a Russian-language
+call; transliterate it to Latin before judging (к→k, с→s/c, ё→yo, дж→j,
+«стикс»→stix/stocks). Compare the TRANSLITERATED form to each candidate.
+  «к стикс» → "k stix" → StockX;  «мирая» → "miraya" → Mirae;
+  «аксентюр» → "accentur" → Accenture;  «Тесер» → "teser" → Tether.
+
 CORE TEST — match ONLY when a candidate's NAME is a plausible rendering
-of the SAME name as the mention: the same core sounds/letters, allowing
-for transcription noise, transliteration, abbreviation, or legal
-suffixes. Same industry / vaguely similar is NOT enough.
+of the SAME name as the mention (after transliteration): the same core
+sounds/letters, allowing for transcription noise, transliteration,
+abbreviation, or legal suffixes. Same industry / vaguely similar is NOT
+enough.
   MATCH:  «Шрука»→Shorooq Partners; «Митсобиш»→Mitsubishi; «Севе»→CEVA
-          Logistics; «Голдман»→Goldman Sachs; «Блюму»→Blume.
+          Logistics; «Голдман»→Goldman Sachs; «Блюму»→Blume;
+          «к стикс»→StockX; «мирая»→Mirae.
   RETURN NULL (the mention is its OWN distinct name, simply absent from
   the candidates — do not force the closest one):
           «Винроботикс» (WinRobotics) ≠ Rainbow Robotics;
           «сугу» (Sugo) ≠ Genia Xasis;
           «День Z» ≠ 2PZ;  «Маслон» ≠ Mistral;
-          «Nuremberg» ≠ Neuberger Berman;  «кам» ≠ Dunhong Capital.
+          «Nuremberg» ≠ Neuberger Berman;  «кам» ≠ Dunhong Capital;
+          «Клеф» ≠ Ross Cliff;  «Мазон» ≠ Mason (a person).
+
+RANK SIGNAL: candidates are ordered by vector similarity (rank 1 = closest).
+A rank-1 candidate that transliterates to the same name as the mention is
+STRONG evidence — accept it even if the absolute score is modest. Rank
+alone never forces a match: a rank-1 candidate that is a DIFFERENT name
+still returns null.
 
 Rules:
 1. matched_entity_id MUST be one of the candidate ids, or null. Never
    invent an id.
-2. BIAS TO NULL when unsure. A wrong link is worse than a miss — if no
-   candidate is clearly the SAME name, return null.
+2. Prefer null on GENUINE ambiguity (no candidate is the same name). But
+   DO accept a candidate that clearly transliterates to the mention — a
+   correct link is the goal, not maximal caution.
 3. confidence in [0,1]: use >=0.85 ONLY for a clear same-name match;
    <0.6 when candidates are weak/ambiguous; pair null with a low
    confidence.

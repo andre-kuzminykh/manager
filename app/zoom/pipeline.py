@@ -973,32 +973,13 @@ class ZoomPipeline:
         if not text:
             row.last_error = "short summary returned empty"
             return False
-        # FR-CR-05-191 — canonicalize names (TeamMember +
-        # Counterparty directories) before the post-processing chain
-        # so the title-hyperlink line, body, and Slack post all use
-        # consistent canonical forms.
-        try:
-            from app.services.summary_canonicalize import (
-                canonicalize_summary_text,
-            )
-            new_text, applied = canonicalize_summary_text(
-                text,
-                session=session, llm_backend=self._llm,
-                model=self._settings.fireflies_tasks_model,
-                trace_source="zoom_short",
-                trace_recording_id=row.zoom_id,
-            )
-            if applied:
-                text = new_text
-                log.info(
-                    "zoom_short_summary_canonicalized",
-                    zoom_id=row.zoom_id, rewrites=applied,
-                )
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "zoom_short_summary_canonicalize_failed",
-                zoom_id=row.zoom_id, error=str(e),
-            )
+        # FR-CR-05-191 + FR-CR-05-241 (2026-06-03) — NO canonicalisation here.
+        # The short summary is generated FROM `row.detailed_summary` (see
+        # `body_in` above), which was ALREADY canonicalised in
+        # `_step_detailed_summary`. Re-running it was a redundant SECOND
+        # counterparty-resolution pass — the source of the 9-vs-20 mention
+        # desync and extra LLM cost on «Алина, Ирина». Names in the input are
+        # already canonical, so the short-summary LLM carries them through.
         # FR-CR-05-157 follow-up — LLM said «содержательная часть
         # отсутствует» (transcript was too thin to summarize, but
         # passed the upstream char/marker guards). Don't post this

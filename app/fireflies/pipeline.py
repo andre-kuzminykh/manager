@@ -2113,30 +2113,12 @@ class FirefliesPipeline:
             )
             return False
         body = _truncate(text, limit=3800)
-        # FR-CR-05-191 — canonicalize names against TeamMember +
-        # Counterparty directories before the post-processing chain.
-        try:
-            from app.services.summary_canonicalize import (
-                canonicalize_summary_text,
-            )
-            new_body, applied = canonicalize_summary_text(
-                body,
-                session=session, llm_backend=self._llm,
-                model=self._settings.fireflies_tasks_model,
-                trace_source="ff_short",
-                trace_recording_id=row.fireflies_id,
-            )
-            if applied:
-                body = new_body
-                log.info(
-                    "fireflies_short_summary_canonicalized",
-                    fireflies_id=row.fireflies_id, rewrites=applied,
-                )
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "fireflies_short_summary_canonicalize_failed",
-                fireflies_id=row.fireflies_id, error=str(e),
-            )
+        # FR-CR-05-191 + FR-CR-05-241 (2026-06-03) — NO canonicalisation here.
+        # The short summary is generated FROM `row.detailed_summary` (see
+        # `user_prompt` above), already canonicalised in
+        # `_step_detailed_summary`. Re-running it was a redundant SECOND
+        # counterparty pass (mention desync + extra cost). Names in the input
+        # are already canonical and carry through the short-summary LLM.
         # FR-CR-05-119 — strip any «To-Do» / «Следующие шаги»
         # block the LLM still emits despite the prompt forbidding
         # it. We rebuild the section deterministically from the

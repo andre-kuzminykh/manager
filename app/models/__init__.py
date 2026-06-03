@@ -53,6 +53,7 @@ from app.models.task import (
     TaskSubscription,
 )
 from app.models.task_status_event import TaskStatusEvent
+from app.models.sheet_task_link import SheetTaskLink
 from app.models.fireflies import MeetingRecording
 from app.models.meeting_agenda import MeetingAgenda
 from app.models.zoom import ZoomRecording
@@ -109,6 +110,7 @@ __all__ = [
     "TaskStatus",
     "TaskStatusHistory",
     "TaskStatusEvent",
+    "SheetTaskLink",
     "TaskSubscription",
     "TeamMember",
     "MeetingAgenda",

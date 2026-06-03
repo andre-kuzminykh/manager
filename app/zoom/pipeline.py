@@ -712,6 +712,13 @@ class ZoomPipeline:
                         "zoom_detailed_summary_canonicalized",
                         zoom_id=row.zoom_id, rewrites=applied,
                     )
+                # FR-CR-05-242 — detailed summary is the SINGLE source of
+                # canonical entity forms. Stash its rewrite map so tasks
+                # (and any later step) use the SAME forms — no second,
+                # divergent canonicalisation («Siva» in summary vs «Ceva
+                # Logistics» in a task). Short summary already derives from
+                # this canonical detailed text.
+                row.__dict__["_zm_detail_canon_map"] = applied or {}
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "zoom_detailed_summary_canonicalize_failed",
@@ -1469,12 +1476,27 @@ class ZoomPipeline:
             if "description" in ch:
                 t.description = ch["description"]
             applied += 1
-        if applied:
+        # FR-CR-05-242 — enforce the DETAILED summary's canonical forms on
+        # task text so every surface (detailed / short / tasks) uses ONE
+        # form per entity. Reuse canonicalize_text (longest-first,
+        # case-insensitive, cascade-safe) with the detailed's rewrite map.
+        from app.services.counterparty_match import canonicalize_text
+
+        detail_map = row.__dict__.get("_zm_detail_canon_map") or {}
+        forced = 0
+        if detail_map:
+            for t in tasks:
+                nt = canonicalize_text(t.title, detail_map)
+                nd = canonicalize_text(t.description, detail_map)
+                if nt != t.title or nd != t.description:
+                    t.title, t.description = nt, nd
+                    forced += 1
+        if applied or forced:
             session.flush()
             log.info(
                 "zoom_task_canonical_rewrite_applied",
-                zoom_id=row.zoom_id,
-                applied=applied,
+                zoom_id=row.zoom_id, applied=applied,
+                forced_from_detailed=forced,
             )
         return applied
 

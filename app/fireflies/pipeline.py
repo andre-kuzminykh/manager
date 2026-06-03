@@ -1371,6 +1371,9 @@ class FirefliesPipeline:
                     "fireflies_detailed_summary_canonicalized",
                     fireflies_id=row.fireflies_id, rewrites=applied,
                 )
+            # FR-CR-05-242 — detailed is the single source of canonical
+            # entity forms; stash its map so tasks use the SAME forms.
+            row.__dict__["_ff_detail_canon_map"] = applied or {}
         except Exception as e:  # noqa: BLE001
             log.warning(
                 "fireflies_detailed_summary_canonicalize_failed",
@@ -1860,12 +1863,25 @@ class FirefliesPipeline:
             if "description" in ch:
                 t.description = ch["description"]
             applied += 1
-        if applied:
+        # FR-CR-05-242 — enforce the DETAILED summary's canonical forms on
+        # task text so detailed / short / tasks all use ONE form.
+        from app.services.counterparty_match import canonicalize_text
+
+        detail_map = row.__dict__.get("_ff_detail_canon_map") or {}
+        forced = 0
+        if detail_map:
+            for t in tasks:
+                nt = canonicalize_text(t.title, detail_map)
+                nd = canonicalize_text(t.description, detail_map)
+                if nt != t.title or nd != t.description:
+                    t.title, t.description = nt, nd
+                    forced += 1
+        if applied or forced:
             session.flush()
             log.info(
                 "fireflies_task_canonical_rewrite_applied",
                 fireflies_id=row.fireflies_id,
-                applied=applied,
+                applied=applied, forced_from_detailed=forced,
             )
         return applied
 

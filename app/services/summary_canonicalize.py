@@ -116,9 +116,18 @@ def _norm(s: str) -> str:
 
 def resolve_people_to_team_members(
     mentions: list[str], session: Session,
+    *, participant_names: list[str] | None = None,
 ) -> dict[str, str]:
     """Map each mention → canonical TeamMember.real_name when there's
     a confident match.
+
+    FR-CR-05-191 v4 (2026-06-03) — `participant_names` guard: only
+    canonicalize a mention to a TeamMember who actually ATTENDED this
+    meeting (matched by surname against the participant roster). An
+    employee absent from the meeting must NEVER be injected — e.g. an
+    external fundraising contact «Андре» was being rewritten to the
+    internal team member «Андрей Кузьминых» (AI Lead, not in the call).
+    Empty/None roster → no filter (legacy behaviour).
 
     Match strategies (FR-CR-05-191 v3 — stricter than v2 to avoid
     false rewrites like «Chris Watkins» → «Chris Windle» (different
@@ -152,6 +161,19 @@ def resolve_people_to_team_members(
     )
     if not members:
         return {}
+    # FR-CR-05-191 v4 — restrict to team members who attended this
+    # meeting (surname appears in the participant roster). Absent
+    # employees are not candidates → external mentions stay raw.
+    if participant_names:
+        roster_tokens: set[str] = set()
+        for p in participant_names:
+            roster_tokens |= set(_norm(p).split())
+        members = [
+            m for m in members
+            if (_norm(m.real_name).split() or [""])[-1] in roster_tokens
+        ]
+        if not members:
+            return {}
     out: dict[str, str] = {}
     for mention in mentions:
         mention_norm = _norm(mention)
@@ -338,6 +360,7 @@ def canonicalize_summary_text(
     trace_source: str = "summary",
     trace_recording_id: str | None = None,
     auto_seed_counterparties: bool = True,
+    participant_names: list[str] | None = None,
 ) -> tuple[str | None, dict[str, str]]:
     """End-to-end: extract entities → optionally auto-seed
     Counterparty (FR-CR-05-191b) → resolve people + orgs →
@@ -363,6 +386,7 @@ def canonicalize_summary_text(
             )
     people_map = resolve_people_to_team_members(
         entities["people"], session,
+        participant_names=participant_names,
     )
     org_map = resolve_organizations_to_counterparties(
         entities["organizations"], session,

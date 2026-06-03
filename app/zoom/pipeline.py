@@ -689,12 +689,22 @@ class ZoomPipeline:
                 from app.services.summary_canonicalize import (
                     canonicalize_summary_text,
                 )
+                # FR-CR-05-191 v4 — pass the meeting roster so people
+                # canonicalisation never injects an absent employee
+                # (external «Андре» ≠ team member «Андрей Кузьминых»).
+                _roster = list(row.participants or [])
+                for _a in (row.calendar_attendees or []):
+                    if isinstance(_a, dict):
+                        _nm = _a.get("resolved_name") or _a.get("display_name")
+                        if _nm:
+                            _roster.append(_nm)
                 new_text, applied = canonicalize_summary_text(
                     row.detailed_summary,
                     session=session, llm_backend=self._llm,
                     model=self._settings.fireflies_tasks_model,
                     trace_source="zoom_detailed",
                     trace_recording_id=row.zoom_id,
+                    participant_names=_roster,
                 )
                 if applied:
                     row.detailed_summary = new_text

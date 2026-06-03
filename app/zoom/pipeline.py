@@ -1143,9 +1143,21 @@ class ZoomPipeline:
         try:
             from app.services.meeting_webhook import post_meeting_to_webhook
 
+            from app.services.transcription import summary_has_body
+
             url = self._settings.meeting_webhook_url
             has_summary = bool((row.short_summary or "").strip())
-            if url and has_summary:
+            has_body = summary_has_body(row.short_summary)
+            if url and has_summary and not has_body:
+                # FR-CR-05-160 — content-free summary (Whisper
+                # hallucination / silent audio → header + «Участники:»
+                # only). Don't forward junk to the consumer. 2026-06-03
+                # «Design Status / SDF / Алина, Ирина» regression.
+                log.warning(
+                    "meeting_webhook_skipped_empty_body",
+                    source="zoom", source_id=row.zoom_id,
+                )
+            elif url and has_summary and has_body:
                 post_meeting_to_webhook(
                     webhook_url=url,
                     source="zoom",

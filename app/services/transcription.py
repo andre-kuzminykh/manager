@@ -275,6 +275,55 @@ def is_transcript_unsummarizable(text: str) -> tuple[bool, str | None]:
     return False, None
 
 
+def summary_has_body(short_summary: str | None, *, min_body_chars: int = 80) -> bool:
+    """Guard against publishing CONTENT-FREE meeting summaries.
+
+    A `short_summary` is structured as:
+
+        <title — DD.MM.YYYY | NN мин>
+        <DD/MM - title>
+        Участники: A, B, C
+        Суть: <recap prose>
+        To-Do: 1) … 2) …
+
+    When the transcript is a Whisper hallucination / silent audio /
+    fragmented VTT, the recap body comes back empty and the summary
+    collapses to just the title + «Участники: …» line + whitespace.
+    Those reached Slack AND the external webhook as junk on
+    2026-06-03 (Design Status / SDF / «Алина, Ирина»). This returns
+    False for that shape so callers can suppress publishing.
+
+    Heuristic: strip the «Участники:» line and any date-prefixed
+    header line, drop the leading title line, then require at least
+    `min_body_chars` alphanumeric characters of remaining prose.
+    Real recaps run into hundreds-to-thousands of chars; content-free
+    ones leave ~0 — the threshold cleanly separates them.
+    """
+    import re as _re
+
+    if not short_summary or not short_summary.strip():
+        return False
+    header_re = _re.compile(r"^\s*\d{1,2}[./]\d{1,2}([./]\d{2,4})?\b")
+    body_lines: list[str] = []
+    for ln in short_summary.split("\n"):
+        s = ln.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if low.startswith("участники:") or low.startswith("participants:"):
+            continue
+        if header_re.match(s):  # «03/06 - …» / «03.06.2026 …» header
+            continue
+        body_lines.append(s)
+    # The first remaining line is the meeting-title header
+    # («Алина, Ирина — 03.06.2026 | 30 мин») — drop it.
+    if body_lines:
+        body_lines = body_lines[1:]
+    body = " ".join(body_lines)
+    real = _re.sub(r"[^0-9A-Za-zА-Яа-яЁё]", "", body)
+    return len(real) >= min_body_chars
+
+
 def _looks_like_roster_only(text: str) -> bool:
     """True when `text`, after stripping bilingual-restoration scaffolding,
     is essentially a comma-separated roster (≥8 short name-like segments,

@@ -57,7 +57,13 @@ Python 3.x, SQLAlchemy 2.0, Postgres 16, Pydantic settings, бот на Bolt Soc
 |---|---|---|
 | `manager-db-1` | `postgres:16-alpine` | **Основная БД.** `slack_tasks` / user `postgres` / пароль в `.env`. Порт наружу не торчит — заходи через `docker exec`. |
 | `manager-bot-1` | `manager-bot` | Прод-бот: Slack listener + agenda runner + briefs + sync. |
-| `manager-zoom-ff-1` | `manager-bot:v2shadow` | **Параллельный shadow-бот** для Zoom/Fireflies-пайплайнов. Та же БД. v2-пайплайн (`ops/v2_publish_meeting.py`). |
+| `manager-zoom-ff-1` | `manager-bot:v2shadow` | **Актуальный Zoom/Fireflies-пайплайн.** Команда `python -m ops.zoom_fireflies_runner`. Та же БД. Именно он обрабатывает свежие записи и постит саммари. Env прокинут инлайн при `docker run` (НЕ compose — лейблы compose пустые); кастомный runner примонтирован из `/home/andre/manager-zff/zoom_fireflies_runner.py`. |
+
+⚠️ **На хосте ДВА деплоя этого приложения, env между ними НЕ синхронизирован:**
+- `manager-*` (`manager-bot`, `manager-zoom-ff-1`) — **актуальный прод**, образ `manager-bot[:v2shadow]`, запуск через `docker run` (env инлайн).
+- `slack-task-*` (`slack-task-tg-listener`, `slack-task-slack-ingest`, ...) — **старый деплой**, образ `slack-task-bot:latest`. Часть env-переменных живёт ТОЛЬКО здесь.
+
+Грабли (2026-06-03): `MEETING_WEBHOOK_URL` (n8n-вебхук саммари коллеге) был выставлен только на старых `slack-task-*`, но они не гоняют Zoom/FF-пайплайн → вебхук молчал. Новый `manager-zoom-ff-1`, который реально обрабатывает митинги, переменную не получил. **Вывод: при правке env проверяй ОБА деплоя; переменная в репе (`.env.example`) ≠ переменная в рантайме контейнера.** Реальный env смотри: `docker inspect <c> --format '{{range .Config.Env}}{{println .}}{{end}}'` или `docker exec <c> python -c "from app.config import get_settings; print(get_settings().<field>)"`.
 
 Оба бота смотрят в **одну и ту же** Postgres (`DATABASE_URL` идентичен — проверил). Никаких отдельных схем — таблицы общие.
 

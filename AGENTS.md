@@ -96,8 +96,8 @@ docker logs --since 24h manager-zoom-ff-1 2>&1 | grep zoom_pipeline_summary
 |---|---|
 | `tasks` | Источник правды по задачам. `source_kind ∈ {slack, telegram, fireflies, zoom}`, `source_conversation_id`, `status`, `owner_*`, `due_date`, `extra` (jsonb) — там `direction`. Soft-delete через `deleted_at`. |
 | `meetings` | Митинги (созданные через intent), не путать с записями. |
-| `zoom_recordings` | Колонки: `zoom_id` (PK), `title`, `meeting_date`, `transcript_text`, `short_summary`, `detailed_summary`, `short_summary_sent` (флаг постинга), `created_at`, `updated_at`. |
-| `meeting_recordings` | Параллельная таблица для v2shadow-пайплайна. **Не путать с `zoom_recordings`.** Если запись митинга «потерялась» — проверь обе таблицы. |
+| `zoom_recordings` | **Zoom-записи.** Ключ `zoom_id` (PK, base64 типа `dA2fUMqxQv6X...==`). Колонки: `title`, `meeting_date`, `transcript_text`, `short_summary`, `detailed_summary`, `short_summary_sent`, `created_at`, `updated_at`. ⚠️ Пустые/провальные записи (Whisper упал) могут чиститься фоновым cleanup'ом — строка появляется и исчезает. |
+| `meeting_recordings` | **Fireflies-записи (v2).** Ключ `fireflies_id` (uniq), НЕ `zoom_id`. Колонки `id` (serial PK), `transcript_text`, `short_summary`, `detailed_summary`, флаги стадий (`audio_downloaded`/`transcribed`/`short_summary_sent`/...), `attempts`, `last_error`, `calendar_attendees`. **Не путать с `zoom_recordings`** — это РАЗНЫЕ источники, а не legacy/v2 одной записи. Если митинг ищешь — проверь обе по `title ILIKE`. |
 | `meeting_agendas` | Idempotency для постов агенды: `calendar_event_id` (uniq), `slack_ts`, `posted_at`, `prior_meeting_zoom_ids` (json). |
 | `intent_inferences`, `action_drafts` | Трейс работы intent-классификатора. |
 | `context_snapshots` | Сообщение + 10 предыдущих + thread — audit-trail для задачи/митинга. |
@@ -212,7 +212,7 @@ Daemon. Сканит upcoming митинги, выделяет внешние о
 
 1. **`DATABASE_URL` на хосте не выставлен** и в `~/manager/.env` его НЕТ — Postgres только внутри docker network. Заходи через `docker exec -i manager-db-1 psql -U postgres -d slack_tasks`.
 2. **Два бота** (`manager-bot-1` + `manager-zoom-ff-1` aka v2shadow) пишут в **одну** БД. v2shadow гоняет Zoom/FF пайплайны через `ops/v2_publish_meeting.py`.
-3. **Дубли пайплайнов на одну запись:** `zoom_recordings` (legacy) vs `meeting_recordings` (v2). Если ищешь митинг и не находишь — проверь обе.
+3. **Две таблицы записей по источнику:** `zoom_recordings` (ключ `zoom_id`) для Zoom, `meeting_recordings` (ключ `fireflies_id`) для Fireflies. Это РАЗНЫЕ источники, не legacy/v2. Ищешь митинг — `title ILIKE` по обеим. И помни: провальная Zoom-запись (Whisper пустой) может существовать недолго и быть вычищенной — в логах `agenda_prior_skipped_thin` она есть, а в БД уже нет.
 4. **Three engines** в `app/db.py`. Vector БД могут быть отдельным инстансом; fallback chain прописан в `task_vector_db.py`.
 5. **Shadow v2 паттерн** для counterparty match: v1 = canonical, v2 = parallel, логирует mismatches, никогда не raise'ит.
 6. **`compose_agenda` всегда lite, никакого LLM** (FR-CR-05-192u). Прошлый LLM-путь сохранён как `_compose_agenda_llm_legacy` — не вызывается.

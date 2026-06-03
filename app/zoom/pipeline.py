@@ -1144,7 +1144,8 @@ class ZoomPipeline:
             from app.services.meeting_webhook import post_meeting_to_webhook
 
             url = self._settings.meeting_webhook_url
-            if url and (row.short_summary or "").strip():
+            has_summary = bool((row.short_summary or "").strip())
+            if url and has_summary:
                 post_meeting_to_webhook(
                     webhook_url=url,
                     source="zoom",
@@ -1157,6 +1158,15 @@ class ZoomPipeline:
                     google_doc_url=row.google_doc_url,
                     participants=list(row.participants or []),
                     tasks_count=row.tasks_extracted_count,
+                )
+            elif has_summary and not url:
+                # FR-CR-05-160 observability — a meeting WAS summarised
+                # but we have nowhere to forward it. Surfaces the silent
+                # «webhook URL lost on redeploy» misconfig (2026-06-03)
+                # so monitoring can alert instead of it going dark.
+                log.warning(
+                    "meeting_webhook_skipped_no_url",
+                    source="zoom", source_id=row.zoom_id,
                 )
         except Exception as e:  # noqa: BLE001
             log.warning(

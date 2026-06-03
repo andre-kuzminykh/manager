@@ -2295,7 +2295,8 @@ class FirefliesPipeline:
             from app.services.meeting_webhook import post_meeting_to_webhook
 
             url = self._settings.meeting_webhook_url
-            if url and (row.short_summary or "").strip():
+            has_summary = bool((row.short_summary or "").strip())
+            if url and has_summary:
                 post_meeting_to_webhook(
                     webhook_url=url,
                     source="fireflies",
@@ -2308,6 +2309,14 @@ class FirefliesPipeline:
                     google_doc_url=row.google_doc_url,
                     participants=list(row.participants or []),
                     tasks_count=row.tasks_extracted_count,
+                )
+            elif has_summary and not url:
+                # FR-CR-05-160 observability — summarised but nowhere to
+                # forward. Surfaces the silent «webhook URL lost on
+                # redeploy» misconfig (2026-06-03) for monitoring.
+                log.warning(
+                    "meeting_webhook_skipped_no_url",
+                    source="fireflies", source_id=row.fireflies_id,
                 )
         except Exception as e:  # noqa: BLE001
             log.warning(

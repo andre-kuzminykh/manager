@@ -48,18 +48,29 @@ _TOOL_PARAMS = {
     "required": ["resolutions"],
 }
 
-# Boss's ground-truth corrections for «Алина, Ирина» (key substring in the
-# mention → expected canonical). Used by --truth to score the resolver.
+# Boss's ground truth for «Алина, Ирина», keyed on the ACTUAL transcript
+# (Cyrillic/garbled) surface forms → expected canonical. Used by --truth.
 _TRUTH: list[tuple[str, str]] = [
-    ("ki one", "Key 1 Capital"), ("киван", "Key 1 Capital"),
-    ("winrobotics", "Vinrobotics"), ("almiraia", "Mirae"), ("альмирая", "Mirae"),
-    ("химейн", "HUMAIN"), ("humaine", "HUMAIN"),
-    ("tru arrow", "Tru Arrow"), ("accenture", "Accenture Ventures"),
-    ("incharge", "Incharge Capital Partners"), ("mazon", "Amazon Industrial Fund"),
-    ("felix", "Felix Jahn"), ("rigby", "Rigby"),
-    ("lingotto", "Lingotto Investment Management"),
-    ("utrenberg", "Daniel Gutenberg"), ("утренберг", "Daniel Gutenberg"),
-    ("йохан", "Jochen Rudat"), ("самир", "Samer Zawaideh"),
+    # companies
+    ("киван", "Key 1 Capital"),
+    ("виндроботикс", "Vinrobotics"),
+    ("альмирая", "Mirae"), ("мирая", "Mirae"),
+    ("химейн", "HUMAIN"),
+    ("труэр", "Tru Arrow"),
+    ("аксентюр", "Accenture Ventures"),
+    ("инчардж", "Incharge"), ("in charge", "Incharge"),
+    ("мазон", "Amazon Industrial Fund"),
+    ("феликс", "Felix Jahn"),
+    ("ригби", "Rigby"),
+    ("лингота", "Lingotto Investment Management"),
+    ("мубадала", "Mubadala"),
+    ("цуи", "Tsugu"),
+    ("тесер", "Tether"),
+    ("дары", "Dara"),
+    # people
+    ("утренберг", "Daniel Gutenberg"),
+    ("йохан", "Jochen Rudat"),
+    ("самир", "Samer Zawaideh"),
     ("стеф", "Stepan Natalevich"),
 ]
 

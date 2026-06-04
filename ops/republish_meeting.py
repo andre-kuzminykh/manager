@@ -1,11 +1,18 @@
-"""Republish ONE Fireflies meeting through the REAL pipeline (resolver →
-detailed → tasks → short → Doc) and, when armed, publish it (Telegram DM +
-Slack mirror + n8n webhook + per-task cards).
+"""Republish ONE meeting (Fireflies OR Zoom) through the REAL pipeline
+(resolver → detailed → tasks → short → Doc) and, when armed, publish it
+(Slack message, n8n webhook).
 
-Built for the Kima Ventures regression (01KT94K42F): the meeting was processed
-too early off a roster-only transcript → «Запись без содержимого», suppressed
-by the content gate. The native Fireflies transcript is now complete, so we
-re-run it for real and ship the correct result.
+Built for the Kima Ventures regression (FF, 01KT94K42F: roster-only transcript →
+«Запись без содержимого») and the Fundraising daily regression (Zoom: legacy
+task-canon mangled names — Amazon.com/SDF/RosKlif — fixed by FR-CR-05-251).
+
+Pass exactly one of --ff-id / --zoom-id. FF refetches the native transcript and
+re-derives the title; Zoom keeps its stored transcript + calendar title.
+
+--sync-sheet (with --regenerate): mark the meeting's OLD tasks as «deleted» in
+the Google Sheet, then push the freshly-extracted tasks as new rows. (Old tasks
+are soft-deleted in the DB — never row-removed, which would shift every other
+task's sheet-row mapping.)
 
 Two phases (so you can eyeball before anything leaves the building):
 
@@ -82,7 +89,8 @@ def _drop_from_calendar_attendees(attendees, drop: list[str]):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--ff-id", required=True)
+    ap.add_argument("--ff-id", default=None)
+    ap.add_argument("--zoom-id", default=None)
     ap.add_argument("--regenerate", action="store_true",
                     help="refetch native transcript, reset stale flags, and "
                          "re-run resolver+detailed+tasks+short+Doc (no sending)")
@@ -113,6 +121,12 @@ def main() -> int:
                          "calendar invitee who didn't actually attend.")
     ap.add_argument("--no-title-push", action="store_true",
                     help="don't push the re-derived title back to Fireflies' UI")
+    ap.add_argument("--sync-sheet", action="store_true",
+                    help="with --regenerate: mark the meeting's OLD tasks as "
+                         "deleted in the Google Sheet, then push the freshly "
+                         "extracted tasks as new rows. Old tasks are soft-deleted "
+                         "in the DB (deleted_at), not row-removed (row-removal "
+                         "would shift every other task's row mapping).")
     a = ap.parse_args()
     if not any([a.regenerate, a.send, a.webhook_only, a.repost_slack,
                 a.update_slack, a.drop_participant]):
@@ -120,20 +134,24 @@ def main() -> int:
               "--repost-slack / --update-slack / --drop-participant")
         return 2
 
+    if bool(a.ff_id) == bool(a.zoom_id):
+        print("pass exactly one of --ff-id / --zoom-id")
+        return 2
+    is_zoom = bool(a.zoom_id)
+
     s = get_settings()
     from openai import OpenAI
 
-    from app.fireflies.client import FirefliesClient
     from app.fireflies.pipeline import (
-        FirefliesPipeline,
         _DDMM_PREFIX,
         _dedupe_meeting_tasks,
     )
     from app.intent.llm_backends import OpenAIBackend
-    from app.models import MeetingRecording, Task, TaskSourceKind
+    from app.models import Task, TaskSourceKind
     from app.sync.factories import (
         build_calendar_credentials_factory_with_sa_fallback,
         build_docs_factory,
+        build_sheets_factory,
     )
     from app.telegram_bot.sender import TelegramSender
 
@@ -148,15 +166,34 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         print(f"[docs_factory failed: {type(e).__name__}: {str(e)[:120]}]")
         docs = None
+    sheets_factory = build_sheets_factory(s)
     sender = TelegramSender(token=s.telegram_bot_token)
 
-    pipe = FirefliesPipeline(
-        settings=s,
-        client=FirefliesClient(token=s.fireflies_api_token,
-                               endpoint=s.fireflies_api_url),
-        llm_backend=llm, docs_factory=docs, sender=sender, calendar_factory=cal,
-    )
-    src_kind, src_id = TaskSourceKind.fireflies, a.ff_id
+    if is_zoom:
+        from app.zoom.client import ZoomClient
+        from app.zoom.pipeline import ZoomPipeline
+        from app.models import ZoomRecording
+        pipe = ZoomPipeline(
+            settings=s,
+            client=ZoomClient(account_id=s.zoom_account_id,
+                              client_id=s.zoom_client_id,
+                              client_secret=s.zoom_client_secret,
+                              api_base=s.zoom_api_base, oauth_url=s.zoom_oauth_url),
+            llm_backend=llm, docs_factory=docs, sender=sender, calendar_factory=cal)
+        src_kind, src_id = TaskSourceKind.zoom, a.zoom_id
+        _RowModel, _id_col, _id_val = ZoomRecording, ZoomRecording.zoom_id, a.zoom_id
+    else:
+        from app.fireflies.client import FirefliesClient
+        from app.fireflies.pipeline import FirefliesPipeline
+        from app.models import MeetingRecording
+        pipe = FirefliesPipeline(
+            settings=s,
+            client=FirefliesClient(token=s.fireflies_api_token,
+                                   endpoint=s.fireflies_api_url),
+            llm_backend=llm, docs_factory=docs, sender=sender, calendar_factory=cal)
+        src_kind, src_id = TaskSourceKind.fireflies, a.ff_id
+        _RowModel, _id_col, _id_val = (
+            MeetingRecording, MeetingRecording.fireflies_id, a.ff_id)
 
     def _try(label, fn):
         try:
@@ -166,9 +203,8 @@ def main() -> int:
             return None
 
     with session_scope() as sess:
-        row = sess.query(MeetingRecording).filter(
-            MeetingRecording.fireflies_id == a.ff_id).one()
-        print(f"meeting: {row.title!r}  ff_id={a.ff_id}")
+        row = sess.query(_RowModel).filter(_id_col == _id_val).one()
+        print(f"meeting: {row.title!r}  {'zoom_id' if is_zoom else 'ff_id'}={src_id}")
         print(f"  transcript_chars(stored)={len(row.transcript_text or '')}  "
               f"detailed={bool(row.detailed_summary)}  "
               f"short_sent={row.short_summary_sent}")
@@ -178,15 +214,47 @@ def main() -> int:
               f"tg={'on' if getattr(sender, 'enabled', False) else 'off'}\n")
 
         if a.regenerate:
-            # 1) native transcript — refetch the complete call (was roster-only).
-            native = _try("refetch_native",
-                          lambda: pipe._client.fetch_transcript_text(a.ff_id))
-            if native and len(native) > len(row.transcript_text or ""):
-                print(f"native transcript: {len(native)} chars "
-                      f"(was {len(row.transcript_text or '')})")
-                row.transcript_text = native
-            row.transcribed = True
-            row.audio_downloaded = True  # skip download/Whisper — native is primary
+            from datetime import datetime as _dt, timezone as _tz
+            # 0) OLD tasks — soft-delete (deleted_at) and, with --sync-sheet,
+            #    mark each as «deleted» in the Google Sheet BEFORE we drop them,
+            #    so the sheet rows are reconciled (not orphaned). Without
+            #    --sync-sheet we hard-delete (legacy behaviour, FF Kima path).
+            old_tasks = (sess.query(Task).filter(
+                Task.source_kind == src_kind,
+                Task.source_conversation_id == src_id,
+                Task.deleted_at.is_(None)).all())
+            if a.sync_sheet and old_tasks:
+                sheets = sheets_factory() if sheets_factory else None
+                marked = 0
+                for t in old_tasks:
+                    t.deleted_at = _dt.now(_tz.utc)
+                    if sheets is not None:
+                        try:
+                            sheets.sync(sess, t)  # status → «deleted» in-place
+                            marked += 1
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[sheet mark-deleted task {t.id} failed: "
+                                  f"{type(e).__name__}: {str(e)[:120]}]")
+                print(f"old tasks: {len(old_tasks)} soft-deleted, "
+                      f"{marked} marked deleted in sheet")
+            else:
+                sess.query(Task).filter(
+                    Task.source_kind == src_kind,
+                    Task.source_conversation_id == src_id,
+                ).delete(synchronize_session=False)
+
+            # 1) transcript + title — FF refetches the native transcript and
+            #    re-derives the title; Zoom keeps its stored transcript and its
+            #    calendar-matched title.
+            if not is_zoom:
+                native = _try("refetch_native",
+                              lambda: pipe._client.fetch_transcript_text(src_id))
+                if native and len(native) > len(row.transcript_text or ""):
+                    print(f"native transcript: {len(native)} chars "
+                          f"(was {len(row.transcript_text or '')})")
+                    row.transcript_text = native
+                row.transcribed = True
+                row.audio_downloaded = True
 
             # 2) reset stale derived state so each step regenerates.
             row.detailed_summarised = False
@@ -198,30 +266,28 @@ def main() -> int:
             row.doc_exported = False
             row.google_doc_id = None
             row.google_doc_url = None
-            row.title = None  # force re-derive from THIS transcript
-            sess.query(Task).filter(
-                Task.source_kind == src_kind,
-                Task.source_conversation_id == src_id,
-            ).delete(synchronize_session=False)
+            if not is_zoom:
+                row.title = None  # FF: force re-derive from THIS transcript
 
             # 3) detailed (runs the FR resolver inside → improves transcript,
-            #    stashes _ff_detail_canon_map on this very row instance).
+            #    stashes _*_detail_canon_map on this very row instance).
             _try("detailed", lambda: pipe._step_detailed_summary(row, session=sess))
 
-            # 4) title — derive from the (now resolved) transcript. _step_*
-            #    doesn't do this for FF; process_one does it inline, so we
-            #    replicate that here (and optionally push to the FF UI).
-            derived = _try("derive_title", lambda: pipe._derive_topic_title(row))
-            if derived:
-                if row.meeting_date and not _DDMM_PREFIX.match(derived):
-                    derived = f"{row.meeting_date.strftime('%d/%m')} - {derived}"
-                row.title = derived
-                if not a.no_title_push:
-                    _try("push_title", lambda: pipe._client.update_transcript_title(
-                        a.ff_id, derived))
-            else:
-                row.title = (f"{row.meeting_date.strftime('%d/%m')} - Meeting"
-                             if row.meeting_date else "Meeting")
+            # 4) FF title — derive from the (now resolved) transcript + push.
+            if not is_zoom:
+                derived = _try("derive_title",
+                               lambda: pipe._derive_topic_title(row))
+                if derived:
+                    if row.meeting_date and not _DDMM_PREFIX.match(derived):
+                        derived = f"{row.meeting_date.strftime('%d/%m')} - {derived}"
+                    row.title = derived
+                    if not a.no_title_push:
+                        _try("push_title",
+                             lambda: pipe._client.update_transcript_title(
+                                 src_id, derived))
+                elif not row.title:
+                    row.title = (f"{row.meeting_date.strftime('%d/%m')} - Meeting"
+                                 if row.meeting_date else "Meeting")
 
             # 5) tasks — extract → verify → canonicalize → consolidate →
             #    dedupe → classify (same sequence as process_one; legacy
@@ -237,9 +303,33 @@ def main() -> int:
             _try("classify_directions",
                  lambda: pipe._step_classify_directions(sess, row))
 
-            # 6) Doc + short summary (short reads google_doc_url, so Doc first).
+            # 6) Doc + short summary. Zoom's _step_short_summary auto-sends via
+            #    _send_short_summary when a sender is set — null it for the
+            #    regen so nothing leaves the building here.
             _try("doc_export", lambda: pipe._step_doc_export(sess, row))
+            _saved_sender = getattr(pipe, "_sender", None)
+            pipe._sender = None
             _try("short_summary", lambda: pipe._step_short_summary(sess, row))
+            pipe._sender = _saved_sender
+
+            # 7) push the freshly-extracted tasks to the Google Sheet as new rows.
+            if a.sync_sheet:
+                sheets = sheets_factory() if sheets_factory else None
+                new_tasks = (sess.query(Task).filter(
+                    Task.source_kind == src_kind,
+                    Task.source_conversation_id == src_id,
+                    Task.deleted_at.is_(None)).all())
+                pushed = 0
+                if sheets is not None:
+                    for t in new_tasks:
+                        try:
+                            sheets.sync(sess, t)
+                            pushed += 1
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[sheet push task {t.id} failed: "
+                                  f"{type(e).__name__}: {str(e)[:120]}]")
+                print(f"new tasks: {len(new_tasks)} extracted, "
+                      f"{pushed} pushed to sheet")
 
         # ---- report ----
         print("=" * 70)
@@ -313,16 +403,30 @@ def main() -> int:
                 print("REFUSING to send: short_summary is empty (run "
                       "--regenerate first / content gate suppressed it).")
             elif a.webhook_only:
-                # Only the n8n webhook: stub out TG + Slack mirror so
-                # _step_send_short_summary runs solely the webhook tail.
-                import app.services.slack_mirror as _sm
-                _sm.post_meeting_summary_to_slack = lambda *aa, **kw: []
-                if getattr(pipe, "_sender", None) is not None:
-                    pipe._sender.send_message = lambda *aa, **kw: {"message_id": 0}
-                row.short_summary_sent = False
-                print(">>> SENDING WEBHOOK ONLY (no Slack / TG / cards)…")
-                _try("webhook", lambda: pipe._step_send_short_summary(row))
-                print(">>> webhook sent.")
+                # Only the n8n webhook — call it directly (source-agnostic),
+                # exactly as the pipeline does internally. No Slack / TG / cards.
+                from app.services.meeting_webhook import post_meeting_to_webhook
+                url = (s.meeting_webhook_url or "").strip()
+                if not url:
+                    print("webhook: MEETING_WEBHOOK_URL not set.")
+                else:
+                    print(">>> SENDING WEBHOOK ONLY (no Slack / TG / cards)…")
+                    _try("webhook", lambda: post_meeting_to_webhook(
+                        webhook_url=url,
+                        source=("zoom" if is_zoom else "fireflies"),
+                        source_id=src_id,
+                        title=row.title,
+                        meeting_date=row.meeting_date,
+                        duration_seconds=row.duration_seconds,
+                        short_summary=row.short_summary,
+                        detailed_summary=row.detailed_summary,
+                        google_doc_url=row.google_doc_url,
+                        participants=list(row.participants or []),
+                        tasks_count=len(tasks)))
+                    print(">>> webhook sent.")
+            elif is_zoom:
+                print("--send is FF-only; for Zoom use --repost-slack / "
+                      "--update-slack + --webhook-only.")
             else:
                 if a.no_webhook:
                     import app.services.meeting_webhook as _mw

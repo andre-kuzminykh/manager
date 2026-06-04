@@ -102,6 +102,14 @@ def main() -> int:
         row.detailed_summary = None
         row.tasks_extracted = False
         row.tasks_extracted_count = 0
+        # Stale short_summary/title short-circuit their steps (FF
+        # `_step_short_summary` returns early on `if row.short_summary`,
+        # and the title is only re-derived for auto-stamp titles). Clear
+        # them so the dry-run shows THIS run's real short summary, and
+        # re-derive the title locally below (no push to Fireflies).
+        row.short_summary = None
+        if hasattr(row, "short_summary_sent"):
+            row.short_summary_sent = False
         sess.query(Task).filter(Task.source_kind == src_kind,
                                 Task.source_conversation_id == src_id
                                 ).delete(synchronize_session=False)
@@ -119,7 +127,27 @@ def main() -> int:
         _try("consolidate_tasks", lambda: pipe._step_consolidate_tasks(sess, row))
         _try("short_summary", lambda: pipe._step_short_summary(sess, row))
 
+        # Re-derive the title from THIS run's transcript (FF only). The real
+        # pipeline only re-derives auto-stamp titles, so a stale «04/06 -
+        # Запись без содержимого» would otherwise survive. Local-only — we
+        # call _derive_topic_title directly (LLM read), NOT the push path.
+        old_title = row.title
+        new_title = None
+        if not a.zoom_id and hasattr(pipe, "_derive_topic_title"):
+            def _retitle():
+                nonlocal new_title
+                from app.fireflies.pipeline import _DDMM_PREFIX
+                derived = pipe._derive_topic_title(row)
+                if derived:
+                    if row.meeting_date and not _DDMM_PREFIX.match(derived):
+                        derived = f"{row.meeting_date.strftime('%d/%m')} - {derived}"
+                    new_title = derived
+            _try("retitle", _retitle)
+
         print("=" * 70)
+        if new_title and new_title != old_title:
+            print(f"TITLE (re-derived):  {old_title!r}  ->  {new_title!r}")
+            print("=" * 70)
         print("DETAILED SUMMARY (FR resolver applied):\n")
         print(row.detailed_summary or "(none)")
         print("\n" + "=" * 70)

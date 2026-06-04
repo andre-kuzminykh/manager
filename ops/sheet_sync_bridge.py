@@ -35,9 +35,9 @@ log = get_logger(__name__)
 
 
 def _build_client(s: Any):
-    from app.sheet_sync.sheets_client import SheetsClient
+    from app.sheet_sync.sheets_client import TasksSheetClient
 
-    return SheetsClient(
+    return TasksSheetClient(
         spreadsheet_id=s.sheet_sync_spreadsheet_id,
         tab_title=s.sheet_sync_tab_title,
     )
@@ -110,10 +110,10 @@ def _migrate(args: argparse.Namespace) -> int:
     # System A header has task_id in col A; this command lives in the bridge
     # tab — if the user runs --migrate against a System B tab (no visible id),
     # we just skip rows without a parseable id.
-    from app.sheet_sync.sheets_client import SheetsClient
+    from app.sheet_sync.sheets_client import TasksSheetClient
 
-    client = SheetsClient(spreadsheet_id=s.sheet_sync_spreadsheet_id,
-                          tab_title=args.tab or s.sheet_sync_tab_title)
+    client = TasksSheetClient(spreadsheet_id=s.sheet_sync_spreadsheet_id,
+                              tab_title=args.tab or s.sheet_sync_tab_title)
     rng = f"{client._tab}!A1:A"
     resp = (client._svc.spreadsheets().values()
             .get(spreadsheetId=client._sid, range=rng).execute())

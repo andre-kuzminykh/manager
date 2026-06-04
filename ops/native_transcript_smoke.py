@@ -27,12 +27,14 @@ import sys
 from app.config import get_settings
 
 
-def _verdict(text: str | None, min_chars: int) -> str:
-    from app.services.transcription import should_use_native
+def _should_use_native(text: str | None, min_chars: int) -> bool:
+    # Mirror of app.services.transcription.should_use_native — inlined so
+    # this probe runs on an OLD image (before the new code is deployed).
+    return bool(text and text.strip() and len(text.strip()) >= min_chars)
 
-    use = should_use_native(
-        prefer_native=True, native_text=text, min_native_chars=min_chars
-    )
+
+def _verdict(text: str | None, min_chars: int) -> str:
+    use = _should_use_native(text, min_chars)
     n = len((text or "").strip())
     tag = "USE native (Whisper skipped)" if use else "FALL BACK to Whisper"
     return f"{n} chars -> {tag}"
@@ -136,7 +138,8 @@ def main() -> int:
     a = ap.parse_args()
 
     s = get_settings()
-    min_chars = s.native_transcript_min_chars
+    # getattr fallback: the new config field may not exist on an old image.
+    min_chars = getattr(s, "native_transcript_min_chars", 100)
     print(f"native_transcript_min_chars = {min_chars}  "
           f"(flags are NOT read here — this is a read-only probe)")
 

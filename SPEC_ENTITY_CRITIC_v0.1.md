@@ -120,11 +120,14 @@ retrieval кандидатов (vector+lex по каталогу, теперь �
 
 ## 11. Интеграция в пайплайн встреч (rev3 — prod)
 
-**Точка встройки:** `_step_detailed_summary`, СРАЗУ после
-`canonicalize_summary_text` (которая строит карту замен `applied` и кладёт её в
-`_zm_detail_canon_map` / `_ff_detail_canon_map`, откуда её наследуют задачи и
-короткое саммари — SPEC_ENTITY_CONSISTENCY). FR-резолвер добавляет свои замены
-в ТУ ЖЕ карту → задачи/саммари автоматически получают канонические формы.
+**Точка встройки (rev5 — transcript-first):** в `_step_detailed_summary`
+резолвер вызывается ДО построения detailed summary — на **сыром транскрипте**:
+`improved_transcript = canonicalize_text(transcript, fr_map)`. Из улучшенного
+транскрипта строится detailed → из detailed задачи → из detailed короткое
+(всё с уже подменёнными именами). После старой `canonicalize_summary_text`
+(team+counterparty) карта `fr_map` применяется к detailed ПОВТОРНО, чтобы FR-
+формы побеждали ошибки старого резолвера («Amazon»→«Amazon.com»,
+«Accenture Ventures»→имя человека) и вливается в `_detail_canon_map` для задач.
 
 ```
 detailed_summary (LLM, canonical RU)

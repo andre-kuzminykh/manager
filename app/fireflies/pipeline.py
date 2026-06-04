@@ -1381,6 +1381,33 @@ class FirefliesPipeline:
                     "fireflies_calendar_attendees_step_failed",
                     fireflies_id=row.fireflies_id, error=str(e),
                 )
+        # FR-EC-CRITIC — improve the TRANSCRIPT FIRST (resolve CRM names), so
+        # the detailed summary + tasks + short summary are built canonical from
+        # the start; re-applied to the summary after canonicalisation so FR wins.
+        _roster = list(row.participants or [])
+        for _a in (row.calendar_attendees or []):
+            if isinstance(_a, dict):
+                _nm = _a.get("resolved_name") or _a.get("display_name")
+                if _nm:
+                    _roster.append(_nm)
+        fr_map: dict[str, str] = {}
+        if session is not None:
+            try:
+                from app.services.fr_resolve_step import resolve_for_meeting
+                fr_map = resolve_for_meeting(
+                    settings=self._settings, text=row.transcript_text,
+                    meeting_title=row.title, participants=_roster,
+                    source="fireflies", source_id=row.fireflies_id,
+                    llm=self._llm, session=session,
+                ) or {}
+                if fr_map:
+                    from app.services.counterparty_match import canonicalize_text
+                    row.transcript_text = canonicalize_text(row.transcript_text, fr_map)
+                    log.info("fireflies_fr_transcript_improved",
+                             fireflies_id=row.fireflies_id, rewrites=fr_map)
+            except Exception as e:  # noqa: BLE001
+                log.warning("fireflies_fr_transcript_improve_failed",
+                            fireflies_id=row.fireflies_id, error=str(e))
         user_prompt = (
             build_meta_block_for_summary(row)
             + "\n\nТранскрипт:\n"
@@ -1404,14 +1431,8 @@ class FirefliesPipeline:
             from app.services.summary_canonicalize import (
                 canonicalize_summary_text,
             )
-            # FR-CR-05-191 v4 — roster guard: never inject an absent
-            # employee for an external mention.
-            _roster = list(row.participants or [])
-            for _a in (row.calendar_attendees or []):
-                if isinstance(_a, dict):
-                    _nm = _a.get("resolved_name") or _a.get("display_name")
-                    if _nm:
-                        _roster.append(_nm)
+            # FR-CR-05-191 v4 — roster guard (built above): never inject an
+            # absent employee for an external mention.
             new_text, applied = canonicalize_summary_text(
                 row.detailed_summary,
                 session=session, llm_backend=self._llm,
@@ -1434,30 +1455,19 @@ class FirefliesPipeline:
                 "fireflies_detailed_summary_canonicalize_failed",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
-        # FR-EC-CRITIC — resolve entity mentions against Viktor's CRM, merge
-        # canonical replacements into the same canon map (tasks inherit them).
-        try:
-            from app.services.fr_resolve_step import resolve_for_meeting
-            # Resolve entity names from the raw TRANSCRIPT (source of truth);
-            # the resulting map is applied to the summary + inherited by tasks.
-            fr_repl = resolve_for_meeting(
-                settings=self._settings,
-                text=(row.transcript_text or row.detailed_summary),
-                meeting_title=row.title, participants=list(row.participants or []),
-                source="fireflies", source_id=row.fireflies_id,
-                llm=self._llm, session=session,
-            )
-            if fr_repl:
+        # FR-EC-CRITIC — re-apply the transcript-resolved FR map so FR canonical
+        # forms WIN over the team/counterparty canonicalisation; tasks inherit
+        # via the merged canon map.
+        if fr_map:
+            try:
                 from app.services.counterparty_match import canonicalize_text
-                row.detailed_summary = canonicalize_text(row.detailed_summary, fr_repl)
+                row.detailed_summary = canonicalize_text(row.detailed_summary, fr_map)
                 merged = dict(row.__dict__.get("_ff_detail_canon_map") or {})
-                merged.update(fr_repl)
+                merged.update(fr_map)
                 row.__dict__["_ff_detail_canon_map"] = merged
-                log.info("fireflies_fr_resolver_applied",
-                         fireflies_id=row.fireflies_id, rewrites=fr_repl)
-        except Exception as e:  # noqa: BLE001
-            log.warning("fireflies_fr_resolver_failed",
-                        fireflies_id=row.fireflies_id, error=str(e))
+            except Exception as e:  # noqa: BLE001
+                log.warning("fireflies_fr_reapply_failed",
+                            fireflies_id=row.fireflies_id, error=str(e))
         row.detailed_summarised = True
         row.last_error = None
         return True

@@ -438,7 +438,7 @@ class Settings(BaseSettings):
     # Reasoning model for the one-pass canonicaliser (operator can point this at
     # a strong model independent of the cheaper summary model).
     entity_fr_resolver_model: str = Field(
-        default="gpt-5", alias="ENTITY_FR_RESOLVER_MODEL"
+        default="gpt-5.5", alias="ENTITY_FR_RESOLVER_MODEL"
     )
     # Catalog cache TTL — Viktor syncs every ~3h, so we refetch at most this
     # often (the dump is one MCP call; caching keeps per-meeting cost down).

@@ -40,6 +40,45 @@ import sys
 from app.config import get_settings
 from app.db import session_scope
 
+_PARTICIPANT_PREFIXES = ("Участники:", "Participants:")
+
+
+def _drop_from_participants_line(short: str, drop: list[str]) -> tuple[str, bool]:
+    """Remove `drop` names from the «Участники: a, b, c» line of a short
+    summary. Case-insensitive, exact-name match. Returns (new_text, changed)."""
+    if not short or not drop:
+        return short, False
+    drop_cf = {d.strip().casefold() for d in drop if d.strip()}
+    out, changed = [], False
+    for line in short.splitlines():
+        stripped = line.lstrip()
+        hit = next((p for p in _PARTICIPANT_PREFIXES
+                    if stripped.startswith(p)), None)
+        if hit:
+            names = [n.strip() for n in stripped[len(hit):].split(",")]
+            names = [n for n in names if n]
+            kept = [n for n in names if n.casefold() not in drop_cf]
+            if len(kept) != len(names):
+                changed = True
+                indent = line[: len(line) - len(stripped)]
+                line = f"{indent}{hit} " + ", ".join(kept)
+        out.append(line)
+    return "\n".join(out), changed
+
+
+def _drop_from_calendar_attendees(attendees, drop: list[str]):
+    """Drop calendar-attendee dicts whose resolved/display name matches."""
+    drop_cf = {d.strip().casefold() for d in drop if d.strip()}
+    out = []
+    for a in attendees or []:
+        if isinstance(a, dict):
+            nm = (a.get("resolved_name") or a.get("display_name")
+                  or "").strip().casefold()
+            if nm in drop_cf:
+                continue
+        out.append(a)
+    return out
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
@@ -67,13 +106,18 @@ def main() -> int:
                          "with the current short summary — no new message, no dup.")
     ap.add_argument("--keep-stale-slack", action="store_true",
                     help="with --repost-slack: do NOT delete the old message.")
+    ap.add_argument("--drop-participant", action="append", default=[],
+                    metavar="NAME",
+                    help="remove NAME from the «Участники:» line + "
+                         "calendar_attendees (repeatable). Use to drop a "
+                         "calendar invitee who didn't actually attend.")
     ap.add_argument("--no-title-push", action="store_true",
                     help="don't push the re-derived title back to Fireflies' UI")
     a = ap.parse_args()
     if not any([a.regenerate, a.send, a.webhook_only, a.repost_slack,
-                a.update_slack]):
+                a.update_slack, a.drop_participant]):
         print("nothing to do: pass --regenerate / --send / --webhook-only / "
-              "--repost-slack / --update-slack")
+              "--repost-slack / --update-slack / --drop-participant")
         return 2
 
     s = get_settings()
@@ -217,6 +261,20 @@ def main() -> int:
         print("SHORT SUMMARY:\n")
         print(row.short_summary or "(none / suppressed by content gate)")
         print("\n" + "=" * 70)
+
+        if a.drop_participant:
+            new_short, ch = _drop_from_participants_line(
+                row.short_summary or "", a.drop_participant)
+            if ch:
+                row.short_summary = new_short
+            row.calendar_attendees = _drop_from_calendar_attendees(
+                row.calendar_attendees, a.drop_participant)
+            print(f"drop-participant {a.drop_participant}: "
+                  f"short_summary {'edited' if ch else 'unchanged (name not in line)'}")
+            for ln in (row.short_summary or "").splitlines():
+                if ln.lstrip().startswith(_PARTICIPANT_PREFIXES):
+                    print("  now:", ln.strip())
+                    break
 
         if a.repost_slack or a.update_slack:
             import app.services.slack_publish as _sp

@@ -516,6 +516,17 @@ class Settings(BaseSettings):
     entity_fr_shard_records: int = Field(
         default=200, alias="ENTITY_FR_SHARD_RECORDS"
     )
+    # FR-EC-CRITIC-2 — serve the resolver from a LOCAL replica of Viktor's CRM
+    # (table fr_catalog_snapshots) instead of the live MCP per meeting. The
+    # replica refreshes lazily once it is older than max_age_hours (≈daily) and
+    # falls back to the last good snapshot when his MCP is down. enabled=false →
+    # legacy live-MCP fetch with the in-memory TTL cache.
+    entity_fr_replica_enabled: bool = Field(
+        default=True, alias="ENTITY_FR_REPLICA_ENABLED"
+    )
+    entity_fr_replica_max_age_hours: float = Field(
+        default=24.0, alias="ENTITY_FR_REPLICA_MAX_AGE_HOURS"
+    )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable
     # flag is flipped LAST, after indexing + synthetic calibration (operator

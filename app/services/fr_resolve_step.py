@@ -175,10 +175,17 @@ def resolve_for_meeting(
     try:
         mcp_url = getattr(settings, "entity_fr_mcp_url", "") or ""
         if catalog is None:
-            catalog = R.fetch_catalog(
-                mcp_url=mcp_url,
-                ttl_seconds=getattr(settings, "entity_fr_catalog_ttl_seconds", 3600),
-            )
+            # FR-EC-CRITIC-2 — prefer the local replica (table fr_catalog_snapshots,
+            # refreshed ≈daily); independent of live MCP per meeting. Falls back to
+            # live MCP fetch when the replica is disabled or unavailable.
+            if getattr(settings, "entity_fr_replica_enabled", False) and session is not None:
+                from app.services import fr_catalog_replica as _repl
+                catalog = _repl.load_catalog(session, settings=settings)
+            else:
+                catalog = R.fetch_catalog(
+                    mcp_url=mcp_url,
+                    ttl_seconds=getattr(settings, "entity_fr_catalog_ttl_seconds", 3600),
+                )
         if not catalog:
             log.warning("fr_resolve_empty_catalog", source=source, source_id=source_id)
             return {}

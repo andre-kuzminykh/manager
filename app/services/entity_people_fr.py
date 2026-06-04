@@ -48,10 +48,12 @@ _ORG_SYSTEM = (
     "From a meeting transcript, find EXTERNAL-CONTACT PEOPLE — individuals who "
     "are investors / intro contacts / counterparties, NOT internal team members "
     "and NOT companies. EXCLUDE any name already in the ALREADY-RESOLVED list. "
-    "For each remaining person, name the org/fund they are associated with based "
-    "on the meeting context (e.g. «Самир» is the SDF / Tawazun contact → org "
-    "«Tawazun»). Only include entries where you can name an org. Set "
-    "is_person=true and fill `org`. STRICT JSON via the tool only."
+    "For each remaining person, give the org/fund they are tied to AS REFERRED "
+    "TO IN THE MEETING — an acronym or short name is fine («SDF», «Jabal», "
+    "«Tawazun»); we look it up afterwards, so do NOT try to expand it yourself. "
+    "Prefer an org from the ORGS-DISCUSSED hints when one fits. Only include "
+    "entries where you can name some org token. Set is_person=true and fill "
+    "`org`. STRICT JSON via the tool only."
 )
 
 _EXTRACT_SYSTEM = (

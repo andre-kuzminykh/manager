@@ -459,7 +459,7 @@ class Settings(BaseSettings):
     # Apply a resolver pick to summaries/tasks only at/above this confidence
     # (smoke-calibrated: correct cross-lingual matches land 0.7-0.99).
     entity_fr_min_confidence: float = Field(
-        default=0.7, alias="ENTITY_FR_MIN_CONFIDENCE"
+        default=0.65, alias="ENTITY_FR_MIN_CONFIDENCE"
     )
     # Track 2 (counterparty people) — agentic second pass: guess each unresolved
     # person's org, fetch that CRM record's prose (comm_log), extract the full

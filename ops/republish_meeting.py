@@ -223,12 +223,18 @@ def main() -> int:
                          "Repeatable. e.g. --rename 'Аэроджемель=Abdul Latif Jameel Ventures'. "
                          "Works with --regenerate (applied before Doc/short) or "
                          "standalone on the committed row.")
+    ap.add_argument("--reexport-doc", action="store_true",
+                    help="re-export the Google Doc from the CURRENT (e.g. renamed) "
+                         "detailed+tasks and re-point the short summary's link to "
+                         "the new Doc — NO LLM. Use with standalone --rename so the "
+                         "linked Doc carries the fixes too.")
     a = ap.parse_args()
     if not any([a.regenerate, a.send, a.webhook_only, a.repost_slack,
-                a.update_slack, a.drop_participant, a.sheet_only, a.rename]):
+                a.update_slack, a.drop_participant, a.sheet_only, a.rename,
+                a.reexport_doc]):
         print("nothing to do: pass --regenerate / --send / --webhook-only / "
               "--repost-slack / --update-slack / --drop-participant / --sheet-only "
-              "/ --rename")
+              "/ --rename / --reexport-doc")
         return 2
 
     if bool(a.ff_id) == bool(a.zoom_id):
@@ -475,6 +481,20 @@ def main() -> int:
             _fx = _apply_renames(sess, row, src_kind=src_kind, src_id=src_id,
                                  renames=_renames)
             print(f"rename {list(_renames.items())}: detailed + {_fx} tasks updated")
+
+        # Re-export the Doc from the (renamed) detailed+tasks and re-point the
+        # short summary's link — NO LLM. Standalone only (regen already exports).
+        if a.reexport_doc and not a.regenerate:
+            old_url = row.google_doc_url
+            row.doc_exported = False
+            row.google_doc_url = None
+            row.google_doc_id = None
+            _try("reexport_doc", lambda: pipe._step_doc_export(sess, row))
+            new_url = row.google_doc_url
+            if old_url and new_url and row.short_summary and old_url in (row.short_summary or ""):
+                row.short_summary = row.short_summary.replace(old_url, new_url)
+                print(f"short link re-pointed: {old_url} -> {new_url}")
+            print(f"doc re-exported: {new_url or '(failed)'}")
 
         # ---- report ----
         print("=" * 70)

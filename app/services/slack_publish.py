@@ -58,6 +58,7 @@ def publish_zoom_recording_to_slack(
     override_short_summary: str | None = None,
     override_thread_todo_text: str | None = None,
     skip_db_write: bool = False,
+    update_if_exists: bool = False,
 ) -> dict:
     """FR-CR-05-194a — Slack publish одной recording (Zoom OR Fireflies).
 
@@ -99,9 +100,12 @@ def publish_zoom_recording_to_slack(
         or getattr(row, "fireflies_id", None)
     )
 
-    # Idempotent skip — если уже postnut в этот channel
+    # Idempotent skip — если уже postnut в этот channel. С update_if_exists=True
+    # вместо skip делаем chat.update существующего parent-сообщения (нужно, когда
+    # ранняя/пустая версия встречи уже залетела в Slack и её надо ЗАМЕНИТЬ
+    # исправленным саммери — Kima/Fundraising regression, FR-CR-05-252).
     existing_ts = getattr(row, "slack_post_ts", None)
-    if existing_ts:
+    if existing_ts and not update_if_exists:
         log.info("slack_publish_skipped_already_posted",
                  row_id=row_identifier,
                  slack_post_ts=existing_ts)
@@ -174,6 +178,31 @@ def publish_zoom_recording_to_slack(
              all_tasks_in_thread=all_tasks_in_thread)
 
     client = WebClient(token=token)
+    # FR-CR-05-252 — update mode: replace the existing parent message in place
+    # (chat.update) instead of posting a new one. Updates ONLY the parent
+    # (summary + important-task trailer) — the thread is left untouched to
+    # avoid duplicate task replies. Keeps the same format as a fresh parent.
+    if existing_ts and update_if_exists:
+        try:
+            client.chat_update(
+                channel=channel, ts=existing_ts, text=chunks[0],
+            )
+        except SlackApiError as e:
+            err = (
+                e.response.data.get("error")
+                if e.response is not None
+                and isinstance(e.response.data, dict)
+                else str(e)
+            )
+            log.warning("slack_publish_update_api_error",
+                        row_id=row_identifier, error=err)
+            return {"ok": False, "error": err, "step": "update"}
+        log.info("slack_publish_updated",
+                 row_id=row_identifier, parent_ts=existing_ts,
+                 chunks=len(chunks),
+                 truncated_extra_chunks=max(0, len(chunks) - 1))
+        return {"ok": True, "parent_ts": existing_ts,
+                "tasks_posted": False, "updated": True}
     try:
         resp = client.chat_postMessage(
             channel=channel, text=chunks[0],

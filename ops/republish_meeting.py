@@ -57,11 +57,23 @@ def main() -> int:
     ap.add_argument("--webhook-only", action="store_true",
                     help="send ONLY the n8n webhook (no Slack / TG / cards). "
                          "For the deferred webhook step after Slack looks right.")
+    ap.add_argument("--repost-slack", action="store_true",
+                    help="post a FRESH full Slack message (parent + task thread) "
+                         "to the CEO Brain channel, deleting the stale earlier "
+                         "post of this meeting first. Use when an empty/early "
+                         "version already landed and you want a clean new one.")
+    ap.add_argument("--update-slack", action="store_true",
+                    help="UPDATE the existing Slack message in place (chat.update) "
+                         "with the current short summary — no new message, no dup.")
+    ap.add_argument("--keep-stale-slack", action="store_true",
+                    help="with --repost-slack: do NOT delete the old message.")
     ap.add_argument("--no-title-push", action="store_true",
                     help="don't push the re-derived title back to Fireflies' UI")
     a = ap.parse_args()
-    if not a.regenerate and not a.send and not a.webhook_only:
-        print("nothing to do: pass --regenerate and/or --send / --webhook-only")
+    if not any([a.regenerate, a.send, a.webhook_only, a.repost_slack,
+                a.update_slack]):
+        print("nothing to do: pass --regenerate / --send / --webhook-only / "
+              "--repost-slack / --update-slack")
         return 2
 
     s = get_settings()
@@ -206,6 +218,38 @@ def main() -> int:
         print(row.short_summary or "(none / suppressed by content gate)")
         print("\n" + "=" * 70)
 
+        if a.repost_slack or a.update_slack:
+            import app.services.slack_publish as _sp
+            channel = _sp._get_channel()
+            token = getattr(s, _sp._get_token_key(), "") or ""
+            old_ts = getattr(row, "slack_post_ts", None)
+            if not (row.short_summary or "").strip():
+                print("REFUSING slack: short_summary empty (run --regenerate).")
+            elif not channel or not token:
+                print("slack: AUTO_SEND_TO_SLACK_CHANNEL / token not configured.")
+            elif a.update_slack:
+                print(f">>> UPDATING existing Slack message (ts={old_ts})…")
+                res = _try("slack_update", lambda: _sp.publish_zoom_recording_to_slack(
+                    sess, row, channel=channel, token=token,
+                    use_db_tasks=True, update_if_exists=True))
+                print("update result:", res)
+            else:  # --repost-slack
+                if old_ts and not a.keep_stale_slack:
+                    try:
+                        from slack_sdk import WebClient
+                        WebClient(token=token).chat_delete(
+                            channel=channel, ts=old_ts)
+                        print(f"deleted stale slack message ts={old_ts}")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[delete stale failed: {type(e).__name__}: "
+                              f"{str(e)[:140]}] — continuing")
+                row.slack_post_ts = None  # force a fresh post
+                print(">>> POSTING fresh full Slack message (parent + tasks)…")
+                res = _try("slack_repost", lambda: _sp.publish_zoom_recording_to_slack(
+                    sess, row, channel=channel, token=token,
+                    use_db_tasks=True, all_tasks_in_thread=True))
+                print("repost result:", res)
+
         if a.send or a.webhook_only:
             if not (row.short_summary or "").strip():
                 print("REFUSING to send: short_summary is empty (run "
@@ -239,9 +283,9 @@ def main() -> int:
                 from datetime import datetime, timezone
                 row.processed_at = datetime.now(timezone.utc)
                 print(">>> published.")
-        else:
+        elif not (a.repost_slack or a.update_slack):
             print("NOT sent (no --send). DB persisted + Doc created. Re-run "
-                  "with --send [--no-webhook] to publish.")
+                  "with --send / --repost-slack / --update-slack to publish.")
         # session_scope commits on exit.
     print("\n(committed)")
     return 0

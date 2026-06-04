@@ -42,6 +42,7 @@ class ReconcilePlan:
     pushes: list[tuple[int, dict[str, str]]] = field(default_factory=list)  # (task_id, cells to write to sheet)
     appends: list[int] = field(default_factory=list)               # task_ids with no row yet
     errors: list[tuple[RowView, str]] = field(default_factory=list)
+    stale_skipped: list[tuple[int, str]] = field(default_factory=list)  # FR-SS-CONF-2
     abort: str | None = None
 
 
@@ -58,6 +59,8 @@ def plan_reconcile(
     links: dict[str, tuple[int, str | None]],
     *,
     max_delete_pct: float = 0.2,
+    task_updated_at: dict[int, Any] | None = None,
+    link_synced_at: dict[str, Any] | None = None,
 ) -> ReconcilePlan:
     """Pure reconcile.
 
@@ -104,13 +107,25 @@ def plan_reconcile(
         cur_hash = payload_hash(r.values)
         human_edited = cur_hash != last_hash  # FR-SS-CONF-3: cell really changed
 
+        # FR-SS-CONF-2 anti-stale: DB changed AFTER the link was last synced
+        # -> the human's row is stale; DB wins, sheet edit is skipped per-field.
+        stale = False
+        if task_updated_at and link_synced_at:
+            tu = task_updated_at.get(task_id)
+            ls = link_synced_at.get(r.row_uuid)
+            if tu is not None and ls is not None and tu > ls:
+                stale = True
+
         # --- FR-SS-EDIT: sheet -> DB on fields the human changed & that differ ---
         edit: dict[str, str] = {}
         if human_edited:
             for f in EDITABLE_FIELDS:
                 rv = r.values.get(f, "")
                 if rv != db_pl.get(f, ""):
-                    edit[f] = rv
+                    if stale:
+                        plan.stale_skipped.append((task_id, f))
+                    else:
+                        edit[f] = rv
         if edit:
             plan.edits.append((task_id, edit))
 

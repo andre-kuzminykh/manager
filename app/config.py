@@ -513,6 +513,16 @@ class Settings(BaseSettings):
     sheet_sync_max_rows_per_tab: int = Field(
         default=5000, alias="SHEET_SYNC_MAX_ROWS_PER_TAB"
     )
+    # FR-SS — bidirectional Sheet<->DB bridge (SPEC_SHEET_SYNC_v0.1).
+    # OFF by default, fully decoupled from sheet_sync_enabled (System B
+    # feeder) and the legacy app/sync/sheets.py writer. Activate ONLY after
+    # `--migrate` has stamped DeveloperMetadata and a shadow-tab smoke pass.
+    sheet_sync_bridge_enabled: bool = Field(
+        default=False, alias="SHEET_SYNC_BRIDGE_ENABLED"
+    )
+    sheet_sync_bridge_max_delete_pct: float = Field(
+        default=0.2, alias="SHEET_SYNC_BRIDGE_MAX_DELETE_PCT"
+    )
     # FR-CR-05-124 — counterparties directory pulled from two
     # Google Sheets, wipe-and-reload semantics. Source A is the
     # «Status outreach» tab on the investor master sheet (name

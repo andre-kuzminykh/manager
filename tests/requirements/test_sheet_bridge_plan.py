@@ -89,6 +89,23 @@ def test_empty_sheet_with_links_aborts() -> None:
     assert plan.abort == "empty_sheet_with_links"
 
 
+def test_anti_stale_db_wins_on_stale_sheet_edit() -> None:
+    # human edited the row, but DB was updated later (via chat/meeting) ->
+    # FR-SS-CONF-2: skip the stale edit per-field.
+    import datetime as dt
+    r = _row("u1", 2, title="T", status="in_progress")
+    links = {"u1": (1, "stale")}  # hash differs -> human_edited=True
+    task_payloads = {1: {"title": "T", "status": "done"}}
+    plan = plan_reconcile(
+        [r], task_payloads, links,
+        task_updated_at={1: dt.datetime(2026, 6, 4, 10)},
+        link_synced_at={"u1": dt.datetime(2026, 6, 4, 8)},  # DB newer than link
+    )
+    assert plan.edits == []
+    assert plan.stale_skipped == [(1, "status")]
+    assert plan.pushes == [(1, {"status": "done"})]  # DB wins -> pushed
+
+
 def test_append_live_task_without_row() -> None:
     plan = plan_reconcile([], task_payloads={5: {"title": "T5"}}, links={})
     assert plan.appends == [5]

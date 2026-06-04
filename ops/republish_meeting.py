@@ -87,6 +87,52 @@ def _drop_from_calendar_attendees(attendees, drop: list[str]):
     return out
 
 
+def _read_sheet_id_to_row(svc) -> dict[int, int]:
+    """Read column A of the target sheet → {task_id: row_number}. The first
+    cell of each task row is str(task.id) (sheets._task_row), so this rebuilds
+    the row mapping by reading the live sheet — needed when the DB has no
+    GoogleSheetsSync records (broken / never-synced link)."""
+    rng = f"{svc._sheet_name}!A:A"
+    resp = (svc._service.spreadsheets().values()
+            .get(spreadsheetId=svc._spreadsheet_id, range=rng).execute())
+    out: dict[int, int] = {}
+    for i, r in enumerate(resp.get("values", []), start=1):
+        if r and str(r[0]).strip().isdigit():
+            out[int(str(r[0]).strip())] = i
+    return out
+
+
+def _reconcile_sheet_then_sync(svc, sess, tasks, *, label: str) -> tuple[int, int]:
+    """For each task: find its existing row in the sheet by task id, set the
+    GoogleSheetsSync.row_id so sheets.sync() UPDATES in place (active→status,
+    soft-deleted→«deleted») instead of appending a duplicate; append only when
+    the id isn't found. Returns (updated, appended)."""
+    from app.models import GoogleSheetsSync, SyncStatus
+    id_to_row = _read_sheet_id_to_row(svc)
+    updated = appended = 0
+    for t in tasks:
+        rec = (sess.query(GoogleSheetsSync)
+               .filter_by(task_id=t.id).one_or_none())
+        if rec is None:
+            rec = GoogleSheetsSync(task_id=t.id,
+                                   spreadsheet_id=svc._spreadsheet_id,
+                                   status=SyncStatus.pending)
+            sess.add(rec)
+            sess.flush()
+        rec.spreadsheet_id = svc._spreadsheet_id
+        sheet_row = id_to_row.get(int(t.id))
+        rec.row_id = sheet_row  # None → sheets.sync appends; else updates
+        t.google_sheets_row_id = sheet_row
+        try:
+            svc.sync(sess, t)
+            updated += 1 if sheet_row else 0
+            appended += 0 if sheet_row else 1
+        except Exception as e:  # noqa: BLE001
+            print(f"[{label} task {t.id} sheet sync failed: "
+                  f"{type(e).__name__}: {str(e)[:120]}]")
+    return updated, appended
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--ff-id", default=None)
@@ -127,11 +173,19 @@ def main() -> int:
                          "extracted tasks as new rows. Old tasks are soft-deleted "
                          "in the DB (deleted_at), not row-removed (row-removal "
                          "would shift every other task's row mapping).")
+    ap.add_argument("--sheet-only", action="store_true",
+                    help="NO LLM / NO regen: reconcile THIS meeting's tasks with "
+                         "the Google Sheet (rebuild row mapping by matching task id "
+                         "in column A, then update / mark-deleted in place; append "
+                         "any missing). Use to fix the sheet after a regen.")
+    ap.add_argument("--sheet-id", default=None, metavar="ID",
+                    help="override the target spreadsheet id (the configured "
+                         "GOOGLE_SHEETS_SPREADSHEET_ID points at the wrong sheet).")
     a = ap.parse_args()
     if not any([a.regenerate, a.send, a.webhook_only, a.repost_slack,
-                a.update_slack, a.drop_participant]):
+                a.update_slack, a.drop_participant, a.sheet_only]):
         print("nothing to do: pass --regenerate / --send / --webhook-only / "
-              "--repost-slack / --update-slack / --drop-participant")
+              "--repost-slack / --update-slack / --drop-participant / --sheet-only")
         return 2
 
     if bool(a.ff_id) == bool(a.zoom_id):
@@ -202,6 +256,14 @@ def main() -> int:
             print(f"[{label} failed: {type(e).__name__}: {str(e)[:200]}]")
             return None
 
+    def _sheet_service():
+        """Build the SheetsSyncService, honouring --sheet-id override (the
+        configured GOOGLE_SHEETS_SPREADSHEET_ID points at the wrong sheet)."""
+        svc = sheets_factory() if sheets_factory else None
+        if svc is not None and a.sheet_id:
+            svc._spreadsheet_id = a.sheet_id.strip()
+        return svc
+
     with session_scope() as sess:
         row = sess.query(_RowModel).filter(_id_col == _id_val).one()
         print(f"meeting: {row.title!r}  {'zoom_id' if is_zoom else 'ff_id'}={src_id}")
@@ -212,6 +274,32 @@ def main() -> int:
         print(f"  factories: docs={'ok' if docs else 'MISSING'} "
               f"cal={'ok' if cal else 'MISSING'} "
               f"tg={'on' if getattr(sender, 'enabled', False) else 'off'}\n")
+
+        if a.sheet_only:
+            # NO LLM, NO regen — just reconcile THIS meeting's tasks with the
+            # Google Sheet (read column A, fix row mapping, update / mark-deleted
+            # in place, append missing). Cheap probe of access + layout too.
+            svc = _sheet_service()
+            if svc is None:
+                print("sheet-only: sheets factory unavailable "
+                      "(no spreadsheet id / creds).")
+            else:
+                print(f"sheet-only: target spreadsheet={svc._spreadsheet_id} "
+                      f"tab={svc._sheet_name}")
+                meeting_tasks = (sess.query(Task).filter(
+                    Task.source_kind == src_kind,
+                    Task.source_conversation_id == src_id).all())
+                active = [t for t in meeting_tasks if t.deleted_at is None]
+                deleted = [t for t in meeting_tasks if t.deleted_at is not None]
+                print(f"  tasks: {len(active)} active, {len(deleted)} deleted "
+                      f"(both get reconciled)")
+                up, ap = _try("sheet_reconcile",
+                              lambda: _reconcile_sheet_then_sync(
+                                  svc, sess, meeting_tasks, label="sheet-only")
+                              ) or (0, 0)
+                print(f"  sheet: {up} rows updated in place, {ap} appended")
+            print("\n(committed)")
+            return 0
 
         if a.regenerate:
             from datetime import datetime as _dt, timezone as _tz
@@ -224,19 +312,17 @@ def main() -> int:
                 Task.source_conversation_id == src_id,
                 Task.deleted_at.is_(None)).all())
             if a.sync_sheet and old_tasks:
-                sheets = sheets_factory() if sheets_factory else None
-                marked = 0
                 for t in old_tasks:
                     t.deleted_at = _dt.now(_tz.utc)
-                    if sheets is not None:
-                        try:
-                            sheets.sync(sess, t)  # status → «deleted» in-place
-                            marked += 1
-                        except Exception as e:  # noqa: BLE001
-                            print(f"[sheet mark-deleted task {t.id} failed: "
-                                  f"{type(e).__name__}: {str(e)[:120]}]")
-                print(f"old tasks: {len(old_tasks)} soft-deleted, "
-                      f"{marked} marked deleted in sheet")
+                svc = _sheet_service()
+                if svc is not None:
+                    up, ap = _reconcile_sheet_then_sync(
+                        svc, sess, old_tasks, label="mark-deleted")
+                    print(f"old tasks: {len(old_tasks)} soft-deleted, "
+                          f"{up} marked deleted in-place ({ap} not found)")
+                else:
+                    print(f"old tasks: {len(old_tasks)} soft-deleted "
+                          "(sheet factory unavailable)")
             else:
                 sess.query(Task).filter(
                     Task.source_kind == src_kind,
@@ -312,24 +398,22 @@ def main() -> int:
             _try("short_summary", lambda: pipe._step_short_summary(sess, row))
             pipe._sender = _saved_sender
 
-            # 7) push the freshly-extracted tasks to the Google Sheet as new rows.
+            # 7) push the freshly-extracted tasks to the Google Sheet (append —
+            #    they're brand new, so the reconcile won't find existing rows).
             if a.sync_sheet:
-                sheets = sheets_factory() if sheets_factory else None
                 new_tasks = (sess.query(Task).filter(
                     Task.source_kind == src_kind,
                     Task.source_conversation_id == src_id,
                     Task.deleted_at.is_(None)).all())
-                pushed = 0
-                if sheets is not None:
-                    for t in new_tasks:
-                        try:
-                            sheets.sync(sess, t)
-                            pushed += 1
-                        except Exception as e:  # noqa: BLE001
-                            print(f"[sheet push task {t.id} failed: "
-                                  f"{type(e).__name__}: {str(e)[:120]}]")
-                print(f"new tasks: {len(new_tasks)} extracted, "
-                      f"{pushed} pushed to sheet")
+                svc = _sheet_service()
+                if svc is not None:
+                    up, ap = _reconcile_sheet_then_sync(
+                        svc, sess, new_tasks, label="push-new")
+                    print(f"new tasks: {len(new_tasks)} extracted, "
+                          f"{ap} appended ({up} updated existing)")
+                else:
+                    print(f"new tasks: {len(new_tasks)} extracted "
+                          "(sheet factory unavailable)")
 
         # ---- report ----
         print("=" * 70)

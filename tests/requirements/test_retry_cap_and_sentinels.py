@@ -23,6 +23,11 @@ def test_fr_cr_05_196_zoom_attempts_20_caps_to_permanent_failure() -> None:
     row.attempts = 20
     row.duration_seconds = 1800
     row.last_error = None
+    # A row stuck at the attempts cap is by definition NOT fully processed —
+    # defeat the FR-CR-05-257 already_processed short-circuit (a bare
+    # MagicMock(spec=...) returns truthy children for every step flag).
+    row.processed_at = None
+    row.audio_url = "https://zoom.example/rec"
 
     # Pipeline без зависимостей — проверяем только gate
     pipeline = ZoomPipeline.__new__(ZoomPipeline)
@@ -67,6 +72,10 @@ def test_fr_cr_05_197_zoom_24h_sentinel_skipped() -> None:
     row.attempts = 0
     row.duration_seconds = 86400  # SENTINEL
     row.last_error = None
+    # Defeat the FR-CR-05-257 already_processed short-circuit (bare
+    # MagicMock(spec=...) flags are truthy) so we reach the sentinel gate.
+    row.processed_at = None
+    row.audio_url = "https://zoom.example/rec"
 
     pipeline = ZoomPipeline.__new__(ZoomPipeline)
     pipeline._settings = MagicMock(min_meeting_seconds=300)

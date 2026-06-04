@@ -1210,7 +1210,6 @@ class ZoomPipeline:
                     break
             if uid_chunks == len(chunks):
                 sent += 1
-        row.short_summary_sent = sent > 0
         # FR-CR-05-137 — mirror the same body into Slack (Artem
         # AI's bot DM by default). Failures here MUST NOT block
         # the rest of the pipeline. Configured via
@@ -1295,6 +1294,11 @@ class ZoomPipeline:
                 "zoom_meeting_webhook_unexpected_error",
                 zoom_id=row.zoom_id, error=str(e),
             )
+        # FR-CR-05-257 — mark done once the Slack-mirror + webhook ran, even if
+        # the Telegram DM failed (sent==0). Was `short_summary_sent = sent > 0`,
+        # so a failed TG left the flag False while mirror + webhook had already
+        # posted → next poll re-fired both (duplicate Slack + n8n webhook).
+        row.short_summary_sent = True
         return sent
 
     def _step_match_counterparties(
@@ -2866,6 +2870,23 @@ class ZoomPipeline:
             recording_id=row.id, zoom_id=row.zoom_id, title=row.title,
             errors=[],
         )
+        # FR-CR-05-257 — already-processed short-circuit (mirror of Fireflies
+        # process_one). Without it Zoom re-ran every step on each invocation, so
+        # a row left with a non-null last_error but tasks_extracted=True (or any
+        # out-of-band flag reset, e.g. republish --regenerate clearing
+        # short_summary_sent) re-entered the tail and RE-fired the Slack mirror /
+        # n8n webhook / task cards. Skip when the whole pipeline is done.
+        if (
+            row.processed_at
+            and row.audio_downloaded
+            and row.transcribed
+            and row.detailed_summarised
+            and row.doc_exported
+            and row.short_summary_sent
+            and row.tasks_extracted
+        ):
+            report.skipped_reason = "already_processed"
+            return report
         # FR-CR-05-198 — Zoom cloud recording not finished processing yet:
         # no audio_url is published and we haven't downloaded audio before.
         # This is a transient not-ready state, NOT a failure — return early

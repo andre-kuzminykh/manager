@@ -2427,8 +2427,6 @@ class FirefliesPipeline:
                     break
             if uid_sent == len(chunks):
                 sent += 1
-        if sent:
-            row.short_summary_sent = True
         # FR-CR-05-158 — operator-pinned: «в слаке я не вижу
         # firefiles». Fireflies pipeline never mirrored to Slack
         # (Zoom did via FR-CR-05-137). Add the same call here.
@@ -2502,6 +2500,14 @@ class FirefliesPipeline:
                 "fireflies_meeting_webhook_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
+        # FR-CR-05-257 — mark the step done once we've run the Slack-mirror +
+        # webhook sends, EVEN IF the Telegram DM failed (sent==0). Previously
+        # short_summary_sent was set only on TG success, so a failed/blocked TG
+        # left the flag False while the mirror + webhook had ALREADY posted →
+        # the next poll re-entered and RE-fired Slack + the n8n webhook
+        # (duplicate external deliveries). The top-of-method guard makes the
+        # whole step idempotent once this is set.
+        row.short_summary_sent = True
         return sent
 
     # --- step 7: task extraction -----------------------------

@@ -315,6 +315,14 @@ def main() -> int:
 
     with session_scope() as sess:
         row = sess.query(_RowModel).filter(_id_col == _id_val).one()
+        # FR-CR-05-258 — take the same per-meeting advisory lock the runner
+        # uses, so a manual republish and the always-on runner can't process
+        # this recording concurrently (which duplicated Slack/Doc/webhook).
+        from app.services.pg_lock import try_meeting_lock
+        if not try_meeting_lock(sess, "zoom" if is_zoom else "fireflies", src_id):
+            print("ANOTHER PROCESS (runner?) is handling this meeting right now "
+                  "— aborting to avoid a double-post. Retry in a moment.")
+            return 3
         print(f"meeting: {row.title!r}  {'zoom_id' if is_zoom else 'ff_id'}={src_id}")
         print(f"  transcript_chars(stored)={len(row.transcript_text or '')}  "
               f"detailed={bool(row.detailed_summary)}  "

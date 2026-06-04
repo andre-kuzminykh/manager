@@ -18,6 +18,7 @@ from app.fireflies.pipeline import FirefliesPipeline
 from app.intent.llm_backends import OpenAIBackend
 from app.logging_setup import get_logger, setup_logging
 from app.models import MeetingRecording, ZoomRecording
+from app.services.pg_lock import try_meeting_lock
 from app.sync.factories import (
     build_calendar_credentials_factory_with_sa_fallback, build_docs_factory,
 )
@@ -95,6 +96,13 @@ def _poll_fireflies(pipeline, s, op_email, started_at):
                 skipped += 1; continue
             try:
                 with session_scope() as session:
+                    # FR-CR-05-258 — per-meeting advisory lock closes the
+                    # runner-vs-manual (and runner-vs-runner) double-process
+                    # race that caused duplicate Slack/Doc/webhook deliveries.
+                    if not try_meeting_lock(session, "fireflies", t.id):
+                        log.info("ff_runner_skip_locked", fireflies_id=t.id)
+                        skipped += 1
+                        continue
                     r = pipeline.process_one(session, t)
                 if r.skipped_reason: skipped += 1
                 else: processed += 1
@@ -154,6 +162,11 @@ def _poll_zoom(pipeline, s, op_email, started_at):
                 skipped += 1; continue
             try:
                 with session_scope() as session:
+                    # FR-CR-05-258 — per-meeting advisory lock (see Fireflies).
+                    if not try_meeting_lock(session, "zoom", m.id):
+                        log.info("zoom_runner_skip_locked", zoom_id=m.id)
+                        skipped += 1
+                        continue
                     r = pipeline.process_one(session, m)
                 if r.skipped_reason: skipped += 1
                 else: processed += 1

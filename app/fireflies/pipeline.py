@@ -2241,17 +2241,22 @@ class FirefliesPipeline:
         if not text:
             row.last_error = "short summary LLM returned empty"
             return False
-        # FR-CR-05-157 follow-up — same no-content guard as Zoom.
-        from app.services.transcription import is_summary_no_content
+        # FR-CR-05-157e — single content gate (same as Zoom): empty/contentless
+        # meeting → publish to NO channel (TG + Slack + webhook). Returning
+        # False before row.short_summary is set suppresses all of them.
+        from app.services.transcription import is_contentless_meeting
 
-        no_content, hit_phrase = is_summary_no_content(text)
-        if no_content:
+        empty, reason = is_contentless_meeting(
+            title=row.title, short_summary=text,
+            tasks_count=row.tasks_extracted_count,
+        )
+        if empty:
             row.tasks_extracted = True
             row.last_error = None
             log.info(
-                "fireflies_pipeline_skipped_no_content_summary",
+                "fireflies_pipeline_skipped_contentless_meeting",
                 fireflies_id=row.fireflies_id, title=row.title,
-                hit_phrase=hit_phrase, summary_chars=len(text),
+                reason=reason, summary_chars=len(text),
             )
             return False
         body = _truncate(text, limit=3800)

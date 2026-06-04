@@ -1104,17 +1104,24 @@ class ZoomPipeline:
         # passed the upstream char/marker guards). Don't post this
         # to Slack/TG — it's noise. Mark done so listener won't
         # retry.
-        from app.services.transcription import is_summary_no_content
+        # FR-CR-05-157e — single content gate. An empty/contentless meeting
+        # («Запись без содержимого», 0 tasks, prose-but-meaningless summary)
+        # must NOT reach ANY channel — Telegram, Slack, OR the n8n webhook.
+        # Returning False here (before row.short_summary is set) suppresses
+        # all of them at once.
+        from app.services.transcription import is_contentless_meeting
 
-        no_content, hit_phrase = is_summary_no_content(text)
-        if no_content:
+        empty, reason = is_contentless_meeting(
+            title=row.title, short_summary=text,
+            tasks_count=row.tasks_extracted_count,
+        )
+        if empty:
             row.tasks_extracted = True
             row.last_error = None
             log.info(
-                "zoom_pipeline_skipped_no_content_summary",
+                "zoom_pipeline_skipped_contentless_meeting",
                 zoom_id=row.zoom_id, title=row.title,
-                hit_phrase=hit_phrase,
-                summary_chars=len(text),
+                reason=reason, summary_chars=len(text),
             )
             return False
         # FR-CR-05-119 — drop any LLM-emitted To-Do section so we

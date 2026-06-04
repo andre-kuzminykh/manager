@@ -324,6 +324,50 @@ def summary_has_body(short_summary: str | None, *, min_body_chars: int = 80) -> 
     return len(real) >= min_body_chars
 
 
+# FR-CR-05-157e — markers of a derived TITLE that the summary LLM produces for
+# an empty / contentless recording («Запись без содержимого», «Recording without
+# content»). These slipped past the phrase-based `is_summary_no_content` because
+# the SUMMARY body read like prose; the TITLE is the deterministic giveaway.
+_EMPTY_RECORDING_TITLE_RE = __import__("re").compile(
+    r"(?i)("
+    r"без\s+содержимог|без\s+содержани|нет\s+содержимог|пуста[яй]\s+запис|"
+    r"запись\s+без\s+|no\s+content|without\s+content|empty\s+recording|"
+    r"no\s+meaningful\s+content|nothing\s+to\s+summari"
+    r")"
+)
+
+
+def is_contentless_meeting(
+    *,
+    title: str | None,
+    short_summary: str | None,
+    tasks_count: int | None = None,
+    min_body_chars: int = 80,
+) -> tuple[bool, str | None]:
+    """FR-CR-05-157e — single content gate: should this meeting be published
+    AT ALL (Telegram + Slack + webhook)? Returns (True, reason) when the
+    meeting is empty / contentless, so the caller suppresses every channel.
+
+    Catches two RELIABLE shapes that `is_summary_no_content` (phrase-only)
+    missed on the «Запись без содержимого» regression:
+      1. the existing no-content phrase markers in the summary;
+      2. the derived TITLE literally says «без содержимого» / «no content»
+         (the LLM's deterministic label for an empty recording — this is what
+         «Запись без содержимого» / 0 tasks / 15K-char junk webhook was).
+
+    `tasks_count` is accepted for callers/logging but is NOT used to suppress
+    on its own: a legitimate info-sync can have a real recap and 0 action
+    items, and `summary_has_body` is unreliable on the raw (pre-assembly)
+    summary text, so a tasks+body rule risked dropping real meetings.
+    """
+    nc, phrase = is_summary_no_content(short_summary or "")
+    if nc:
+        return True, f"summary_no_content: {phrase}"
+    if title and _EMPTY_RECORDING_TITLE_RE.search(title):
+        return True, f"empty_recording_title: {title.strip()[:60]}"
+    return False, None
+
+
 def _looks_like_roster_only(text: str) -> bool:
     """True when `text`, after stripping bilingual-restoration scaffolding,
     is essentially a comma-separated roster (≥8 short name-like segments,
@@ -648,4 +692,5 @@ __all__ = [
     "build_whisper_bias_prompt",
     "merge_transcripts_into_text",
     "should_use_native",
+    "is_contentless_meeting",
 ]

@@ -190,6 +190,30 @@ class Settings(BaseSettings):
         default=True,
         alias="ZOOM_FALLBACK_WHISPER_ENABLED",
     )
+    # FR-NT-TR (SPEC_NATIVE_TRANSCRIPT_v0.1) — prefer Zoom's own native
+    # VTT transcript as the PRIMARY source instead of Whisper. When True,
+    # `_step_transcribe` fetches the VTT first; if it's present and long
+    # enough (`should_use_native`) Whisper is skipped entirely, and the
+    # existing bilingual English pass still runs on top (D4). When the VTT
+    # is empty/short the step falls back to the full Whisper path (D3).
+    # Default False ⇒ byte-identical to the Whisper-first behaviour (I1).
+    zoom_prefer_native_transcript: bool = Field(
+        default=False,
+        alias="ZOOM_PREFER_NATIVE_TRANSCRIPT",
+    )
+    # FR-NT-TR — Fireflies counterpart: prefer Fireflies' native
+    # `fetch_transcript_text` (GraphQL sentences) over Whisper. Default
+    # False ⇒ unchanged Whisper-first behaviour.
+    fireflies_prefer_native_transcript: bool = Field(
+        default=False,
+        alias="FIREFLIES_PREFER_NATIVE_TRANSCRIPT",
+    )
+    # FR-NT-TR — minimum chars for a native transcript to be accepted as
+    # primary (below this ⇒ treated as a fragment, fall back to Whisper).
+    native_transcript_min_chars: int = Field(
+        default=100,
+        alias="NATIVE_TRANSCRIPT_MIN_CHARS",
+    )
     zoom_fallback_whisper_model: str = Field(
         default="whisper-1",
         alias="ZOOM_FALLBACK_WHISPER_MODEL",

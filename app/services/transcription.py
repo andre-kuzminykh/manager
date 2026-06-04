@@ -598,6 +598,35 @@ def build_whisper_bias_prompt(
     return ", ".join(out)
 
 
+def should_use_native(
+    *,
+    prefer_native: bool,
+    native_text: str | None,
+    min_native_chars: int = 100,
+) -> bool:
+    """FR-NT-TR — decide whether to use the service's native transcript
+    (Zoom VTT / Fireflies sentences) instead of running Whisper.
+
+    Pure function (no I/O) so the gate is trivially testable:
+
+      - `prefer_native` False  → always False (flag off ⇒ Whisper path,
+        byte-identical to prior behaviour);
+      - native empty / whitespace / None → False (→ Whisper fallback);
+      - native shorter than `min_native_chars` → False (obvious fragment,
+        e.g. a 2-line VTT stub ⇒ Whisper fallback);
+      - otherwise → True (use the native transcript, skip Whisper).
+
+    Invariant I2 (SPEC_NATIVE_TRANSCRIPT_v0.1): a False here means the
+    caller runs the existing Whisper path, so a transcript is always
+    produced regardless of native availability.
+    """
+    if not prefer_native:
+        return False
+    if not native_text or not native_text.strip():
+        return False
+    return len(native_text.strip()) >= min_native_chars
+
+
 def merge_transcripts_into_text(original_text: str, transcripts: list[str]) -> str:
     """Produce the source_text the intent pipeline will see. Keeps any
     user-typed caption and appends the transcripts, joined with a
@@ -618,4 +647,5 @@ __all__ = [
     "transcribe_audio_files",
     "build_whisper_bias_prompt",
     "merge_transcripts_into_text",
+    "should_use_native",
 ]

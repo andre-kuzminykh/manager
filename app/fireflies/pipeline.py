@@ -1048,6 +1048,53 @@ class FirefliesPipeline:
             transcribe_chunks_parallel,
         )
 
+        # FR-NT-TR (SPEC_NATIVE_TRANSCRIPT_v0.1) — native-first: when
+        # FIREFLIES_PREFER_NATIVE_TRANSCRIPT is on, use Fireflies' own
+        # transcript (GraphQL `sentences` via `fetch_transcript_text`) as
+        # PRIMARY and skip Whisper. If the native transcript is absent /
+        # empty / too short (e.g. Fireflies hasn't finished processing),
+        # we fall through to the full Whisper path below (D3 fallback).
+        # No bilingual pass here (D5). Default OFF ⇒ unchanged (I1).
+        if self._settings.fireflies_prefer_native_transcript:
+            from app.services.transcription import should_use_native
+            native_text: str | None = None
+            try:
+                native_text = self._client.fetch_transcript_text(
+                    row.fireflies_id
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "fireflies_native_fetch_failed",
+                    fireflies_id=row.fireflies_id, error=str(e),
+                )
+                native_text = None
+            if should_use_native(
+                prefer_native=True,
+                native_text=native_text,
+                min_native_chars=self._settings.native_transcript_min_chars,
+            ):
+                from app.services.trace_log import trace_event as _fnt
+                log.info(
+                    "fireflies_native_transcript_used",
+                    fireflies_id=row.fireflies_id,
+                    native_chars=len(native_text or ""),
+                )
+                _fnt(
+                    source="fireflies", recording_id=row.fireflies_id,
+                    event="transcript_source",
+                    transcript_source="native_ff",
+                    chars=len(native_text or ""),
+                )
+                row.transcript_text = (native_text or "").strip()
+                row.transcribed = True
+                row.last_error = None
+                return True
+            log.info(
+                "fireflies_native_transcript_skipped_fallback_whisper",
+                fireflies_id=row.fireflies_id,
+                native_chars=len((native_text or "").strip()),
+            )
+
         # FR-CR-05-127 — bias Whisper toward the operator's
         # canonical name registries (counterparties + team) so
         # brand names don't mutate in transcription («Tether» →
@@ -1146,6 +1193,14 @@ class FirefliesPipeline:
                     except OSError:
                         pass
         row.transcript_text = transcript
+        # FR-NT-TR I4 — record Whisper as the primary source.
+        try:
+            from app.services.trace_log import trace_event as _fts
+            _fts(source="fireflies", recording_id=row.fireflies_id,
+                 event="transcript_source", transcript_source="whisper",
+                 chars=len(transcript))
+        except Exception:  # noqa: BLE001
+            pass
         row.transcribed = True
         row.last_error = None
         return True

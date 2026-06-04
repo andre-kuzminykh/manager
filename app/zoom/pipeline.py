@@ -253,6 +253,61 @@ class ZoomPipeline:
             transcribe_chunks_parallel,
         )
 
+        # FR-NT-TR (SPEC_NATIVE_TRANSCRIPT_v0.1) — native-first: when
+        # ZOOM_PREFER_NATIVE_TRANSCRIPT is on, use Zoom's own VTT as the
+        # PRIMARY transcript and skip Whisper entirely. If the VTT is
+        # absent / empty / too short we fall through to the full Whisper
+        # path below (D3 fallback). The bilingual English pass + merge
+        # (D4) runs the same way on whichever primary we keep, so it is
+        # NOT short-circuited here. Default OFF ⇒ identical behaviour (I1).
+        if self._settings.zoom_prefer_native_transcript:
+            from app.services.transcription import should_use_native
+            native_text: str | None = None
+            try:
+                vtt_url = self._find_vtt_download_url(row)
+                if vtt_url:
+                    native_text = self._client.fetch_vtt_transcript(vtt_url)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "zoom_native_vtt_fetch_failed",
+                    zoom_id=row.zoom_id, error=str(e),
+                )
+                native_text = None
+            if should_use_native(
+                prefer_native=True,
+                native_text=native_text,
+                min_native_chars=self._settings.native_transcript_min_chars,
+            ):
+                from app.services.trace_log import trace_event as _znt
+                log.info(
+                    "zoom_native_transcript_used",
+                    zoom_id=row.zoom_id, vtt_chars=len(native_text or ""),
+                )
+                _znt(
+                    source="zoom", recording_id=row.zoom_id,
+                    event="transcript_source",
+                    transcript_source="native_vtt",
+                    chars=len(native_text or ""),
+                )
+                row.transcript_text = (native_text or "").strip()
+                # D4 — bilingual restoration runs over the native primary
+                # exactly as it does over a Whisper primary.
+                try:
+                    self._maybe_restore_bilingual_transcript(row)
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "zoom_bilingual_restore_step_failed",
+                        zoom_id=row.zoom_id, error=str(e),
+                    )
+                row.transcribed = True
+                row.last_error = None
+                return True
+            log.info(
+                "zoom_native_transcript_skipped_fallback_whisper",
+                zoom_id=row.zoom_id,
+                native_chars=len((native_text or "").strip()),
+            )
+
         # FR-CR-05-153 reverted (operator-pinned «мне нужна
         # именно Whisper транскибация всегда»): Whisper FIRST
         # with bias-prompt for proper-noun fidelity, VTT kept
@@ -495,6 +550,15 @@ class ZoomPipeline:
                     except OSError:
                         pass
         row.transcript_text = transcript
+        # FR-NT-TR I4 — record that the primary came from Whisper (the
+        # native-VTT branch above logs `native_vtt`).
+        try:
+            from app.services.trace_log import trace_event as _zts
+            _zts(source="zoom", recording_id=row.zoom_id,
+                 event="transcript_source", transcript_source="whisper",
+                 chars=len(transcript))
+        except Exception:  # noqa: BLE001
+            pass
         # FR-CR-05-170 — bilingual restoration: if enabled, re-STT
         # the SAME audio in English-biased mode and let an LLM merge
         # primary + secondary into one canonical transcript. The

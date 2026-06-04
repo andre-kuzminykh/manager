@@ -114,7 +114,9 @@ def _migrate(args: argparse.Namespace) -> int:
 
     client = TasksSheetClient(spreadsheet_id=s.sheet_sync_spreadsheet_id,
                               tab_title=args.tab or s.sheet_sync_tab_title)
-    rng = f"{client._tab}!A1:A"
+    client.resolve_tab()  # raises SheetTabNotFound with available tabs if missing
+    from app.sheet_sync.bridge_io import _a1_tab
+    rng = f"{_a1_tab(client._tab)}!A1:A"
     resp = (client._svc.spreadsheets().values()
             .get(spreadsheetId=client._sid, range=rng).execute())
     rows = list(resp.get("values") or [])

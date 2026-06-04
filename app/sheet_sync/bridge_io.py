@@ -22,6 +22,19 @@ from app.sheet_sync.config import FIELD_BY_HEADER, TASK_HEADERS
 log = get_logger(__name__)
 
 
+def _a1_tab(title: str) -> str:
+    """Quote a tab title for A1 notation (handles spaces; doubles inner quotes)."""
+    return "'" + (title or "").replace("'", "''") + "'"
+
+
+def _col_letter(n: int) -> str:
+    out = ""
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        out = chr(ord("A") + rem) + out
+    return out
+
+
 # Map between bridge editable fields and System B's `TASK_COLUMNS` internal fields.
 # Bridge uses "owner"/"due_date"; System B sheet uses "responsible"/"deadline_date".
 _BRIDGE_TO_SHEET = {
@@ -75,16 +88,25 @@ def _bridge_values_from_sheet_fields(fields: dict[str, str]) -> dict[str, str]:
 def read_all_with_metadata(client: Any) -> list[RowView]:
     """Read every data row + its DeveloperMetadata gs_row_uuid.
 
-    `client` is an instance of `app.sheet_sync.sheets_client.SheetsClient`.
+    `client` is an instance of `app.sheet_sync.sheets_client.TasksSheetClient`.
     Rows without a uuid (newly typed by a human) come through with `row_uuid=None`.
+
+    We read with a QUOTED tab range (handles spaces, e.g. "Copy of main") rather
+    than `client.read_rows()` which builds an unquoted range — so the bridge
+    works on any tab name without touching System B's client.
     """
-    raw_rows = client.read_rows()                       # [{"row_number", "fields"}]
+    width = len(TASK_HEADERS)
+    rng = f"{_a1_tab(client._tab)}!A1:{_col_letter(width)}"
+    resp = (client._svc.spreadsheets().values()
+            .get(spreadsheetId=client._sid, range=rng).execute())
+    values = list(resp.get("values") or [])
     uuids = client.read_row_uuids() or {}               # {row_number: uuid}
     out: list[RowView] = []
-    for r in raw_rows:
-        rn = int(r["row_number"])
-        values = _bridge_values_from_sheet_fields(r.get("fields", {}))
-        out.append(RowView(row_uuid=uuids.get(rn), row_number=rn, values=values))
+    for i, raw in enumerate(values[1:], start=2):        # row 1 = header
+        cells = list(raw) + [""] * (width - len(raw))
+        fields = {FIELD_BY_HEADER[h]: cells[idx] for idx, h in enumerate(TASK_HEADERS)}
+        out.append(RowView(row_uuid=uuids.get(i), row_number=i,
+                           values=_bridge_values_from_sheet_fields(fields)))
     return out
 
 
@@ -144,7 +166,7 @@ class GoogleSheetWriter(SheetWriter):
             except StopIteration:
                 continue
             data.append({
-                "range": f"{self._c._tab}!{self._col_letter(col)}{row}",
+                "range": f"{_a1_tab(self._c._tab)}!{self._col_letter(col)}{row}",
                 "values": [[_to_sheet(bf, val)]],
             })
         if not data:
@@ -155,11 +177,20 @@ class GoogleSheetWriter(SheetWriter):
         ).execute()
 
     def append_task(self, task_id: int, payload: dict[str, str]) -> str:
-        """Append one row and stamp it with a fresh gs_row_uuid. Returns uuid."""
-        self._c.append_rows([_row_for_append(payload)])
-        # row_number = last row after append. Fetch it once.
-        rows = self._c.read_rows()
-        rn = max((int(r["row_number"]) for r in rows), default=2)
+        """Append one row and stamp it with a fresh gs_row_uuid. Returns uuid.
+        Uses quoted ranges directly (spaced-tab safe), not System B's helpers."""
+        end = _col_letter(len(TASK_HEADERS))
+        self._c._svc.spreadsheets().values().append(
+            spreadsheetId=self._c._sid,
+            range=f"{_a1_tab(self._c._tab)}!A:{end}",
+            valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
+            body={"values": [_row_for_append(payload)]},
+        ).execute()
+        # new row number = count of rows in column A (header included)
+        resp = (self._c._svc.spreadsheets().values()
+                .get(spreadsheetId=self._c._sid, range=f"{_a1_tab(self._c._tab)}!A1:A")
+                .execute())
+        rn = len(resp.get("values") or []) or 2
         new = _uuid.uuid4().hex
         self._c.stamp_row_uuids({rn: new})
         return new
@@ -179,7 +210,7 @@ class GoogleSheetWriter(SheetWriter):
                        if FIELD_BY_HEADER[h] == "status")
             self._c._svc.spreadsheets().values().update(
                 spreadsheetId=self._c._sid,
-                range=f"{self._c._tab}!{self._col_letter(col)}{row}",
+                range=f"{_a1_tab(self._c._tab)}!{self._col_letter(col)}{row}",
                 valueInputOption="USER_ENTERED",
                 body={"values": [["Cancelled"]]},
             ).execute()

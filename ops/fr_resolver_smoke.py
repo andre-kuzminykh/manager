@@ -103,7 +103,13 @@ def _words(s):
 
 
 def _score(decisions, *, verbose=True):
-    by_mention = {d.mention.lower(): d for d in decisions}
+    # Prefer the RESOLVED decision when a mention appears twice (main pass left
+    # it unknown, Track 2 resolved it) — otherwise the unknown dup hides the win.
+    by_mention = {}
+    for d in decisions:
+        k = d.mention.lower()
+        if k not in by_mention or (d.canonical and not by_mention[k].canonical):
+            by_mention[k] = d
     hits = 0
     print("\n=== TRUTH CHECK (boss ground truth) ===")
     seen_keys = set()

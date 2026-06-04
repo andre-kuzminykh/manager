@@ -87,6 +87,41 @@ def _drop_from_calendar_attendees(attendees, drop: list[str]):
     return out
 
 
+def _parse_renames(pairs: list[str]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for p in pairs or []:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            if k.strip() and v.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+
+def _apply_renames(sess, row, *, src_kind, src_id, renames: dict[str, str]) -> int:
+    """Deterministic point-fix: replace OLD->NEW across detailed_summary,
+    short_summary and every active task's title/description (single-pass
+    canonicalize_text — no cascade). Returns how many task rows changed."""
+    if not renames:
+        return 0
+    from app.services.counterparty_match import canonicalize_text
+    from app.models import Task
+    if row.detailed_summary:
+        row.detailed_summary = canonicalize_text(row.detailed_summary, renames)
+    if getattr(row, "short_summary", None):
+        row.short_summary = canonicalize_text(row.short_summary, renames)
+    fixed = 0
+    for t in (sess.query(Task).filter(
+            Task.source_kind == src_kind,
+            Task.source_conversation_id == src_id,
+            Task.deleted_at.is_(None)).all()):
+        nt = canonicalize_text(t.title, renames)
+        nd = canonicalize_text(t.description, renames)
+        if nt != t.title or nd != t.description:
+            t.title, t.description = nt, nd
+            fixed += 1
+    return fixed
+
+
 def _read_sheet_id_to_row(svc) -> dict[int, int]:
     """Read column A of the target sheet → {task_id: row_number}. The first
     cell of each task row is str(task.id) (sheets._task_row), so this rebuilds
@@ -181,11 +216,19 @@ def main() -> int:
     ap.add_argument("--sheet-id", default=None, metavar="ID",
                     help="override the target spreadsheet id (the configured "
                          "GOOGLE_SHEETS_SPREADSHEET_ID points at the wrong sheet).")
+    ap.add_argument("--rename", action="append", default=[], metavar="OLD=NEW",
+                    help="deterministic point-fix: replace OLD with NEW in the "
+                         "detailed summary, task titles/descriptions and short "
+                         "summary (word-boundary, case-insensitive; single pass). "
+                         "Repeatable. e.g. --rename 'Аэроджемель=Abdul Latif Jameel Ventures'. "
+                         "Works with --regenerate (applied before Doc/short) or "
+                         "standalone on the committed row.")
     a = ap.parse_args()
     if not any([a.regenerate, a.send, a.webhook_only, a.repost_slack,
-                a.update_slack, a.drop_participant, a.sheet_only]):
+                a.update_slack, a.drop_participant, a.sheet_only, a.rename]):
         print("nothing to do: pass --regenerate / --send / --webhook-only / "
-              "--repost-slack / --update-slack / --drop-participant / --sheet-only")
+              "--repost-slack / --update-slack / --drop-participant / --sheet-only "
+              "/ --rename")
         return 2
 
     if bool(a.ff_id) == bool(a.zoom_id):
@@ -389,6 +432,15 @@ def main() -> int:
             _try("classify_directions",
                  lambda: pipe._step_classify_directions(sess, row))
 
+            # 5c) deterministic point-fix names BEFORE Doc/short, so every
+            #     surface carries the corrected form (e.g. Аэроджемель→Abdul
+            #     Latif Jameel Ventures).
+            _renames = _parse_renames(a.rename)
+            if _renames:
+                _fx = _apply_renames(sess, row, src_kind=src_kind, src_id=src_id,
+                                     renames=_renames)
+                print(f"rename {list(_renames.items())}: detailed + {_fx} tasks updated")
+
             # 6) Doc + short summary. Zoom's _step_short_summary auto-sends via
             #    _send_short_summary when a sender is set — null it for the
             #    regen so nothing leaves the building here.
@@ -414,6 +466,15 @@ def main() -> int:
                 else:
                     print(f"new tasks: {len(new_tasks)} extracted "
                           "(sheet factory unavailable)")
+
+        # Standalone point-fix (no --regenerate): apply renames to the
+        # already-committed row + tasks (no LLM). Lets you patch a name and
+        # re-post without re-running the pipeline.
+        if a.rename and not a.regenerate:
+            _renames = _parse_renames(a.rename)
+            _fx = _apply_renames(sess, row, src_kind=src_kind, src_id=src_id,
+                                 renames=_renames)
+            print(f"rename {list(_renames.items())}: detailed + {_fx} tasks updated")
 
         # ---- report ----
         print("=" * 70)

@@ -112,7 +112,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--zoom-id", default=_DEFAULT_ZOOM)
     ap.add_argument("--ff-id", default=None)
-    ap.add_argument("--use", choices=["summary", "transcript"], default="summary")
+    ap.add_argument("--use", choices=["summary", "transcript"], default="transcript")
     ap.add_argument("--mcp-url", default=None)
     ap.add_argument("--model", default="gpt-5.5")
     ap.add_argument("--effort", default="high")

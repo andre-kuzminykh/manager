@@ -228,6 +228,11 @@ _SYSTEM = (
     "Ventures» over «Accenture», «Amazon Industrial Fund» over «Amazon», "
     "«Lingotto Investment Management» over «Lingotto».\n"
     "- Use type/status/industry/source to disambiguate between similar names.\n"
+    "- The input is a raw meeting TRANSCRIPT with phonetic/garbled spellings "
+    "(«мирая», «Сива», «Тесер»). When a garbled mention could match several CRM "
+    "entries, weigh the meeting context AND prefer an ACTIVE / in-pipeline entry "
+    "(status active/follow_up/meeting_*/nda_*/data_room_*) over a rejected or "
+    "archived one. Better null than a confident wrong pick.\n"
     "- A mention that is clearly an INDIVIDUAL PERSON who is NOT a team member "
     "and NOT itself the name of a company/fund → set canonical=null (external "
     "people are resolved separately; never map a person to a company/fund, e.g. "
@@ -265,7 +270,7 @@ def build_resolution_messages(
     participants: list[str] | None,
     transcript_or_summary: str,
     catalog_text: str,
-    max_transcript_chars: int = 24000,
+    max_transcript_chars: int = 40000,
     is_shard: bool = False,
 ) -> list[dict[str, str]]:
     """Build chat messages for ONE map-call (full catalog or a shard). The big

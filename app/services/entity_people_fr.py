@@ -68,7 +68,7 @@ _EXTRACT_SYSTEM = (
 def build_person_org_messages(
     *, transcript: str, meeting_title: str | None,
     participants: list[str] | None, already_resolved: list[str] | None = None,
-    org_hints: list[str] | None = None, max_transcript_chars: int = 16000,
+    org_hints: list[str] | None = None, max_transcript_chars: int = 40000,
 ) -> list[dict[str, str]]:
     ctx = f"Meeting: {meeting_title or '(untitled)'}"
     if participants:

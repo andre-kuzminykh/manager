@@ -793,8 +793,11 @@ class ZoomPipeline:
             # + short summary inherit them. Gated/shadow/best-effort.
             try:
                 from app.services.fr_resolve_step import resolve_for_meeting
+                # Resolve entity names from the raw TRANSCRIPT (source of truth);
+                # the resulting map is applied to the summary + inherited by tasks.
                 fr_repl = resolve_for_meeting(
-                    settings=self._settings, text=row.detailed_summary,
+                    settings=self._settings,
+                    text=(row.transcript_text or row.detailed_summary),
                     meeting_title=row.title, participants=_roster,
                     source="zoom", source_id=row.zoom_id,
                     llm=self._llm, session=session,

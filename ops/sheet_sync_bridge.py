@@ -34,12 +34,12 @@ from app.sheet_sync.bridge_io import GoogleSheetWriter, read_all_with_metadata
 log = get_logger(__name__)
 
 
-def _build_client(s: Any):
+def _build_client(s: Any, tab: str | None = None):
     from app.sheet_sync.sheets_client import TasksSheetClient
 
     return TasksSheetClient(
         spreadsheet_id=s.sheet_sync_spreadsheet_id,
-        tab_title=s.sheet_sync_tab_title,
+        tab_title=tab or s.sheet_sync_tab_title,
     )
 
 
@@ -67,7 +67,8 @@ def _tick(args: argparse.Namespace) -> int:
         print("SHEET_SYNC_SPREADSHEET_ID is empty.", file=sys.stderr)
         return 2
 
-    client = _build_client(s)
+    client = _build_client(s, tab=getattr(args, "tab", None))
+    client.resolve_tab()  # fail fast with available tabs if the tab is wrong
     rows = read_all_with_metadata(client)
     log.info("sheet_bridge_read", rows=len(rows),
              with_uuid=sum(1 for r in rows if r.row_uuid))
@@ -84,6 +85,14 @@ def _tick(args: argparse.Namespace) -> int:
             log.warning("sheet_bridge_abort", reason=plan.abort)
             print(f"abort: {plan.abort}")
             return 1
+        # --limit: safety cap on operations per tick (smoke / blast-radius).
+        if args.limit and args.limit > 0:
+            n = args.limit
+            plan.creates = plan.creates[:n]
+            plan.edits = plan.edits[:n]
+            plan.deletes = plan.deletes[:n]
+            plan.pushes = plan.pushes[:n]
+            plan.appends = plan.appends[:n]
         print(f"plan: creates={len(plan.creates)} edits={len(plan.edits)} "
               f"deletes={len(plan.deletes)} pushes={len(plan.pushes)} "
               f"appends={len(plan.appends)} errors={len(plan.errors)} "
@@ -166,7 +175,8 @@ def main() -> int:
     ap.add_argument("--migrate", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true", help="override SHEET_SYNC_BRIDGE_ENABLED guard")
-    ap.add_argument("--tab", default=None, help="(migrate only) tab to scan")
+    ap.add_argument("--limit", type=int, default=0, help="cap operations per tick (smoke/safety)")
+    ap.add_argument("--tab", default=None, help="tab to scan/sync (overrides SHEET_SYNC_TAB_TITLE)")
     a = ap.parse_args()
 
     if a.migrate:

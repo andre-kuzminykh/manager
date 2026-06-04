@@ -3197,6 +3197,34 @@ class FirefliesPipeline:
         log.info("fireflies_step_extract_via_reasoning_stub",
                  fireflies_id=getattr(row, "fireflies_id", None))
 
+    def _ff_native_transcript_not_ready(self, row: MeetingRecording) -> bool:
+        """FR-CR-05-209 — True when native is preferred but Fireflies hasn't
+        finished ASR yet (transcript empty/roster), AND the meeting is still
+        inside the grace window. Best-effort: any uncertainty → False (proceed
+        normally), so this can only DEFER, never wrongly drop a meeting."""
+        if not getattr(self._settings, "fireflies_prefer_native_transcript", False):
+            return False
+        if row.transcribed and row.transcript_text:
+            return False  # already have a real transcript
+        # only defer inside the grace window — after it, let the meeting proceed
+        # (content gate handles a genuinely-empty one).
+        if row.meeting_date is not None:
+            from datetime import datetime, timezone
+            md = row.meeting_date
+            if md.tzinfo is None:
+                md = md.replace(tzinfo=timezone.utc)
+            age_h = (datetime.now(timezone.utc) - md).total_seconds() / 3600.0
+            grace = float(getattr(self._settings, "fireflies_transcript_grace_hours", 6.0))
+            if age_h >= grace:
+                return False
+        try:
+            native = self._client.fetch_transcript_text(row.fireflies_id)
+        except Exception:  # noqa: BLE001
+            return False  # fetch error → don't block; normal path will handle
+        from app.services.transcription import is_native_transcript_ready
+        min_chars = int(getattr(self._settings, "fireflies_transcript_min_ready_chars", 600))
+        return not is_native_transcript_ready(native, min_chars=min_chars)
+
     # --- main entry ------------------------------------------
 
     def process_one(
@@ -3287,6 +3315,19 @@ class FirefliesPipeline:
                 fireflies_id=row.fireflies_id,
                 duration_seconds=row.duration_seconds,
                 threshold=min_secs,
+            )
+            return report
+        # FR-CR-05-209 — Fireflies sometimes lists a meeting before its ASR is
+        # finished; the native transcript is then empty/roster and processing
+        # would emit «Запись без содержимого» for a REAL meeting (Kima Ventures
+        # regression). DEFER like `waiting_for_audio` — return WITHOUT burning
+        # an attempt or marking done, so the next poll re-checks once Fireflies
+        # has the real transcript. Bounded by FIREFLIES_TRANSCRIPT_GRACE_HOURS.
+        if self._ff_native_transcript_not_ready(row):
+            report.skipped_reason = "ff_transcript_not_ready"
+            log.info(
+                "fireflies_pipeline_transcript_not_ready",
+                fireflies_id=row.fireflies_id, attempts=row.attempts or 0,
             )
             return report
         row.attempts += 1

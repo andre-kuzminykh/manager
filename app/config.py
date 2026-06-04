@@ -208,6 +208,17 @@ class Settings(BaseSettings):
         default=False,
         alias="FIREFLIES_PREFER_NATIVE_TRANSCRIPT",
     )
+    # FR-CR-05-209 — Fireflies may list a meeting before its ASR is done (the
+    # native transcript is then empty/roster). When native is preferred, DEFER
+    # processing (no attempt burn, no mark-done) until the native transcript has
+    # >= this many chars, but only within the grace window below — after that we
+    # stop deferring and let the content gate handle a genuinely-empty meeting.
+    fireflies_transcript_min_ready_chars: int = Field(
+        default=600, alias="FIREFLIES_TRANSCRIPT_MIN_READY_CHARS"
+    )
+    fireflies_transcript_grace_hours: float = Field(
+        default=6.0, alias="FIREFLIES_TRANSCRIPT_GRACE_HOURS"
+    )
     # FR-NT-TR — minimum chars for a native transcript to be accepted as
     # primary (below this ⇒ treated as a fragment, fall back to Whisper).
     native_transcript_min_chars: int = Field(

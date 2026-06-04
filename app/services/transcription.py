@@ -642,6 +642,22 @@ def build_whisper_bias_prompt(
     return ", ".join(out)
 
 
+def is_native_transcript_ready(
+    text: str | None, *, min_chars: int = 600
+) -> bool:
+    """FR-CR-05-209 — has Fireflies finished ASR? Pure check.
+
+    Fireflies sometimes lists a meeting (and serves a roster-only / empty
+    `fetch_transcript_text`) BEFORE its transcription is done — processing it
+    then yields «Запись без содержимого» / 0 tasks for a REAL meeting (the Kima
+    Ventures regression). Treat a native transcript as READY only when it has
+    real content (>= `min_chars`); otherwise the caller DEFERS (no attempt
+    burn) and re-checks next poll. Conservative on length only — never blocks a
+    genuinely short real meeting beyond the caller's grace window.
+    """
+    return bool(text and len(text.strip()) >= min_chars)
+
+
 def should_use_native(
     *,
     prefer_native: bool,
@@ -692,5 +708,6 @@ __all__ = [
     "build_whisper_bias_prompt",
     "merge_transcripts_into_text",
     "should_use_native",
+    "is_native_transcript_ready",
     "is_contentless_meeting",
 ]

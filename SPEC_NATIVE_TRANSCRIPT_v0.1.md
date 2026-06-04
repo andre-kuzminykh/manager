@@ -82,6 +82,26 @@ _step_transcribe (Fireflies):
   - `should_use_native(False, "<long>")` → False (флаг off).
 - (интеграция, на проде/shadow) smoke: включить флаг на одной встрече, сверить `transcript_source` в трейсе + что Whisper не вызывался.
 
+## 6a. Defer not-ready Fireflies transcripts (FR-CR-05-209)
+
+**Регресс (Kima Ventures, 01KT94K42F):** Fireflies отдал встречу в `list_transcripts`
+ДО завершения ASR → транскрипт был ростер-онли (4343 симв., список участников) →
+derive «Запись без содержимого», 0 задач, контент-гейт подавил **реальную** встречу.
+Нативный `fetch_transcript_text` позже отдал полный звонок (14537 симв.).
+
+**Фикс:** в `process_one` (FF), ПЕРЕД `attempts += 1`, новый ранний выход
+(зеркало `waiting_for_audio` — без сжигания attempts, без mark-done):
+`_ff_native_transcript_not_ready(row)` → если нативный транскрипт «не готов»
+(пустой/короче `FIREFLIES_TRANSCRIPT_MIN_READY_CHARS=600`) И встреча моложе
+`FIREFLIES_TRANSCRIPT_GRACE_HOURS=6` → `skipped_reason=ff_transcript_not_ready`,
+следующий поллинг пере-проверит. После grace-окна — НЕ откладываем (контент-гейт
+разберётся с реально пустой). Только при `FIREFLIES_PREFER_NATIVE_TRANSCRIPT=true`.
+
+**Инварианты:** best-effort — любая неопределённость (флаг off, уже
+транскрибирована, нет даты вне grace, ошибка fetch) → `False` (идём обычным
+путём). Откладывание ограничено grace-окном → не зацикливается. Чистый чек
+`is_native_transcript_ready(text, min_chars)`. Тест `test_ff_transcript_not_ready.py`.
+
 ## 7. Открытые вопросы
 
 - Порог `min_native_chars` (старт 100) — тюним, если VTT иногда отдаёт обрывки.

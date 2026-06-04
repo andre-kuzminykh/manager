@@ -37,6 +37,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--ff-id", default=None)
     ap.add_argument("--zoom-id", default=None)
+    ap.add_argument("--refetch-native", action="store_true",
+                    help="re-pull the native transcript (FF sentences) before running — "
+                         "use when the stored transcript is stale/roster-only")
     a = ap.parse_args()
 
     s = get_settings()
@@ -77,8 +80,21 @@ def main() -> int:
             src_kind, src_id = TaskSourceKind.fireflies, row.fireflies_id
 
         print(f"meeting: {row.title!r}  source_id={src_id}")
-        print(f"transcript_chars={len(row.transcript_text or '')}  "
-              f"(DRY-RUN — rolled back, nothing sent)\n")
+        print(f"transcript_chars(stored)={len(row.transcript_text or '')}")
+
+        if a.refetch_native and not a.zoom_id:
+            try:
+                native = pipe._client.fetch_transcript_text(src_id)
+                if native and len(native) > len(row.transcript_text or ""):
+                    print(f"refetched NATIVE transcript: {len(native)} chars "
+                          f"(was {len(row.transcript_text or '')})")
+                    row.transcript_text = native
+                    row.transcribed = True
+                else:
+                    print(f"native transcript not longer ({len(native or '')}) — keeping stored")
+            except Exception as e:  # noqa: BLE001
+                print(f"[refetch_native failed: {type(e).__name__}: {str(e)[:120]}]")
+        print("(DRY-RUN — rolled back, nothing sent)\n")
 
         # Force a fresh re-run in memory + clear existing tasks IN THE SESSION
         # (rolled back) so we see only this run's output.

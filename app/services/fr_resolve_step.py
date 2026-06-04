@@ -207,8 +207,11 @@ def resolve_for_meeting(
         # the mentions Track 1/3 left unresolved. Gated + best-effort.
         people: list[R.Decision] = []
         if getattr(settings, "entity_fr_people_enabled", False):
-            # exclude what Track 1/3 already handled (mentions + canonicals)
-            already = [d.mention for d in decisions]
+            # exclude only SUCCESSFULLY-resolved mentions (+ their canonicals).
+            # Unknown ones (canonical=None) are exactly the people Track 2 must
+            # resolve — never add them to the skip-list, or «Самир»/«Стеф» get
+            # excluded and Track 2 finds nobody.
+            already = [d.mention for d in decisions if d.canonical]
             already += [d.canonical for d in decisions if d.canonical]
             # resolved company canonicals → org hints for the person→org guess
             org_hints = [d.canonical for d in decisions

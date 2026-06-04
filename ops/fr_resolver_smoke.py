@@ -190,7 +190,9 @@ def main() -> int:
     # Track 2 — agentic people pass: find external-contact people in the text
     # (excluding what Track 1/3 already resolved) → org → comm_log → full name.
     if a.people:
-        already = [d.mention for d in decisions] + [d.canonical for d in decisions if d.canonical]
+        # exclude only RESOLVED mentions — keep unknowns (the people) for Track 2
+        already = [d.mention for d in decisions if d.canonical] + \
+                  [d.canonical for d in decisions if d.canonical]
         print(f"\nTrack-2 people: scanning transcript (excluding {len(already)} resolved) "
               "→ org-guess → search → extract ...")
         from app.services.entity_people_fr import PERSON_ORG_TOOL, resolve_people

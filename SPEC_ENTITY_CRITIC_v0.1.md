@@ -192,3 +192,33 @@ unresolved person-like mentions (canonical=None из Track 1/3)
 - Нужен ли вообще Track 2, если Track 1 (его чистые данные в нашем резолвере) уже закрывает recall — решаем после E3 по факту жалоб.
 - Частота зеркала: его sync 3ч → нам хватит раз в 6–12ч (имена меняются медленно).
 - Не дублируем ли мы Виктора по смыслу — может, начальнице достаточно его бота, а нам — только доставка имён в саммари/задачи (тогда Track 1 и хватит).
+
+## FR-CR-05-251 — канонизация задач против FR/MCP-имён (не старый справочник)
+
+**Регресс (Fundraising daily):** detailed-саммери корректно («Amazon Industrial
+Fund», «Rosecliff», «Invus», «Abdul Latif Jameel Ventures»), а задачи/To-Do
+несли кривые имена: `Amazon.com`, `SDF`, `RosKlif`, `Chery Ventures`, `Invos`,
+`Aerodjemel`. Источники (по всему пайплайну):
+
+1. **Дрейф на извлечении** (`*_step_extract_tasks`) — экстрактор читает
+   улучшенный транскрипт, но LLM сам транслитерирует имена в заголовках задач
+   (`Invus→Invos`, `Rosecliff→Roscliff`, `CDEV→Cazdev`).
+2. **Легаси `canonicalize_task_names`** гонял задачи против локальной таблицы
+   `Counterparty` (~847 строк) со СТАРЫМИ формами (`Amazon.com`, `SDF`) и
+   `applied` перетирал правильные имена. Не был выключен даже при
+   `MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED=false`.
+3. **FR-страховка (FR-CR-05-242)** не достаёт: ключи `_*_detail_canon_map` —
+   транскриптные формы (кириллица), а в задачах уже латиница.
+
+**Фикс:** имена берём из MCP коллеги (резолвер уже сходил туда). Когда
+`MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED=false` (прод), `canonicalize_task_names`
+канонизирует задачи против **FR-набора имён этой встречи** —
+`fr_canonical_names(detail_map)` (уникальные значения резолвер-карты), а НЕ против
+локального справочника. Тогда `Invos→Invus`, `Roscliff→Rosecliff`,
+`Amazon→Amazon Industrial Fund`; на ком резолвер абстейнился (Cazdev/CDEV) —
+остаётся форма извлечения, без мангла в «SDF». Легаси-справочник — только при
+явном флаге. Пустая карта → проход — no-op (FR-CR-05-242 enforcement сохраняется).
+
+**Где:** `app/services/counterparty_match.py::fr_canonical_names`,
+`app/{zoom,fireflies}/pipeline.py::_step_canonicalize_task_names`.
+**Тест:** `tests/requirements/test_fr_canonical_names.py`.

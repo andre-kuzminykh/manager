@@ -51,11 +51,17 @@ def main() -> int:
                     help="publish: Telegram DM + Slack mirror + n8n webhook + "
                          "per-task cards. Requires detailed/short already present "
                          "(run --regenerate first, or pass both).")
+    ap.add_argument("--no-webhook", action="store_true",
+                    help="with --send: skip the n8n webhook (Slack + TG still go). "
+                         "Use to publish to Slack first, webhook later.")
+    ap.add_argument("--webhook-only", action="store_true",
+                    help="send ONLY the n8n webhook (no Slack / TG / cards). "
+                         "For the deferred webhook step after Slack looks right.")
     ap.add_argument("--no-title-push", action="store_true",
                     help="don't push the re-derived title back to Fireflies' UI")
     a = ap.parse_args()
-    if not a.regenerate and not a.send:
-        print("nothing to do: pass --regenerate and/or --send")
+    if not a.regenerate and not a.send and not a.webhook_only:
+        print("nothing to do: pass --regenerate and/or --send / --webhook-only")
         return 2
 
     s = get_settings()
@@ -200,12 +206,31 @@ def main() -> int:
         print(row.short_summary or "(none / suppressed by content gate)")
         print("\n" + "=" * 70)
 
-        if a.send:
+        if a.send or a.webhook_only:
             if not (row.short_summary or "").strip():
                 print("REFUSING to send: short_summary is empty (run "
                       "--regenerate first / content gate suppressed it).")
+            elif a.webhook_only:
+                # Only the n8n webhook: stub out TG + Slack mirror so
+                # _step_send_short_summary runs solely the webhook tail.
+                import app.services.slack_mirror as _sm
+                _sm.post_meeting_summary_to_slack = lambda *aa, **kw: []
+                if getattr(pipe, "_sender", None) is not None:
+                    pipe._sender.send_message = lambda *aa, **kw: {"message_id": 0}
+                row.short_summary_sent = False
+                print(">>> SENDING WEBHOOK ONLY (no Slack / TG / cards)…")
+                _try("webhook", lambda: pipe._step_send_short_summary(row))
+                print(">>> webhook sent.")
             else:
-                print(">>> PUBLISHING (TG DM + Slack mirror + webhook + cards)…")
+                if a.no_webhook:
+                    import app.services.meeting_webhook as _mw
+                    _mw.post_meeting_to_webhook = (
+                        lambda *aa, **kw: {"skipped": "no_webhook_flag"})
+                    print("(--no-webhook: n8n webhook suppressed)")
+                label = ("TG DM + Slack mirror + cards"
+                         if a.no_webhook
+                         else "TG DM + Slack mirror + webhook + cards")
+                print(f">>> PUBLISHING ({label})…")
                 _try("send_short_summary",
                      lambda: pipe._step_send_short_summary(row))
                 _try("post_task_cards",
@@ -216,7 +241,7 @@ def main() -> int:
                 print(">>> published.")
         else:
             print("NOT sent (no --send). DB persisted + Doc created. Re-run "
-                  "with --send to publish.")
+                  "with --send [--no-webhook] to publish.")
         # session_scope commits on exit.
     print("\n(committed)")
     return 0

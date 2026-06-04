@@ -1931,9 +1931,9 @@ class FirefliesPipeline:
         LLM with reasoning handles every form the prior passes
         missed without per-case regex band-aids.
         """
-        from app.models import Counterparty
         from app.services.counterparty_match import (
             canonicalize_task_content_via_llm,
+            fr_canonical_names,
         )
 
         tasks = (
@@ -1945,42 +1945,54 @@ class FirefliesPipeline:
         )
         if not tasks:
             return 0
-        directory = session.query(Counterparty).all()
-        if not directory:
-            return 0
-        task_dicts = [
-            {"id": t.id, "title": t.title, "description": t.description}
-            for t in tasks
-        ]
-        try:
-            rewrites_map = canonicalize_task_content_via_llm(
-                task_dicts,
-                directory,
-                llm_backend=self._llm,
-                model=self._settings.fireflies_tasks_model,
-                reasoning_effort=(
-                    self._settings.fireflies_tasks_reasoning_effort or None
-                ),
-                trace_source="fireflies",
-                trace_recording_id=row.fireflies_id,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.info(
-                "fireflies_canonicalize_tasks_unexpected_error",
-                fireflies_id=row.fireflies_id, error=str(e),
-            )
-            return 0
+        detail_map = row.__dict__.get("_ff_detail_canon_map") or {}
+        # FR-CR-05-251 — canonicalize task names against the FR/MCP canonical
+        # set for THIS meeting (resolver output), NOT the stale local
+        # `Counterparty` directory («Amazon.com», «SDF» mangled correct names).
+        # Legacy directory only when MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED=true.
+        if self._settings.meeting_legacy_counterparty_canon_enabled:
+            from app.models import Counterparty
+            directory = session.query(Counterparty).all()
+        else:
+            import types as _types
+            directory = [
+                _types.SimpleNamespace(id=i, name=n)
+                for i, n in enumerate(fr_canonical_names(detail_map), 1)
+            ]
         applied = 0
-        by_id = {t.id: t for t in tasks}
-        for tid, ch in rewrites_map.items():
-            t = by_id.get(tid)
-            if not t:
-                continue
-            if "title" in ch:
-                t.title = ch["title"]
-            if "description" in ch:
-                t.description = ch["description"]
-            applied += 1
+        if directory:
+            task_dicts = [
+                {"id": t.id, "title": t.title, "description": t.description}
+                for t in tasks
+            ]
+            try:
+                rewrites_map = canonicalize_task_content_via_llm(
+                    task_dicts,
+                    directory,
+                    llm_backend=self._llm,
+                    model=self._settings.fireflies_tasks_model,
+                    reasoning_effort=(
+                        self._settings.fireflies_tasks_reasoning_effort or None
+                    ),
+                    trace_source="fireflies",
+                    trace_recording_id=row.fireflies_id,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "fireflies_canonicalize_tasks_unexpected_error",
+                    fireflies_id=row.fireflies_id, error=str(e),
+                )
+                rewrites_map = {}
+            by_id = {t.id: t for t in tasks}
+            for tid, ch in rewrites_map.items():
+                t = by_id.get(tid)
+                if not t:
+                    continue
+                if "title" in ch:
+                    t.title = ch["title"]
+                if "description" in ch:
+                    t.description = ch["description"]
+                applied += 1
         # FR-CR-05-242 — enforce the DETAILED summary's canonical forms on
         # task text so detailed / short / tasks all use ONE form.
         from app.services.counterparty_match import canonicalize_text

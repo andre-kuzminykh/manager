@@ -1187,6 +1187,30 @@ def consolidate_tasks_via_llm(
     return out
 
 
+def fr_canonical_names(detail_map: dict | None) -> list[str]:
+    """FR-CR-05-251 — the unique canonical entity names from a meeting's FR
+    resolver map (the ``{mention: canonical}`` dict the detailed-summary step
+    stashes on the row as ``_zm_detail_canon_map`` / ``_ff_detail_canon_map``).
+
+    These are MCP-sourced forms (resolved against the colleague's CRM via the
+    n8n MCP), so they are the authoritative names for THIS meeting. We feed
+    them to ``canonicalize_task_content_via_llm`` as the directory instead of
+    the stale local ``Counterparty`` table — which carried outdated forms
+    (``Amazon.com``, ``SDF``) and actively MANGLED already-correct task names.
+
+    Returns a sorted, case-insensitively de-duplicated list (first spelling
+    of each name wins).
+    """
+    if not detail_map:
+        return []
+    seen: dict[str, str] = {}
+    for v in detail_map.values():
+        n = (v or "").strip()
+        if n and n.casefold() not in seen:
+            seen[n.casefold()] = n
+    return sorted(seen.values(), key=str.casefold)
+
+
 def canonicalize_task_content_via_llm(
     tasks: list[dict],
     directory: list["Counterparty"],

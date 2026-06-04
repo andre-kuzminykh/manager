@@ -35,6 +35,21 @@ _DEFAULT_HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream",
 }
+
+
+def _utf8_body(resp: Any) -> str:
+    """Decode the HTTP body as UTF-8.
+
+    n8n returns UTF-8 but does NOT set a charset on `text/event-stream`;
+    `requests` then defaults `resp.text` to ISO-8859-1 (RFC 2616), which
+    mangles Cyrillic and smart quotes («Отказы» → «ÐÑÐºÐ°Ð·Ñ», "you've"
+    → "youâ€™ve"). Decode the raw bytes as UTF-8 instead so downstream
+    (CEO Brain agent, FR entity resolver) gets clean text.
+    """
+    try:
+        return resp.content.decode("utf-8")
+    except (UnicodeDecodeError, AttributeError):
+        return resp.text
 _PROTOCOL_VERSION = "2025-03-26"
 _CLIENT_INFO = {"name": "ceo-brain-direct-http", "version": "1.0"}
 
@@ -148,7 +163,7 @@ def list_tools(url: str, *, timeout: float = 15.0) -> list[dict]:
             timeout=timeout,
         )
         resp.raise_for_status()
-        parsed = _parse_sse_or_json(resp.text)
+        parsed = _parse_sse_or_json(_utf8_body(resp))
         if not parsed:
             return []
         result = (parsed.get("result") or {}) if isinstance(parsed, dict) else {}
@@ -269,7 +284,7 @@ def call_tool(
                 timeout=timeout,
             )
             resp.raise_for_status()
-            parsed = _parse_sse_or_json(resp.text)
+            parsed = _parse_sse_or_json(_utf8_body(resp))
             if not parsed:
                 last_error = "empty/unparseable response"
                 # Drop the cached session — server may be confused.

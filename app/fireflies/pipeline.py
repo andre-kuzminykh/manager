@@ -3603,7 +3603,7 @@ def _render_known_employees_table(employees: list[dict]) -> str:
         dn = (e.get("display_name") or "")[:25]
         rn = (e.get("real_name") or "")[:30]
         role = (e.get("role") or "")[:26]
-        notes = (e.get("notes") or "")[:200]
+        notes = (e.get("notes") or "")[:1000]  # owner-match hints — keep full
         lines.append(
             f"  {sid:<22} | {dn:<19} | {rn:<30} | {role:<26} | {notes}"
         )

@@ -241,10 +241,10 @@ def build_owner_user_prompt(
             role = (e.get("role") or "")[:26]
             # FR-CR-05-31 — notes were truncated to 60 chars,
             # which clipped operator-written responsibility blurbs
-            # before the LLM could see them. 200 is enough for the
-            # «who does what» context the operator types into the
-            # Sheet, while still keeping the prompt bounded.
-            notes = (e.get("notes") or "")[:200]
+            # before the LLM could see them. Raised 60 → 200 → 1000
+            # so the full «who does what / who to match» context the
+            # operator types into the Sheet reaches the owner matcher.
+            notes = (e.get("notes") or "")[:1000]
             lines.append(
                 f"  {sid:<22} | {dn:<19} | {rn:<30} | {role:<26} | {notes}"
             )

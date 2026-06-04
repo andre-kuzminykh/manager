@@ -779,39 +779,39 @@ class ZoomPipeline:
         # downstream short_summary, doc export, and Slack post
         # all use consistent canonical forms.
         if session is not None:
-            try:
-                from app.services.summary_canonicalize import (
-                    canonicalize_summary_text,
-                )
-                # FR-CR-05-191 v4 — pass the meeting roster (built above) so
-                # people canonicalisation never injects an absent employee
-                # (external «Андре» ≠ team member «Андрей Кузьминых»).
-                new_text, applied = canonicalize_summary_text(
-                    row.detailed_summary,
-                    session=session, llm_backend=self._llm,
-                    model=self._settings.fireflies_tasks_model,
-                    trace_source="zoom_detailed",
-                    trace_recording_id=row.zoom_id,
-                    participant_names=_roster,
-                )
-                if applied:
-                    row.detailed_summary = new_text
-                    log.info(
-                        "zoom_detailed_summary_canonicalized",
-                        zoom_id=row.zoom_id, rewrites=applied,
+            # FR-EC-CRITIC — legacy vector counterparty canonicaliser is OFF
+            # when MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED=false: the FR
+            # resolver (already applied to the transcript above) is the sole
+            # entity canonicaliser, so we skip this name-mangling pass entirely.
+            row.__dict__.setdefault("_zm_detail_canon_map", {})
+            if self._settings.meeting_legacy_counterparty_canon_enabled:
+                try:
+                    from app.services.summary_canonicalize import (
+                        canonicalize_summary_text,
                     )
-                # FR-CR-05-242 — detailed summary is the SINGLE source of
-                # canonical entity forms. Stash its rewrite map so tasks
-                # (and any later step) use the SAME forms — no second,
-                # divergent canonicalisation («Siva» in summary vs «Ceva
-                # Logistics» in a task). Short summary already derives from
-                # this canonical detailed text.
-                row.__dict__["_zm_detail_canon_map"] = applied or {}
-            except Exception as e:  # noqa: BLE001
-                log.warning(
-                    "zoom_detailed_summary_canonicalize_failed",
-                    zoom_id=row.zoom_id, error=str(e),
-                )
+                    # FR-CR-05-191 v4 — pass the meeting roster (built above) so
+                    # people canonicalisation never injects an absent employee
+                    # (external «Андре» ≠ team member «Андрей Кузьминых»).
+                    new_text, applied = canonicalize_summary_text(
+                        row.detailed_summary,
+                        session=session, llm_backend=self._llm,
+                        model=self._settings.fireflies_tasks_model,
+                        trace_source="zoom_detailed",
+                        trace_recording_id=row.zoom_id,
+                        participant_names=_roster,
+                    )
+                    if applied:
+                        row.detailed_summary = new_text
+                        log.info(
+                            "zoom_detailed_summary_canonicalized",
+                            zoom_id=row.zoom_id, rewrites=applied,
+                        )
+                    row.__dict__["_zm_detail_canon_map"] = applied or {}
+                except Exception as e:  # noqa: BLE001
+                    log.warning(
+                        "zoom_detailed_summary_canonicalize_failed",
+                        zoom_id=row.zoom_id, error=str(e),
+                    )
             # FR-EC-CRITIC — re-apply the transcript-resolved FR map so the FR
             # canonical forms WIN over the team/counterparty canonicalisation
             # (which otherwise mangles «Amazon»→«Amazon.com», «Accenture
@@ -2953,8 +2953,10 @@ class ZoomPipeline:
 
         # FR-CR-05-125 — match counterparties before tasks +
         # doc + short so all three surfaces can render the
-        # «🔗 Контрагенты» block.
-        if row.detailed_summarised:
+        # «🔗 Контрагенты» block. Skipped (with the legacy vector resolver) when
+        # MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED=false — FR resolver covers
+        # entities and this per-mention vector pass is slow + name-mangling.
+        if row.detailed_summarised and self._settings.meeting_legacy_counterparty_canon_enabled:
             try:
                 with _trace_step("zoom", "match_counterparties", **ctx):
                     self._step_match_counterparties(session, row)

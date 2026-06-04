@@ -480,6 +480,14 @@ class Settings(BaseSettings):
     entity_fr_people_max_orgs: int = Field(
         default=10, alias="ENTITY_FR_PEOPLE_MAX_ORGS"
     )
+    # When False, the meeting pipeline DROPS the legacy vector counterparty
+    # resolver — both the per-mention `canonicalize_summary_text` pass (which
+    # mangled «Amazon»→«Amazon.com», «Accenture Ventures»→a person) and the
+    # slow `_step_match_counterparties` vector retrieval — and relies on the FR
+    # resolver alone for entity canonicalisation. Default True (legacy on).
+    meeting_legacy_counterparty_canon_enabled: bool = Field(
+        default=True, alias="MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED"
+    )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable
     # flag is flipped LAST, after indexing + synthetic calibration (operator

@@ -1454,35 +1454,36 @@ class FirefliesPipeline:
             row.last_error = "detailed summary LLM returned empty"
             return False
         row.detailed_summary = _strip_markdown_emphasis(text)
-        # FR-CR-05-191 — canonicalize names (TeamMember + Counterparty)
-        try:
-            from app.services.summary_canonicalize import (
-                canonicalize_summary_text,
-            )
-            # FR-CR-05-191 v4 — roster guard (built above): never inject an
-            # absent employee for an external mention.
-            new_text, applied = canonicalize_summary_text(
-                row.detailed_summary,
-                session=session, llm_backend=self._llm,
-                model=self._settings.fireflies_tasks_model,
-                trace_source="ff_detailed",
-                trace_recording_id=row.fireflies_id,
-                participant_names=_roster,
-            )
-            if applied:
-                row.detailed_summary = new_text
-                log.info(
-                    "fireflies_detailed_summary_canonicalized",
-                    fireflies_id=row.fireflies_id, rewrites=applied,
+        # FR-CR-05-191 — legacy counterparty canonicaliser (skipped when
+        # MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED=false — FR resolver is sole).
+        row.__dict__.setdefault("_ff_detail_canon_map", {})
+        if self._settings.meeting_legacy_counterparty_canon_enabled:
+            try:
+                from app.services.summary_canonicalize import (
+                    canonicalize_summary_text,
                 )
-            # FR-CR-05-242 — detailed is the single source of canonical
-            # entity forms; stash its map so tasks use the SAME forms.
-            row.__dict__["_ff_detail_canon_map"] = applied or {}
-        except Exception as e:  # noqa: BLE001
-            log.warning(
-                "fireflies_detailed_summary_canonicalize_failed",
-                fireflies_id=row.fireflies_id, error=str(e),
-            )
+                # FR-CR-05-191 v4 — roster guard (built above): never inject an
+                # absent employee for an external mention.
+                new_text, applied = canonicalize_summary_text(
+                    row.detailed_summary,
+                    session=session, llm_backend=self._llm,
+                    model=self._settings.fireflies_tasks_model,
+                    trace_source="ff_detailed",
+                    trace_recording_id=row.fireflies_id,
+                    participant_names=_roster,
+                )
+                if applied:
+                    row.detailed_summary = new_text
+                    log.info(
+                        "fireflies_detailed_summary_canonicalized",
+                        fireflies_id=row.fireflies_id, rewrites=applied,
+                    )
+                row.__dict__["_ff_detail_canon_map"] = applied or {}
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "fireflies_detailed_summary_canonicalize_failed",
+                    fireflies_id=row.fireflies_id, error=str(e),
+                )
         # FR-EC-CRITIC — re-apply the transcript-resolved FR map so FR canonical
         # forms WIN over the team/counterparty canonicalisation; tasks inherit
         # via the merged canon map.
@@ -3323,30 +3324,30 @@ class FirefliesPipeline:
                 "fireflies_calendar_match_unexpected_error",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
-        # FR-CR-05-125 — match counterparty mentions against the
-        # canonical directory before doc/summary generation so
-        # both surfaces can render the «🔗 Контрагенты» block.
-        try:
-            with _trace_step("fireflies", "match_counterparties", **ctx):
-                self._step_match_counterparties(session, row)
-        except Exception as e:  # noqa: BLE001
-            log.info(
-                "fireflies_counterparty_match_unexpected_error",
-                fireflies_id=row.fireflies_id, error=str(e),
-            )
-        # FR-CR-05-133 — for every unresolved mention surfaced
-        # by Pass 2, post a «Track this entity?» widget to each
-        # admin recipient. Failures here MUST NOT break the
-        # rest of the pipeline (the meeting summary still goes
-        # out even if enrollment fails entirely).
-        try:
-            with _trace_step("fireflies", "enroll_unresolved", **ctx):
-                self._step_enroll_unresolved(session, row)
-        except Exception as e:  # noqa: BLE001
-            log.info(
-                "fireflies_enroll_unresolved_unexpected_error",
-                fireflies_id=row.fireflies_id, error=str(e),
-            )
+        # FR-CR-05-125 — match counterparty mentions against the canonical
+        # directory. Skipped (with the legacy vector resolver) when
+        # MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED=false — FR resolver covers
+        # entities; this per-mention vector pass is slow + name-mangling.
+        if self._settings.meeting_legacy_counterparty_canon_enabled:
+            try:
+                with _trace_step("fireflies", "match_counterparties", **ctx):
+                    self._step_match_counterparties(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "fireflies_counterparty_match_unexpected_error",
+                    fireflies_id=row.fireflies_id, error=str(e),
+                )
+        # FR-CR-05-133 — enrollment widgets for unresolved mentions (depends on
+        # the legacy match step; skipped together with it).
+        if self._settings.meeting_legacy_counterparty_canon_enabled:
+            try:
+                with _trace_step("fireflies", "enroll_unresolved", **ctx):
+                    self._step_enroll_unresolved(session, row)
+            except Exception as e:  # noqa: BLE001
+                log.info(
+                    "fireflies_enroll_unresolved_unexpected_error",
+                    fireflies_id=row.fireflies_id, error=str(e),
+                )
         # FR-CR-05-119 follow-up: extract tasks FIRST, then doc
         # with full task list, then short with compressed.
         with _trace_step("fireflies", "extract_tasks", **ctx):

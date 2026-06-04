@@ -364,6 +364,53 @@ def _normalise_name_for_match(name: str) -> set[str]:
     return {t for t in toks if len(t) > 1}
 
 
+def reconcile_team_attendees(
+    attendees: list[dict[str, Any]] | None,
+    present_names: list[str] | None,
+    *,
+    keep_emails: "set[str] | list[str] | None" = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """FR-CR-05-253 — Fireflies counterpart of Zoom's join-time reconcile.
+
+    Fireflies exposes no authoritative «who actually joined» list, so a
+    calendar invitee who never showed (Kima: Jochen Rudat, invited but absent)
+    would surface in the «Участники:» line. The only attendance signal FF has
+    is the LLM-extracted speaker list (``row.participants``) — who actually
+    spoke / was addressed in the transcript.
+
+    Rule (conservative — only drop when we can VERIFY absence):
+      * ``source == "team_member"`` → keep only if a name token overlaps the
+        present-speaker tokens; otherwise DROP (invited teammate, no-show).
+      * any other source (counterparty / unknown / external) → KEEP — we can't
+        verify externals via team-speaker extraction, so we never drop them.
+      * an attendee whose email is in ``keep_emails`` (the operator) → KEEP.
+
+    Returns ``(kept, dropped)``. Pure / no I/O.
+    """
+    present_tok: set[str] = set()
+    for n in present_names or []:
+        present_tok |= _normalise_name_for_match(n if isinstance(n, str) else "")
+    keep_cf = {(e or "").strip().lower() for e in (keep_emails or set()) if e}
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for a in attendees or []:
+        if not isinstance(a, dict):
+            kept.append(a)
+            continue
+        email = (a.get("email") or "").strip().lower()
+        source = (a.get("source") or "").strip()
+        if source != "team_member" or (email and email in keep_cf):
+            kept.append(a)
+            continue
+        name = a.get("resolved_name") or a.get("display_name") or ""
+        toks = _normalise_name_for_match(name)
+        if toks and (toks & present_tok):
+            kept.append(a)
+        else:
+            dropped.append(a)
+    return kept, dropped
+
+
 def _llm_reconcile_unmatched(
     *,
     unmatched_calendar: list[dict[str, Any]],

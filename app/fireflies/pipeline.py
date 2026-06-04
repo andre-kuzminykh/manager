@@ -1272,6 +1272,27 @@ class FirefliesPipeline:
         attendees = (resolved or {}).get("attendees") or []
         if not attendees:
             return
+        # FR-CR-05-253 — reconcile calendar invitees against actual presence
+        # (LLM-extracted speakers in row.participants, set just above). Drops
+        # team invitees who never showed (Kima: Jochen Rudat). Externals + the
+        # operator are never dropped. Safety: never end up empty.
+        if self._settings.fireflies_reconcile_calendar_attendees:
+            from app.services.calendar_attendees import reconcile_team_attendees
+
+            op_email = (self._settings.zoom_required_email or "").strip()
+            kept, dropped = reconcile_team_attendees(
+                attendees, list(row.participants or []),
+                keep_emails={op_email} if op_email else None,
+            )
+            if dropped and kept:
+                log.info(
+                    "fireflies_calendar_attendees_reconciled",
+                    fireflies_id=row.fireflies_id,
+                    dropped=[d.get("resolved_name") or d.get("email")
+                             for d in dropped],
+                    kept_count=len(kept),
+                )
+                attendees = kept
         row.calendar_attendees = attendees
 
     # --- step 3: detailed RU summary --------------------------

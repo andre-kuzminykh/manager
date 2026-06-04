@@ -222,3 +222,34 @@ Fund», «Rosecliff», «Invus», «Abdul Latif Jameel Ventures»), а зада�
 **Где:** `app/services/counterparty_match.py::fr_canonical_names`,
 `app/{zoom,fireflies}/pipeline.py::_step_canonicalize_task_names`.
 **Тест:** `tests/requirements/test_fr_canonical_names.py`.
+
+## FR-CR-05-253 — FF: сверка приглашённых с фактически присутствовавшими
+
+**Регресс (Kima):** в «Участники:» попал **Jochen Rudat**, которого на встрече
+не было. Он был **приглашён в календаре** (responseStatus НЕ declined), а FF —
+в отличие от Zoom — брал инвайтов «как есть»: у FF нет join-time данных о
+фактическом присутствии, поэтому `_populate_calendar_attendees` доверял списку
+приглашённых. (Declined и так отбрасывался — FF зовёт
+`resolve_calendar_attendees_for_zoom`, который дропает `responseStatus=="declined"`.)
+
+**Сигнал присутствия у FF:** единственный — LLM-экстракция спикеров из
+транскрипта (`row.participants`, FR-CR-05-158), которая ставится ДО
+`_populate_calendar_attendees`. Это «кто реально говорил / к кому обращались».
+
+**Фикс (`fireflies_reconcile_calendar_attendees`, default true):**
+`reconcile_team_attendees(attendees, present_names, keep_emails)` —
+консервативно, дропаем только когда МОЖЕМ подтвердить отсутствие:
+- `source=="team_member"` → оставляем, только если токен имени пересекается с
+  токенами спикеров; иначе ДРОП (приглашённый тиммейт, который не пришёл);
+- любой другой source (counterparty / unknown / внешний) → ВСЕГДА оставляем
+  (внешних через спикер-экстракцию не проверить — не дропаем);
+- email оператора (`ZOOM_REQUIRED_EMAIL`) → всегда оставляем.
+Safety: если сверка дропнула бы всех — оставляем исходный список (не обнуляем
+строку участников). Флаг off → побайтово прежний путь.
+
+**Где:** `app/services/calendar_attendees.py::reconcile_team_attendees`,
+`app/fireflies/pipeline.py::_populate_calendar_attendees`.
+**Тесты:** `tests/requirements/test_ff_attendee_reconcile.py` (8).
+**Почему не Zoom:** у Zoom уже есть авторитетная сверка с Zoom-джойном
+(`_llm_reconcile_unmatched` + join-данные) — там приглашённые-без-явки уже
+отсекаются. Фикс только для FF.

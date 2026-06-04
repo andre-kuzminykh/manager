@@ -499,6 +499,15 @@ class Settings(BaseSettings):
     meeting_legacy_counterparty_canon_enabled: bool = Field(
         default=True, alias="MEETING_LEGACY_COUNTERPARTY_CANON_ENABLED"
     )
+    # FR-CR-05-253 — Fireflies has no join-time attendance data (unlike Zoom),
+    # so it took calendar invitees as-is and a no-show invitee (Kima: Jochen
+    # Rudat, invited but absent) leaked into the «Участники:» line. When on,
+    # reconcile calendar attendees against the actual-attendance signal
+    # (LLM-extracted speakers): drop TEAM invitees with zero presence; never
+    # drop external invitees or the operator. Off → byte-for-byte prior path.
+    fireflies_reconcile_calendar_attendees: bool = Field(
+        default=True, alias="FIREFLIES_RECONCILE_CALENDAR_ATTENDEES"
+    )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable
     # flag is flipped LAST, after indexing + synthetic calibration (operator

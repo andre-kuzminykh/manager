@@ -429,6 +429,25 @@ def shard_char_budget(
     return max(20000, int(avail_tokens * chars_per_token))
 
 
+def assemble_shard_texts(
+    catalog: list[FrEntity], roster_text: str, *, max_chars: int
+) -> list[str]:
+    """Render the candidate slices for the map step. CRM is sharded to
+    `max_chars`; the team roster is FOLDED into the last shard when it fits, so
+    a catalog that fits in one slice yields ONE shard_text → a SINGLE
+    reasoning pass (no critic-merge variance). Only when the data exceeds one
+    slice do we fall back to multiple shards + critic."""
+    shards = [lean_catalog_text(sh) for sh in shard_catalog(catalog, max_chars=max_chars)]
+    if roster_text:
+        if shards and len(shards[-1]) + len(roster_text) + 1 <= max_chars:
+            shards[-1] = shards[-1] + "\n" + roster_text
+        else:
+            shards.append(roster_text)
+    if not shards and roster_text:
+        shards = [roster_text]
+    return shards
+
+
 def merge_partials_deterministic(partials: list[list[Decision]]) -> list[Decision]:
     """Fallback reduce (no LLM): per mention, keep the proposal with a canonical
     and the highest confidence; preserve first-seen order."""
@@ -509,6 +528,7 @@ __all__ = [
     "Decision",
     "parse_fr_dump",
     "shard_catalog",
+    "assemble_shard_texts",
     "lean_catalog_text",
     "team_roster_text",
     "shard_char_budget",

@@ -217,3 +217,15 @@ def test_should_apply_gates() -> None:
 
 
 __all__: list[str] = []
+
+
+def test_assemble_shard_texts_folds_team_into_single_pass() -> None:
+    import app.services.entity_resolver_fr as r2
+    ents = r2.parse_fr_dump(_SAMPLE)
+    roster = r2.team_roster_text([("Jochen Rudat", "advisor", "Йохан")])
+    # huge budget → CRM in one shard, team folded in → ONE shard_text
+    one = r2.assemble_shard_texts(ents, roster, max_chars=100000)
+    assert len(one) == 1 and "Jochen Rudat" in one[0] and "Ki One" in one[0]
+    # tiny budget → CRM splits, team can't fold → its own shard
+    many = r2.assemble_shard_texts(ents, roster, max_chars=20)
+    assert len(many) >= 2 and any("Jochen Rudat" in s for s in many)

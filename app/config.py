@@ -447,9 +447,11 @@ class Settings(BaseSettings):
     )
     # Map-reduce budget: the CRM is sharded so each parallel map-call (system +
     # transcript + shard) stays under this many tokens; a critic merges the
-    # per-shard results. Keeps cost/latency bounded as Viktor's CRM grows.
+    # per-shard results. Default sized so the CURRENT CRM (~40K-token lean) fits
+    # in ONE pass — single reasoning call → no critic-merge variance (more
+    # consistent). Sharding+critic only kick in once the CRM outgrows this.
     entity_fr_max_context_tokens: int = Field(
-        default=30000, alias="ENTITY_FR_MAX_CONTEXT_TOKENS"
+        default=50000, alias="ENTITY_FR_MAX_CONTEXT_TOKENS"
     )
     entity_fr_shard_workers: int = Field(
         default=4, alias="ENTITY_FR_SHARD_WORKERS"

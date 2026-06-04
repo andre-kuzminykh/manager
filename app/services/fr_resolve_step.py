@@ -179,15 +179,15 @@ def resolve_for_meeting(
             return {}
 
         budget = R.shard_char_budget(
-            max_context_tokens=getattr(settings, "entity_fr_max_context_tokens", 30000),
+            max_context_tokens=getattr(settings, "entity_fr_max_context_tokens", 50000),
             transcript_chars=len(text or ""),
         )
-        shard_texts = [R.lean_catalog_text(sh) for sh in R.shard_catalog(catalog, max_chars=budget)]
         rows = team_rows if team_rows is not None else (
             _load_team_rows(session) if session is not None else [])
         roster = R.team_roster_text(rows)
-        if roster:
-            shard_texts.append(roster)
+        # Folds team into one slice when the CRM fits → single pass (no critic
+        # variance); shards + critic only when the CRM outgrows the budget.
+        shard_texts = R.assemble_shard_texts(catalog, roster, max_chars=budget)
 
         if call is None:
             call = _make_llm_call(

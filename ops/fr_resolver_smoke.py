@@ -117,6 +117,8 @@ def main() -> int:
     ap.add_argument("--model", default="gpt-5.5")
     ap.add_argument("--effort", default="high")
     ap.add_argument("--limit", type=int, default=2000)
+    ap.add_argument("--max-tokens", type=int, default=50000,
+                    help="context budget; high enough → single pass (no critic variance)")
     ap.add_argument("--no-team", action="store_true", help="skip the team_members slice")
     ap.add_argument("--people", action="store_true", help="run Track-2 agentic people pass")
     ap.add_argument("--truth", action="store_true", help="score against boss ground truth")
@@ -124,7 +126,7 @@ def main() -> int:
 
     s = get_settings()
     mcp_url = a.mcp_url or getattr(s, "entity_fr_mcp_url", "") or _DEFAULT_MCP
-    max_tokens = getattr(s, "entity_fr_max_context_tokens", 30000)
+    max_tokens = a.max_tokens or getattr(s, "entity_fr_max_context_tokens", 50000)
     workers = getattr(s, "entity_fr_shard_workers", 4)
 
     text, title, participants = _load_text(a.zoom_id, a.ff_id, a.use)
@@ -140,15 +142,11 @@ def main() -> int:
         return 1
 
     budget = R.shard_char_budget(max_context_tokens=max_tokens, transcript_chars=len(text))
-    shards = R.shard_catalog(catalog, max_chars=budget)
-    shard_texts = [R.lean_catalog_text(sh) for sh in shards]
-    if not a.no_team:
-        roster = _team_roster()
-        if roster:
-            shard_texts.append(roster)
-    print(f"catalog: {len(catalog)} entities → {len(shards)} CRM shard(s) "
-          f"(budget {budget} chars each) + {0 if a.no_team else 1} team slice; "
-          f"{len(shard_texts)} parallel map-calls")
+    roster = "" if a.no_team else _team_roster()
+    shard_texts = R.assemble_shard_texts(catalog, roster, max_chars=budget)
+    print(f"catalog: {len(catalog)} entities + {'no' if a.no_team else 'a'} team slice "
+          f"→ {len(shard_texts)} map-call(s) (budget {budget} chars; "
+          f"{'SINGLE pass, no critic' if len(shard_texts) == 1 else 'sharded + critic'})")
 
     from openai import OpenAI
 

@@ -17,11 +17,11 @@ _TAWAZUN = (
 )
 
 
-def test_org_messages_carry_mentions_and_context() -> None:
+def test_org_messages_carry_resolved_and_context() -> None:
     msgs = build_person_org_messages(
-        unresolved_mentions=["Самир", "DEV"], meeting_title="Fundraising",
-        participants=["Alina"], transcript="Обсудили Самир из SDF")
-    assert "Самир" in msgs[1]["content"] and "DEV" in msgs[1]["content"]
+        transcript="Обсудили Самир из SDF", meeting_title="Fundraising",
+        participants=["Alina"], already_resolved=["Tether", "Key 1 Capital"])
+    assert "Tether" in msgs[1]["content"]                 # already-resolved skip-list
     assert "Fundraising" in msgs[2]["content"] and "SDF" in msgs[2]["content"]
 
 
@@ -48,8 +48,8 @@ def test_resolve_people_full_flow() -> None:
                          source="Tawazun", confidence=0.9)]
 
     out = resolve_people(
-        unresolved_mentions=["Самир", "DEV"], meeting_title="m",
-        participants=None, transcript="t",
+        transcript="Обсудили Самир и DEV", meeting_title="m",
+        participants=None, already_resolved=[],
         call_orgs=call_orgs, search_fn=search_fn, call_extract=call_extract)
     assert seen["searched"] == "Tawazun"
     assert len(out) == 1 and out[0].canonical == "Samer Zawadeih"
@@ -65,24 +65,24 @@ def test_resolve_people_no_orgs_short_circuits() -> None:
         calls["search"] += 1
         return "x"
 
-    out = resolve_people(unresolved_mentions=["DEV"], meeting_title="m",
-                         participants=None, transcript="t",
+    out = resolve_people(transcript="DEV stuff", meeting_title="m",
+                         participants=None, already_resolved=[],
                          call_orgs=call_orgs, search_fn=lambda o: (_ for _ in ()).throw(AssertionError),
                          call_extract=lambda m: [])
     assert out == []
 
 
 def test_resolve_people_empty_input() -> None:
-    assert resolve_people(unresolved_mentions=[], meeting_title="m", participants=None,
-                          transcript="t", call_orgs=lambda m: [],
+    assert resolve_people(transcript="   ", meeting_title="m", participants=None,
+                          already_resolved=[], call_orgs=lambda m: [],
                           search_fn=lambda o: "", call_extract=lambda m: []) == []
 
 
 def test_resolve_people_swallows_failures() -> None:
     def boom(_msgs):
         raise RuntimeError("llm down")
-    out = resolve_people(unresolved_mentions=["Самир"], meeting_title="m",
-                         participants=None, transcript="t",
+    out = resolve_people(transcript="Самир", meeting_title="m",
+                         participants=None, already_resolved=[],
                          call_orgs=boom, search_fn=lambda o: "x", call_extract=lambda m: [])
     assert out == []
 

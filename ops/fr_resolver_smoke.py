@@ -178,10 +178,12 @@ def main() -> int:
         meeting_title=title, participants=participants, transcript_or_summary=text,
         shard_texts=shard_texts, call_map=_call, call_critic=_call, max_workers=workers,
     )
-    # Track 2 — agentic people pass on unresolved person-like mentions.
+    # Track 2 — agentic people pass: find external-contact people in the text
+    # (excluding what Track 1/3 already resolved) → org → comm_log → full name.
     if a.people:
-        unresolved = [d.mention for d in decisions if not d.canonical]
-        print(f"\nTrack-2 people: {len(unresolved)} unresolved mentions → org-guess → search → extract ...")
+        already = [d.mention for d in decisions] + [d.canonical for d in decisions if d.canonical]
+        print(f"\nTrack-2 people: scanning transcript (excluding {len(already)} resolved) "
+              "→ org-guess → search → extract ...")
         from app.services.entity_people_fr import PERSON_ORG_TOOL, resolve_people
 
         def _orgs(messages):
@@ -200,8 +202,8 @@ def main() -> int:
             return R._unwrap_mcp_text(t2) if ok2 else ""
 
         people = resolve_people(
-            unresolved_mentions=unresolved, meeting_title=title,
-            participants=participants, transcript=text,
+            transcript=text, meeting_title=title, participants=participants,
+            already_resolved=already,
             call_orgs=_orgs, search_fn=_search, call_extract=_call,
             max_orgs=getattr(s, "entity_fr_people_max_orgs", 6))
         print(f"Track-2 resolved {len(people)} people:")

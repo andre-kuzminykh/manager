@@ -45,12 +45,13 @@ PERSON_ORG_TOOL = {
 }
 
 _ORG_SYSTEM = (
-    "From a meeting transcript, decide which UNRESOLVED mentions are PEOPLE "
-    "(external contacts, not companies) and, for each, name the org/fund they "
-    "are associated with based ONLY on the meeting context (e.g. «Самир» is the "
-    "SDF / Tawazun contact → org «Tawazun»). Set is_person=false for "
-    "companies/products. Leave org empty if the context gives no org. STRICT "
-    "JSON via the tool only."
+    "From a meeting transcript, find EXTERNAL-CONTACT PEOPLE — individuals who "
+    "are investors / intro contacts / counterparties, NOT internal team members "
+    "and NOT companies. EXCLUDE any name already in the ALREADY-RESOLVED list. "
+    "For each remaining person, name the org/fund they are associated with based "
+    "on the meeting context (e.g. «Самир» is the SDF / Tawazun contact → org "
+    "«Tawazun»). Only include entries where you can name an org. Set "
+    "is_person=true and fill `org`. STRICT JSON via the tool only."
 )
 
 _EXTRACT_SYSTEM = (
@@ -65,15 +66,17 @@ _EXTRACT_SYSTEM = (
 
 
 def build_person_org_messages(
-    *, unresolved_mentions: list[str], meeting_title: str | None,
-    participants: list[str] | None, transcript: str, max_transcript_chars: int = 16000,
+    *, transcript: str, meeting_title: str | None,
+    participants: list[str] | None, already_resolved: list[str] | None = None,
+    max_transcript_chars: int = 16000,
 ) -> list[dict[str, str]]:
     ctx = f"Meeting: {meeting_title or '(untitled)'}"
     if participants:
         ctx += "\nParticipants: " + ", ".join(participants)
+    resolved = ", ".join(already_resolved or []) or "(none)"
     return [
         {"role": "system", "content": _ORG_SYSTEM},
-        {"role": "user", "content": "UNRESOLVED MENTIONS:\n" + "\n".join(unresolved_mentions)},
+        {"role": "user", "content": "ALREADY-RESOLVED (skip these):\n" + resolved},
         {"role": "user", "content": ctx + "\n\nTRANSCRIPT/SUMMARY:\n"
                                     + (transcript or "")[:max_transcript_chars]},
     ]
@@ -97,23 +100,26 @@ def build_person_extract_messages(
 
 def resolve_people(
     *,
-    unresolved_mentions: list[str],
+    transcript: str,
     meeting_title: str | None,
     participants: list[str] | None,
-    transcript: str,
+    already_resolved: list[str] | None = None,
     call_orgs: Callable[[list[dict]], list[tuple[str, str]]],
     search_fn: Callable[[str], str],
     call_extract: Callable[[list[dict]], list[Decision]],
     max_orgs: int = 6,
 ) -> list[Decision]:
-    """Agentic Track-2 resolve. Injected: `call_orgs(messages)->[(mention,org)]`,
-    `search_fn(org)->verbose record text`, `call_extract(messages)->[Decision]`."""
-    if not unresolved_mentions:
+    """Agentic Track-2 resolve. Finds external-contact PEOPLE in the transcript
+    itself (excluding `already_resolved`), guesses each org, fetches that CRM
+    record's prose, extracts the canonical full name. Injected:
+    `call_orgs(messages)->[(mention,org)]`, `search_fn(org)->record text`,
+    `call_extract(messages)->[Decision]`."""
+    if not (transcript or "").strip():
         return []
     try:
         person_orgs = call_orgs(build_person_org_messages(
-            unresolved_mentions=unresolved_mentions, meeting_title=meeting_title,
-            participants=participants, transcript=transcript)) or []
+            transcript=transcript, meeting_title=meeting_title,
+            participants=participants, already_resolved=already_resolved)) or []
     except Exception as e:  # noqa: BLE001
         log.info("fr_people_org_step_failed", error=str(e))
         return []

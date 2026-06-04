@@ -125,22 +125,20 @@ def _make_search_fn(mcp_url: str, *, timeout: float = 30.0):
 
 
 def _resolve_people_track(
-    *, settings: Any, llm: Any, mcp_url: str, unresolved: list[str],
+    *, settings: Any, llm: Any, mcp_url: str, already_resolved: list[str],
     meeting_title: str | None, participants: list[str] | None, text: str,
     call_orgs: Callable | None, search_fn: Callable | None,
     call_extract: Callable[[list[dict]], list[R.Decision]],
 ) -> list[R.Decision]:
     from app.services.entity_people_fr import resolve_people
-    if not unresolved:
-        return []
     model = getattr(settings, "entity_fr_resolver_model", "gpt-5.5")
     if call_orgs is None:
         call_orgs = _make_orgs_call(llm, model=model, effort="high")
     if search_fn is None:
         search_fn = _make_search_fn(mcp_url)
     return resolve_people(
-        unresolved_mentions=unresolved, meeting_title=meeting_title,
-        participants=participants, transcript=text,
+        transcript=text, meeting_title=meeting_title, participants=participants,
+        already_resolved=already_resolved,
         call_orgs=call_orgs, search_fn=search_fn, call_extract=call_extract,
         max_orgs=int(getattr(settings, "entity_fr_people_max_orgs", 6)),
     )
@@ -208,10 +206,12 @@ def resolve_for_meeting(
         # the mentions Track 1/3 left unresolved. Gated + best-effort.
         people: list[R.Decision] = []
         if getattr(settings, "entity_fr_people_enabled", False):
-            unresolved = [d.mention for d in decisions if not d.canonical]
+            # exclude what Track 1/3 already handled (mentions + canonicals)
+            already = [d.mention for d in decisions]
+            already += [d.canonical for d in decisions if d.canonical]
             people = _resolve_people_track(
                 settings=settings, llm=llm, mcp_url=mcp_url,
-                unresolved=unresolved, meeting_title=meeting_title,
+                already_resolved=already, meeting_title=meeting_title,
                 participants=participants, text=text or "",
                 call_orgs=people_call_orgs, search_fn=people_search_fn,
                 call_extract=call,

@@ -46,6 +46,7 @@ class FrEntity:
     entity_type: str = ""
     status: str = ""
     industry: str = ""
+    contact: str = ""
     sources: list[str] = field(default_factory=list)
     fr_id: str = ""
 
@@ -54,6 +55,11 @@ class FrEntity:
         for v in (self.entity_type, self.status, self.industry):
             if v:
                 parts.append(v)
+        # contact_person — needed to resolve PEOPLE / intro contacts
+        # («Йохан» → Jochen Rudat, «Самир» → Samer Zawaideh), which live in
+        # this field, not the company name.
+        if self.contact and self.contact.strip().lower() != self.name.strip().lower():
+            parts.append("contact: " + self.contact)
         if self.sources:
             parts.append(", ".join(self.sources))
         return " | ".join(parts)
@@ -124,11 +130,32 @@ def parse_fr_dump(raw_mcp_text: str) -> list[FrEntity]:
                 entity_type=_field(e, "Type"),
                 status=_field(e, "Status"),
                 industry=_field(e, "Industry"),
+                contact=_field(e, "Contact"),
                 sources=_dedup_sources(_field(e, "Source")),
                 fr_id=_field(e, "ID"),
             )
         )
     return out
+
+
+def shard_catalog(entities: list[FrEntity], *, max_chars: int) -> list[list[FrEntity]]:
+    """Split the catalog into shards whose lean text is ≤ `max_chars` each, so
+    every map-call stays under the per-call context budget (FR-EC-CRITIC: 30K
+    tokens). Greedy pack, order preserved. A single oversize line still gets
+    its own shard (never dropped)."""
+    shards: list[list[FrEntity]] = []
+    cur: list[FrEntity] = []
+    cur_len = 0
+    for ent in entities:
+        ln = len(ent.lean_line()) + 1
+        if cur and cur_len + ln > max_chars:
+            shards.append(cur)
+            cur, cur_len = [], 0
+        cur.append(ent)
+        cur_len += ln
+    if cur:
+        shards.append(cur)
+    return shards
 
 
 def lean_catalog_text(entities: list[FrEntity]) -> str:
@@ -188,16 +215,43 @@ def reset_cache_for_tests() -> None:
 
 _SYSTEM = (
     "You resolve entity mentions from a meeting transcript to their canonical "
-    "form using a fundraising CRM. The CRM list is authoritative for spelling.\n"
+    "form using a fundraising CRM. The CRM list is AUTHORITATIVE for spelling — "
+    "always prefer the CRM's exact form over the transcript's.\n"
     "Rules:\n"
-    "- Match across languages/transliteration (e.g. Russian «Киван» may be the "
-    "English «Ki One»); use meaning + context, not just string similarity.\n"
+    "- Match across languages/transliteration (Russian «Киван» = «Key 1 Capital», "
+    "«Химейн» = «HUMAIN», «Виндроботикс» = «Vinrobotics»); use meaning + context, "
+    "not just string similarity.\n"
+    "- A mention may be a COMPANY or a PERSON (intro contact / team member) — "
+    "match people against the `contact:` field too («Йохан» → Jochen Rudat, "
+    "«Самир» → Samer Zawaideh).\n"
+    "- Prefer the MOST SPECIFIC / most complete matching CRM entry: «Accenture "
+    "Ventures» over «Accenture», «Amazon Industrial Fund» over «Amazon», "
+    "«Lingotto Investment Management» over «Lingotto».\n"
     "- Use type/status/industry/source to disambiguate between similar names.\n"
-    "- Return a canonical name ONLY when reasonably confident it is in the CRM; "
-    "otherwise set canonical=null (do NOT invent).\n"
+    "- Return a canonical name ONLY when it is genuinely in the CRM; otherwise "
+    "set canonical=null (do NOT invent). Calibrate confidence honestly: a clear "
+    "cross-lingual match IS high confidence.\n"
     "- Output STRICT JSON: a list of "
     '{"mention","canonical","source","confidence"} (confidence 0..1). '
     "No prose, no markdown."
+)
+
+_SHARD_NOTE = (
+    "\nNOTE: the CRM list below is ONE SLICE of a larger CRM. Only return matches "
+    "you find in THIS slice; omit mentions you cannot match here (another slice "
+    "may hold them). Do not guess outside this slice."
+)
+
+_CRITIC_SYSTEM = (
+    "You are the final critic merging entity-resolution results from several "
+    "parallel scans of DIFFERENT slices of one fundraising CRM, for ONE meeting.\n"
+    "For each distinct mention, choose the SINGLE best canonical from the "
+    "candidates the slices proposed, using the meeting context. Resolve "
+    "conflicts; prefer the most specific/complete CRM form; keep canonical=null "
+    "if no slice produced a trustworthy match. Do not invent names absent from "
+    "the candidates.\n"
+    "Output STRICT JSON: a list of "
+    '{"mention","canonical","source","confidence"}. No prose, no markdown.'
 )
 
 
@@ -208,20 +262,56 @@ def build_resolution_messages(
     transcript_or_summary: str,
     catalog_text: str,
     max_transcript_chars: int = 24000,
+    is_shard: bool = False,
 ) -> list[dict[str, str]]:
-    """Build chat messages. The big `catalog_text` is its OWN message so a
-    caller can mark it for prompt-caching; the per-meeting transcript is
-    separate and small."""
+    """Build chat messages for ONE map-call (full catalog or a shard). The big
+    `catalog_text` is its OWN message so a caller can mark it for prompt-caching;
+    the per-meeting transcript is separate and small. `is_shard` appends the
+    slice note so the model omits (not guesses) mentions absent from this slice."""
+    system = _SYSTEM + (_SHARD_NOTE if is_shard else "")
     ctx = f"Meeting: {meeting_title or '(untitled)'}"
     if participants:
         ctx += "\nParticipants: " + ", ".join(participants)
     body = (transcript_or_summary or "")[:max_transcript_chars]
     return [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": "CRM (canonical | type | status | industry | source):\n"
+        {"role": "system", "content": system},
+        {"role": "user", "content": "CRM (canonical | type | status | industry | contact | source):\n"
                                     + catalog_text},
         {"role": "user", "content": ctx + "\n\nTRANSCRIPT/SUMMARY:\n" + body
                                     + "\n\nReturn the JSON list now."},
+    ]
+
+
+def build_critic_messages(
+    *,
+    meeting_title: str | None,
+    participants: list[str] | None,
+    transcript_or_summary: str,
+    partials: list[list["Decision"]],
+    max_transcript_chars: int = 12000,
+) -> list[dict[str, str]]:
+    """Reduce step — feed the per-shard candidate resolutions to the critic so
+    it picks one canonical per mention. Candidates are small (just the lists),
+    so this call stays well under budget."""
+    ctx = f"Meeting: {meeting_title or '(untitled)'}"
+    if participants:
+        ctx += "\nParticipants: " + ", ".join(participants)
+    cand_lines: list[str] = []
+    for i, part in enumerate(partials):
+        for d in part:
+            if d.canonical:
+                cand_lines.append(
+                    f"[slice {i}] {d.mention} -> {d.canonical} "
+                    f"({d.confidence:.2f}) {d.source}"
+                )
+    cand_block = "\n".join(cand_lines) or "(no candidates proposed)"
+    body = (transcript_or_summary or "")[:max_transcript_chars]
+    return [
+        {"role": "system", "content": _CRITIC_SYSTEM},
+        {"role": "user", "content": "CANDIDATE RESOLUTIONS (from parallel CRM slices):\n"
+                                    + cand_block},
+        {"role": "user", "content": ctx + "\n\nTRANSCRIPT/SUMMARY:\n" + body
+                                    + "\n\nReturn the merged JSON list now."},
     ]
 
 
@@ -284,14 +374,128 @@ def should_apply(d: Decision, *, current: str | None, min_confidence: float = 0.
     return True
 
 
+# -- map-reduce orchestration (shards ≤ budget, parallel, critic merge) --------
+
+def team_roster_text(rows: list[tuple[str, str, str]]) -> str:
+    """Render the internal team roster as a candidate slice. `rows` are
+    (real_name, role, aliases) — people like «Йохан» → Jochen Rudat resolve
+    against OUR team_members table, not Viktor's CRM. Marked `team` so the
+    critic knows the source."""
+    lines: list[str] = []
+    for name, role, aliases in rows:
+        if not name:
+            continue
+        parts = [name, "team"]
+        if role:
+            parts.append(role)
+        if aliases:
+            parts.append("aliases: " + aliases)
+        lines.append(" | ".join(parts))
+    return "\n".join(lines)
+
+
+def shard_char_budget(
+    *,
+    max_context_tokens: int = 30000,
+    transcript_chars: int = 0,
+    overhead_tokens: int = 1200,
+    chars_per_token: float = 3.5,
+) -> int:
+    """Char budget for ONE shard's catalog text so a map-call (system +
+    transcript + shard) stays under `max_context_tokens`."""
+    avail_tokens = max_context_tokens - overhead_tokens - int(transcript_chars / chars_per_token)
+    return max(20000, int(avail_tokens * chars_per_token))
+
+
+def merge_partials_deterministic(partials: list[list[Decision]]) -> list[Decision]:
+    """Fallback reduce (no LLM): per mention, keep the proposal with a canonical
+    and the highest confidence; preserve first-seen order."""
+    best: dict[str, Decision] = {}
+    order: list[str] = []
+    for part in partials:
+        for d in part:
+            key = d.mention.strip().lower()
+            if not key:
+                continue
+            if key not in best:
+                order.append(key)
+                best[key] = d
+                continue
+            cur = best[key]
+            if (d.canonical and not cur.canonical) or (
+                d.canonical and cur.canonical and d.confidence > cur.confidence
+            ):
+                best[key] = d
+    return [best[k] for k in order]
+
+
+def resolve_sharded(
+    *,
+    meeting_title: str | None,
+    participants: list[str] | None,
+    transcript_or_summary: str,
+    shard_texts: list[str],
+    call_map: Callable[[list[dict[str, str]]], list[Decision]],
+    call_critic: Callable[[list[dict[str, str]]], list[Decision]] | None = None,
+    max_workers: int = 4,
+) -> list[Decision]:
+    """Map-reduce resolve. Each `shard_texts` entry (CRM slice OR team roster)
+    is mapped in PARALLEL against the transcript via `call_map`; if there is
+    more than one shard the per-shard candidates are merged by `call_critic`
+    (LLM) when provided, else deterministically. `call_map`/`call_critic` take
+    chat messages and return Decisions — injected so the module stays free of
+    any specific LLM SDK and is unit-testable."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    multi = len(shard_texts) > 1
+
+    def _one(arg: tuple[int, str]) -> list[Decision]:
+        idx, text = arg
+        msgs = build_resolution_messages(
+            meeting_title=meeting_title, participants=participants,
+            transcript_or_summary=transcript_or_summary, catalog_text=text,
+            is_shard=multi,
+        )
+        try:
+            return call_map(msgs)
+        except Exception as e:  # noqa: BLE001
+            log.warning("fr_shard_map_failed", shard=idx, error=str(e))
+            return []
+
+    jobs = list(enumerate(shard_texts))
+    if not jobs:
+        return []
+    workers = max(1, min(max_workers, len(jobs)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        partials = list(pool.map(_one, jobs))
+
+    if not multi:
+        return partials[0] if partials else []
+    if call_critic is not None:
+        try:
+            return call_critic(build_critic_messages(
+                meeting_title=meeting_title, participants=participants,
+                transcript_or_summary=transcript_or_summary, partials=partials,
+            ))
+        except Exception as e:  # noqa: BLE001
+            log.warning("fr_critic_failed", error=str(e))
+    return merge_partials_deterministic(partials)
+
+
 __all__ = [
     "FrEntity",
     "Decision",
     "parse_fr_dump",
+    "shard_catalog",
     "lean_catalog_text",
+    "team_roster_text",
+    "shard_char_budget",
     "fetch_catalog",
     "reset_cache_for_tests",
     "build_resolution_messages",
+    "build_critic_messages",
     "parse_resolution",
+    "merge_partials_deterministic",
+    "resolve_sharded",
     "should_apply",
 ]

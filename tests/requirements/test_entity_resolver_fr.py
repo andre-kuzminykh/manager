@@ -47,6 +47,81 @@ def test_lean_line_and_catalog_text() -> None:
     assert txt.count("\n") == 2 and "Charles Button | active | Followers / Outreach" in txt
 
 
+def test_lean_line_includes_distinct_contact() -> None:
+    # contact != name (company row) → contact appended (recovers people).
+    e = r.FrEntity(name="Incharge Capital", contact="Daniel Gutenberg", sources=["Followers"])
+    assert "contact: Daniel Gutenberg" in e.lean_line()
+    # contact == name (angel row, person IS the name) → not duplicated.
+    e2 = r.FrEntity(name="Charles Button", contact="Charles Button")
+    assert "contact:" not in e2.lean_line()
+
+
+def test_shard_catalog_respects_budget() -> None:
+    ents = r.parse_fr_dump(_SAMPLE)
+    # tiny budget forces one entity per shard; none dropped
+    shards = r.shard_catalog(ents, max_chars=10)
+    assert sum(len(sh) for sh in shards) == len(ents)
+    assert all(len(sh) >= 1 for sh in shards)
+    # huge budget → single shard
+    assert len(r.shard_catalog(ents, max_chars=100000)) == 1
+
+
+def test_team_roster_text() -> None:
+    txt = r.team_roster_text([("Jochen Rudat", "advisor", "Йохан jochen"), ("", "", "")])
+    assert "Jochen Rudat | team | advisor | aliases: Йохан jochen" in txt
+    assert txt.count("\n") == 0   # empty-name row skipped
+
+
+def test_merge_partials_prefers_canonical_then_confidence() -> None:
+    p1 = [r.Decision(mention="Киван", canonical=None, confidence=0.4)]
+    p2 = [r.Decision(mention="Киван", canonical="Key 1 Capital", confidence=0.6)]
+    p3 = [r.Decision(mention="Киван", canonical="Wrong", confidence=0.5)]
+    merged = r.merge_partials_deterministic([p1, p2, p3])
+    assert len(merged) == 1 and merged[0].canonical == "Key 1 Capital"
+
+
+def test_resolve_sharded_single_shard_skips_critic() -> None:
+    calls = {"map": 0, "critic": 0}
+
+    def cm(_msgs):
+        calls["map"] += 1
+        return [r.Decision(mention="A", canonical="Alpha", confidence=0.9)]
+
+    def cc(_msgs):
+        calls["critic"] += 1
+        return []
+
+    out = r.resolve_sharded(meeting_title="m", participants=None,
+                            transcript_or_summary="t", shard_texts=["only"],
+                            call_map=cm, call_critic=cc)
+    assert [d.canonical for d in out] == ["Alpha"]
+    assert calls == {"map": 1, "critic": 0}        # single shard → no critic
+
+
+def test_resolve_sharded_multi_runs_critic() -> None:
+    calls = {"map": 0, "critic": 0}
+
+    def cm(_msgs):
+        calls["map"] += 1
+        return [r.Decision(mention="A", canonical="Alpha", confidence=0.5)]
+
+    def cc(_msgs):
+        calls["critic"] += 1
+        return [r.Decision(mention="A", canonical="AlphaMerged", confidence=0.9)]
+
+    out = r.resolve_sharded(meeting_title="m", participants=None,
+                            transcript_or_summary="t", shard_texts=["s1", "s2", "s3"],
+                            call_map=cm, call_critic=cc, max_workers=3)
+    assert calls["map"] == 3 and calls["critic"] == 1
+    assert out[0].canonical == "AlphaMerged"
+
+
+def test_shard_char_budget_shrinks_with_transcript() -> None:
+    big = r.shard_char_budget(max_context_tokens=30000, transcript_chars=0)
+    small = r.shard_char_budget(max_context_tokens=30000, transcript_chars=40000)
+    assert big > small >= 20000        # floor respected
+
+
 def test_parse_dump_handles_bare_and_empty() -> None:
     assert r.parse_fr_dump("") == []
     # bare (unwrapped) text still parses

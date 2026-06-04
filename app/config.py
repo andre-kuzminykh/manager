@@ -445,6 +445,15 @@ class Settings(BaseSettings):
     entity_fr_catalog_ttl_seconds: int = Field(
         default=3600, alias="ENTITY_FR_CATALOG_TTL_SECONDS"
     )
+    # Map-reduce budget: the CRM is sharded so each parallel map-call (system +
+    # transcript + shard) stays under this many tokens; a critic merges the
+    # per-shard results. Keeps cost/latency bounded as Viktor's CRM grows.
+    entity_fr_max_context_tokens: int = Field(
+        default=30000, alias="ENTITY_FR_MAX_CONTEXT_TOKENS"
+    )
+    entity_fr_shard_workers: int = Field(
+        default=4, alias="ENTITY_FR_SHARD_WORKERS"
+    )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable
     # flag is flipped LAST, after indexing + synthetic calibration (operator

@@ -443,7 +443,16 @@ class Settings(BaseSettings):
     # Catalog cache TTL — Viktor syncs every ~3h, so we refetch at most this
     # often (the dump is one MCP call; caching keeps per-meeting cost down).
     entity_fr_catalog_ttl_seconds: int = Field(
-        default=3600, alias="ENTITY_FR_CATALOG_TTL_SECONDS"
+        default=7200, alias="ENTITY_FR_CATALOG_TTL_SECONDS"
+    )
+    # Reasoning effort for the MAIN matching pass (quality-critical — companies
+    # validated at "high"). Lower to "medium" via env to cut cost, but re-check
+    # the smoke first. Track-2 (people) uses its own, cheaper, effort.
+    entity_fr_reasoning_effort: str = Field(
+        default="high", alias="ENTITY_FR_REASONING_EFFORT"
+    )
+    entity_fr_people_effort: str = Field(
+        default="medium", alias="ENTITY_FR_PEOPLE_EFFORT"
     )
     # Map-reduce budget: the CRM is sharded so each parallel map-call (system +
     # transcript + shard) stays under this many tokens; a critic merges the

@@ -134,7 +134,11 @@ def _resolve_people_track(
     from app.services.entity_people_fr import resolve_people
     model = getattr(settings, "entity_fr_resolver_model", "gpt-5.5")
     if call_orgs is None:
-        call_orgs = _make_orgs_call(llm, model=model, effort="high")
+        # Track-2 LLM #1 (person? + org) is a simple classify — medium effort
+        # is plenty and ~30-40% cheaper than high.
+        call_orgs = _make_orgs_call(
+            llm, model=model,
+            effort=getattr(settings, "entity_fr_people_effort", "medium"))
     if search_fn is None:
         search_fn = _make_search_fn(mcp_url)
     return resolve_people(
@@ -193,7 +197,7 @@ def resolve_for_meeting(
         if call is None:
             call = _make_llm_call(
                 llm, model=getattr(settings, "entity_fr_resolver_model", "gpt-5.5"),
-                effort="high")
+                effort=getattr(settings, "entity_fr_reasoning_effort", "high"))
 
         decisions = R.resolve_sharded(
             meeting_title=meeting_title, participants=participants,

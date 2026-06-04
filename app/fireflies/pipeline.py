@@ -1367,6 +1367,25 @@ class FirefliesPipeline:
                     old=row.title, new=derived,
                 )
                 row.title = derived
+                # FR-CR-05-154 follow-up — push the derived title to Fireflies'
+                # UI too. Previously only the calendar-match path pushed, so when
+                # CALENDAR_MATCH_ENABLED is off (or no event matches) the FF
+                # record kept its «Apr 30, 03:32 PM» auto-stamp even though our
+                # summary used the derived name. Best-effort, idempotent.
+                try:
+                    pushed = self._client.update_transcript_title(
+                        row.fireflies_id, derived,
+                    )
+                    log.info(
+                        "fireflies_derived_title_pushed_to_remote",
+                        fireflies_id=row.fireflies_id, title=derived,
+                        success=pushed,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    log.info(
+                        "fireflies_derived_title_push_failed",
+                        fireflies_id=row.fireflies_id, error=str(e),
+                    )
         # FR-CR-05-176 — populate calendar_attendees before building
         # the meta block so the «Участники: …» line resolves real
         # names from People/Counterparty. Best-effort: failures fall

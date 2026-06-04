@@ -54,6 +54,8 @@ Google (Sheets / Tasks / Docs / Calendar) и отвечает на вопрос�
 | **Meeting Agenda** — преднастрочная агенда | `FR-CR-05-165` | [SPEC_MEETING_AGENDA_v0.1.md](./SPEC_MEETING_AGENDA_v0.1.md) | 🟢 | ⚠️ |
 | **Meeting Webhook** — доставка в n8n | `FR-CR-05-160` | [SPEC_MEETING_WEBHOOK_v0.1.md](./SPEC_MEETING_WEBHOOK_v0.1.md) | 🔵 | ✅ |
 | **Entity Consistency** — одна форма сущности | `FR-CR-05-242/-241` | [SPEC_ENTITY_CONSISTENCY_v0.1.md](./SPEC_ENTITY_CONSISTENCY_v0.1.md) | 🟢 | ✅ |
+| **Entity Critic** — выбор сущности по контексту (мульти-лист) | `FR-EC-CRITIC` | [SPEC_ENTITY_CRITIC_v0.1.md](./SPEC_ENTITY_CRITIC_v0.1.md) | ⚪ | ⬜ |
+| **Native Transcript** — нативные транскрипты сервисов | `FR-NT-TR` | [SPEC_NATIVE_TRANSCRIPT_v0.1.md](./SPEC_NATIVE_TRANSCRIPT_v0.1.md) | 🟡 | ✅ |
 | **Counterparty Briefs** — брифы к встречам | `FR-CR-05-168` (`FR-CB-*`) | [SPEC_COUNTERPARTY_BRIEFS_v0.1.md](./SPEC_COUNTERPARTY_BRIEFS_v0.1.md) | 🟡 | ✅ |
 | **Task Tracker** — жизненный цикл задач | `FR-CR-*` | [SPEC_TASK_TRACKER_v0.1.md](./SPEC_TASK_TRACKER_v0.1.md) | 🟢 | ⚠️ |
 | **Task Extractor** — задачи из TG/Slack | `FR-CR-*` | [SPEC_TASK_EXTRACTOR_v0.1.md](./SPEC_TASK_EXTRACTOR_v0.1.md) | 🟠 | ⚠️ |

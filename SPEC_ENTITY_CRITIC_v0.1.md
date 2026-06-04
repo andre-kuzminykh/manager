@@ -1,130 +1,126 @@
-# SPEC v0.1 — Entity critic: multi-sheet retrieval + context selection (FR-EC-CRITIC)
+# SPEC v0.1 — Entity quality via Viktor's fundraising DB (FR-EC-CRITIC)
 
-> **Дата:** 2026-06-04 · **Эпик:** `FR-EC-CRITIC` (entity selection critic)
-> **Флаги:** `ENTITY_CRITIC_ENABLED`, `ENTITY_CRITIC_SHADOW` (оба default false).
-> **Связано:** [SPEC_ENTITY_CONSISTENCY_v0.1.md](./SPEC_ENTITY_CONSISTENCY_v0.1.md)
-> (FR-CR-05-242 — одна форма на встречу), [AUDIT.md](./AUDIT.md) §entity.
-> **Статус:** ⚪ SPEC-ONLY (код не написан; ingest + критик за флагами, shadow-first).
+> **Дата:** 2026-06-04 · **rev2** (переписано после разбора n8n-воркфлоу Виктора)
+> **Эпик:** `FR-EC-CRITIC` (entity quality / canonical selection)
+> **Флаги:** `ENTITY_FR_MIRROR_ENABLED`, `ENTITY_CRITIC_ENABLED`, `ENTITY_CRITIC_SHADOW` (все default false).
+> **Связано:** [SPEC_ENTITY_CONSISTENCY_v0.1.md](./SPEC_ENTITY_CONSISTENCY_v0.1.md) (одна форма на встречу).
+> **Статус:** ⚪ SPEC-ONLY. Бэкап прежней редакции spec — в git (`7d71e56`).
 
 ## 1. Проблема
 
-Начальница (Ира) пользуется ботом коллеги (Виктор) и он отдаёт **правильные**
-канонические имена там, где наш бот ошибается («большая часть была в файле
-followers»). Наш резолвер (`entity_match_v2`: vector top-k + fuzzy canonicalize)
-проигрывает по **recall** (если имени нет в нашем `counterparties`-Sheet — не найдём)
-и по **точности выбора** (между двумя похожими кандидатами из разных списков мы
-берём ближайшего по строке, а не уместного по контексту встречи).
+Начальница (Ира) пользуется ботом коллеги (Виктор) — он отдаёт **правильные**
+канонические имена там, где наш бот ошибается («большая часть была в файле followers»).
 
-## 2. Гипотеза о подходе Виктора (подтвердить зондом MCP)
+## 2. Как РЕАЛЬНО устроено у Виктора (из его n8n — факты)
 
-Это **RAG c финальным критиком**, не один список в промпт:
+- **`humanoid_fr_sync`** (cron 3ч) — хардкод-список **~22 листов** из 6 файлов
+  (`Fundraising Status_CEO Офис`, `Followers`, `List_Series_A` (20 листов),
+  `Tatiana` xlsx, `Xasis` xlsx, `European SFO Targets+Xasis`).
+- **`humanoid_fr_process_sheet`** на каждый лист: read → **MD5-хэш строки**
+  (change-detection по `file_id::sheet::row_index`) → только изменённые строки →
+  **GPT-4.1-mini `classify_and_extract`** (парсит грязную строку в структуру +
+  нормализует enum'ы и имя: «Nvidia (Барсуков)» → company+contact) →
+  **upsert в Supabase `humanoid_fr_companies`** (dedup по `company_name_normalized`,
+  merge `source_sheets`+`row_hashes`) → лог `humanoid_fr_events`.
+- **MCP** `search`/`dashboard`/`history` — Supabase RPC; `humanoid_fr_search` =
+  **fuzzy-поиск** (pg_trgm) по имени + фильтры status/assignee/entity_type/deadline.
 
-1. **Источники — все его листы** (`followers`, `List_Series_A`,
-   `Xasis (European SFO Targets)`, …), у каждой сущности атрибуты:
-   `type / status / industry / next_action / last_update` (видно в
-   `humanoid_fr_search`).
-2. **Retrieval** кандидатов по упоминанию из всех листов.
-3. **Финальный критик** (LLM): упоминание + **контекст встречи** + кандидаты с
-   атрибутами → выбирает того, **кто лучше подходит под контекст**.
+**Ключевое:** отдельной «ноды-критика» НЕТ. LLM работает на **ingest** (строка→структура),
+на **запросе** — обычный fuzzy-поиск. «Финальный критик под контекст» — это **сам
+чат-агент в Slack**: зовёт `humanoid_fr_search` и своим разумом выбирает из результатов.
+Его преимущество = **ширина** (22 листа в одной чистой БД) + **LLM-нормализация на
+ingest** + **рассуждение консумер-агента**.
 
-Чего у нас нет — именно шага (3) **с контекстом встречи**. Это и строим.
+## 3. Наш план — НЕ дублировать его ingest
 
-## 3. Решения
+У Виктора уже есть готовая, нормализованная, дедуплицированная таблица
+`humanoid_fr_companies` (~660 active / 1415 всего) в Supabase `uqbcabewzyenidihbxln`.
+У нас в раннере уже есть коннект в **тот же проект** (`telegram_source_database_url`).
+→ читаем его таблицу **напрямую** и зеркалим в наш каталог. Один источник правды,
+нормализованный его пайплайном, ноль дублирования.
 
 | # | Решение |
 |---|---|
-| D1 | Каталог пополняем из **всех листов** (не только counterparties), с провенансом листа и атрибутами. |
-| D2 | Перед каждым ingest — **snapshot** текущего каталога (pg_dump) → откат одной командой. |
-| D3 | Новый шаг-критик: retrieval кандидатов (vector+lex+alias, по всем листам) → **один LLM-вызов** с контекстом встречи → каноническое имя + лист + confidence. |
-| D4 | Критик **за флагом** `ENTITY_CRITIC_ENABLED` (default false). При off — текущий `entity_match_v2` без изменений. |
-| D5 | `ENTITY_CRITIC_SHADOW=true` — критик **считает и логирует** свой выбор, но НЕ применяет (сверяем с текущим перед раскаткой). |
-| D6 | Применяем выбор критика только если `confidence ≥ порога` И он отличается от текущего. Иначе оставляем текущий резолв. |
-| D7 | Каждое решение критика пишем в **аудит-лог** (`entity_critic_decisions`) — для сверки, метрик и отката формы постфактум. |
+| D1 | **Track 1 (recall, главный выигрыш):** зеркалим `humanoid_fr_companies` → `entity_catalog_staging`. Cron, read-only к его БД. |
+| D2 | Доступ: роль `humanoid_reader` (TG) → проверить `GRANT SELECT` на `humanoid_fr_companies`; если нет — попросить Виктора дать read-роль ИЛИ REST-эндпоинт. |
+| D3 | Перед каждым зеркалированием — **snapshot** нашего каталога (pg_dump) → откат одной командой. |
+| D4 | После зеркалирования наш `entity_match_v2` видит его 660+ компаний → recall-фикс закрывает жалобу. |
+| D5 | **Track 2 (disambiguation, опц.):** контекст-критик на шаге `canonicalize` встречи — повторяет «разум агента» в нашем не-чатовом пайплайне. За флагом, shadow-first. |
+| D6 | Всё за флагами (`ENTITY_FR_MIRROR_ENABLED`, `ENTITY_CRITIC_ENABLED`/`_SHADOW`), default false. При off — текущий резолвер без изменений. |
 
-## 4. Архитектура
+## 4. Track 1 — зеркало FR-БД (делаем первым)
 
 ```
-[ingest, разовый/по cron]
-  все листы Виктора/наши Sheets ──► snapshot каталога (D2)
-        │                            └─ pg_dump entity_catalog_staging → /traces/catalog_backup_<ts>.sql
+[cron, ops/mirror_fr_companies.py, за флагом ENTITY_FR_MIRROR_ENABLED]
+  Supabase humanoid_fr_companies (read-only)
+        │  SELECT company_name, company_name_normalized, entity_type,
+        │         current_status, industry, contact_person, aliases?, source_sheets
         ▼
-  upsert в entity_catalog_staging (+ source_list, +attrs)   ← аддитивно, по name_normalised
-
-[runtime, шаг canonicalize встречи, за флагом]
-  extracted entity mention
-        │  retrieval: vector top-k + lexical + alias  (по всем листам)
+  snapshot нашего каталога (pg_dump entity_catalog_staging → /traces/catalog_backup_<ts>.sql)
         ▼
-  candidates[]  (name, list, type, status, industry, last_update, score)
-        │  + meeting context: title, participants, transcript-window вокруг упоминания
-        ▼
-  LLM-критик ──► { canonical, source_list, confidence, reason } | {none}
-        │  (shadow: только лог; live: apply если confidence≥порог и ≠ current)
-        ▼
-  запись в entity_critic_decisions + (live) подстановка канонической формы
-        │
-        ▼
-  далее — карта замен detailed → задачи/короткое (SPEC_ENTITY_CONSISTENCY, без изменений)
+  upsert в entity_catalog_staging по name_normalised
+        ├─ name = company_name (каноническая форма)
+        ├─ is_org = (entity_type != angel_prospect)
+        ├─ parent_org / aliases (contact_person, прежние формы)
+        ├─ source_list = source_sheets[].sheet_name (провенанс)
+        └─ attrs = {entity_type, current_status, industry}  (для критика)
 ```
 
-## 5. Данные (аддитивно, ничего не ломаем)
+- Маппинг его полей → наш `EntityCatalogStaging` (аддитивно добавить `source_list TEXT`,
+  `attrs JSONB`, оба nullable; старые строки = NULL, vector-поиск не меняется).
+- Идемпотентно по `name_normalised`; чужие листы НЕ перетирают наши вручную внесённые
+  строки (merge, не replace).
 
-- **`entity_catalog_staging`** — добавить nullable-поля: `source_list TEXT`,
-  `attrs JSONB` (status/industry/next_action/last_update). Старые строки = NULL,
-  поведение vector-поиска не меняется (поля для критика, не для эмбеддинга).
-- **`entity_critic_decisions`** (новая таблица): `id, meeting_source (zoom/ff),
-  meeting_source_id, mention, chosen_name, chosen_list, confidence, reason,
-  candidates JSONB, applied BOOL, shadow BOOL, created_at`. Append-only —
-  для метрик recall/точности и разбора жалоб.
-- Миграция additive `0041_entity_critic.py` (`down_revision=0040`).
+## 5. Track 2 — контекст-критик (опционально, после Track 1)
 
-## 6. Чистые / тестируемые юниты
+Для каждого спорного упоминания на шаге `canonicalize`:
+retrieval кандидатов (vector+lex по каталогу, теперь с его данными) → **один LLM-вызов**
+с контекстом встречи (title, participants, окно транскрипта) + кандидаты с `attrs` →
+`{canonical, source_list, confidence, reason}` | `none`. Применяем при `confidence≥порог`
+и `≠current`; иначе текущий резолв. Лог в `entity_critic_decisions` (append-only).
 
-- `assemble_candidates(mention, hits) -> list[Candidate]` — слияние vector/lex/alias,
-  дедуп по name_normalised, сорт по score. (чистая)
-- `build_critic_prompt(mention, context, candidates) -> str` — детерминированная сборка. (чистая)
-- `parse_critic_response(text) -> Decision` — извлекает `{canonical, source_list,
-  confidence, reason}` или `none`; на мусоре → `none` (fail-safe). (чистая)
-- `should_apply(decision, *, current, min_confidence) -> bool` — `confidence≥min И
-  canonical≠current И canonical непустой`. (чистая)
+Чистые/тестируемые юниты: `assemble_candidates`, `build_critic_prompt`,
+`parse_critic_response`, `should_apply(decision, current, min_confidence)`.
 
-LLM-вызов изолирован за этими чистыми функциями — тестируем без сети.
+## 6. Данные (аддитивно)
+
+- `entity_catalog_staging` +`source_list TEXT` +`attrs JSONB` (nullable).
+- `entity_critic_decisions` (новая, append-only) — только если делаем Track 2.
+- Миграция `0041_entity_quality.py` (`down_revision=0040`).
 
 ## 7. Инварианты безопасности
 
-- **I1.** `ENTITY_CRITIC_ENABLED=false` → ровно текущий `entity_match_v2`. Ноль изменений по умолчанию.
-- **I2.** `ENTITY_CRITIC_SHADOW=true` → ничего не подставляется, только лог `entity_critic_decisions(shadow=true)`. Сверяем неделю.
-- **I3.** Низкая `confidence` / `none` / ошибка LLM → fallback на текущий резолв. Имя всегда получается.
-- **I4.** ingest НЕ трогает прод-таблицы (`counterparties`, `tasks`) — только `entity_catalog_staging`. Перед ingest — snapshot (D2).
-- **I5.** Каждое применённое решение залогировано → форму можно откатить постфактум по `entity_critic_decisions`.
+- **I1.** Все флаги off → текущий `entity_match_v2`, ноль изменений.
+- **I2.** Зеркало — read-only к чужой БД; пишем ТОЛЬКО в `entity_catalog_staging`, не в `counterparties`/`tasks`.
+- **I3.** Перед каждым зеркалированием — snapshot каталога (откат `psql < backup`).
+- **I4.** Критик: низкая confidence/none/ошибка → текущий резолв (имя всегда есть).
+- **I5.** `ENTITY_CRITIC_SHADOW=true` → только лог, без подстановки.
 
-## 8. Бэкап и откат (по требованию оператора)
+## 8. Бэкап и откат
 
 | Что | Бэкап | Откат |
 |---|---|---|
-| Спеки/код | git-ветка `claude/...`, версия `_v0.1` | `git revert` / `git checkout <tag>` |
-| Каталог перед ingest | `pg_dump entity_catalog_staging` → `catalog_backup_<ts>.sql` (D2) | `psql < catalog_backup_<ts>.sql` |
-| Применённые формы | `entity_critic_decisions` (append-only) | re-apply прежней формы по логу |
-| Поведение рантайма | флаги off + shadow | снять `ENTITY_CRITIC_ENABLED` (env), без передеплоя кода |
+| Спека/код | git-ветка + версия (`7d71e56` = rev1) | `git revert`/`checkout` |
+| Каталог перед зеркалом | `pg_dump entity_catalog_staging` → `catalog_backup_<ts>.sql` | `psql < backup` |
+| Применённые формы (Track 2) | `entity_critic_decisions` append-only | re-apply по логу |
+| Поведение | env-флаги off + shadow | снять флаг, без передеплоя кода |
 
 ## 9. Тесты
 
-`tests/requirements/test_entity_critic.py`:
-- `assemble_candidates` — дедуп/сорт/слияние источников;
-- `build_critic_prompt` — содержит mention, контекст, всех кандидатов с атрибутами;
-- `parse_critic_response` — валид/мусор/none;
-- `should_apply` — порог, identity-skip, пустой-skip;
-- shadow-режим: решение пишется, подстановка НЕ происходит (мок-LLM).
+- `test_mirror_fr_companies.py` — маппинг его полей → каталог; идемпотентность; merge-не-replace; snapshot вызывается перед записью (мок Supabase + мок pg_dump).
+- `test_entity_critic.py` (Track 2) — assemble/prompt/parse/should_apply; shadow не подставляет.
 
 ## 10. Раскатка
 
-- **E0** — миграция additive (поля + `entity_critic_decisions`). Прод не меняется.
-- **E1** — ingest всех листов в каталог (после snapshot). Сверить размер каталога до/после.
-- **E2** — `ENTITY_CRITIC_SHADOW=true`: неделю собираем `entity_critic_decisions`, сверяем выбор критика с текущим резолвом и с ботом Виктора на тех же встречах.
-- **E3** — `ENTITY_CRITIC_ENABLED=true` (shadow off): включаем подстановку. Метрика — доля задач/саммари с корректной канонической формой (жалобы Иры → 0).
+- **E0** — миграция additive (поля каталога). Прод не меняется.
+- **E1** — проверить доступ к `humanoid_fr_companies` (D2). Нет доступа → запрос Виктору.
+- **E2** — `ENTITY_FR_MIRROR_ENABLED=true`: разовый зеркало-прогон (после snapshot), сверить размер каталога до/после, выборочно проверить имена из followers.
+- **E3** — встреча проходит резолвер с обогащённым каталогом; сверить, что имена из жалобы Иры теперь корректны.
+- **E4** (опц.) — Track 2 критик: shadow-неделя → включить.
 
-## 11. Открытые вопросы (подтвердить зондом MCP Виктора с прод-хоста)
+## 11. Открытые вопросы
 
-- Точный список листов и набор полей у сущности (`humanoid_fr_search` schema).
-- Делает ли Виктор retrieval сам или кладёт весь список в промпт (влияет на E1: нужен ли нам vector или хватит lexical+LLM на 1.5К именах).
-- Порог `min_confidence` (старт 0.7) — тюним по shadow-логу E2.
-- Нужен ли критику transcript-window или хватает title+participants (стоимость vs точность).
+- Доступ роли `humanoid_reader` к `humanoid_fr_companies` (проверить SELECT; иначе грант/REST у Виктора).
+- Нужен ли вообще Track 2, если Track 1 (его чистые данные в нашем резолвере) уже закрывает recall — решаем после E3 по факту жалоб.
+- Частота зеркала: его sync 3ч → нам хватит раз в 6–12ч (имена меняются медленно).
+- Не дублируем ли мы Виктора по смыслу — может, начальнице достаточно его бота, а нам — только доставка имён в саммари/задачи (тогда Track 1 и хватит).

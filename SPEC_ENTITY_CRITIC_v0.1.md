@@ -118,7 +118,41 @@ retrieval кандидатов (vector+lex по каталогу, теперь �
 - **E3** — встреча проходит резолвер с обогащённым каталогом; сверить, что имена из жалобы Иры теперь корректны.
 - **E4** (опц.) — Track 2 критик: shadow-неделя → включить.
 
-## 11. Открытые вопросы
+## 11. Интеграция в пайплайн встреч (rev3 — prod)
+
+**Точка встройки:** `_step_detailed_summary`, СРАЗУ после
+`canonicalize_summary_text` (которая строит карту замен `applied` и кладёт её в
+`_zm_detail_canon_map` / `_ff_detail_canon_map`, откуда её наследуют задачи и
+короткое саммари — SPEC_ENTITY_CONSISTENCY). FR-резолвер добавляет свои замены
+в ТУ ЖЕ карту → задачи/саммари автоматически получают канонические формы.
+
+```
+detailed_summary (LLM, canonical RU)
+   └─ canonicalize_summary_text → applied {found: canonical}  (people + counterparty)
+        └─ resolve_for_meeting(detailed_summary):                 ← НОВОЕ, за флагом
+             fetch CRM dump (MCP, cached) → shard ≤30K + team roster
+             → parallel maps + critic → decisions
+             → build_replacements (confidence ≥ ENTITY_FR_MIN_CONFIDENCE)
+        └─ APPLY: detailed_summary = canonicalize_text(text, replacements);
+                  merge replacements в _detail_canon_map → задачи/короткое
+        └─ SHADOW: НЕ меняем текст/карту; только пишем решения в БД
+   → лог КАЖДОГО решения в entity_fr_decisions (для сверки/отката)
+```
+
+**Режимы (`app/services/fr_resolve_step.resolve_for_meeting`):**
+- `ENTITY_FR_RESOLVER_ENABLED=false` → шаг не выполняется (ноль изменений, I1);
+- `…ENABLED=true, …SHADOW=true` → считает + логирует, **текст не трогает**;
+- `…ENABLED=true, …SHADOW=false` → применяет замены ≥ порога и вливает в карту.
+
+**Данные:** `entity_fr_decisions` (id, source, source_id, mention, canonical,
+source_list, confidence, applied, shadow, created_at) — append-only; миграция
+`0041` additive (`down_revision=0040`).
+
+**Инварианты:** best-effort (любой сбой резолвера НЕ ломает шаг — try/except,
+саммари строится как раньше); reuse карты замен = consistency гарантирована;
+люди-сотрудники из team_members, внешние контакты-люди — вне CRM (отдельно).
+
+## 12. Открытые вопросы
 
 - Доступ роли `humanoid_reader` к `humanoid_fr_companies` (проверить SELECT; иначе грант/REST у Виктора).
 - Нужен ли вообще Track 2, если Track 1 (его чистые данные в нашем резолвере) уже закрывает recall — решаем после E3 по факту жалоб.

@@ -788,6 +788,28 @@ class ZoomPipeline:
                     "zoom_detailed_summary_canonicalize_failed",
                     zoom_id=row.zoom_id, error=str(e),
                 )
+            # FR-EC-CRITIC — resolve entity mentions against Viktor's CRM and
+            # merge the canonical replacements into the SAME canon map so tasks
+            # + short summary inherit them. Gated/shadow/best-effort.
+            try:
+                from app.services.fr_resolve_step import resolve_for_meeting
+                fr_repl = resolve_for_meeting(
+                    settings=self._settings, text=row.detailed_summary,
+                    meeting_title=row.title, participants=_roster,
+                    source="zoom", source_id=row.zoom_id,
+                    llm=self._llm, session=session,
+                )
+                if fr_repl:
+                    from app.services.counterparty_match import canonicalize_text
+                    row.detailed_summary = canonicalize_text(row.detailed_summary, fr_repl)
+                    merged = dict(row.__dict__.get("_zm_detail_canon_map") or {})
+                    merged.update(fr_repl)
+                    row.__dict__["_zm_detail_canon_map"] = merged
+                    log.info("zoom_fr_resolver_applied",
+                             zoom_id=row.zoom_id, rewrites=fr_repl)
+            except Exception as e:  # noqa: BLE001
+                log.warning("zoom_fr_resolver_failed",
+                            zoom_id=row.zoom_id, error=str(e))
         row.detailed_summarised = True
         row.last_error = None
         return True

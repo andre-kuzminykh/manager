@@ -362,6 +362,28 @@ def parse_resolution(text: str) -> list[Decision]:
     return out
 
 
+def build_replacements(
+    decisions: list[Decision], *, min_confidence: float = 0.7
+) -> dict[str, str]:
+    """Turn confident decisions into a {surface_form: canonical} map for
+    `canonicalize_text`. A mention can carry several surface variants joined
+    by '/' or ',' (e.g. «Ki One Capital India/Киван») — split them so EVERY
+    variant present in the text gets rewritten to the canonical. Identity and
+    empty mappings are skipped."""
+    out: dict[str, str] = {}
+    for d in decisions:
+        if not d.canonical or d.confidence < min_confidence:
+            continue
+        canon = d.canonical.strip()
+        if not canon:
+            continue
+        for part in re.split(r"[/,;]", d.mention or ""):
+            key = part.strip()
+            if key and key.lower() != canon.lower():
+                out[key] = canon
+    return out
+
+
 def should_apply(d: Decision, *, current: str | None, min_confidence: float = 0.7) -> bool:
     """Apply the resolver's pick only when confident, non-empty, and it
     actually changes the current form (identity-skip)."""
@@ -497,5 +519,6 @@ __all__ = [
     "parse_resolution",
     "merge_partials_deterministic",
     "resolve_sharded",
+    "build_replacements",
     "should_apply",
 ]

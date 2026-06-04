@@ -54,6 +54,7 @@ from app.models.task import (
 )
 from app.models.task_status_event import TaskStatusEvent
 from app.models.sheet_task_link import SheetTaskLink
+from app.models.entity_fr_decision import EntityFrDecision
 from app.models.fireflies import MeetingRecording
 from app.models.meeting_agenda import MeetingAgenda
 from app.models.zoom import ZoomRecording
@@ -111,6 +112,7 @@ __all__ = [
     "TaskStatusHistory",
     "TaskStatusEvent",
     "SheetTaskLink",
+    "EntityFrDecision",
     "TaskSubscription",
     "TeamMember",
     "MeetingAgenda",

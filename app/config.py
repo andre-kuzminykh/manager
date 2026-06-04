@@ -454,6 +454,11 @@ class Settings(BaseSettings):
     entity_fr_shard_workers: int = Field(
         default=4, alias="ENTITY_FR_SHARD_WORKERS"
     )
+    # Apply a resolver pick to summaries/tasks only at/above this confidence
+    # (smoke-calibrated: correct cross-lingual matches land 0.7-0.99).
+    entity_fr_min_confidence: float = Field(
+        default=0.7, alias="ENTITY_FR_MIN_CONFIDENCE"
+    )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable
     # flag is flipped LAST, after indexing + synthetic calibration (operator

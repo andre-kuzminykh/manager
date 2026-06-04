@@ -1434,6 +1434,27 @@ class FirefliesPipeline:
                 "fireflies_detailed_summary_canonicalize_failed",
                 fireflies_id=row.fireflies_id, error=str(e),
             )
+        # FR-EC-CRITIC — resolve entity mentions against Viktor's CRM, merge
+        # canonical replacements into the same canon map (tasks inherit them).
+        try:
+            from app.services.fr_resolve_step import resolve_for_meeting
+            fr_repl = resolve_for_meeting(
+                settings=self._settings, text=row.detailed_summary,
+                meeting_title=row.title, participants=list(row.participants or []),
+                source="fireflies", source_id=row.fireflies_id,
+                llm=self._llm, session=session,
+            )
+            if fr_repl:
+                from app.services.counterparty_match import canonicalize_text
+                row.detailed_summary = canonicalize_text(row.detailed_summary, fr_repl)
+                merged = dict(row.__dict__.get("_ff_detail_canon_map") or {})
+                merged.update(fr_repl)
+                row.__dict__["_ff_detail_canon_map"] = merged
+                log.info("fireflies_fr_resolver_applied",
+                         fireflies_id=row.fireflies_id, rewrites=fr_repl)
+        except Exception as e:  # noqa: BLE001
+            log.warning("fireflies_fr_resolver_failed",
+                        fireflies_id=row.fireflies_id, error=str(e))
         row.detailed_summarised = True
         row.last_error = None
         return True

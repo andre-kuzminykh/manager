@@ -1065,6 +1065,9 @@ class ZoomPipeline:
                 cal_attendees_names.append(nm)
         if cal_attendees_names:
             effective_participants = cal_attendees_names
+        elif self._settings.meeting_calendar_attendees_only:
+            # FR-CR-05-254 — Calendar is the sole source; no LLM/raw fallback.
+            effective_participants = []
         else:
             effective_participants = list(row.participants or [])
         participants_block = "\n".join(
@@ -1850,7 +1853,14 @@ class ZoomPipeline:
             row, session, calendar_events=events,
         )
         cal_attendees = (resolved or {}).get("attendees") or []
-        # FR-CR-05-172 — cross-reference Calendar invitees with the
+        # FR-CR-05-254 — Calendar is the SINGLE source of truth for invitees.
+        # No Zoom-presence reconcile (don't drop no-shows, don't add zoom-only
+        # joiners). The «Участники:» line = exactly the calendar invitee list.
+        if self._settings.meeting_calendar_attendees_only:
+            if cal_attendees:
+                row.calendar_attendees = cal_attendees
+            return
+        # FR-CR-05-172 — (legacy) cross-reference Calendar invitees with the
         # ACTUAL Zoom participants and (a) drop calendar invitees who
         # didn't join, (b) add Zoom participants who joined but were
         # NOT on the Calendar invite (operator-pinned: «к зуму может

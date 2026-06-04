@@ -1462,42 +1462,40 @@ def canonicalize_text(
         return text
     import re
 
-    # Sort by length DESC so longer surface forms replace first.
+    # Longest surface forms first so «Bauer/Dart» wins over «Bauer».
     items = sorted(
-        mention_to_canonical.items(), key=lambda x: -len(x[0])
+        ((m, c) for m, c in mention_to_canonical.items()
+         if m and c and m != c),
+        key=lambda x: -len(x[0]),
     )
-    out = text
-    for mention, canonical in items:
-        if not mention or not canonical:
-            continue
-        if mention == canonical:
-            continue
-        # FR-CR-05-129 follow-up — skip the replace when the
-        # CANONICAL is already in the text right where we'd
-        # substitute (avoids «Insight Partners Partners»).
-        # Build the lookahead from the canonical's tail.
-        if canonical.lower().startswith(mention.lower() + " "):
-            tail = canonical[len(mention):]
-            tail_pattern = re.escape(tail)
-            try:
-                pattern = re.compile(
-                    r"(?<!\w)" + re.escape(mention)
-                    + r"(?!\w)(?!" + tail_pattern + r")",
-                    flags=re.IGNORECASE,
-                )
-                out = pattern.sub(canonical, out)
-            except re.error:
-                continue
-            continue
-        try:
-            pattern = re.compile(
-                r"(?<!\w)" + re.escape(mention) + r"(?!\w)",
-                flags=re.IGNORECASE,
-            )
-            out = pattern.sub(canonical, out)
-        except re.error:
-            continue
-    return out
+    if not items:
+        return text
+    # FR-CR-05-256 — ONE non-overlapping pass over the ORIGINAL text via a
+    # single alternation (longest-first = leftmost-alternative-wins). Inserted
+    # canonical text is never re-scanned, so a rewrite whose VALUE contains
+    # another mention key can't cascade («Vinrobotics» → «Vinrobotics/
+    # Vinventures», then «Vinventures» → «Vinrobotics/ Vinventures» again).
+    lookup: dict[str, str] = {}
+    for m, c in items:
+        lookup.setdefault(m.lower(), c)
+    alt = "|".join(re.escape(m) for m, _ in items)
+    try:
+        pattern = re.compile(r"(?<!\w)(" + alt + r")(?!\w)", flags=re.IGNORECASE)
+    except re.error:
+        return text
+
+    def _repl(mo: "re.Match[str]") -> str:
+        surface = mo.group(1)
+        canonical = lookup.get(surface.lower(), surface)
+        # FR-CR-05-129 — «Insight» → «Insight Partners» but the text already
+        # reads «Insight Partners» → don't append « Partners» twice.
+        if canonical.lower().startswith(surface.lower() + " "):
+            tail = canonical[len(surface):]
+            if text[mo.end():].lower().startswith(tail.lower()):
+                return surface
+        return canonical
+
+    return pattern.sub(_repl, text)
 
 
 __all__ = [

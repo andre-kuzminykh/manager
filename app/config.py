@@ -508,6 +508,14 @@ class Settings(BaseSettings):
     fireflies_reconcile_calendar_attendees: bool = Field(
         default=True, alias="FIREFLIES_RECONCILE_CALENDAR_ATTENDEES"
     )
+    # FR-CR-05-254 — Google Calendar is the SINGLE source of truth for the
+    # «Участники:» line. When true, the invitee list = resolved calendar
+    # attendees (minus declined) and NOTHING else: no Zoom-presence reconcile
+    # (FR-CR-05-172), no FF speaker reconcile (FR-CR-05-253), no LLM/raw
+    # fallback. Removes the paths that dropped/added/guessed attendees.
+    meeting_calendar_attendees_only: bool = Field(
+        default=True, alias="MEETING_CALENDAR_ATTENDEES_ONLY"
+    )
     # FR-EC-CRITIC-2 — shard the FR catalog into fixed-size record chunks
     # (≈200/shard) for the resolver's map-reduce instead of one giant pass over
     # all ~1424 rows. A single full-catalog LLM pass had unstable company recall

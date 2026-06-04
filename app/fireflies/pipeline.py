@@ -1276,7 +1276,10 @@ class FirefliesPipeline:
         # (LLM-extracted speakers in row.participants, set just above). Drops
         # team invitees who never showed (Kima: Jochen Rudat). Externals + the
         # operator are never dropped. Safety: never end up empty.
-        if self._settings.fireflies_reconcile_calendar_attendees:
+        # FR-CR-05-254 — disabled when Calendar is the single source of truth
+        # (the invitee list is taken from the calendar as-is, no reconcile).
+        if (self._settings.fireflies_reconcile_calendar_attendees
+                and not self._settings.meeting_calendar_attendees_only):
             from app.services.calendar_attendees import reconcile_team_attendees
 
             op_email = (self._settings.zoom_required_email or "").strip()
@@ -2230,6 +2233,9 @@ class FirefliesPipeline:
                 cal_attendees_names.append(nm)
         if cal_attendees_names:
             effective_participants = cal_attendees_names
+        elif self._settings.meeting_calendar_attendees_only:
+            # FR-CR-05-254 — Calendar is the sole source; no LLM/raw fallback.
+            effective_participants = []
         else:
             effective_participants = list(row.participants or [])
         # FR-CR-05-200 — нормализуем участников: резолвим email-адреса в имена

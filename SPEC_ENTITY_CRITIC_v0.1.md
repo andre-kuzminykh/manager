@@ -253,3 +253,23 @@ Safety: если сверка дропнула бы всех — оставля�
 **Почему не Zoom:** у Zoom уже есть авторитетная сверка с Zoom-джойном
 (`_llm_reconcile_unmatched` + join-данные) — там приглашённые-без-явки уже
 отсекаются. Фикс только для FF.
+
+## FR-CR-05-254 — Calendar = единственная истина по участникам
+
+Строка «Участники:» = разрезолвленные **приглашённые из Google Calendar** (минус
+declined) и больше НИЧЕГО. Убраны прочие действия над списком: Zoom-сверка
+присутствия (FR-CR-05-172, дропала не-зашедших / добавляла zoom-only), FF
+speaker-reconcile (FR-CR-05-253), fallback на LLM-из-транскрипта и на сырой
+Zoom/FF-список. Флаг `MEETING_CALENDAR_ATTENDEES_ONLY` (default true); off →
+прежнее поведение. Пост-гейт оператора (`_operator_actually_present`) не затронут
+— он отдельно смотрит calendar/participants/transcript.
+
+## FR-CR-05-256 — canonicalize_text: один проход, без каскада
+
+Регресс (Fundraising): «Vinrobotics/ Vinrobotics/ Vinventures / …» и «Артем
+Соколов Соколовым». Причина — многопроходная замена: вставленный канон повторно
+матчился следующим правилом, чьё ЗНАЧЕНИЕ содержит другой ключ. Фикс: ОДИН
+неперекрывающийся проход по исходному тексту через единую альтернацию
+(длинные формы первыми = leftmost-wins); вставленный текст не пере-сканируется.
+Prefix-guard («Insight»→«Insight Partners») сохранён. Тест
+`tests/requirements/test_canonicalize_text_cascade.py`.

@@ -199,9 +199,10 @@ def main() -> int:
                          arguments={"query": org, "limit": "2"}, timeout=30.0)
             return R._unwrap_mcp_text(t2) if ok2 else ""
 
+        org_hints = [d.canonical for d in decisions if d.canonical]
         people = resolve_people(
             transcript=text, meeting_title=title, participants=participants,
-            already_resolved=already,
+            already_resolved=already, org_hints=org_hints,
             call_orgs=_orgs, search_fn=_search, call_extract=_call,
             max_orgs=getattr(s, "entity_fr_people_max_orgs", 6))
         print(f"Track-2 resolved {len(people)} people:")

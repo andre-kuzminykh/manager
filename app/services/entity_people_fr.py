@@ -68,15 +68,18 @@ _EXTRACT_SYSTEM = (
 def build_person_org_messages(
     *, transcript: str, meeting_title: str | None,
     participants: list[str] | None, already_resolved: list[str] | None = None,
-    max_transcript_chars: int = 16000,
+    org_hints: list[str] | None = None, max_transcript_chars: int = 16000,
 ) -> list[dict[str, str]]:
     ctx = f"Meeting: {meeting_title or '(untitled)'}"
     if participants:
         ctx += "\nParticipants: " + ", ".join(participants)
     resolved = ", ".join(already_resolved or []) or "(none)"
+    hints = ", ".join(org_hints or []) or "(none)"
     return [
         {"role": "system", "content": _ORG_SYSTEM},
         {"role": "user", "content": "ALREADY-RESOLVED (skip these):\n" + resolved},
+        {"role": "user", "content": "ORGS DISCUSSED IN THIS MEETING (a person is most "
+                                    "likely tied to ONE of these — pick from here when possible):\n" + hints},
         {"role": "user", "content": ctx + "\n\nTRANSCRIPT/SUMMARY:\n"
                                     + (transcript or "")[:max_transcript_chars]},
     ]
@@ -104,22 +107,25 @@ def resolve_people(
     meeting_title: str | None,
     participants: list[str] | None,
     already_resolved: list[str] | None = None,
+    org_hints: list[str] | None = None,
     call_orgs: Callable[[list[dict]], list[tuple[str, str]]],
     search_fn: Callable[[str], str],
     call_extract: Callable[[list[dict]], list[Decision]],
     max_orgs: int = 6,
 ) -> list[Decision]:
     """Agentic Track-2 resolve. Finds external-contact PEOPLE in the transcript
-    itself (excluding `already_resolved`), guesses each org, fetches that CRM
-    record's prose, extracts the canonical full name. Injected:
-    `call_orgs(messages)->[(mention,org)]`, `search_fn(org)->record text`,
-    `call_extract(messages)->[Decision]`."""
+    itself (excluding `already_resolved`), guesses each org (hinted by the
+    meeting's resolved companies), fetches those CRM records' prose (the
+    `communication_log` = the Followers «Communication» column), extracts the
+    canonical full names. Injected: `call_orgs(messages)->[(mention,org)]`,
+    `search_fn(org)->record text`, `call_extract(messages)->[Decision]`."""
     if not (transcript or "").strip():
         return []
     try:
         person_orgs = call_orgs(build_person_org_messages(
             transcript=transcript, meeting_title=meeting_title,
-            participants=participants, already_resolved=already_resolved)) or []
+            participants=participants, already_resolved=already_resolved,
+            org_hints=org_hints)) or []
     except Exception as e:  # noqa: BLE001
         log.info("fr_people_org_step_failed", error=str(e))
         return []
@@ -127,10 +133,12 @@ def resolve_people(
     if not person_orgs:
         return []
 
-    # distinct orgs, capped
+    # Orgs to read: those LLM #1 tied to a person, PLUS the meeting's resolved
+    # companies (org_hints) — so a person whose org was guessed weakly is still
+    # caught when their company was discussed (e.g. «Стеф» in Jabal's comm_log).
     orgs: list[str] = []
-    for _m, o in person_orgs:
-        if o not in orgs:
+    for o in [o for _m, o in person_orgs] + list(org_hints or []):
+        if o and o not in orgs:
             orgs.append(o)
     orgs = orgs[:max_orgs]
 

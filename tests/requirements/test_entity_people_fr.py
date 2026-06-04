@@ -17,12 +17,14 @@ _TAWAZUN = (
 )
 
 
-def test_org_messages_carry_resolved_and_context() -> None:
+def test_org_messages_carry_resolved_hints_and_context() -> None:
     msgs = build_person_org_messages(
         transcript="Обсудили Самир из SDF", meeting_title="Fundraising",
-        participants=["Alina"], already_resolved=["Tether", "Key 1 Capital"])
+        participants=["Alina"], already_resolved=["Tether", "Key 1 Capital"],
+        org_hints=["Tawazun Strategic Development Fund", "Jabal"])
     assert "Tether" in msgs[1]["content"]                 # already-resolved skip-list
-    assert "Fundraising" in msgs[2]["content"] and "SDF" in msgs[2]["content"]
+    assert "Jabal" in msgs[2]["content"]                  # org hints
+    assert "Fundraising" in msgs[3]["content"] and "SDF" in msgs[3]["content"]
 
 
 def test_extract_messages_embed_records_and_pairs() -> None:

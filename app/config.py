@@ -469,7 +469,7 @@ class Settings(BaseSettings):
         default=False, alias="ENTITY_FR_PEOPLE_ENABLED"
     )
     entity_fr_people_max_orgs: int = Field(
-        default=6, alias="ENTITY_FR_PEOPLE_MAX_ORGS"
+        default=10, alias="ENTITY_FR_PEOPLE_MAX_ORGS"
     )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable

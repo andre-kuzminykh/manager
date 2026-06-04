@@ -126,7 +126,8 @@ def _make_search_fn(mcp_url: str, *, timeout: float = 30.0):
 
 def _resolve_people_track(
     *, settings: Any, llm: Any, mcp_url: str, already_resolved: list[str],
-    meeting_title: str | None, participants: list[str] | None, text: str,
+    org_hints: list[str], meeting_title: str | None,
+    participants: list[str] | None, text: str,
     call_orgs: Callable | None, search_fn: Callable | None,
     call_extract: Callable[[list[dict]], list[R.Decision]],
 ) -> list[R.Decision]:
@@ -138,7 +139,7 @@ def _resolve_people_track(
         search_fn = _make_search_fn(mcp_url)
     return resolve_people(
         transcript=text, meeting_title=meeting_title, participants=participants,
-        already_resolved=already_resolved,
+        already_resolved=already_resolved, org_hints=org_hints,
         call_orgs=call_orgs, search_fn=search_fn, call_extract=call_extract,
         max_orgs=int(getattr(settings, "entity_fr_people_max_orgs", 6)),
     )
@@ -209,9 +210,13 @@ def resolve_for_meeting(
             # exclude what Track 1/3 already handled (mentions + canonicals)
             already = [d.mention for d in decisions]
             already += [d.canonical for d in decisions if d.canonical]
+            # resolved company canonicals → org hints for the person→org guess
+            org_hints = [d.canonical for d in decisions
+                         if d.canonical and kinds.get(id(d)) == "company"]
             people = _resolve_people_track(
                 settings=settings, llm=llm, mcp_url=mcp_url,
-                already_resolved=already, meeting_title=meeting_title,
+                already_resolved=already, org_hints=org_hints,
+                meeting_title=meeting_title,
                 participants=participants, text=text or "",
                 call_orgs=people_call_orgs, search_fn=people_search_fn,
                 call_extract=call,

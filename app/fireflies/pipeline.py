@@ -1508,19 +1508,19 @@ class FirefliesPipeline:
         participants = ", ".join(row.participants or [])
         prompt = (
             "Determine a SHORT (≤60 chars) meeting topic in "
-            "Russian for the transcript below. Prefer the "
+            "ENGLISH for the transcript below. Prefer the "
             "external company / client name if any (ADNOC, "
             "Bosch, Goldman Sachs). Otherwise pick the main "
-            "subject (раунд, проект, кандидат). Drop fluff. "
+            "subject (round, project, candidate). Drop fluff. "
             "Output ONLY the topic, no quotes or extra text.\n\n"
-            f"Участники: {participants}\n\n"
-            f"Транскрипт (первые 6000 chars):\n"
+            f"Participants: {participants}\n\n"
+            f"Transcript (first 6000 chars):\n"
             f"{(row.transcript_text or '')[:6000]}"
         )
         try:
             text = self._llm.complete_text(  # type: ignore[attr-defined]
                 system_prompt=(
-                    "You output ONE short Russian meeting topic "
+                    "You output ONE short ENGLISH meeting topic "
                     "phrase. ≤60 chars. No quotes."
                 ),
                 user_prompt=prompt,

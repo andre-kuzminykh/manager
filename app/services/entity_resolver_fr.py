@@ -138,17 +138,26 @@ def parse_fr_dump(raw_mcp_text: str) -> list[FrEntity]:
     return out
 
 
-def shard_catalog(entities: list[FrEntity], *, max_chars: int) -> list[list[FrEntity]]:
-    """Split the catalog into shards whose lean text is ≤ `max_chars` each, so
-    every map-call stays under the per-call context budget (FR-EC-CRITIC: 30K
-    tokens). Greedy pack, order preserved. A single oversize line still gets
-    its own shard (never dropped)."""
+def shard_catalog(
+    entities: list[FrEntity], *, max_chars: int, max_records: int | None = None
+) -> list[list[FrEntity]]:
+    """Split the catalog into shards. A shard is closed when EITHER its lean
+    text would exceed `max_chars` OR it reaches `max_records` entities.
+
+    FR-EC-CRITIC-2: record-count sharding (≈200/shard) is the reliability lever
+    — a single LLM pass scanning the whole 1424-row catalog has unstable recall
+    (44 companies one run, 0 the next), but each focused ~200-row shard matches
+    reliably and the critic merges the parallel results. `max_records=None`
+    keeps the original char-only behaviour. Greedy pack, order preserved; a
+    single oversize line still gets its own shard (never dropped)."""
     shards: list[list[FrEntity]] = []
     cur: list[FrEntity] = []
     cur_len = 0
     for ent in entities:
         ln = len(ent.lean_line()) + 1
-        if cur and cur_len + ln > max_chars:
+        over_chars = cur and cur_len + ln > max_chars
+        over_count = max_records and len(cur) >= max_records
+        if over_chars or over_count:
             shards.append(cur)
             cur, cur_len = [], 0
         cur.append(ent)
@@ -445,14 +454,17 @@ def shard_char_budget(
 
 
 def assemble_shard_texts(
-    catalog: list[FrEntity], roster_text: str, *, max_chars: int
+    catalog: list[FrEntity], roster_text: str, *, max_chars: int,
+    max_records: int | None = None,
 ) -> list[str]:
     """Render the candidate slices for the map step. CRM is sharded to
-    `max_chars`; the team roster is FOLDED into the last shard when it fits, so
-    a catalog that fits in one slice yields ONE shard_text → a SINGLE
-    reasoning pass (no critic-merge variance). Only when the data exceeds one
-    slice do we fall back to multiple shards + critic."""
-    shards = [lean_catalog_text(sh) for sh in shard_catalog(catalog, max_chars=max_chars)]
+    `max_chars` AND `max_records` (≈200/shard, FR-EC-CRITIC-2 — small focused
+    shards resolve reliably; the critic merges). The team roster is FOLDED into
+    the last shard when it fits. With `max_records=None` a catalog that fits one
+    slice yields ONE shard (legacy single-pass)."""
+    shards = [lean_catalog_text(sh)
+              for sh in shard_catalog(catalog, max_chars=max_chars,
+                                      max_records=max_records)]
     if roster_text:
         if shards and len(shards[-1]) + len(roster_text) + 1 <= max_chars:
             shards[-1] = shards[-1] + "\n" + roster_text

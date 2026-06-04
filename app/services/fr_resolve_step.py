@@ -190,9 +190,13 @@ def resolve_for_meeting(
         rows = team_rows if team_rows is not None else (
             _load_team_rows(session) if session is not None else [])
         roster = R.team_roster_text(rows)
-        # Folds team into one slice when the CRM fits → single pass (no critic
-        # variance); shards + critic only when the CRM outgrows the budget.
-        shard_texts = R.assemble_shard_texts(catalog, roster, max_chars=budget)
+        # FR-EC-CRITIC-2 — shard the CRM into ≈200-record chunks (not one pass
+        # over all 1424) so each focused map-call resolves reliably and the
+        # critic merges; this removes the run-to-run company-recall variance.
+        shard_records = int(getattr(settings, "entity_fr_shard_records", 200) or 0)
+        shard_texts = R.assemble_shard_texts(
+            catalog, roster, max_chars=budget,
+            max_records=shard_records or None)
 
         if call is None:
             call = _make_llm_call(

@@ -66,6 +66,23 @@ def test_shard_catalog_respects_budget() -> None:
     assert len(r.shard_catalog(ents, max_chars=100000)) == 1
 
 
+def test_shard_catalog_record_count() -> None:
+    # FR-EC-CRITIC-2 — split by record count even when the whole catalog fits
+    # the char budget (the reliability lever).
+    ents = [r.FrEntity(name=f"Co{i}", entity_type="vc", status="active",
+                       industry="", contact="", sources=[], fr_id=str(i))
+            for i in range(450)]
+    shards = r.shard_catalog(ents, max_chars=10_000_000, max_records=200)
+    assert [len(s) for s in shards] == [200, 200, 50]
+    assert sum(len(s) for s in shards) == 450        # nothing dropped
+    # max_records=None → legacy single shard when it fits the budget
+    assert len(r.shard_catalog(ents, max_chars=10_000_000, max_records=None)) == 1
+    # roster folds into the last record-sharded slice
+    texts = r.assemble_shard_texts(ents, "ROSTER", max_chars=10_000_000,
+                                   max_records=200)
+    assert len(texts) == 3 and "ROSTER" in texts[-1]
+
+
 def test_team_roster_text() -> None:
     txt = r.team_roster_text([("Jochen Rudat", "advisor", "Йохан jochen"), ("", "", "")])
     assert "Jochen Rudat | team | advisor | aliases: Йохан jochen" in txt

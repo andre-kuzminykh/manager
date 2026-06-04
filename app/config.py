@@ -508,6 +508,14 @@ class Settings(BaseSettings):
     fireflies_reconcile_calendar_attendees: bool = Field(
         default=True, alias="FIREFLIES_RECONCILE_CALENDAR_ATTENDEES"
     )
+    # FR-EC-CRITIC-2 — shard the FR catalog into fixed-size record chunks
+    # (≈200/shard) for the resolver's map-reduce instead of one giant pass over
+    # all ~1424 rows. A single full-catalog LLM pass had unstable company recall
+    # (44 resolved one run, 0 the next); small focused shards + the critic merge
+    # make it deterministic. 0 → disable record sharding (char-budget only).
+    entity_fr_shard_records: int = Field(
+        default=200, alias="ENTITY_FR_SHARD_RECORDS"
+    )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable
     # flag is flipped LAST, after indexing + synthetic calibration (operator

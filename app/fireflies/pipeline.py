@@ -296,6 +296,10 @@ _AUTO_STAMP_TITLE_RE = __import__("re").compile(
     flags=__import__("re").IGNORECASE,
 )
 
+# «DD/MM - » / «DD.MM - » prefix (the calendar/cron canonical title format) —
+# used to avoid double-prefixing a derived title that already carries a date.
+_DDMM_PREFIX = re.compile(r"^\s*\d{1,2}[./ ]\d{1,2}\s*[-–]")
+
 
 def _looks_like_auto_stamp_title(title: str | None) -> bool:
     """FR-CR-05-117 — return True when `title` matches
@@ -1361,6 +1365,11 @@ class FirefliesPipeline:
                 )
                 derived = None
             if derived:
+                # Match the calendar/cron format «DD/MM - Title» (FR-CR-05-136)
+                # so a derived title reads like a native Fireflies one
+                # («04/06 - Dubai Future District Fund»), not bare «DFTF: …».
+                if row.meeting_date and not _DDMM_PREFIX.match(derived):
+                    derived = f"{row.meeting_date.strftime('%d/%m')} - {derived}"
                 log.info(
                     "fireflies_topic_title_derived",
                     fireflies_id=row.fireflies_id,

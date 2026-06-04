@@ -420,6 +420,31 @@ class Settings(BaseSettings):
     catalog_database_url: str | None = Field(
         default=None, alias="CATALOG_DATABASE_URL"
     )
+    # FR-EC-CRITIC — Fundraising entity resolver via Viktor's MCP (SPEC_ENTITY_
+    # CRITIC). Pulls his deduplicated CRM (humanoid_fr_search dump, ~1422 rows),
+    # leans it to name|type|status|industry|source (~45K tokens), caches it, and
+    # lets a reasoning model canonicalise meeting entity mentions in ONE pass.
+    # No vector search. All default-OFF; shadow logs the decision without
+    # applying it so we compare against the current resolver before switching.
+    entity_fr_resolver_enabled: bool = Field(
+        default=False, alias="ENTITY_FR_RESOLVER_ENABLED"
+    )
+    entity_fr_resolver_shadow: bool = Field(
+        default=False, alias="ENTITY_FR_RESOLVER_SHADOW"
+    )
+    entity_fr_mcp_url: str = Field(
+        default="", alias="ENTITY_FR_MCP_URL"
+    )
+    # Reasoning model for the one-pass canonicaliser (operator can point this at
+    # a strong model independent of the cheaper summary model).
+    entity_fr_resolver_model: str = Field(
+        default="gpt-5", alias="ENTITY_FR_RESOLVER_MODEL"
+    )
+    # Catalog cache TTL — Viktor syncs every ~3h, so we refetch at most this
+    # often (the dump is one MCP call; caching keeps per-meeting cost down).
+    entity_fr_catalog_ttl_seconds: int = Field(
+        default=3600, alias="ENTITY_FR_CATALOG_TTL_SECONDS"
+    )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable
     # flag is flipped LAST, after indexing + synthetic calibration (operator

@@ -27,6 +27,7 @@ def upgrade() -> None:
           id           BIGSERIAL    PRIMARY KEY,
           source       VARCHAR(16)  NOT NULL,         -- zoom | fireflies
           source_id    TEXT         NOT NULL,         -- zoom_id / fireflies_id
+          kind         VARCHAR(16),                   -- company | person | team
           mention      TEXT         NOT NULL,
           canonical    TEXT,                          -- NULL = no confident match
           source_list  TEXT,                          -- CRM sheet(s)

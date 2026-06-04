@@ -118,6 +118,7 @@ def main() -> int:
     ap.add_argument("--effort", default="high")
     ap.add_argument("--limit", type=int, default=2000)
     ap.add_argument("--no-team", action="store_true", help="skip the team_members slice")
+    ap.add_argument("--people", action="store_true", help="run Track-2 agentic people pass")
     ap.add_argument("--truth", action="store_true", help="score against boss ground truth")
     a = ap.parse_args()
 
@@ -177,6 +178,37 @@ def main() -> int:
         meeting_title=title, participants=participants, transcript_or_summary=text,
         shard_texts=shard_texts, call_map=_call, call_critic=_call, max_workers=workers,
     )
+    # Track 2 — agentic people pass on unresolved person-like mentions.
+    if a.people:
+        unresolved = [d.mention for d in decisions if not d.canonical]
+        print(f"\nTrack-2 people: {len(unresolved)} unresolved mentions → org-guess → search → extract ...")
+        from app.services.entity_people_fr import PERSON_ORG_TOOL, resolve_people
+
+        def _orgs(messages):
+            res = backend.call_tool(
+                system_prompt=messages[0]["content"],
+                user_prompt="\n\n".join(m["content"] for m in messages[1:]),
+                tool_name="classify_people", tool_description="people + org",
+                tool_parameters=PERSON_ORG_TOOL, reasoning_effort=a.effort)
+            return [(str(p.get("mention", "")), str(p.get("org", "")))
+                    for p in (res or {}).get("people") or [] if p.get("is_person") and p.get("org")]
+
+        def _search(org):
+            from app.ceo_brain.mcp_client import call_tool as ct
+            ok2, t2 = ct(url=mcp_url, tool_name="humanoid_fr_search",
+                         arguments={"query": org, "limit": "2"}, timeout=30.0)
+            return R._unwrap_mcp_text(t2) if ok2 else ""
+
+        people = resolve_people(
+            unresolved_mentions=unresolved, meeting_title=title,
+            participants=participants, transcript=text,
+            call_orgs=_orgs, search_fn=_search, call_extract=_call,
+            max_orgs=getattr(s, "entity_fr_people_max_orgs", 6))
+        print(f"Track-2 resolved {len(people)} people:")
+        for d in people:
+            print(f"   → {d.mention!r:28} -> {d.canonical!r:28} [{d.confidence:.2f}] {d.source}")
+        decisions = decisions + people
+
     decisions.sort(key=lambda d: -d.confidence)
     print(f"\n=== {len(decisions)} resolutions ===")
     for d in decisions:

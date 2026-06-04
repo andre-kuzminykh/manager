@@ -459,6 +459,16 @@ class Settings(BaseSettings):
     entity_fr_min_confidence: float = Field(
         default=0.7, alias="ENTITY_FR_MIN_CONFIDENCE"
     )
+    # Track 2 (counterparty people) — agentic second pass: guess each unresolved
+    # person's org, fetch that CRM record's prose (comm_log), extract the full
+    # name. Default off (companies+team don't need it). MAX_ORGS caps targeted
+    # lookups per meeting.
+    entity_fr_people_enabled: bool = Field(
+        default=False, alias="ENTITY_FR_PEOPLE_ENABLED"
+    )
+    entity_fr_people_max_orgs: int = Field(
+        default=6, alias="ENTITY_FR_PEOPLE_MAX_ORGS"
+    )
     # FR-TV — Task Vector layer (semantic task search / NL field updates via
     # the CEO-brain agent + external MCP server). All default-OFF; the enable
     # flag is flipped LAST, after indexing + synthetic calibration (operator

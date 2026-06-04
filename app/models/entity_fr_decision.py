@@ -20,6 +20,7 @@ class EntityFrDecision(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     source: Mapped[str] = mapped_column(String(16), nullable=False)   # zoom | fireflies
     source_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)  # company | person | team
     mention: Mapped[str] = mapped_column(Text, nullable=False)
     canonical: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_list: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -152,7 +152,38 @@ source_list, confidence, applied, shadow, created_at) — append-only; мигр�
 саммари строится как раньше); reuse карты замен = consistency гарантирована;
 люди-сотрудники из team_members, внешние контакты-люди — вне CRM (отдельно).
 
-## 12. Открытые вопросы
+## 12. Три трека резолва (rev4)
+
+Резолв делится по ИСТОЧНИКУ сущности, результаты помечаются `kind`:
+
+| Трек | Что | Источник | Механизм |
+|---|---|---|---|
+| **company** | контрагенты-компании | lean-каталог CRM | шарды ≤30K + критик (Track 1) |
+| **team** | участники команды | наша `team_members` | ростер-срез в той же map-reduce |
+| **person** | контрагенты-люди | `next_action`/`last_update`/`communication_log` записей CRM | **агентный 2-й проход** |
+
+**Агентный проход для людей** (`app/services/entity_people_fr.resolve_people`) —
+дёшево и точно, как у бота Виктора (компании lean'ом, людей добираем точечно):
+
+```
+unresolved person-like mentions (canonical=None из Track 1/3)
+   └─ LLM #1: для каждого — это человек? из какого орга/фонда? (по контексту встречи)
+        → [(mention, org_guess)]
+   └─ для каждого org_guess: humanoid_fr_search(org)  → ПОЛНАЯ запись с comm_log
+        (точечно: только нужные орги, ≤ ENTITY_FR_PEOPLE_MAX_ORGS)
+   └─ LLM #2: из прозы записей достать каноническое ПОЛНОЕ имя
+        → [Decision(mention→canonical, source, confidence, kind=person)]
+```
+
+Подтверждено зондом: «Samer Zawadeih» лежит в `communication_log` записи
+*Tawazun Strategic Development Fund* (запись 02/04) — lean его режет, агентный
+проход читает полную запись по орг-контексту и достаёт.
+
+**За флагом** `ENTITY_FR_PEOPLE_ENABLED` (default false). Best-effort: сбой
+2-го прохода НЕ влияет на Track 1/3. Параметры: `ENTITY_FR_PEOPLE_MAX_ORGS`
+(сколько орг-записей тянуть, default 6).
+
+## 13. Открытые вопросы
 
 - Доступ роли `humanoid_reader` к `humanoid_fr_companies` (проверить SELECT; иначе грант/REST у Виктора).
 - Нужен ли вообще Track 2, если Track 1 (его чистые данные в нашем резолвере) уже закрывает recall — решаем после E3 по факту жалоб.

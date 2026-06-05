@@ -1,6 +1,6 @@
 # SPEC v0.2 — Status Tracker (reconciled с Task Vector)
 
-> **Дата:** 2026-06-03 · **Заменяет:** [SPEC_STATUS_TRACKER_v0.1.md](./SPEC_STATUS_TRACKER_v0.1.md)
+> **Дата:** 2026-06-03 · **Заменяет:** [SPEC_STATUS_TRACKER_v0.1.md](./docs/archive/SPEC_STATUS_TRACKER_v0.1.md)
 > (функциональные требования v0.1 в силе; v0.2 меняет ТЕХНИКУ — переиспользование
 > движка Task Vector + единый лог апдейтов + откат из мастер-таблицы).
 > **Связано:** [docs/SPEC_TASK_VECTOR_v0.1.md](./docs/SPEC_TASK_VECTOR_v0.1.md) (FR-TV), [AUDIT.md](./AUDIT.md) §10.
@@ -82,7 +82,7 @@ Append-only. Пишется при ЛЮБОМ изменении задачи и
 
 ## 5. Вход №2 — Status Tracker (пассив, встречи)
 
-Функционал — по [v0.1](./SPEC_STATUS_TRACKER_v0.1.md) (D1–D8, §5–§11). Техника:
+Функционал — по [v0.1](./docs/archive/SPEC_STATUS_TRACKER_v0.1.md) (D1–D8, §5–§11). Техника:
 - **FR-ST-EX-1:** после `detailed_summary` — один LLM-проход (D7) извлекает progress-события
   `{speaker, mentioned_task_hint, status_hint, comment, quote, confidence}`.
 - **FR-ST-MATCH-1:** матч кандидата к живой задаче — через **Task Vector** `search_tasks`

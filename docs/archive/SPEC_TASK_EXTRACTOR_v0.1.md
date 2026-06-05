@@ -1,5 +1,10 @@
 # SPEC v0.1 — Task Extractor Agent (NEW)
 
+> **🗄️ АРХИВ (2026-06-05).** Спека forward-looking — net-new (Favorites, chat-subscription,
+> `blocked`-статус, `/audit`) **не построен**. Унаследованный TG-пайплайн из `FR-CR-*` есть.
+> Перечень расхождений — `AUDIT.md` §7.
+> Реальная трассировка — `FR-CR-05-*` в коде (см. `PRD.md` §4).
+
 > **Уровень:** Product + Business + Solution Architecture (Draft)
 > **Дата:** 2026-05-11
 > **Версия:** 0.1

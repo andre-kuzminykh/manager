@@ -11,6 +11,26 @@
 
 ---
 
+## 📋 Groom 2026-06-05
+
+По результатам аудита 2026-06-03 проведён groom:
+- **В `docs/archive/` перенесены:** `SPEC_TASK_TRACKER_v0.1.md` (§6 ниже),
+  `SPEC_TASK_EXTRACTOR_v0.1.md` (§7), `SPEC_STATUS_TRACKER_v0.1.md` (§10 — заменён на
+  v0.2 в корне).
+- **Статус-баннер с перечнем дрейфа добавлен** на 4 LIVE-спеки, у которых аудит нашёл
+  расхождения: `SPEC_NOTE_TAKER_v0.1.md` (§1), `SPEC_MEETING_AGENDA_v0.1.md` (§2),
+  `SPEC_COUNTERPARTY_BRIEFS_v0.1.md` (§5), `SPEC_CEO_BRAIN_BOT_v0.1.md` (§9).
+- **Без изменений** (уже в синке): `SPEC_MEETING_WEBHOOK_v0.1.md` (§3),
+  `SPEC_ENTITY_CONSISTENCY_v0.1.md` (§4), `docs/SPEC_TASK_VECTOR_v0.1.md` (§8),
+  `SPEC_NATIVE_TRANSCRIPT_v0.1.md`, `SPEC_ENTITY_CRITIC_v0.1.md` (rev2),
+  `SPEC_SHEET_SYNC_v0.1.md`, `SPEC_STATUS_TRACKER_v0.2.md`.
+- `PRD.md` §2 / §5 обновлён под новый набор спек.
+
+Содержание §1–§10 ниже — результаты аудита на 2026-06-03 (для архивированных §6, §7, §10
+оставлено как «карта дрейфа на момент архивации»).
+
+---
+
 ## 1. Note Taker — `SPEC_NOTE_TAKER_v0.1.md` ⚠️
 
 **Статус:** «MVP уже работает» — в основном **верно** (33/43 FR). FR-NT-* ID в коде нет (код — `FR-CR-05-*`).

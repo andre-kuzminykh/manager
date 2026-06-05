@@ -1,5 +1,11 @@
 # SPEC v0.1 — Task Tracker Agent
 
+> **🗄️ АРХИВ (2026-06-05).** Эта спека отстала от кода.
+> Перечень расхождений — `AUDIT.md` §6 (на 2026-06-03).
+> Реализованные в коде требования трассируются через `FR-CR-*` (см. `PRD.md` §4).
+> Для актуального статуса фичи смотри: `AGENTS.md` + `docs/PIPELINE_FLOW.md` + код
+> (`app/slack_bot/`, `app/orchestrator/`, `app/sync/`).
+
 > **Уровень:** Product + Business + Solution Architecture (Draft)
 > **Дата:** 2026-05-08
 > **Целевой пользователь:** CEO, solopreneurs, предприниматели

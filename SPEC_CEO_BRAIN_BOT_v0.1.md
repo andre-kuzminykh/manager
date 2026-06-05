@@ -1,5 +1,16 @@
 # SPEC v0.1 — CEO Brain Bot (FR-CB2-200)
 
+> **🟡 LIVE-под-флагом — код впереди спеки (~52/74 FR + ещё ~12 вне спеки).** Аудит
+> 2026-06-03 — `AUDIT.md` §9. Заметки:
+> - **Cat 1, 2, 4, 5 → GREEN. Cat 3 → в основном GREEN. Cat 6 (Operations) — НЕ построена.**
+>   Отсутствуют: `ops/brain_archive_export.py`, `ops/brain_backfill.py`,
+>   `ceo_brain/health.py`, `metrics.py`. Тесты этой категории помечены xfail.
+> - **NFR-CB2-C.2** — per-run cost cap: спека $5, код **$1** (`config.py:124`). Решить.
+> - **FR-CB2-3.8** (streaming chat_update) → заброшено в пользу non-streaming (3.22) +
+>   per-MCP / direct-HTTP (3.30/3.31). Документировать как deviation.
+> - **FR-CB2-3.9** (блок Sources) → убран (3.29), вместо него inline-ссылки.
+> - **Вне спеки**, но в коде: FR-CB2-3.27/3.32–3.39, 4.6/4.7 (Jira/Rovo). Дописать.
+
 > **Версия:** v0.1, 2026-05-18
 > **Scope:** новый Slack-bot который (а) архивирует все сообщения из каналов где он добавлен — отдельный файл/строка per channel + per day — и (б) отвечает на @mention / DM через Anthropic Claude API с доступом к нескольким MCP-серверам (Slack, Gmail, Calendar, Drive и т.д.).
 > **Источники данных:** Slack Events API (read), Anthropic Claude API (Messages API + MCP), MCP-серверы из claude.ai connector-настройки (Slack, Gmail, Calendar, Drive, Fireflies, Pitchbook, Hubspot, Telegram, Atlassian, …).

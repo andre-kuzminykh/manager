@@ -2,9 +2,11 @@
 
 > **Тип:** мастер-PRD = единая точка входа. Сам по себе он НЕ содержит требований —
 > он индексирует **версионные фиче-спеки** и фиксирует их **соответствие коду**.
-> **Дата сборки:** 2026-06-03 · **Ветка:** `claude/slack-bot-task-extraction-9eGSC`
+> **Дата сборки:** 2026-06-05 (groom) · **Ветка:** `claude/slack-bot-task-extraction-9eGSC`
 > **Метод аудита:** FR-by-FR сверка каждой спеки с кодом (`app/`, `ops/`, `tests/`, `alembic/`),
 > 2026-06-03. Детали — в [`AUDIT.md`](./AUDIT.md).
+> **2026-06-05 groom:** 3 устаревшие спеки перенесены в `docs/archive/` (см. §5),
+> на 4 LIVE-спеки добавлен статус-баннер с перечнем дрейфа.
 
 ---
 
@@ -57,8 +59,7 @@ Google (Sheets / Tasks / Docs / Calendar) и отвечает на вопрос�
 | **Entity Critic** — выбор сущности по контексту (мульти-лист) | `FR-EC-CRITIC` | [SPEC_ENTITY_CRITIC_v0.1.md](./SPEC_ENTITY_CRITIC_v0.1.md) | ⚪ | ⬜ |
 | **Native Transcript** — нативные транскрипты сервисов | `FR-NT-TR` | [SPEC_NATIVE_TRANSCRIPT_v0.1.md](./SPEC_NATIVE_TRANSCRIPT_v0.1.md) | 🟡 | ✅ |
 | **Counterparty Briefs** — брифы к встречам | `FR-CR-05-168` (`FR-CB-*`) | [SPEC_COUNTERPARTY_BRIEFS_v0.1.md](./SPEC_COUNTERPARTY_BRIEFS_v0.1.md) | 🟡 | ✅ |
-| **Task Tracker** — жизненный цикл задач | `FR-CR-*` | [SPEC_TASK_TRACKER_v0.1.md](./SPEC_TASK_TRACKER_v0.1.md) | 🟢 | ⚠️ |
-| **Task Extractor** — задачи из TG/Slack | `FR-CR-*` | [SPEC_TASK_EXTRACTOR_v0.1.md](./SPEC_TASK_EXTRACTOR_v0.1.md) | 🟠 | ⚠️ |
+| **Task lifecycle** — extract / track / digest / 2-way Google Tasks | `FR-CR-05-*` | (трассировка в коде; дизайнерские v0.1-спеки → `docs/archive/`³) | 🟢 | n/a |
 | **Task Vector** — поиск/Q&A/апдейт задач NL | `FR-TV-*` | [docs/SPEC_TASK_VECTOR_v0.1.md](./docs/SPEC_TASK_VECTOR_v0.1.md) | 🟡 | ✅ |
 | **CEO Brain Bot** — чат-агент | `FR-CB2-*` | [SPEC_CEO_BRAIN_BOT_v0.1.md](./SPEC_CEO_BRAIN_BOT_v0.1.md) | 🟡 | ⚠️ |
 | **Status Tracker** — встречи → статус в Sheet + лог/откат | `FR-ST-*` | [SPEC_STATUS_TRACKER_v0.2.md](./SPEC_STATUS_TRACKER_v0.2.md) | ⚪ | ⬜ |
@@ -70,6 +71,14 @@ Google (Sheets / Tasks / Docs / Calendar) и отвечает на вопрос�
 префиксы выше.
 
 ² Полные FR-by-FR таблицы и список расхождений — [`AUDIT.md`](./AUDIT.md).
+
+³ **Task lifecycle:** дизайнерские спеки `SPEC_TASK_TRACKER_v0.1.md` (2026-05-08) и
+`SPEC_TASK_EXTRACTOR_v0.1.md` (2026-05-11) сильно разошлись с кодом — оба перенесены в
+`docs/archive/` (2026-06-05). Реальная функциональность жизненного цикла задач (Slack-/TG-
+ingest, утренний/вечерний дайджесты, deadline-reminders, Google Tasks 2-way, подписки, edit
+modal, status history) трассируется через `FR-CR-05-*` в коде:
+`app/slack_bot/`, `app/orchestrator/`, `app/sync/`, `app/intent/`. AUDIT.md §6 и §7 — карта
+дрейфа на момент архивации.
 
 ---
 
@@ -91,10 +100,24 @@ Google (Sheets / Tasks / Docs / Calendar) и отвечает на вопрос�
 
 ## 5. Архив
 
-Старые монолиты и дубли — в [`docs/archive/`](./docs/archive/) (история в git цела):
-`SPEC.md` (524К), `SPEC_v0.1.md`, `Spec_eng.md`, `CEO_BRAIN_SPEC_ASIS.md` (код-трейс PRD от
-2026-05-27, полезен как референс), `docs/SPEC_TASK_TRACKER.md`, `docs/SPEC_NOTE_TAKER.md`,
-`docs/Arch.md`.
+В [`docs/archive/`](./docs/archive/) (история в git цела):
+
+**Старые монолиты и дубли:**
+- `SPEC.md` (524К), `SPEC_v0.1.md`, `Spec_eng.md`
+- `CEO_BRAIN_SPEC_ASIS.md` — код-трейс PRD от 2026-05-27, полезен как референс
+- `SPEC_TASK_TRACKER.md`, `SPEC_NOTE_TAKER.md` (исторические редакции)
+- `Arch.md`
+
+**Перенесено при groom 2026-06-05** (см. шапки соответствующих файлов):
+- `SPEC_TASK_TRACKER_v0.1.md` — спека 2026-05-08, сильно отстала; код ушёл вперёд
+  (Slack-ingest / дайджесты / Google Tasks 2-way / подписки реализованы, но в спеке
+  помечены TODO). Расхождения см. `AUDIT.md` §6.
+- `SPEC_TASK_EXTRACTOR_v0.1.md` — спека 2026-05-11, forward-looking; net-new
+  (Favorites, chat-subscription, `blocked`-статус, `/audit <id>`) не построен.
+  См. `AUDIT.md` §7.
+- `SPEC_STATUS_TRACKER_v0.1.md` — заменена на
+  [`SPEC_STATUS_TRACKER_v0.2.md`](./SPEC_STATUS_TRACKER_v0.2.md) (переиспользование
+  движка Task Vector + единый лог апдейтов).
 
 ## 6. Главные выводы аудита (2026-06-03)
 

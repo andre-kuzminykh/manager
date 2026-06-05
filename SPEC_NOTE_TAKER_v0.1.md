@@ -1,5 +1,16 @@
 # SPEC v0.1 — Note Taker Agent
 
+> **🟢 LIVE — спека в основном совпадает с кодом (33/43 FR).** Аудит на 2026-06-03 —
+> `AUDIT.md` §1. Известные расхождения / TODO (не блокеры, но имей в виду):
+> - **FR-NT-9.6** — DB-view `meeting_summaries_published` + роль `zoom_colleague`:
+>   в коде/миграциях НЕТ (только текст спеки). Решить: построить или снять claim.
+> - **FR-NT-2.3** (Fireflies native-транскрипт реюзается): **уже исправлено** —
+>   см. [`SPEC_NATIVE_TRANSCRIPT_v0.1.md`](./SPEC_NATIVE_TRANSCRIPT_v0.1.md).
+> - **FR-NT-8.4** — dedup-порог: спека 0.85, код 0.70 (`task_dedup.py:268`). Выровнять.
+> - **FR-NT-1.2/1.4** — batch defaults: спека 50, код 10 (Zoom) / 20 (FF). Low-risk.
+> - **FR-NT-1.5/1.6/1.7** (manual upload / dictation / GMeet) — TODO в самой спеке.
+> - FR-ID в коде — `FR-CR-05-*`, не `FR-NT-*` (это спецификационная нумерация).
+
 > **Уровень:** Product + Business + Solution Architecture (Draft)
 > **Дата:** 2026-05-08
 > **Целевой пользователь:** CEO, solopreneurs, предприниматели
@@ -1202,7 +1213,7 @@ flowchart LR
 ## 14.0b Out of Scope (Что не входит в продукт)
 
 **Note Taker НЕ делает:**
-- ❌ Назначение task-owner'ов / parsing deadlines / priority — это Task Tracker (см. SPEC_TASK_TRACKER_v0.1.md)
+- ❌ Назначение task-owner'ов / parsing deadlines / priority — это Task Tracker (трассируется через `FR-CR-05-*` в коде; дизайнерская v0.1-спека в `docs/archive/SPEC_TASK_TRACKER_v0.1.md`)
 - ❌ Status updates / digests / reminders — Task Tracker
 - ❌ Project management (Gantt, sprints, dependencies) — out of vision
 - ❌ Real-time meeting analytics во время встречи (latency недостижим без push events) — будущее

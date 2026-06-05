@@ -72,13 +72,12 @@ Google (Sheets / Tasks / Docs / Calendar) и отвечает на вопрос�
 
 ² Полные FR-by-FR таблицы и список расхождений — [`AUDIT.md`](./AUDIT.md).
 
-³ **Task lifecycle:** дизайнерские спеки `SPEC_TASK_TRACKER_v0.1.md` (2026-05-08) и
-`SPEC_TASK_EXTRACTOR_v0.1.md` (2026-05-11) сильно разошлись с кодом — оба перенесены в
-`docs/archive/` (2026-06-05). Реальная функциональность жизненного цикла задач (Slack-/TG-
-ingest, утренний/вечерний дайджесты, deadline-reminders, Google Tasks 2-way, подписки, edit
-modal, status history) трассируется через `FR-CR-05-*` в коде:
-`app/slack_bot/`, `app/orchestrator/`, `app/sync/`, `app/intent/`. AUDIT.md §6 и §7 — карта
-дрейфа на момент архивации.
+³ **Task lifecycle.** Функциональность жизненного цикла задач (Slack-/TG-ingest,
+утренний/вечерний дайджесты, deadline-reminders, Google Tasks 2-way sync, подписки,
+edit modal, status history) трассируется через префикс `FR-CR-05-*` в коде:
+`app/slack_bot/`, `app/orchestrator/`, `app/sync/`, `app/intent/`. Исторические
+дизайнерские редакции (`SPEC_TASK_TRACKER_v0.1.md`, `SPEC_TASK_EXTRACTOR_v0.1.md`) —
+в `docs/archive/`.
 
 ---
 
@@ -108,16 +107,12 @@ modal, status history) трассируется через `FR-CR-05-*` в ко�
 - `SPEC_TASK_TRACKER.md`, `SPEC_NOTE_TAKER.md` (исторические редакции)
 - `Arch.md`
 
-**Перенесено при groom 2026-06-05** (см. шапки соответствующих файлов):
-- `SPEC_TASK_TRACKER_v0.1.md` — спека 2026-05-08, сильно отстала; код ушёл вперёд
-  (Slack-ingest / дайджесты / Google Tasks 2-way / подписки реализованы, но в спеке
-  помечены TODO). Расхождения см. `AUDIT.md` §6.
-- `SPEC_TASK_EXTRACTOR_v0.1.md` — спека 2026-05-11, forward-looking; net-new
-  (Favorites, chat-subscription, `blocked`-статус, `/audit <id>`) не построен.
-  См. `AUDIT.md` §7.
-- `SPEC_STATUS_TRACKER_v0.1.md` — заменена на
-  [`SPEC_STATUS_TRACKER_v0.2.md`](./SPEC_STATUS_TRACKER_v0.2.md) (переиспользование
-  движка Task Vector + единый лог апдейтов).
+**Исторические дизайнерские редакции** (актуальная трассировка task lifecycle —
+через `FR-CR-05-*` в коде):
+- `SPEC_TASK_TRACKER_v0.1.md` (2026-05-08)
+- `SPEC_TASK_EXTRACTOR_v0.1.md` (2026-05-11)
+- `SPEC_STATUS_TRACKER_v0.1.md` (2026-06-03) — заменена на
+  [`SPEC_STATUS_TRACKER_v0.2.md`](./SPEC_STATUS_TRACKER_v0.2.md) в корне репы.
 
 ## 6. Главные выводы аудита (2026-06-03)
 

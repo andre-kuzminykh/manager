@@ -1,171 +1,135 @@
-# Handover — Slack Task Manager (ветка FR-CR-05)
+# Передача дел — Humanoid CEO Brain Manager
 
-> **Кому:** инженеру, который продолжает поддержку проекта.
+> **Кому:** инженеру, продолжающему работу с системой.
 > **Дата:** 2026-06-05.
-> **Ветка:** `claude/slack-bot-task-extraction-9eGSC` (последний коммит запушен в `andre-kuzminykh/manager`).
-
-Этот документ содержит:
-1. Что изменилось на этой ветке и зачем (FR-CR-05-257/258).
-2. Как это деплоить в боевой контейнер.
-3. Карта окружения и точки входа.
-4. Регламент работы (спека → тесты → код).
-
-Все детали по архитектуре и оперативке — в `AGENTS.md`, `docs/TECHNICAL_ARCHITECTURE.md`,
-`docs/PIPELINE_FLOW.md`, `AUDIT.md`, `PRD.md` и `SPEC_*.md` в корне репы.
+> **Ветка:** `claude/slack-bot-task-extraction-9eGSC` (запушена в `andre-kuzminykh/manager`).
+> Этот документ — точка входа. Всё необходимое — внутри архива.
 
 ---
 
-## 1. Что изменилось на этой ветке
+## 1. Что это
 
-### 1.1 FR-CR-05-258 — Postgres advisory-лок per-meeting
+**Humanoid CEO Brain Manager** — монолитный Python-сервис (FastAPI/Bolt + Postgres),
+который слушает рабочие каналы оператора, превращает разговоры и встречи в
+структурированные задачи + саммари + брифы, ведёт их жизненный цикл и зеркалит
+всё в Google (Sheets / Tasks / Docs / Calendar).
 
-**Проблема:** always-on раннер (`ops/zoom_fireflies_runner.py`) и ручные
-ops (`ops/republish_meeting.py`) могли одновременно обработать одну и ту же
-запись. Идемпотентность раннера букмарк-based с TOCTOU-окном: он читает
-`tasks_extracted`/`last_error` в одной сессии, обрабатывает в другой. Если
-ручной republish стартует во время тика крона → встреча обрабатывается дважды
-→ дубли Google Doc, Slack-mirror и n8n-вебхука.
+Пользователь — CEO компании Humanoid.
 
-**Фикс:** новый модуль `app/services/pg_lock.py` с `try_meeting_lock(session,
-source, source_id)` — берёт `pg_try_advisory_xact_lock` (auto-released при
-коммите/роллбэке `session_scope`). Подключён в **трёх местах**:
-- `ops/zoom_fireflies_runner.py` — оба цикла (FF + Zoom).
-- `ops/republish_meeting.py` — после загрузки строки, выходит с кодом 3
-  и понятным сообщением, если лок занят.
+### Главные фичи
 
-Best-effort: если БД упала при взятии лока — возвращаем True, чтобы инфра-
-инцидент не блокировал работу.
+| Фича | Что делает | Спека |
+|---|---|---|
+| **Note Taker** | Zoom + Fireflies записи → транскрипт → детальное саммари + задачи + Google Doc + Slack/TG | `SPEC_NOTE_TAKER_v0.1.md` |
+| **Meeting Webhook** | Полное саммари встречи в n8n-вебхук → внешние системы | `SPEC_MEETING_WEBHOOK_v0.1.md` |
+| **Meeting Agenda** | За 10 мин до regular-встречи Calendar — авто-повестка в Slack DM | `SPEC_MEETING_AGENDA_v0.1.md` |
+| **Counterparty Briefs** | Calendar → новый контрагент → deep-research (компания + бенефициары) → Google Doc + Slack | `SPEC_COUNTERPARTY_BRIEFS_v0.1.md` |
+| **Entity Consistency** | Единая каноническая форма имён сущностей по всей встрече (detailed/tasks/short/Doc) | `SPEC_ENTITY_CONSISTENCY_v0.1.md` |
+| **Entity Critic / FR-каталог** | Резолв сущностей через локальную реплику CRM-каталога (~22 листов, daily sync) + shard + critic | `SPEC_ENTITY_CRITIC_v0.1.md` |
+| **Native Transcript** | Нативные транскрипты сервисов (Zoom VTT / Fireflies sentences) как primary, Whisper — fallback | `SPEC_NATIVE_TRANSCRIPT_v0.1.md` |
+| **Task Vector** | Embedding-индекс задач, NL-поиск/Q&A/апдейт через MCP-сервер | `docs/SPEC_TASK_VECTOR_v0.1.md` |
+| **CEO Brain Bot** | Slack-агент с памятью (архив каналов) + ответы через Claude + MCP (Slack/Gmail/Calendar/Drive/Pitchbook/Hubspot/...) | `SPEC_CEO_BRAIN_BOT_v0.1.md` |
+| **Status Tracker** | Встречи → авто-апдейт статусов задач в Google Sheet с логом и откатом (поверх движка Task Vector) | `SPEC_STATUS_TRACKER_v0.2.md` |
+| **Sheet Sync** | Двунаправленный мост Sheet ↔ БД (uuid-идентичность, append-only log) | `SPEC_SHEET_SYNC_v0.1.md` |
 
-### 1.2 FR-CR-05-257 — флаги идемпотентности
-
-**Проблема #1.** В `_send_short_summary` (и Zoom, и Fireflies) флаг
-`short_summary_sent` ставился ТОЛЬКО при успешной отправке Telegram-DM
-(`sent > 0`). А Slack-mirror и n8n-вебхук уже были отправлены до этого
-момента. Если TG падал (блокировка, лимит, error) → флаг оставался False →
-следующий тик переотправлял ВЕСЬ хвост → дубли в Slack + повторный вебхук.
-**Решено:** ставим `short_summary_sent = True` всегда после mirror+webhook,
-независимо от исхода TG. Мёртвое раннее присваивание удалено.
-
-**Проблема #2.** В Zoom `process_one` не было `already_processed`
-short-circuit (асимметрично с Fireflies). Любое внешнее обнуление флага
-(например, `republish --regenerate` или вручную проставленный `last_error`
-на уже-обработанной строке) приводило к повторному входу в хвост и
-дублированию Slack/вебхука/task-карточек. **Решено:** добавлен такой же
-guard, как в FF — проверяет 7 флагов и выходит с `skipped_reason="already_processed"`.
-
-### 1.3 Тесты
-
-- `tests/requirements/test_pg_meeting_lock.py` — 5 тестов: детерминизм
-  ключа, разные ключи для разных (source, id), acquired/held/error-paths.
-- `tests/requirements/test_zoom_already_processed_guard.py` — 2 теста:
-  полностью обработанная строка скипается БЕЗ LLM-вызовов; недо-обработанная
-  не короткозамыкается.
-- `tests/requirements/test_retry_cap_and_sentinels.py` — два MagicMock-теста
-  доправлены (`MagicMock(spec=ZoomRecording)` делал все step-флаги
-  truthy → новый guard их считал "fully processed"). Поставили
-  `processed_at=None` — строка на attempts-cap по определению не fully processed.
-
-Все 12 затронутых тестов зелёные.
-
-### 1.4 Прочие коммиты этой же ветки
-
-```
-docs: HANDOVER.md (этот файл)
-FR-CR-05-257/258: stop duplicate Slack/Doc/webhook deliveries
-republish_meeting: --reexport-doc (no-LLM Doc refresh after --rename)
-republish_meeting: --rename for deterministic point-fix of names
-FR-CR-05-254 calendar-only attendees + FR-CR-05-256 canon single-pass
-FR-EC-CRITIC-2: local replica of CRM catalog + daily sync
-FR-EC-CRITIC-2: shard FR catalog by record count (~200) + critic
-owner matching: raise notes cap 200 -> 1000 chars per employee
-republish_meeting: --sheet-only + --sheet-id (read-reconcile by task id)
-republish_meeting: Zoom support + Google Sheet task sync
-```
-
-Поверх этой ветки можно мержить в main.
+`PRD.md` в корне — мастер-индекс с актуальным статусом каждой фичи.
+`AUDIT.md` — детальная FR-by-FR карта соответствия спек и кода.
 
 ---
 
-## 2. Развёртывание
+## 2. Архитектура (коротко)
 
-### 2.1 Топология (см. AGENTS.md §50-60)
+### Контейнеры в проде
 
-| контейнер              | образ                  | что делает                                      |
-|------------------------|------------------------|-------------------------------------------------|
-| `manager-db-1`         | `postgres:16-alpine`   | основная БД `slack_tasks`                       |
-| `manager-bot-1`        | `manager-bot[:latest]` | Slack-bot (Socket Mode), TG-handlers            |
-| `manager-zoom-ff-1`    | `manager-bot:v2shadow` | **актуальный** Zoom/Fireflies polling-runner    |
+| Контейнер | Образ | Назначение |
+|---|---|---|
+| `manager-db-1` | `postgres:16-alpine` | основная БД `slack_tasks` |
+| `manager-bot-1` | `manager-bot:latest` | Slack-бот (Socket Mode) + TG-handlers + демоны Agenda и Counterparty Briefs + CEO Brain Bot |
+| `manager-zoom-ff-1` | `manager-bot:v2shadow` | always-on Zoom/Fireflies polling-runner (две нитки в одном процессе) |
 
-Прод **не** через `docker-compose up` — оба бота запущены через `docker run`
-с env инлайн. Файл `docker-compose.yml` в репе — только локальный dev.
+В проде запуск через `docker run` с env инлайн (НЕ `docker-compose up` —
+compose-файл в репе для локального dev).
 
-### 2.2 После любого изменения раннера
+### Точки входа в коде
+
+| Компонент | Файл |
+|---|---|
+| Slack-bot entry | `app/main.py` → `app.slack_bot.app.build_app` |
+| Zoom/FF polling-runner | `ops/zoom_fireflies_runner.py` |
+| Ручной republish одной встречи | `ops/republish_meeting.py` |
+| Zoom pipeline | `app/zoom/pipeline.py` (`ZoomPipeline.process_one`) |
+| Fireflies pipeline | `app/fireflies/pipeline.py` (`FirefliesPipeline.process_one`) |
+| Entity resolver FR (CRM-каталог) | `app/services/entity_resolver_fr.py`, `app/services/fr_catalog_replica.py` |
+| Канонизация имён | `app/services/counterparty_match.py:canonicalize_text` |
+| Sheet sync (активный) | `app/sync/sheets.py` |
+| Календарь / attendees | `app/services/calendar_attendees.py` |
+| Slack mirror | `app/services/slack_mirror.py` |
+| n8n meeting webhook | `app/services/meeting_webhook.py` |
+| Advisory-локи (per-meeting) | `app/services/pg_lock.py` |
+| Конфиг (Pydantic Settings) | `app/config.py` |
+| Модели | `app/models/` |
+| Миграции | `alembic/versions/0001..0042_*.py` |
+
+### Pipeline встречи (одной строкой)
+
+```
+list → download_audio → transcribe → detailed_summary → match_counterparties
+     → canonicalize_task_names → consolidate_tasks → extract_tasks → verify_tasks
+     → doc_export → short_summary → post_task_cards → slack_mirror → n8n_webhook
+```
+
+Каждый шаг — отдельный флаг на строке `zoom_recordings` / `meeting_recordings`,
+шаги идемпотентны, прерванная встреча возобновляется с того места, где упала.
+Подробно — `docs/PIPELINE_FLOW.md`.
+
+---
+
+## 3. Развёртывание
+
+### 3.1 Деплой обновлений
 
 ```bash
-# 1. Залить файлы на хост
-git pull в ~/manager-zff (если он git-checkout) или скопировать вручную
+# 1. Залить код на хост (если он git-checkout)
+cd ~/manager-zff && git pull
 
-# 2. Если поменялся ИМПОРТ (новый модуль app.services.pg_lock — да, поменялся):
+# 2. Если поменялся импорт / появился новый модуль — пересобрать образ:
 docker build -t manager-bot:v2shadow .
 
 # 3. Перезапустить:
 docker restart manager-zoom-ff-1
+docker restart manager-bot-1
 
-# 4. Проверить, что код реально новый:
-docker exec manager-zoom-ff-1 grep -c "FR-CR-05-258" /app/ops/zoom_fireflies_runner.py
-# должно быть 2
-
-# 5. Логи:
+# 4. Логи:
 docker logs --since 10m -f manager-zoom-ff-1
-# искать строки: zoom_ff_runner_starting, ff_runner_tick, zoom_runner_tick,
-# и НОВЫЕ: ff_runner_skip_locked, zoom_runner_skip_locked, pg_advisory_lock_error
+# искать строки: zoom_ff_runner_starting, ff_runner_tick, zoom_runner_tick
 ```
 
-**ВАЖНО про "in-memory old code":** в проде раннер монтируется с хоста
-(`/home/andre/manager-zff/zoom_fireflies_runner.py`), но **Python-процесс не
-перечитывает файл сам**. После `docker cp` или редактирования файла на хосте
-**обязателен `docker restart manager-zoom-ff-1`**, иначе процесс продолжит
-крутить старый код в памяти. Самая обидная отладочная западня этой репы.
+**Важно:** in-prod раннер монтируется с хоста, но Python-процесс
+**не перечитывает файл сам**. После любой правки кода — `docker restart`
+обязателен, иначе процесс продолжит крутить старый код в памяти.
 
-### 2.3 Миграции
+### 3.2 Миграции
 
 ```bash
 docker exec manager-bot-1 alembic upgrade head
 ```
 
-На этой ветке новых миграций НЕТ (последняя — `0042_fr_catalog_snapshots`,
-уже в `main`). Если катить ветку поверх — миграции уже накатаны.
+Последняя миграция в репе — `0042_fr_catalog_snapshots`.
+
+### 3.3 Per-meeting advisory-локи
+
+Раннер и ручные ops берут `pg_try_advisory_xact_lock` per meeting через
+`app/services/pg_lock.py:try_meeting_lock`, чтобы одна встреча не
+обрабатывалась двумя процессами одновременно. Лок транзакционный —
+освобождается при коммите/роллбэке `session_scope`.
 
 ---
 
-## 3. Карта окружения
-
-### 3.1 Где что лежит
-
-| компонент                         | путь                                                |
-|-----------------------------------|-----------------------------------------------------|
-| Slack-bot entry                   | `app/main.py` → `app.slack_bot.app.build_app`       |
-| Zoom/FF polling-runner            | `ops/zoom_fireflies_runner.py`                      |
-| Ручной republish одной встречи    | `ops/republish_meeting.py`                          |
-| Zoom pipeline                     | `app/zoom/pipeline.py` (`ZoomPipeline.process_one`) |
-| Fireflies pipeline                | `app/fireflies/pipeline.py` (`FirefliesPipeline.process_one`) |
-| Entity resolver FR (CRM-каталог)  | `app/services/entity_resolver_fr.py`, `app/services/fr_catalog_replica.py` |
-| Канонизация имён                  | `app/services/counterparty_match.py:canonicalize_text` |
-| Sheet sync (System A — активный)  | `app/sync/sheets.py`                                |
-| Sheet sync (System B — дормант)   | `app/sheet_sync/*`                                  |
-| Календарь / attendees             | `app/services/calendar_attendees.py`                |
-| Slack mirror                      | `app/services/slack_mirror.py`                      |
-| n8n meeting webhook               | `app/services/meeting_webhook.py`                   |
-| Advisory-локи                     | **`app/services/pg_lock.py`** (новый, FR-CR-05-258) |
-| Конфиг (Pydantic Settings)        | `app/config.py`                                     |
-| Модели                            | `app/models/` (`zoom.py`, `fireflies.py`, …)        |
-| Миграции                          | `alembic/versions/0001..0042_*.py`                  |
-
-### 3.2 Где смотреть оперативку
+## 4. Где смотреть оперативку
 
 ```bash
-# Логи раннера за сутки + грэп по тику:
-docker logs --since 24h manager-zoom-ff-1 2>&1 | grep -E "zoom_runner_tick|ff_runner_tick|skip_locked|already_processed"
+# Логи раннера за сутки:
+docker logs --since 24h manager-zoom-ff-1 2>&1 | grep -E "zoom_runner_tick|ff_runner_tick"
 
 # Сколько встреч обработано:
 docker exec -i manager-db-1 psql -U postgres -d slack_tasks <<'SQL'
@@ -174,55 +138,88 @@ FROM zoom_recordings WHERE processed_at > now() - interval '24 hours'
 GROUP BY 1 ORDER BY 1;
 SQL
 
-# Что висит с last_error:
+# Свежие задачи:
 docker exec -i manager-db-1 psql -U postgres -d slack_tasks -c \
-  "SELECT zoom_id, title, last_error FROM zoom_recordings WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 20;"
+  "SELECT id, title, owner, status, due_at FROM tasks ORDER BY created_at DESC LIMIT 20;"
 ```
 
-### 3.3 Доки в репе (читать в этом порядке)
-
-1. `AGENTS.md` — топология контейнеров, env-инжект, как ходить в БД.
-2. `docs/PIPELINE_FLOW.md` — пошагово, как одна встреча проходит pipeline.
-3. `docs/TECHNICAL_ARCHITECTURE.md` — общая архитектура + ID точек входа.
-4. `PRD.md` — фичи и их статус.
-5. `AUDIT.md` — расхождения спека ↔ код по каждой фиче (на дату 2026-06-03).
-6. `SPEC_*.md` (в корне) — спеки фичей. Имена FR в коде — `FR-CR-05-*`,
-   а в спеках свои (`FR-NT-*`, `FR-EC-*` и т.п.); сверка — в `AUDIT.md`.
-7. `docs/FR_TEST_MATRIX.md` — какие тесты покрывают какой FR.
-
 ---
 
-## 4. Регламент работы (как принято в этой репе)
-
-Это **не формальность**, а то, что чинит большинство багов до их появления:
+## 5. Регламент работы
 
 1. **Спека → тесты → код.** Перед изменением логики:
-   - найди (или напиши) FR в `SPEC_*.md`,
-   - открой/добавь тест в `tests/requirements/`,
-   - **запусти тест и убедись, что он КРАСНЫЙ**,
-   - только потом меняй прод-код,
-   - тест должен стать зелёным.
-2. **Один коммит = один FR-CR-05-NNN.** Номер инкрементируется (текущий
-   максимум — 258). В сообщении коммита и в комментариях к изменению.
+   найди (или напиши) FR в `SPEC_*.md` → открой/добавь тест в
+   `tests/requirements/` → запусти и убедись что красный → меняй код →
+   тест становится зелёным.
+2. **Один коммит = один FR-CR-05-NNN.** Номер инкрементируется
+   (текущий максимум — 258). В сообщении коммита и в комментариях.
 3. **Комментарии в коде — только "WHY".** Что код делает — видно по коду;
-   почему он делает именно так (и какой регрессии не было до этого) —
-   обязательный комментарий.
-4. **Раннер — НЕ перезагружает код.** Любая правка кода, который выполняет
-   `manager-zoom-ff-1` → `docker restart manager-zoom-ff-1` обязателен.
-   Иначе ты будешь видеть "правильный" код в файле и "старое" поведение
-   в логах.
-5. **DB-локи.** Любая фоновая обработка одной "сущности" (recording, task,
+   почему именно так — комментарий обязателен.
+4. **Раннер не перезагружает код сам.** Любая правка → `docker restart`.
+5. **DB-локи.** Любая фоновая обработка одной «сущности» (recording, task,
    meeting) — оборачивай в `try_meeting_lock` или аналогичный
-   `pg_try_advisory_xact_lock`. См. `app/services/pg_lock.py` как шаблон.
-6. **Не амендить коммиты, не пушить force.** `--no-verify` тоже не нужен.
+   `pg_try_advisory_xact_lock`. Шаблон — `app/services/pg_lock.py`.
+6. **Никаких force-push, amend, `--no-verify`.**
 
 ---
 
-## 5. Финальный чек-лист
+## 6. Документация в репе (читать в этом порядке)
 
-- [ ] Образ `manager-bot:v2shadow` пересобран с `app/services/pg_lock.py`.
-- [ ] `manager-zoom-ff-1` перезапущен; в логах виден
-      `ff_runner_started` + (когда сработает) `ff_runner_skip_locked` / `zoom_runner_skip_locked`.
-- [ ] Прогнан тест-пак: `python -m pytest tests/requirements/test_pg_meeting_lock.py tests/requirements/test_zoom_already_processed_guard.py -q` → зелёное.
-- [ ] Ветка `claude/slack-bot-task-extraction-9eGSC` доступна в `andre-kuzminykh/manager`.
-- [ ] Этот `HANDOVER.md` прочитан целиком.
+1. **`PRD.md`** — мастер-индекс фич и их статус.
+2. **`AGENTS.md`** — топология контейнеров, env-инжект, как ходить в БД.
+3. **`docs/PIPELINE_FLOW.md`** — пошагово, как одна встреча проходит pipeline.
+4. **`docs/TECHNICAL_ARCHITECTURE.md`** — общая архитектура + ID точек входа.
+5. **`AUDIT.md`** — FR-by-FR карта соответствия спек и кода (на дату аудита).
+6. **`SPEC_*.md`** (в корне) — спеки фичей. Имена FR в коде — `FR-CR-05-*`,
+   а в спеках свои (`FR-NT-*`, `FR-EC-*`, `FR-TV-*` и т.п.); сверка — в `AUDIT.md`.
+7. **`docs/FR_TEST_MATRIX.md`** — какие тесты покрывают какой FR.
+8. **`DEPLOY.md`** — запуск и деплой подробно.
+9. **`docs/archive/`** — исторические редакции спек и старые монолиты.
+
+---
+
+## 7. Среда разработки
+
+```bash
+# Установка зависимостей:
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# Локальная БД:
+docker-compose up -d db
+alembic upgrade head
+
+# Тесты:
+python -m pytest tests/ -q
+
+# Линтер / типы:
+ruff check .
+mypy app/
+```
+
+### Конфигурация
+
+Все настройки — через env, читаются в `app/config.py` (Pydantic Settings).
+`.env.example` в корне — шаблон с описанием ключевых переменных. Для прода
+env прокидывается инлайн в `docker run`.
+
+---
+
+## 8. Ветка передачи
+
+- **Имя:** `claude/slack-bot-task-extraction-9eGSC`
+- **HEAD:** см. шапку файла
+- **Все изменения запушены** в `andre-kuzminykh/manager`
+- **Pull request — на твоё усмотрение** (можно мержить в `main` или
+  работать дальше с этой ветки)
+
+История последних работ — `git log --oneline -20` в репе. Каждый коммит
+содержит FR-CR-05-NNN-ID и краткое описание изменений.
+
+---
+
+Если есть вопросы по конкретной фиче — начинай с `PRD.md`, оттуда есть
+ссылки на спеку, оттуда на код (через FR-CR-05-NNN номер). `AGENTS.md`
+объясняет, где что лежит в репе.
+
+Удачи.

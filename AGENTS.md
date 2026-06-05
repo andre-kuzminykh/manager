@@ -182,9 +182,9 @@ Daemon. Сканит upcoming митинги, выделяет внешние о
 |---|---|
 | `SPEC.md` | 534 KB. Большой agg-док. Считай неактуальным sliding source-of-truth — лучше открывать тематические. |
 | `SPEC_v0.1.md` | Core: US-1 пассивный детект задач, US-2 explicit-действия, US-3 persistence + sync. |
-| `docs/archive/SPEC_TASK_EXTRACTOR_v0.1.md` | Intent + извлечение полей. **🗄️ архив 2026-06-05** — net-new (Favorites, chat-subscription, blocked) не построен; реальный код трассируется через `FR-CR-05-*`. |
-| `docs/archive/SPEC_TASK_TRACKER_v0.1.md` | Жизненный цикл задачи: create → confirm → status → Google sync. **🗄️ архив 2026-06-05** — спека сильно отстала; код ушёл вперёд (Slack-ingest / дайджесты / Google Tasks 2-way реализованы, но в спеке помечены TODO). См. `AUDIT.md` §6. |
-| `SPEC_STATUS_TRACKER_v0.2.md` | Status updates из Zoom+FF → Sheets, поверх движка Task Vector (заменяет v0.1, которая в `docs/archive/`). |
+| `docs/archive/SPEC_TASK_EXTRACTOR_v0.1.md` | 🗄️ Историческая дизайнерская редакция. Актуальная трассировка task-extraction — `FR-CR-05-*` в коде. |
+| `docs/archive/SPEC_TASK_TRACKER_v0.1.md` | 🗄️ Историческая дизайнерская редакция. Жизненный цикл задач трассируется через `FR-CR-05-*` в коде (`app/slack_bot/`, `app/orchestrator/`, `app/sync/`). |
+| `SPEC_STATUS_TRACKER_v0.2.md` | Status updates из Zoom+FF → Sheets, поверх движка Task Vector. |
 | `SPEC_MEETING_AGENDA_v0.1.md` | Pre-meeting агенда. |
 | `SPEC_NOTE_TAKER_v0.1.md` | Извлечение задач из транскриптов. |
 | `SPEC_COUNTERPARTY_BRIEFS_v0.1.md` | Pre-meeting research-doc. |

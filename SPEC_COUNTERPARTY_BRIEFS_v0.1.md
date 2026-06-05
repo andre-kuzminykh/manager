@@ -1,14 +1,8 @@
 # SPEC v0.2 — Counterparty Briefs (FR-CR-05-168)
 
-> **🟡 LIVE-под-флагом — спека в основном совпадает с кодом (~58/70 FR).** Аудит
-> 2026-06-03 — `AUDIT.md` §5. Заметки:
-> - Файл всё ещё называется `SPEC_COUNTERPARTY_BRIEFS_v0.1.md` (исторически), но
->   содержит **v0.2-дизайн** (event-trigger + two-stage research + grouped-DM).
->   Реально код = v0.2.
-> - §12.1 ссылается на миграцию `0029`, реально — **`0030_counterparty_briefs.py`**.
-> - FR-CB-1.2 lookahead: 7 (operator-pinned), упоминания «14» в тексте устарели.
-> - FR-CB-3.1 (person через `counterparty_mentions`) — отдельного теста нет: PARTIAL.
-> - CLI `--re-render-docs/--seed-existing/--list/--lookback` есть, но без авто-тестов.
+> **🟡 LIVE-под-флагом** `COUNTERPARTY_BRIEFS_ENABLED`. Реализовано в
+> `app/counterparty_briefs/`. FR-трассировка в коде — `FR-CR-05-168` / `FR-CB-*`.
+> Имя файла оставлено `_v0.1.md` исторически; содержимое — актуальный v0.2-дизайн.
 
 > **Версия:** v0.2, 2026-05-14 (revised)
 > **Scope:** новая фича — как только в Calendar появляется встреча с новым контрагентом, бот автоматически собирает справки (отдельно по компании + отдельно по каждому бенефициару) и кладёт ссылки в Slack DM
